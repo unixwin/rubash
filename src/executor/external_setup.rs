@@ -1442,6 +1442,22 @@ impl Executor {
             } else {
                 substitutions
             };
+            // TEMP-DEBUG #3353 (removed before final): trace splice inputs.
+            eprintln!(
+                "[3353-DBG] mat word_index={} word={:?} meta={} subs={:?} node_subs={:?}",
+                word_index,
+                rewritten.words[word_index],
+                metadata.is_some(),
+                substitutions
+                    .iter()
+                    .map(|s| s.target.clone())
+                    .collect::<Vec<_>>(),
+                rewritten
+                    .process_substitutions
+                    .iter()
+                    .map(|s| (s.word_index, s.target.clone()))
+                    .collect::<Vec<_>>(),
+            );
             if substitutions.is_empty() {
                 // rubash#2410: the standalone arm re-scans the EXPANDED
                 // word text, but GNU recognizes a process substitution
@@ -2857,6 +2873,8 @@ impl Executor {
         files: &mut ProcessSubstitutionFiles,
         line: Option<usize>,
     ) -> Result<(), ExecuteError> {
+        // TEMP-DEBUG #3353 (removed before final).
+        eprintln!("[3353-DBG] standalone-in word={:?}", word);
         if let Some(source) = word
             .strip_prefix("<(")
             .and_then(|word| word.strip_suffix(')'))
@@ -2901,6 +2919,15 @@ impl Executor {
         files: &mut ProcessSubstitutionFiles,
         line: Option<usize>,
     ) -> Result<(), ExecuteError> {
+        // TEMP-DEBUG #3353 (removed before final).
+        eprintln!(
+            "[3353-DBG] splice-in word={:?} targets={:?}",
+            word,
+            substitutions
+                .iter()
+                .map(|s| (s.target.clone(), s.source.clone(), s.output))
+                .collect::<Vec<_>>(),
+        );
         for substitution in substitutions {
             if substitution.output {
                 let path = self.empty_process_substitution_temp()?;
@@ -2939,6 +2966,8 @@ impl Executor {
                 *word = word.replacen(&substitution.target, &display_path, 1);
             };
         }
+        // TEMP-DEBUG #3353 (removed before final).
+        eprintln!("[3353-DBG] splice-out word={:?}", word);
         Ok(())
     }
 
