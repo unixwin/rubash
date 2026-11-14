@@ -24,6 +24,14 @@ impl Executor {
                 return Ok(());
             }
         }
+        // rubash#3454: same `set -u` unbound-target gate as `if` —
+        // GNU's do_redirections runs before execute_select_command
+        // (execute_cmd.c:854, before the 3001 check_identifier), so an
+        // unbound `select ... done > $nope` target aborts ahead of the
+        // identifier check and any expansion side effect.
+        if self.compound_redirect_nounset_fatal(cmd)? {
+            return Err(ExecuteError::ExitCode(1));
+        }
         if !is_shell_name(&select_command.variable) {
             // GNU execute_select_command (execute_cmd.c:3001-3010) runs
             // check_identifier BEFORE `line_number = select_command->line`

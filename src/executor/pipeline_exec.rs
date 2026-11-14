@@ -933,7 +933,7 @@ impl Executor {
             // the script at top level — the same unwind the arithmetic
             // command's reject-gate fatal takes (command_execute.rs,
             // finish_heredoc_expansion_error).
-            if self.brace_group_redirect_nounset_fatal(command)? {
+            if self.compound_redirect_nounset_fatal(command)? {
                 return Err(ExecuteError::ExitCode(1));
             }
             // GNU execute_cmd.c:826-828: cm_group is a shell control

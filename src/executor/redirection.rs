@@ -1560,33 +1560,40 @@ impl Executor {
         Ok(None)
     }
 
-    /// rubash#3429 (rework): whether THIS brace group's own redirect
-    /// list carries an unbound variable under `set -u`. The compound
-    /// prologue's brace arms (`prepare_brace_group_redirects` /
-    /// `with_command_input_redirects`) expand the target word with no
-    /// nounset gate, so `$nope` silently becomes the empty string and
-    /// the group reports an empty-name diagnostic (`: Is a directory` /
-    /// `: No such file or directory`) and continues — while GNU's
-    /// compound prologue (execute_cmd.c:854 `do_redirections`,
-    /// RX_ACTIVE|RX_UNDOABLE, shared by cm_group, :479-495) fails the
+    /// rubash#3429 (rework) + rubash#3454: whether THIS compound node's
+    /// own redirect list carries an unbound variable under `set -u`.
+    /// The compound prologue arms (`prepare_compound_output_redirects`
+    /// / `prepare_brace_group_redirects` / `prepare_case_command_redirects`
+    /// / `with_command_input_redirects` / the `[[ ]]` bind) expand the
+    /// target word with no nounset gate, so `$nope` silently becomes
+    /// the empty string and the compound reports an empty-name
+    /// diagnostic (`: Is a directory` / `: No such file or directory`)
+    /// and continues — while GNU's compound prologue (execute_cmd.c:854
+    /// `do_redirections`, shared by every compound kind) fails the
     /// expansion with `name: unbound variable` (error.c:447
     /// err_unboundvar) and aborts the script. The scan is the walker's
     /// own nounset arm (reject_invalid_redirects above):
     /// process-substitution spans and single-quoted spans masked,
     /// heredoc / here-string targets skipped, the first hit in list
     /// order reported through the fd-2 bindings in force at its
-    /// position. Only a brace-group node on a main-shell dispatch
-    /// fires: backgrounded (`&`) and pipelined stages keep the first
-    /// fix's fork-first containment (the classifier's guard in
-    /// heredoc_error_command_runs_in_main_shell), and if/while/for/
-    /// case/`[[]]` are rubash#3454's faces, not this gate's — they
-    /// never reach this helper because only
-    /// execute_brace_group_pipeline calls it.
-    pub(in crate::executor) fn brace_group_redirect_nounset_fatal(
+    /// position. Only a main-shell-dispatched compound fires:
+    /// backgrounded (`&`) and pipelined stages keep the fork-first
+    /// containment (the classifier's guard in
+    /// heredoc_error_command_runs_in_main_shell). Subshell `( )` and
+    /// coproc run their redirects in the spawned child — GNU reports
+    /// the unbound name there but lets the parent continue — so they
+    /// are deliberately NOT in this gate's node set.
+    pub(in crate::executor) fn compound_redirect_nounset_fatal(
         &mut self,
         cmd: &CommandNode,
     ) -> Result<bool, ExecuteError> {
-        if cmd.brace_group.is_none()
+        if (cmd.brace_group.is_none()
+            && cmd.if_command.is_none()
+            && cmd.loop_command.is_none()
+            && cmd.for_command.is_none()
+            && cmd.case_command.is_none()
+            && cmd.conditional_command.is_none()
+            && cmd.select_command.is_none())
             || cmd.background
             || cmd.background_command.is_some()
             || cmd.pipe.is_some()
@@ -1594,6 +1601,22 @@ impl Executor {
         {
             return Ok(false);
         }
+        self.redirect_list_nounset_fatal(cmd)
+    }
+
+    /// The list-scan half of `compound_redirect_nounset_fatal` without
+    /// the compound-kind gate — called directly by the word-sequence
+    /// loop/if executors (`execute_simple_loop` /
+    /// `builtins::source::execute_simple_if`), where the redirects live
+    /// on the synthetic `done`/`fi` node rather than a parsed compound.
+    /// rubash#3454 covers those reparsed paths too: GNU aborts
+    /// `time while ... done > $nope` under `set -u` the same way.
+    /// `pub(crate)` rather than `pub(in crate::executor)` because one
+    /// caller lives under `crate::builtins::source`.
+    pub(crate) fn redirect_list_nounset_fatal(
+        &mut self,
+        cmd: &CommandNode,
+    ) -> Result<bool, ExecuteError> {
         if !crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset") {
             return Ok(false);
         }

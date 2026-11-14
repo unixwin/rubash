@@ -322,6 +322,13 @@ impl Executor {
         cmd: &CommandNode,
         conditional_command: &ConditionalCommand,
     ) -> Result<(), ExecuteError> {
+        // rubash#3454: same `set -u` unbound-target gate as `if` —
+        // `[[ ... ]] > $nope` aborts in GNU's compound do_redirections
+        // (execute_cmd.c:854) before the fd-var allocation or any
+        // expansion side effect below.
+        if self.compound_redirect_nounset_fatal(cmd)? {
+            return Err(ExecuteError::ExitCode(1));
+        }
         // GNU redir.c do_redirections → redir_varassign: `[[ ]] {fd}<f`
         // allocates and assigns the dynamic fd like any other command.
         // This path bypasses the simple-command dispatch, so apply the
