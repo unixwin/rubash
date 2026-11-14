@@ -6132,10 +6132,20 @@ pub(in crate::executor) fn is_enoexec_candidate(program: &std::path::Path) -> bo
     let Ok(mut file) = std::fs::File::open(program) else {
         return false;
     };
-    let mut head = [0u8; 4];
+    let mut head = [0u8; 8];
     let read = file.read(&mut head).unwrap_or(0);
     let head = &head[..read];
-    !head.starts_with(b"#!") && !head.starts_with(b"\x7fELF")
+    // rubash#3510 rework: a Mach-O image is a native binary the Darwin
+    // kernel execs directly, so on macOS it is not an ENOEXEC candidate.
+    // On Linux the kernel refuses it with ENOEXEC, so it stays a
+    // candidate there and GNU's post-ENOEXEC binary refusal (126) is
+    // preserved — an ungated exclusion would have flipped a Mach-O file
+    // on Linux from GNU's 126 to the glibc /bin/sh fallback's 127.
+    // (MZ stays a candidate here on every platform: on unix the kernel
+    // refuses a PE image with ENOEXEC.)
+    !head.starts_with(b"#!")
+        && !head.starts_with(b"\x7fELF")
+        && !(cfg!(target_os = "macos") && crate::executor::path::is_macho_binary_magic(head))
 }
 
 /// GNU general.c:843 absolute_program: a name containing `/` (or `\` on a

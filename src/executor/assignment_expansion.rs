@@ -2380,7 +2380,14 @@ impl Executor {
                         None => Vec::new(),
                     }
                 };
-                if element_values.is_empty() && var_name != "@" && var_name != "*" {
+                // GNU subst.c:9367 parameter_brace_patsub (`value == 0`
+                // returns NULL before getpattern): with no elements at all
+                // — an empty array, or an empty positional list — the
+                // pattern word is never expanded (rubash#3501). The raw
+                // token is kept for the generic re-expansion, which yields
+                // zero elements for an empty `@`/`*
+                // (arrayfunc.c:557 expand_words_no_vars).
+                if element_values.is_empty() {
                     values.push(store!(&token, token_raw));
                 } else {
                     let pattern = self.expand_parameter_pattern_word(
@@ -2520,10 +2527,17 @@ impl Executor {
                         None => Vec::new(),
                     }
                 };
-                if element_values.is_empty()
-                    && quoted_at_operator.var_name() != "@"
-                    && quoted_at_operator.var_name() != "*"
-                {
+                // Same gate as the patsub arm above (rubash#3501): an empty
+                // element list — empty array or empty positional list —
+                // never expands the pattern word; the raw token is kept for
+                // the generic re-expansion. The gate stays empty-only even
+                // for PatternRemoval: this arm handles QUOTED `[@]` words,
+                // and GNU diagnoses a quoted one-element "" list — the
+                // value word carries the QUOTED_NULL marker, so the
+                // removal gate's `*temp == '\0'` test (subst.c:10320)
+                // does not fire (the unquoted form IS silent; see the
+                // joined-word rule in pattern_word_is_silent).
+                if element_values.is_empty() {
                     values.push(store!(&token, token_raw));
                 } else {
                     changed = true;

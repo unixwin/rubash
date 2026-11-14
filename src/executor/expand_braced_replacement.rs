@@ -48,6 +48,12 @@ impl Executor {
         name: &str,
     ) -> Option<String> {
         let (var_name, pattern, replacement, global) = parse_parameter_replacement(name)?;
+        // GNU subst.c:9362-9367 parameter_brace_patsub: an unset parameter
+        // word returns NULL before getpattern, so neither the pattern nor
+        // the replacement is expanded (rubash#3501).
+        if self.pattern_word_is_silent(var_name, false) {
+            return Some(String::new());
+        }
         // GNU subst.c match_upattern applies FNMATCH_IGNCASE when nocasematch
         // is set, so pattern substitution honors the shopt (bash 4.3+).
         let pattern = self.expand_parameter_pattern_word(
