@@ -2,6 +2,20 @@ use super::parse_loop::{unclosed_brace_eof_node, unclosed_paren_eof_node};
 use super::*;
 use crate::lexer::{Token, TokenKind};
 
+/// GNU parse.y:3667 read_token: `(` and `)` are operator tokens only when
+/// read UNQUOTED (the shellmeta branch returns the character itself); a
+/// quoted or escaped paren is part of a WORD (parse.y:5305
+/// read_token_word). The function_def grammar (parse.y:1054-1056
+/// `WORD '(' ')'` / `FUNCTION WORD '(' ')'`) consumes the operator tokens
+/// only. rubash's lexer emits the operator form as TokenKind::Keyword and
+/// a quoted/escaped paren as a TokenKind::Word carrying the same value,
+/// so every paren test on the function head must check the operator kind,
+/// never the text alone (rubash#3388: `echo '(' ')'` and `[ '(' ')'`
+/// parsed as function definitions and aborted the script).
+fn is_paren_operator(token: &Token, text: &str) -> bool {
+    token.kind == TokenKind::Keyword && token.value == text
+}
+
 pub(super) fn parse_function_command(
     tokens: &[Token],
     start: usize,
@@ -78,7 +92,7 @@ pub(super) fn parse_function_command_with_diagnostic(
     if !keyword_form {
         let paren_follows = tokens
             .get(start + 1)
-            .is_some_and(|token| token.value == "(" || token.value == "()");
+            .is_some_and(|token| is_paren_operator(token, "(") || is_paren_operator(token, "()"));
         let group_follows = tokens.get(start).is_some_and(|token| {
             (token.kind == TokenKind::RedirectIn && token.value == "<")
                 || (token.kind == TokenKind::Keyword && token.value == "!")
@@ -201,9 +215,14 @@ pub(super) fn parse_function_command_with_diagnostic(
     {
         return None;
     }
-    let compact_parentheses = tokens.get(i).is_some_and(|token| token.value == "()");
+    let compact_parentheses = tokens
+        .get(i)
+        .is_some_and(|token| is_paren_operator(token, "()"));
     let separated_parentheses = tokens.get(i).is_some_and(|token| {
-        token.value == "(" && tokens.get(i + 1).is_some_and(|next| next.value == ")")
+        is_paren_operator(token, "(")
+            && tokens
+                .get(i + 1)
+                .is_some_and(|next| is_paren_operator(next, ")"))
     });
     let has_parentheses = compact_parentheses || separated_parentheses;
     let keyword_metadata = keyword_form.then(|| build_token_metadata(&tokens[start]));
@@ -441,7 +460,10 @@ pub(super) fn parse_function_command_with_diagnostic(
         return Some(finish_function_command(command, tokens, body_end));
     }
 
-    if tokens.get(i).is_some_and(|token| token.value == "(") {
+    if tokens
+        .get(i)
+        .is_some_and(|token| is_paren_operator(token, "("))
+    {
         // GNU parse.y:6890-6901: `name() (` reaching EOF unclosed reports
         // "unexpected end of file from `(' command on line N" — do not let
         // the `?` fall back to a `(`-unexpected simple command.
@@ -1121,13 +1143,13 @@ fn bang_group_function_name(tokens: &[Token], start: usize) -> Option<(String, S
     }
     let compact = tokens
         .get(start + 2)
-        .is_some_and(|token| token.value == "()");
+        .is_some_and(|token| is_paren_operator(token, "()"));
     let separated = tokens
         .get(start + 2)
-        .is_some_and(|token| token.value == "(")
+        .is_some_and(|token| is_paren_operator(token, "("))
         && tokens
             .get(start + 3)
-            .is_some_and(|token| token.value == ")");
+            .is_some_and(|token| is_paren_operator(token, ")"));
     if !compact && !separated {
         return None;
     }
@@ -1146,24 +1168,23 @@ fn lt_group_function_name(tokens: &[Token], start: usize) -> Option<(String, Str
         || tokens.get(start)?.value != "<"
         || !tokens
             .get(start + 1)
-            .is_some_and(|token| token.value == "(")
+            .is_some_and(|token| is_paren_operator(token, "("))
     {
         return None;
     }
     let mut depth = 0usize;
     let mut index = start + 1;
     while index < tokens.len() {
-        let value = tokens[index].value.as_str();
-        if value == "(" {
+        if is_paren_operator(&tokens[index], "(") {
             depth += 1;
-        } else if value == ")" {
+        } else if is_paren_operator(&tokens[index], ")") {
             if depth == 1 {
                 if tokens
                     .get(index + 1)
-                    .is_some_and(|token| token.value == "(")
+                    .is_some_and(|token| is_paren_operator(token, "("))
                     && tokens
                         .get(index + 2)
-                        .is_some_and(|token| token.value == ")")
+                        .is_some_and(|token| is_paren_operator(token, ")"))
                 {
                     let name = tokens[start..=index]
                         .iter()
