@@ -25,16 +25,21 @@
 //! ENOEXEC scripts in-process, where spawn delivery does not appear
 //! (rubash#2270/#2286).
 
+#[cfg(unix)]
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::process::{Command, Stdio};
 
+#[cfg(unix)]
 const RUBASH: &str = env!("CARGO_BIN_EXE_rubash");
 
+#[cfg(unix)]
 struct Fixture {
     root: PathBuf,
     work: PathBuf,
 }
 
+#[cfg(unix)]
 fn fixture(tag: &str) -> Fixture {
     let root = std::env::temp_dir().join(format!("issue2304_{}_{}", tag, std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
@@ -45,6 +50,7 @@ fn fixture(tag: &str) -> Fixture {
     Fixture { root, work }
 }
 
+#[cfg(unix)]
 impl Fixture {
     fn run(&self, script: &str) -> (String, String, Option<i32>) {
         let script_path = self.root.join("probe.sh");
