@@ -291,9 +291,17 @@ impl Executor {
             let folded_file =
                 crate::executor::substitution_metadata::fold_literal_char_escapes(file);
             let file = &folded_file;
+            // G-02 (rubash#3090): bind.def:268-282 hands the operand to
+            // rl_read_init_file, which opens it against GNU's single
+            // cwd — the session cwd here — so the read (and the
+            // $include reads inside the parse, bind.c parser_include)
+            // go through the anchored file-operand form. Diagnostics
+            // keep the as-typed `file`.
+            let env_vars = &self.shell_state.env_vars;
+            let read_path = crate::executor::path::anchored_file_operand(file, env_vars);
             // bind.def:268-282: read the file; failure is
             // `bind: FILE: cannot read: ERRNO` with rc 1.
-            match std::fs::read_to_string(file) {
+            match std::fs::read_to_string(&read_path) {
                 Ok(text) => {
                     let term = self.get_env("TERM").map(str::to_owned);
                     let editing_mode = self.bind_editing_mode();
@@ -305,7 +313,12 @@ impl Executor {
                         &text,
                         file,
                         &env,
-                        &mut |name| std::fs::read_to_string(name).ok(),
+                        &mut |name| {
+                            std::fs::read_to_string(crate::executor::path::anchored_file_operand(
+                                name, env_vars,
+                            ))
+                            .ok()
+                        },
                     );
                     for diagnostic in &parsed.diagnostics {
                         let _ = writeln!(
