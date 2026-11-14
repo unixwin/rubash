@@ -222,6 +222,29 @@ where
         }
     }
 
+    // GNU builtins/cd.def pwd_builtin, rubash#3349: with
+    // the_current_working_directory NULL — a failed `pwd -P`
+    // poisoned it through resetpwd (cd.def:183-192) — the builtin
+    // takes the get_working_directory ("pwd") branch
+    // (builtins/common.c:592), whose getcwd() fails for a deleted
+    // cwd. The stored logical value is None in exactly that state
+    // (and the $PWD derivation above already declined), so falling
+    // through to the physical display here would print the session
+    // cwd field's stale spelling with rc 0. Gate the display on
+    // the same getcwd truth the physical face uses (G-02): an
+    // unresolvable field fails with the getcwd diagnostic instead.
+    if mode == Mode::Logical {
+        if let Err(error) = physical.canonicalize() {
+            writeln!(
+                stderr,
+                "pwd: error retrieving current directory: getcwd: \
+                 cannot access parent directories: {}",
+                crate::posix_errors::message(&error)
+            )?;
+            return Ok(None);
+        }
+    }
+
     // GNU pwd.def (physical mode) prints get_working_directory — one
     // canonical shell-absolute form: the POSIX /<drive>/... spelling
     // (rubash#537), the same form cd's bindpwd and the startup PWD use.

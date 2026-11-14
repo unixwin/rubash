@@ -39,14 +39,27 @@ impl Executor {
         // field). The old $PWD-verbatim echo fast path is gone: it
         // printed the variable's non-canonical spelling, which is
         // exactly the #2797 divergence.
-        crate::builtins::pwd::execute_with_env_and_io(
+        let status = crate::builtins::pwd::execute_with_env_and_io(
             args.iter().map(String::as_str),
             &self.shell_state.env_vars,
             &self.shell_state.cwd,
             self.shell_state.logical_cwd.as_deref(),
             stdout,
             stderr,
-        )
+        )?;
+        // GNU builtins/cd.def resetpwd ("pwd") (cd.def:183-192),
+        // rubash#3349: pwd_builtin returns EXECUTION_FAILURE only
+        // when get_working_directory failed, and a failed getcwd
+        // leaves the_current_working_directory NULL — the cached
+        // logical value is poisoned, not merely unused. Clear the
+        // session's stored logical cwd so a later logical face
+        // re-derives (and fails) instead of printing the stale
+        // value. Usage errors (EX_USAGE) return before GNU touches
+        // tcwd, so only the failure status clears.
+        if status == 1 {
+            self.shell_state.logical_cwd = None;
+        }
+        Ok(status)
     }
 
     pub(in crate::executor) fn execute_loop_control(
