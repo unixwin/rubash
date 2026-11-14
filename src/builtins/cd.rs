@@ -13,6 +13,7 @@ pub(crate) mod paths;
 
 use super::diagnostic::{diagnostic_prefix, readonly_error_prefix};
 use crate::builtins::pushd::{load_stack, save_stack, DIR_STACK};
+use crate::expand::tilde::tilde::expand_tilde_segment;
 
 use paths::{
     current_logical_pwd, filesystem_path_for_display, logical_canon_erased_components_exist,
@@ -774,6 +775,25 @@ fn resolve_cdpath(
     let cdpath = shell_var(env_vars, "CDPATH")?;
     for unit in cdpath.split(':') {
         let base = if unit.is_empty() { "." } else { unit };
+        // rubash#3394: GNU tilde-expands each CDPATH element before
+        // the join (builtins/cd.def:360 `sh_makepath (path, dirname,
+        // MP_DOTILDE)`; lib/sh/makepath.c:98 expands a `~`-led path
+        // with bash_tilde_expand). `expand_tilde_segment` is that
+        // expansion: `~`/`~/` glue $HOME (an empty HOME still glues,
+        // lib/tilde/tilde.c:304-317), `~+`/`~-`/`~N` take the stack,
+        // `~user` takes the passwd home, and an unresolvable prefix
+        // keeps the unit verbatim (tilde.c:398 savestring fallback) —
+        // so one call covers the whole GNU rule, not just `~/`.
+        // The expanded base feeds BOTH the filesystem probe and the
+        // display spelling: GNU announces the found (joined, expanded)
+        // path (cd.def:375-377) and binds $PWD from it.
+        let expanded_base;
+        let base = if base.starts_with('~') {
+            expanded_base = expand_tilde_segment(base, env_vars);
+            expanded_base.as_str()
+        } else {
+            base
+        };
         let candidate = filesystem_path_for_display(base, env_vars).join(&target.path);
         let display = Path::new(base).join(&target.path);
 
