@@ -253,6 +253,7 @@ pub(crate) use execution_misc::RandomGen;
 // own spawn faces (rubash#3148).
 use execution_misc::*;
 pub(crate) use external_inner::spawn_error_diagnostic;
+pub(crate) use external_inner::ChildFdSetup;
 use external_setup::{
     command_needs_process_substitution_materialization, ProcessSubstitutionFiles,
 };
