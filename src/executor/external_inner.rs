@@ -4436,11 +4436,15 @@ impl Executor {
     /// classification (bad interpreter 126 / cannot-execute 127 /
     /// no-such-file 127), anything else prints the static errno text
     /// with status 126 (GNU shell_execve, execute_cmd.c:6126-6159).
-    /// A `chdir` failure (cwd deleted after `cd`) is rubash-specific
-    /// — GNU's child inherits the already-chdir'd process cwd — and
-    /// exits 1 with a diagnostic. The parent returns the pid at once
-    /// with no error-pipe sync; a fork/dup failure is the only parent
-    /// error, reported like a `spawn` failure.
+    /// A `chdir` failure is rubash-specific — GNU's child inherits
+    /// the already-chdir'd process cwd — and exits 1 with a
+    /// diagnostic. rubash#3420: the child first fchdirs the cwd
+    /// anchor fd (when it names the session cwd), so a deleted cwd
+    /// whose inode the session still holds no longer fails at all;
+    /// only a missing anchor plus an unresolvable spelling reaches
+    /// the diagnostic. The parent returns the pid at once with no
+    /// error-pipe sync; a fork/dup failure is the only parent error,
+    /// reported like a `spawn` failure.
     #[cfg(unix)]
     pub(in crate::executor) fn spawn_async_direct(
         &self,
@@ -4522,6 +4526,18 @@ impl Executor {
         for dup in stdio_fd.iter().flatten() {
             max_fd = max_fd.max(*dup);
         }
+        // rubash#3420: the cwd anchor fd rides into the child so the
+        // raw-fork half can fchdir into the session cwd's inode when
+        // the path spelling no longer resolves (deleted cwd, or a
+        // ghost recreated at the same path) — the same two-state ask
+        // stamp_spawn_cwd makes for Command spawns. The anchor is
+        // borrowed from session state (its Arc<File> outlives the
+        // spawn call) and must be counted in max_fd so the close loop
+        // takes it before exec, exactly like every other inherited fd.
+        let anchor_fd = self.session_cwd_anchor_fd();
+        if let Some(fd) = anchor_fd {
+            max_fd = max_fd.max(fd);
+        }
 
         // Failure diagnostics, pre-built (the child writes them with raw
         // write(2) — the prolog is what `report_external_spawn_error`
@@ -4574,6 +4590,7 @@ impl Executor {
                     argv_p.as_ptr(),
                     env_p.as_ptr(),
                     &cwd_c,
+                    anchor_fd,
                     stdio_fd,
                     stdio_null,
                     max_fd,
@@ -5788,6 +5805,7 @@ unsafe fn raw_fork_async_child(
     argv_p: *const *const libc::c_char,
     env_p: *const *const libc::c_char,
     cwd_c: &std::ffi::CString,
+    anchor_fd: Option<libc::c_int>,
     stdio_fd: [Option<libc::c_int>; 3],
     stdio_null: [bool; 3],
     max_fd: libc::c_int,
@@ -5796,10 +5814,22 @@ unsafe fn raw_fork_async_child(
     fail_enoent_c: &std::ffi::CString,
     enoent_status: i32,
 ) -> ! {
-    // The session cwd is a field, not the process cwd: the child must
-    // move. GNU's child inherits an already-chdir'd process cwd, so
-    // this failure mode is rubash-specific — diagnose and exit 1.
-    if unsafe { libc::chdir(cwd_c.as_ptr()) } != 0 {
+    // rubash#3420: seat the child in the session cwd. GNU's child
+    // inherits the process cwd across fork (execute_cmd.c:5771
+    // execute_disk_command forks via make_child with no chdir in the
+    // child), so the session cwd's INODE is the seat — the anchor fd
+    // names it. fchdir the anchor first: it wins over a ghost path
+    // recreated at the same spelling, exactly as stamp_spawn_cwd's
+    // two-state rule. The path spelling is the fallback for the
+    // no-anchor case and for a failed fchdir. Only when both fail is
+    // the diagnostic printed and the job exited 1 — the failure mode
+    // stays rubash-specific, it just no longer fires for a deleted
+    // cwd whose inode the session still holds.
+    let seated = match anchor_fd {
+        Some(fd) => (unsafe { libc::fchdir(fd) }) == 0,
+        None => false,
+    };
+    if !seated && unsafe { libc::chdir(cwd_c.as_ptr()) } != 0 {
         let code = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
         unsafe {
             write_stderr_parts(&[
