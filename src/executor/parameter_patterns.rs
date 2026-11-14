@@ -647,7 +647,7 @@ impl Executor {
         if matches!(resolved.as_str(), "@" | "*") || resolved.trim().is_empty() {
             return false;
         }
-        let index = match self.eval_indexed_subscript_expression(&resolved) {
+        let index = match self.eval_indexed_subscript_expression(&resolved, false) {
             Some(index) => index,
             None => {
                 self.report_indexed_subscript_error_unless_nounset(&resolved);
