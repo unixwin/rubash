@@ -2106,62 +2106,7 @@ impl Executor {
                 Ok(status)
             }
             Ok(FgWaitOutcome::Stopped(stop_signal)) => {
-                // waitchld's stop bookkeeping (jobs.c:4057): the
-                // process and job go Stopped and the job becomes
-                // current (the table's mark_stopped does all three);
-                // flipping it to a background-listed job is what lets
-                // jobs/fg/bg/wait resolve it from here on.
-                self.shell_state
-                    .job_table
-                    .mark_stopped(pid, Some(stop_signal));
-                if let Some(job_id) = self.shell_state.job_table.job_id_for_pid(pid) {
-                    if let Some(entry) = self.shell_state.job_table.jobs.get_mut(&job_id) {
-                        entry.foreground = false;
-                        entry.background = true;
-                    }
-                }
-                // rubash#2851: GNU jobs.c:4335-4343
-                // set_job_status_and_cleanup — a job stopped by SIGTSTP
-                // with loop_level > 0 sets `breaking = loop_level`.
-                // Only SIGTSTP sets it (SIGTTIN/SIGTTOU never do).
-                // The wait reads the WAITING shell's level across the
-                // fork: loop_depth is already 0 inside functions and
-                // subshells (GNU execute_cmd.c:5359/:1642), so the live
-                // depth alone undercounts a stop inside a subshell in a
-                // loop — the enclosing loops are banked in
-                // subshell_saved_loop_depth (live + 1 per boundary,
-                // accumulated at each subshell entry). The count is
-                // consumed one level per enclosing loop driver and one
-                // per subshell boundary crossed; the list walker
-                // suppresses further commands while it stands (GNU
-                // execute_cmd.c:635). A stop at top level (0 + 0) sets
-                // nothing: the plain list continues, per the oracle. A
-                // stop inside a plain function body also reads 0 — the
-                // function frame reset the live depth and banked
-                // nothing — so the loop continues (r70 boundary).
-                if stop_signal == libc::SIGTSTP {
-                    let depth =
-                        self.shell_state.subshell_saved_loop_depth + self.shell_state.loop_depth;
-                    if depth > 0 {
-                        self.stopped_loop_breaking = depth;
-                    }
-                }
-                // The stop notice prints here, as the wait completes
-                // (jobs.c:3385) — see format_stopped_job_notice for
-                // why it cannot ride the boundary flush. GNU
-                // jobs.c:4690-4691 notify_of_job_status prints a
-                // leading "\n" before the JSTOPPED job line
-                // (rubash#2834): without it the echoed ^Z glues onto
-                // the notice (`^Z[1]+  Stopped`).
-                if let Some(line) = self.format_stopped_job_notice(pid) {
-                    // rubash#2929: the stop notice is a shell
-                    // diagnostic — it follows the shell's current fd-2
-                    // binding (see report_pending_signal_notices).
-                    self.write_diagnostic_fd2(b"\n");
-                    self.write_diagnostic_fd2(line.as_bytes());
-                }
-                self.background_children
-                    .insert(pid, crate::fd::SpawnedChild::from(child));
+                self.settle_stopped_foreground_child(pid, child, stop_signal);
                 // jobs.c:3243: the wait's verdict for a stopped job
                 // is 128 + the stop signal, encoded as a plain exit
                 // status so the shared post-wait handling records
@@ -2173,6 +2118,156 @@ impl Executor {
                 Err(ExecuteError::IoError(error))
             }
         }
+    }
+
+    /// rubash#3467: the Windows twin of the unix job-control foreground
+    /// wait above. GNU's shape is the same on both sides: the
+    /// foreground child is a registered job (jobs.c:3064 wait_for), and
+    /// waitchld's WUNTRACED wait (jobs.c:4077) turns a terminal ^Z into
+    /// a wait outcome — the job goes Stopped and current
+    /// (jobs.c:4290 set_job_status_and_cleanup, :4338), the wait's
+    /// verdict is 128 + the stop signal, and the stopped job stays in
+    /// the table for jobs/fg/bg. Windows has no SIGTSTP: the console
+    /// ^Z reaches the engine as a foreground-stop request
+    /// (`script_driver::inject_console_ctrl_z`, the host's VSUSP
+    /// stand-in), which this wait alone is armed to consume. On a
+    /// request the child is suspended through the kill builtin's
+    /// Windows stop path (`signal_process` 19/20: SuspendThread over
+    /// the child's threads — the same delivery `kill -STOP` makes, and
+    /// the one `fg`/`bg`/`kill -CONT` already undo), then settled as a
+    /// stopped job exactly like the unix arm. Everything else is the
+    /// plain Windows wait (`wait_external_child`): sliced, the mailbox
+    /// drained between slices, an untrapped delivery reaping the
+    /// child.
+    #[cfg(not(unix))]
+    fn wait_fg_child_job_control(
+        &mut self,
+        mut child: std::process::Child,
+        command: String,
+        stage_commands: Vec<String>,
+    ) -> Result<std::process::ExitStatus, ExecuteError> {
+        use std::os::windows::process::ExitStatusExt;
+        const SLICE: std::time::Duration = std::time::Duration::from_millis(50);
+        let pid = child.id();
+        self.shell_state.job_table.register_process_with_stages(
+            pid,
+            command,
+            false,
+            pid,
+            stage_commands,
+        );
+        self.shell_state.job_table.set_job_control(pid, true);
+        let stop_window = crate::builtins::kill::ForegroundStopWindow::arm();
+        loop {
+            match crate::fd::wait_child_slice(&mut child, SLICE) {
+                Ok(Some(status)) => {
+                    // rubash#1776: sample the reaped child's CPU for the
+                    // Windows CHILDREN half while its handle is live.
+                    super::read_helpers::note_reaped_child_cpu(&child);
+                    self.shell_state.job_table.remove_job_by_pid(pid);
+                    return Ok(status);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    self.shell_state.job_table.remove_job_by_pid(pid);
+                    return Err(ExecuteError::IoError(error));
+                }
+            }
+            if let Err(error) = self.observe_signals_while_blocked() {
+                // As in wait_external_child: an untrapped delivery
+                // aborts the wait; reap the child so it does not linger.
+                let _ = child.kill();
+                let _ = child.wait();
+                super::read_helpers::note_reaped_child_cpu(&child);
+                self.shell_state.job_table.remove_job_by_pid(pid);
+                return Err(error);
+            }
+            if crate::builtins::kill::take_foreground_stop_request()
+                && crate::builtins::kill::send_signal(pid, crate::builtins::kill::SIGTSTP_NUMBER)
+                    .is_ok()
+            {
+                // A failed suspension means the child is already gone;
+                // the next slice reaps it and the request is moot.
+                drop(stop_window);
+                let stop_signal = crate::builtins::kill::SIGTSTP_NUMBER;
+                self.settle_stopped_foreground_child(pid, child, stop_signal);
+                // jobs.c:3220-3221 wait_for: 128 + WSTOPSIG for a stopped job,
+                // carried as a plain exit code (no signal-death notice).
+                return Ok(std::process::ExitStatus::from_raw(
+                    (128 + stop_signal) as u32,
+                ));
+            }
+        }
+    }
+
+    /// waitchld's stop bookkeeping for a foreground child the wait just
+    /// observed stopping (rubash#2398 unix WUNTRACED wait; rubash#3467
+    /// the Windows stoppable wait, whose stop is the engine's own
+    /// suspension of the child): mark the job Stopped and current, flip
+    /// it to a background-listed job, arm the loop break a SIGTSTP stop
+    /// owes, print the stop notice, and park the child handle in
+    /// background_children so jobs/fg/bg/wait resolve it from here on.
+    fn settle_stopped_foreground_child(
+        &mut self,
+        pid: u32,
+        child: std::process::Child,
+        stop_signal: i32,
+    ) {
+        // waitchld's stop bookkeeping (jobs.c:4057): the
+        // process and job go Stopped and the job becomes
+        // current (the table's mark_stopped does all three);
+        // flipping it to a background-listed job is what lets
+        // jobs/fg/bg/wait resolve it from here on.
+        self.shell_state
+            .job_table
+            .mark_stopped(pid, Some(stop_signal));
+        if let Some(job_id) = self.shell_state.job_table.job_id_for_pid(pid) {
+            if let Some(entry) = self.shell_state.job_table.jobs.get_mut(&job_id) {
+                entry.foreground = false;
+                entry.background = true;
+            }
+        }
+        // rubash#2851: GNU jobs.c:4335-4343
+        // set_job_status_and_cleanup — a job stopped by SIGTSTP
+        // with loop_level > 0 sets `breaking = loop_level`.
+        // Only SIGTSTP sets it (SIGTTIN/SIGTTOU never do).
+        // The wait reads the WAITING shell's level across the
+        // fork: loop_depth is already 0 inside functions and
+        // subshells (GNU execute_cmd.c:5359/:1642), so the live
+        // depth alone undercounts a stop inside a subshell in a
+        // loop — the enclosing loops are banked in
+        // subshell_saved_loop_depth (live + 1 per boundary,
+        // accumulated at each subshell entry). The count is
+        // consumed one level per enclosing loop driver and one
+        // per subshell boundary crossed; the list walker
+        // suppresses further commands while it stands (GNU
+        // execute_cmd.c:635). A stop at top level (0 + 0) sets
+        // nothing: the plain list continues, per the oracle. A
+        // stop inside a plain function body also reads 0 — the
+        // function frame reset the live depth and banked
+        // nothing — so the loop continues (r70 boundary).
+        if stop_signal == crate::builtins::kill::SIGTSTP_NUMBER {
+            let depth = self.shell_state.subshell_saved_loop_depth + self.shell_state.loop_depth;
+            if depth > 0 {
+                self.stopped_loop_breaking = depth;
+            }
+        }
+        // The stop notice prints here, as the wait completes
+        // (jobs.c:3385) — see format_stopped_job_notice for
+        // why it cannot ride the boundary flush. GNU
+        // jobs.c:4690-4691 notify_of_job_status prints a
+        // leading "\n" before the JSTOPPED job line
+        // (rubash#2834): without it the echoed ^Z glues onto
+        // the notice (`^Z[1]+  Stopped`).
+        if let Some(line) = self.format_stopped_job_notice(pid) {
+            // rubash#2929: the stop notice is a shell
+            // diagnostic — it follows the shell's current fd-2
+            // binding (see report_pending_signal_notices).
+            self.write_diagnostic_fd2(b"\n");
+            self.write_diagnostic_fd2(line.as_bytes());
+        }
+        self.background_children
+            .insert(pid, crate::fd::SpawnedChild::from(child));
     }
 
     /// rubash#1497: execution-time gates for tail exec replacement,
@@ -4636,6 +4731,18 @@ impl Executor {
                 Some(super::external_redirects::ExternalStdioOutcome::CapturePipe(..))
             )
             && !self.external_needs_fd_copy_capture(cmd);
+        // rubash#3467: the Windows face of the same claim — the
+        // foreground-stop channel (see foreground_stop_channel_active)
+        // decides whether the wait is the stoppable job-control one.
+        // Same capture exclusions: those children are comsub-shaped
+        // readers' children, never a terminal's foreground job.
+        #[cfg(not(unix))]
+        let fg_job_control = self.foreground_stop_channel_active()
+            && !matches!(
+                self.external_stdio_outcome,
+                Some(super::external_redirects::ExternalStdioOutcome::CapturePipe(..))
+            )
+            && !self.external_needs_fd_copy_capture(cmd);
         // rubash#229: restore GNU's child signal dispositions between fork
         // and exec (trap.c:1489 restore_original_signals) — without this a
         // policy/trap SIG_IGN in the shell survives exec and makes children
@@ -4905,7 +5012,6 @@ impl Executor {
                         // wait claims it exactly like the no-outcome
                         // plain branch below; only CapturePipe outcomes
                         // stay on the existing wait (see fg_job_control).
-                        #[cfg(unix)]
                         let wait_result = if fg_job_control {
                             self.wait_fg_child_job_control(
                                 child,
@@ -4915,8 +5021,6 @@ impl Executor {
                         } else {
                             self.wait_external_child(&mut child)
                         };
-                        #[cfg(not(unix))]
-                        let wait_result = self.wait_external_child(&mut child);
                         let status = wait_result?;
                         if let Some(signal) =
                             crate::executor::wait_status::exit_status_signal(&status)
@@ -4981,7 +5085,6 @@ impl Executor {
                     // (signal-death note, exit code, SIGCHLD trap) is
                     // shared: a stopped status carries no signal, so
                     // only the exit code moves.
-                    #[cfg(unix)]
                     let wait_result = if fg_job_control {
                         self.wait_fg_child_job_control(
                             child,
@@ -4991,8 +5094,6 @@ impl Executor {
                     } else {
                         self.wait_external_child(&mut child)
                     };
-                    #[cfg(not(unix))]
-                    let wait_result = self.wait_external_child(&mut child);
                     match wait_result {
                         Ok(status) => {
                             // rubash#229: queue the signal-death notice for

@@ -323,6 +323,16 @@ pub const SIGCONT_NUMBER: i32 = libc::SIGCONT;
 #[cfg(not(unix))]
 pub const SIGCONT_NUMBER: i32 = 18;
 
+/// The platform's SIGTSTP number — the stop signal a terminal ^Z
+/// generates for the foreground process group (GNU jobs.c:4319
+/// set_job_status_and_cleanup keys `any_tstped` on it). Linux: 20;
+/// Darwin/BSD: 18. Non-unix keeps the wire-format 20.
+#[cfg(unix)]
+pub const SIGTSTP_NUMBER: i32 = libc::SIGTSTP;
+/// Non-unix (Windows mailbox wire format, Linux numbering by contract).
+#[cfg(not(unix))]
+pub const SIGTSTP_NUMBER: i32 = 20;
+
 /// The platform's SIGQUIT number for dispatch paths that special-case the
 /// shell-policy ignore (sig.c:333 sets SIGQUIT to SIG_IGN in every shell,
 /// before the interactive-only SIGINT/SIGTERM installs). Linux: 3; Darwin/
@@ -1003,6 +1013,93 @@ pub(crate) fn note_console_ctrl_c() {
     {
         // Linux mailbox wire format: SIGINT = 2.
         queue_self_signal(2);
+    }
+}
+
+/// rubash#3467: the foreground-stop channel — the Windows port of the
+/// terminal driver's VSUSP delivery.
+///
+/// GNU never routes a terminal ^Z through the shell's own signal
+/// dispositions: an interactive shell ignores SIGTSTP for itself
+/// (jobs.c:4949-4955 initialize_job_signals sets SIG_IGN), and under
+/// job control the terminal belongs to the foreground job's process
+/// group (jobs.c:2400 make_child -> give_terminal_to), so the
+/// tty's SIGTSTP stops the JOB, and the shell only observes the stop
+/// through waitchld's WUNTRACED wait (jobs.c:4077). Windows has no
+/// VSUSP and no SIGTSTP: the host sees the ^Z key record and calls
+/// `script_driver::inject_console_ctrl_z`, which lands here. Queueing
+/// 20 into the shell's signal mailbox would be the wrong model —
+/// every mailbox drain adjudicates the delivery against the SHELL's
+/// trap table (an untrapped 20 ended the wait at 148 and killed the
+/// child, rubash#3467) — so the request is a separate one-bit channel
+/// that only a stoppable foreground wait consumes: the wait suspends
+/// the job's processes and reports the stop exactly where waitchld
+/// would.
+///
+/// A request is accepted only while a stoppable wait holds a
+/// [`ForegroundStopWindow`]; at any other moment the shell itself is
+/// the terminal's foreground "job" and GNU's SIG_IGN drops the
+/// keystroke, so the request is dropped too (returns false). The
+/// window's drop clears any request it did not consume, so a ^Z that
+/// raced the end of one wait can never stop the next command.
+#[cfg(not(unix))]
+static FOREGROUND_STOP_WINDOWS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(unix))]
+static FOREGROUND_STOP_REQUESTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Record a console ^Z for the foreground job (see the channel doc
+/// above). Returns whether a stoppable foreground wait was armed to
+/// receive it.
+///
+/// Unix: no-op returning false — the kernel terminal driver delivers
+/// SIGTSTP to the foreground process group itself.
+pub(crate) fn note_console_ctrl_z() -> bool {
+    #[cfg(not(unix))]
+    {
+        use std::sync::atomic::Ordering;
+        if FOREGROUND_STOP_WINDOWS.load(Ordering::SeqCst) == 0 {
+            return false;
+        }
+        FOREGROUND_STOP_REQUESTED.store(true, Ordering::SeqCst);
+        true
+    }
+    #[cfg(unix)]
+    {
+        false
+    }
+}
+
+/// Consume a pending foreground-stop request (rubash#3467). Only the
+/// holder of a [`ForegroundStopWindow`] calls this, once per wait
+/// slice.
+#[cfg(not(unix))]
+pub(crate) fn take_foreground_stop_request() -> bool {
+    FOREGROUND_STOP_REQUESTED.swap(false, std::sync::atomic::Ordering::SeqCst)
+}
+
+/// RAII arm of the foreground-stop channel for one stoppable wait
+/// (rubash#3467): while held, a console ^Z is recorded for the wait to
+/// consume; dropping disarms and forgets an unconsumed request.
+#[cfg(not(unix))]
+pub(crate) struct ForegroundStopWindow(());
+
+#[cfg(not(unix))]
+impl ForegroundStopWindow {
+    pub(crate) fn arm() -> Self {
+        FOREGROUND_STOP_WINDOWS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        ForegroundStopWindow(())
+    }
+}
+
+#[cfg(not(unix))]
+impl Drop for ForegroundStopWindow {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+        if FOREGROUND_STOP_WINDOWS.fetch_sub(1, Ordering::SeqCst) == 1 {
+            FOREGROUND_STOP_REQUESTED.store(false, Ordering::SeqCst);
+        }
     }
 }
 

@@ -142,6 +142,33 @@ impl Executor {
         }
     }
 
+    /// rubash#3467: the Windows foreground-stop channel — live exactly
+    /// where the unix job-control channel above would be, minus the
+    /// controlling-terminal term (a console has no tty to hand over;
+    /// the host's ^Z delivery, `script_driver::inject_console_ctrl_z`,
+    /// is the VSUSP stand-in instead): an interactive shell with the
+    /// monitor option on, at the top level of the session (GNU's
+    /// `subshell_environment == 0` WUNTRACED condition, jobs.c:4077),
+    /// outside command substitution. The stoppable foreground waits
+    /// and the emulation stand-downs consult this one predicate. On
+    /// unix it IS the job-control channel.
+    // The unix consumers keep calling job_control_channel_active
+    // directly; only the Windows waits read this face today.
+    #[cfg_attr(unix, allow(dead_code))]
+    pub(in crate::executor) fn foreground_stop_channel_active(&self) -> bool {
+        #[cfg(unix)]
+        {
+            self.job_control_channel_active()
+        }
+        #[cfg(not(unix))]
+        {
+            self.invocation_interactive()
+                && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "monitor")
+                && !self.shell_state.in_command_substitution.get()
+                && self.shell_state.subshell_depth.get() == 0
+        }
+    }
+
     /// rubash#2836 slice 4: the subshell twin of
     /// [`job_control_channel_active`]. GNU's subshell is a real forked
     /// process in its own process group, so its foreground children are
