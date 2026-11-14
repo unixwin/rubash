@@ -1,5 +1,4 @@
 use super::*;
-use crate::executor::markers::STORAGE_WORD_PREFIX;
 
 /// rubash#1166: rebase a trap action's parsed line numbers onto the line
 /// the trap fired at. GNU parses the action string with line_number
@@ -5025,6 +5024,13 @@ impl Executor {
         // `{ exec 10>&1; } >file` must not leave fd 1 pointing at file).
         let mut ambient: std::collections::BTreeMap<u32, String> =
             std::collections::BTreeMap::new();
+        // rubash#3578: the parser mirrors every heredoc / numbered
+        // here-string into BOTH `redirects` (its list position) and
+        // `heredoc_redirects` (its body) in the same order — only an
+        // unnumbered here-string has no twin (its fd-0 bind is the
+        // `here_string` field below). Pair them in the walk so each
+        // entry binds its body at its GNU do_redirections position.
+        let mut heredoc_twins = cmd.heredoc_redirects.iter();
         for redirect in &cmd.redirects {
             if let Some(fd) = redirect.fd {
                 occupied_slots.insert(fd);
@@ -5057,6 +5063,15 @@ impl Executor {
             // (exec redirections are never undone). A failed redirect stops
             // the list — do_redirections returns on the first error.
             if redirect.fd_var.is_some() {
+                // A `{var}<<` entry still consumes its heredoc_redirects
+                // twin to keep the pairing aligned — the fd_var heredoc
+                // loop below owns its bind (vredir1.sub).
+                if matches!(
+                    redirect.kind,
+                    crate::parser::RedirectKind::HereDoc | crate::parser::RedirectKind::HereString
+                ) {
+                    let _ = heredoc_twins.next();
+                }
                 match self.execute_dynamic_fd_var_redirect(
                     redirect,
                     false,
@@ -5819,6 +5834,28 @@ impl Executor {
                         }
                     }
                 }
+                crate::parser::RedirectKind::HereDoc | crate::parser::RedirectKind::HereString => {
+                    // GNU redir.c here_document_to_fd (redir.c:423 +
+                    // :1065-1072): the body materializes at this list
+                    // position and dup2's onto the redirector — under a
+                    // redirect-only exec the bind is persistent, and
+                    // EVERY entry binds (rubash#3578: `exec 14<<A 15<<B`
+                    // kept only fd 15). An unnumbered here-string has no
+                    // heredoc_redirects twin; its fd-0 bind is the
+                    // `here_string` path below.
+                    let unnumbered_here_string =
+                        matches!(redirect.kind, crate::parser::RedirectKind::HereString)
+                            && redirect.fd.is_none();
+                    if !unnumbered_here_string {
+                        if let Some(info) = heredoc_twins.next() {
+                            if info.body.is_some() || info.body_carrier.is_some() {
+                                let fd = redirect.fd.unwrap_or(0);
+                                let input = self.expand_heredoc_redirect_text(info);
+                                self.set_fd_input_text(fd, input, fd != 0);
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
             handled = true;
@@ -5876,9 +5913,16 @@ impl Executor {
             return Ok(Some(0));
         }
 
-        if let Some((fd, input)) = self.exec_heredoc_fd_input(cmd) {
-            self.set_fd_input_text(fd, input, fd != 0);
-            return Ok(Some(0));
+        // Any heredoc entry the walk did not pair (a store with no
+        // `redirects` twin) still binds at its tail position, the same
+        // persistent-descriptor semantics the paired entries got.
+        for info in heredoc_twins {
+            if info.fd_var.is_none() && (info.body.is_some() || info.body_carrier.is_some()) {
+                let fd = info.fd.unwrap_or(0);
+                let input = self.expand_heredoc_redirect_text(info);
+                self.set_fd_input_text(fd, input, fd != 0);
+                handled = true;
+            }
         }
 
         if handled {
@@ -5888,65 +5932,6 @@ impl Executor {
             return Ok(Some(0));
         }
         Ok(None)
-    }
-
-    fn exec_heredoc_fd_input(&self, cmd: &CommandNode) -> Option<(u32, String)> {
-        let redirect = cmd
-            .heredoc_redirects
-            .iter()
-            .rev()
-            // `{var}` heredocs are bound by the fd_var loop above; every
-            // other heredoc/here-string with a body belongs to its explicit
-            // fd, or to fd 0 when the redirect names no fd. The old
-            // `fd.is_some()` gate silently dropped `exec <<EOF` and
-            // `exec <<<word`, whose persistence is the whole point of the
-            // no-operand exec form (GNU redir.c: a redirect-only exec makes
-            // the redirection permanent; rubash#1413).
-            .find(|redirect| redirect.fd_var.is_none() && redirect.body.is_some())?;
-        let fd = redirect.fd.unwrap_or(0);
-        let body = redirect.body.as_deref()?;
-        let input = if let Some(carrier) = &redirect.body_carrier {
-            if let crate::parser::StdinBody::Preexpanded(text) = carrier {
-                text.clone()
-            } else {
-                // NeedsExpansion case: fall through to legacy checks
-                if let Some(word) = body.strip_prefix(STORAGE_WORD_PREFIX) {
-                    let mut input =
-                        decode_ansi_c_quoted_word(word).unwrap_or_else(|| self.expand_word(word));
-                    input.push('\n');
-                    input
-                } else {
-                    strip_unterminated_heredoc_marker(strip_quoted_heredoc_marker(body)).to_string()
-                }
-            }
-        } else if let Some(word) = body.strip_prefix(STORAGE_WORD_PREFIX) {
-            let mut input =
-                decode_ansi_c_quoted_word(word).unwrap_or_else(|| self.expand_word(word));
-            input.push('\n');
-            input
-        } else if let Some(pre) = preexpanded_stdin_body(body) {
-            pre.to_string()
-        } else {
-            strip_unterminated_heredoc_marker(strip_quoted_heredoc_marker(body)).to_string()
-        };
-        // A here-string's stored word is the lexer's transport text:
-        // `$'p\nq\n'` carries ANSI_C_IFS_GUARD pairs around every decoded
-        // blank (lexer/quotes.rs — field-split transport, GNU's CTLESC-
-        // quoted bytes) and the DATA_* carriers hold its literal
-        // quote/dollar bytes. Once the text crosses into the fd byte
-        // channel there is no later strip boundary, so the guards leak
-        // into every consumer of the descriptor (rubash#1208: `exec
-        // 3<<<$'p\nq\n'` + `mapfile -u 3` stored "p<U+E401>" elements).
-        // Resolve them at the entry boundary like the fd-0 here-string
-        // path does (expand_here_string_mut's decode tail).
-        let input = if redirect.here_string {
-            crate::executor::markers::strip_ansi_c_ifs_guard(
-                &crate::executor::markers::decode_word_position_carriers(&input),
-            )
-        } else {
-            input
-        };
-        Some((fd, input))
     }
 
     /// `exec fd>&src` inside a redirected compound must resolve `src`
