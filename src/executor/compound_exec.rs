@@ -3134,6 +3134,9 @@ impl Executor {
         // rubash#2117: the POSIX special-builtin conversion mark is
         // scoped the same way; the ast_exec time branch takes it.
         self.posix_special_status_converted.set(false);
+        // rubash#3325: the ERR-ownership verdict is recomputed by this
+        // frame after its inner dispatch; never inherit a stale one.
+        self.timed_err_owned_by_body.set(None);
         // rubash#1218: in posix mode a dash word right after `time`
         // means `time` was never a keyword (GNU parse.y), so the
         // reconstructed command (`time`, the prefix words, then the
@@ -3195,6 +3198,10 @@ impl Executor {
         // bypassed.
         self.timed_dispatch_depth
             .set(self.timed_dispatch_depth.get() + 1);
+        // rubash#3325: scoped to this frame's root dispatch (a nested
+        // time frame clears it again for its own root and leaves the
+        // verdict set for this frame to read).
+        self.timed_root_redirect_failure.set(false);
         // rubash#1611: clear the conversion mark immediately before the
         // inner dispatch (the DEBUG-trap call in the simple-command arm
         // below runs its own commands first; their conversions must not
@@ -3275,9 +3282,30 @@ impl Executor {
         };
         self.timed_dispatch_depth
             .set(self.timed_dispatch_depth.get() - 1);
+        // rubash#3325: GNU time_command (execute_cmd.c:1430) only hands
+        // the command to execute_command_internal; whether the ERR trap
+        // runs is decided inside that command's own execution. A
+        // statement compound reaches run_error_trap at its own level
+        // only for its do_redirections failure (execute_cmd.c:854-883);
+        // its body's failing commands fire the trap themselves (nested
+        // lists run with the timed deferral masked). The time branch's
+        // final-status adjudication therefore stands only for the
+        // non-compound roots (simple, pipeline, subshell, (( )), [[ ]],
+        // function call) and a compound root's own redirect failure.
+        let body_owns_err = timed_root_is_statement_compound(&time_command.command)
+            && !self.timed_root_redirect_failure.get();
         // rubash#1611: take the errexit-conversion mark left by the
         // inner dispatch (cleared at entry above).
         let errexit_converted = self.errexit_status_converted.replace(false);
+        // A `time time ...` chain: the nested frame (dispatched through
+        // the execute_command funnel, rubash#1805) already computed the
+        // verdict for the innermost command, with the errexit mark it
+        // consumed — keep it instead of recomputing from this frame's
+        // (already taken) mark.
+        if time_command.command.time_command.is_none() {
+            self.timed_err_owned_by_body
+                .set(body_owns_err.then_some(errexit_converted));
+        }
         // Q6 arm B: a converted ExitCode was adjudicated here, so
         // its unwind mark is consumed with it; the ast_exec time
         // branch's own gate re-marks if it raises the break itself.
@@ -8626,4 +8654,17 @@ mod expansion_probe_guard_tests {
         }
         assert!(flag.get());
     }
+}
+
+/// rubash#3325: whether the command a `time` runs is a statement compound — the kinds GNU's execute_command_internal
+/// never adjudicates for ERR at their own level beyond their own
+/// do_redirections failure (execute_cmd.c:854-883): brace group, if,
+/// for (both forms), while/until, case, select.
+fn timed_root_is_statement_compound(root: &CommandNode) -> bool {
+    root.brace_group.is_some()
+        || root.if_command.is_some()
+        || root.for_command.is_some()
+        || root.loop_command.is_some()
+        || root.case_command.is_some()
+        || root.select_command.is_some()
 }

@@ -141,7 +141,21 @@ impl Executor {
         // bodies, loop bodies, pipeline stages) funnels through here, so
         // this is the executor's recursion hub — grow the host thread's
         // stack on demand instead of overflowing it (src/stack_growth.rs).
-        crate::stack_growth::ensure_stack(|| self.execute_ast_inner_walk(commands))
+        //
+        // rubash#3325: the timed-dispatch deferral (timed_dispatch_depth,
+        // rubash#1611) belongs to the timed command ITSELF — GNU
+        // execute_cmd.c time_command hands the timed command to
+        // execute_command_internal and adjudicates only that command's
+        // status; every command inside its body is an ordinary command
+        // there, whose own failure reaches run_error_trap
+        // (execute_cmd.c:854-883 compound redirect failure, :993-1010
+        // simple command) without knowing it is timed. A nested list is
+        // exactly that boundary, so the depth is masked for the walk and
+        // restored on return (the walk's `?` exits all land here).
+        let saved_timed_dispatch_depth = self.timed_dispatch_depth.replace(0);
+        let result = crate::stack_growth::ensure_stack(|| self.execute_ast_inner_walk(commands));
+        self.timed_dispatch_depth.set(saved_timed_dispatch_depth);
+        result
     }
 
     fn execute_ast_inner_walk(&mut self, commands: &[CommandNode]) -> Result<(), ExecuteError> {
@@ -1646,13 +1660,21 @@ impl Executor {
                 // execute_time_ast_command; it is flushed below, after
                 // the ERR trap adjudication (GNU's order).
                 self.defer_list_time_report = true;
-                let execution_result = if command.and_or().is_some() {
-                    self.with_errexit_suppressed(|executor| {
-                        executor.execute_time_ast_command(time_command)
-                    })
-                } else {
-                    self.execute_time_ast_command(time_command)
-                };
+                // rubash#3325: a `!` on the timed command suppresses
+                // errexit / ERR for everything it runs, exactly like the
+                // untimed inverted dispatch (GNU execute_cmd.c:655-656
+                // `if (exit_immediately_on_error && invert) command->flags
+                // |= CMD_IGNORE_RETURN`). Body commands adjudicate
+                // themselves now (nested lists mask the timed deferral),
+                // so the inversion must reach them.
+                let execution_result =
+                    if command.and_or().is_some() || command.inverted || time_command.inverted {
+                        self.with_errexit_suppressed(|executor| {
+                            executor.execute_time_ast_command(time_command)
+                        })
+                    } else {
+                        self.execute_time_ast_command(time_command)
+                    };
                 match execution_result {
                     Ok(()) => {}
                     Err(ExecuteError::Break(_) | ExecuteError::Continue(_))
@@ -1736,7 +1758,14 @@ impl Executor {
                 // timed command's own `!` (time_command.inverted, already
                 // folded into exit_code by execute_time_ast_command)
                 // exempts the command like an outer inversion.
-                self.maybe_run_error_trap(command)?;
+                // rubash#3325: a statement-compound root that completed
+                // without its own redirect failing already had its
+                // failing inner commands fire the trap (GNU adjudicates
+                // inside the command, never again at the time level).
+                let body_verdict = self.timed_err_owned_by_body.take();
+                if body_verdict.is_none() {
+                    self.maybe_run_error_trap(command)?;
+                }
                 // rubash#1277: flush the queued timing report(s) AFTER the
                 // ERR trap (GNU: the trap fires inside the inner
                 // execute_command, execute_time_command prints after it
@@ -1777,6 +1806,7 @@ impl Executor {
                     && !command.inverted
                     && !time_command.inverted
                     && command.and_or().is_none()
+                    && body_verdict.unwrap_or(true)
                 {
                     // DE-06 (design 9.3; PLAN row 12): the errexit
                     // decision for a timed command is made here —

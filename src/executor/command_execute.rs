@@ -243,6 +243,15 @@ impl Executor {
             // records status 1) and adjudicates ERR / errexit
             // against the final status, exactly as the pre-#2659
             // base did.
+            // rubash#3325: the passthrough is the timed command's own
+            // redirect failure (nested lists mask the depth) — record it
+            // so the time branch keeps the adjudication for it.
+            if self.timed_dispatch_depth.get() > 0
+                && self.compound_redirect_failed.get()
+                && matches!(result, Err(ExecuteError::IoError(_)))
+            {
+                self.timed_root_redirect_failure.set(true);
+            }
             if self.timed_dispatch_depth.get() == 0 && self.compound_redirect_failed.get() {
                 if let Err(ExecuteError::IoError(error)) = &result {
                     self.report_io_error_routed(cmd, error)?;
