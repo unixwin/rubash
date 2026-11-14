@@ -102,6 +102,15 @@ fn rubash_stdin(script: &str) -> (String, String, Option<i32>) {
     )
 }
 
+/// Spell a path so it can be interpolated into a script on any host.
+/// Windows paths carry `\` separators, and an unquoted `\U` / `\r` /
+/// ... in a shell word is an escape to the parser, so the sink file is
+/// never created. POSIX separators are inert for both parsers; on
+/// Linux/macOS this is a no-op.
+fn posix_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
 /// Poll a file until its content equals `expected` or the deadline
 /// passes; returns the last observed content.
 fn wait_file_content(path: &Path, expected: &str) -> String {
@@ -131,7 +140,7 @@ fn issue3491_brace_numbered_fd_delivers_to_file() {
     let fa = dir.join("fa");
     let script = format!(
         "{{ echo X >&3; }} 3> >(wc -c > {})\nsleep 0.5\n",
-        fa.display()
+        posix_path(&fa)
     );
     let (_stdout, stderr, code) = rubash_stdin(&script);
     assert_eq!(code, Some(0), "stderr: {stderr}");
@@ -158,7 +167,7 @@ fn issue3491_brace_numbered_fd_cat_delivers() {
     let fb = dir.join("fb");
     let script = format!(
         "{{ echo AB >&3; }} 3> >(cat > {})\nsleep 0.5\n",
-        fb.display()
+        posix_path(&fb)
     );
     let (_stdout, stderr, code) = rubash_stdin(&script);
     assert_eq!(code, Some(0), "stderr: {stderr}");
@@ -183,7 +192,7 @@ fn issue3491_if_numbered_fd_delivers() {
     let fa = dir.join("fa");
     let script = format!(
         "if true; then echo X >&3; fi 3> >(wc -c > {})\nsleep 0.5\n",
-        fa.display()
+        posix_path(&fa)
     );
     let (_stdout, stderr, code) = rubash_stdin(&script);
     assert_eq!(code, Some(0), "stderr: {stderr}");
@@ -199,7 +208,7 @@ fn issue3491_loop_numbered_fd_delivers() {
     let fa = dir.join("fa");
     let script = format!(
         "while read -r l; do echo \"$l\" >&3; done <<< hello 3> >(wc -c > {})\nsleep 0.5\n",
-        fa.display()
+        posix_path(&fa)
     );
     let (_stdout, stderr, code) = rubash_stdin(&script);
     assert_eq!(code, Some(0), "stderr: {stderr}");
@@ -219,8 +228,8 @@ fn issue3491_compound_fd1_chain_first_link_runs() {
     let f2 = dir.join("f2");
     let script = format!(
         "{{ printf hi; }} > >(wc -c > {}) > >(wc -c > {})\nsleep 0.5\n",
-        f1.display(),
-        f2.display()
+        posix_path(&f1),
+        posix_path(&f2)
     );
     let (_stdout, stderr, code) = rubash_stdin(&script);
     assert_eq!(code, Some(0), "stderr: {stderr}");
@@ -251,7 +260,7 @@ fn issue3491_brace_numbered_fd_chain_file_sink_counts_four() {
     let f1 = dir.join("f1");
     let script = format!(
         "{{ echo X >&3; printf hi; }} 3> >(wc -c > {}) > >(wc -c >&3)\nsleep 0.5\n",
-        f1.display()
+        posix_path(&f1)
     );
     let (_stdout, stderr, code) = rubash_stdin(&script);
     assert_eq!(code, Some(0), "stderr: {stderr}");
@@ -273,7 +282,7 @@ fn issue3491_brace_fd1_chain_counts_two() {
     let f1 = dir.join("f1");
     let script = format!(
         "{{ printf hi; }} > >(wc -c > {}) > >(wc -c >&1)\nsleep 0.5\n",
-        f1.display()
+        posix_path(&f1)
     );
     let (_stdout, stderr, code) = rubash_stdin(&script);
     assert_eq!(code, Some(0), "stderr: {stderr}");
@@ -324,7 +333,7 @@ fn issue3491_exec_persistent_fd_still_delivers() {
     let fe = dir.join("fe");
     let script = format!(
         "exec 3> >(cat > {})\necho hi >&3\nexec 3>&-\nsleep 0.5\n",
-        fe.display()
+        posix_path(&fe)
     );
     let (_stdout, stderr, code) = rubash_stdin(&script);
     assert_eq!(code, Some(0), "stderr: {stderr}");
