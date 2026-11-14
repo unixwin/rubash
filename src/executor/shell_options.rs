@@ -1533,7 +1533,9 @@ impl Executor {
         redirects: Option<&[crate::parser::Redirect]>,
     ) {
         self.shell_state.env_vars.retain(|key, _| {
-            !key.starts_with(FD_TARGET_PREFIX) && !key.starts_with(FD_ACCESS_PREFIX)
+            !key.starts_with(FD_TARGET_PREFIX)
+                && !key.starts_with(FD_ACCESS_PREFIX)
+                && !key.starts_with(FD_STAT_PREFIX)
         });
         for (fd, entry) in &self.fd_table.entries {
             if entry.closed {
@@ -1779,6 +1781,42 @@ impl Executor {
                 }
                 None => {}
             }
+            // rubash#3432 (unix): the kernel handle behind this entry,
+            // when it has one — the identity/mtime source for the STAT
+            // mark, minted beside the TARGET/ACCESS fact so both arms
+            // carry it. The read endpoint wins: a `<>` pair shares one
+            // inode. A File endpoint's handle is the bound file/pipe
+            // itself (a procsub pipe included); CoprocStdout's is the
+            // coproc pipe; the inherited-stdin handle is the process's
+            // fd 0, and Stdout/Stderr are the process's fds 1/2. Text/
+            // ProcessSubstitution snapshots, the synthetic Directory
+            // bind, and symbolic write endpoints (FullDevice,
+            // ProcContentWrite, PipeChannel) carry no kernel handle of
+            // the referent — those keep the literal-stat fallback.
+            #[cfg(unix)]
+            let stat_handle: Option<crate::fd::HANDLE> = match &entry.read {
+                Some(FdReadEndpoint::File(file)) => Some(file.handle),
+                Some(FdReadEndpoint::CoprocStdout { fd, .. }) => Some(fd.handle),
+                Some(FdReadEndpoint::InheritedProcessStdin) => {
+                    Some(crate::fd::process_std_handle(0))
+                }
+                _ => match &entry.write {
+                    Some(FdWriteEndpoint::File(file)) => Some(file.handle),
+                    Some(FdWriteEndpoint::CoprocStdin { fd, .. }) => Some(fd.handle),
+                    Some(FdWriteEndpoint::Stdout) => Some(crate::fd::process_std_handle(1)),
+                    Some(FdWriteEndpoint::Stderr) => Some(crate::fd::process_std_handle(2)),
+                    _ => None,
+                },
+            };
+            #[cfg(unix)]
+            if let Some(handle) = stat_handle {
+                if let Some((dev, ino, sec, nsec)) = crate::fd::fd_stat_parts(handle) {
+                    self.shell_state.env_vars.insert(
+                        format!("{FD_STAT_PREFIX}{fd}"),
+                        format!("{dev} {ino} {sec} {nsec}"),
+                    );
+                }
+            }
             if let Some(target) = target {
                 self.shell_state
                     .env_vars
@@ -1878,6 +1916,14 @@ impl Executor {
         self.shell_state
             .env_vars
             .remove(&format!("{FD_ACCESS_PREFIX}{fd}"));
+        // rubash#3432: an overlay supersedes the entry's fact, so a
+        // stale STAT mark must not survive it — the Target arm's
+        // path fallback re-stats the new referent, and the Access/
+        // Closed arms fall back to the literal path. Only DupOf
+        // carries the source's STAT forward (below).
+        self.shell_state
+            .env_vars
+            .remove(&format!("{FD_STAT_PREFIX}{fd}"));
         match mark {
             FdFactMark::Target(target) => {
                 self.shell_state
@@ -1897,6 +1943,19 @@ impl Executor {
             FdFactMark::DupOf(source) => {
                 if *source == fd {
                     return;
+                }
+                // rubash#3432: a dup shares the source's open file
+                // description (redir.c r_duplicating_input/output), so
+                // its fstat identity/mtime travels with it.
+                if let Some(stat) = self
+                    .shell_state
+                    .env_vars
+                    .get(&format!("{FD_STAT_PREFIX}{source}"))
+                    .cloned()
+                {
+                    self.shell_state
+                        .env_vars
+                        .insert(format!("{FD_STAT_PREFIX}{fd}"), stat);
                 }
                 let source_target = self
                     .shell_state
