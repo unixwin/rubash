@@ -1409,6 +1409,93 @@ impl Executor {
         args
     }
 
+    /// Routes a pipeline-element diagnostic through the element's own
+    /// `2>` redirect when present — GNU runs every pipeline element
+    /// inside its own fork and applies do_redirection_internal in that
+    /// fork before the command lookup or execve can fail (redir.c:237),
+    /// so `2>/dev/null` discards, `2>file` writes there, and `2>&1`
+    /// feeds this stage's pipe (issue #70's `git ... 2>/dev/null | sed`
+    /// idiom). Without a redirect the diagnostic is the stage's stderr
+    /// payload. Returns the stage's (stdout, stderr, status) result.
+    fn deliver_stage_diagnostic(
+        &mut self,
+        command: &CommandNode,
+        diagnostic: String,
+        status: i32,
+    ) -> Result<Option<(String, String, i32)>, ExecuteError> {
+        if let Some(redirect) = &command.redirect_err {
+            let target = self.expand_redirect_target(redirect);
+            if redirect_target_fd(&target) == Some(1) {
+                return Ok(Some((diagnostic, String::new(), status)));
+            }
+            if !is_closed_redirect_target(&target) && redirect_target_fd(&target).is_none() {
+                if let Ok(mut file) =
+                    self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)
+                {
+                    let _ = file.write_all(diagnostic.as_bytes());
+                }
+                // rubash#1571: the diagnostic was just delivered through
+                // the element's own open of the target. The driver's
+                // routing walk would re-run the ordered redirects for
+                // this stage and its probe-open
+                // (open_command_output_target) truncates the file again
+                // before writing the stage's (empty) captured stderr —
+                // the delivered diagnostic died for every non-first
+                // stage. The stage owns its stream placement exactly
+                // like the shared-file wiring and the function stage's
+                // rubash#412 case: mark it pre-wired so the driver
+                // skips routing.
+                self.pipeline_stage_fds_pre_wired.set(true);
+                return Ok(Some((String::new(), String::new(), status)));
+            }
+        } else if let Some(redirect) = &command.redirect_err_append {
+            let target = self.expand_redirect_target(redirect);
+            if !is_closed_redirect_target(&target) && redirect_target_fd(&target).is_none() {
+                if let Ok(mut file) = open_redirect_append(
+                    &self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars)),
+                ) {
+                    let _ = file.write_all(diagnostic.as_bytes());
+                }
+                // rubash#1571: same direct delivery as above.
+                self.pipeline_stage_fds_pre_wired.set(true);
+                return Ok(Some((String::new(), String::new(), status)));
+            }
+        }
+        Ok(Some((String::new(), diagnostic, status)))
+    }
+
+    /// rubash#3550: GNU's forked pipeline element reports an execve
+    /// refusal on its own fd 2 — shell_execve names the filename it
+    /// handed to execve (the RESOLVED pathname for PATH shapes,
+    /// execute_cmd.c:6143; the typed word itself for slash-bearing
+    /// names, findcmd.c:385-387) and the fork exits with the
+    /// classification's status (ENOENT → EX_NOTFOUND 127, else
+    /// EX_NOEXEC 126; execute_cmd.c:6126-6159). The pipeline keeps its
+    /// PIPESTATUS shape instead of collapsing into a bare-word
+    /// diagnostic with no status.
+    fn stage_spawn_failure(
+        &mut self,
+        command: &CommandNode,
+        program: &PathBuf,
+        expanded_name: &str,
+        error: io::Error,
+    ) -> Result<Option<(String, String, i32)>, ExecuteError> {
+        let (message, status, sys_error) =
+            super::external_inner::spawn_error_diagnostic(program, &self.shell_state.cwd, &error);
+        let prefix = if sys_error {
+            self.sys_error_prefix()
+        } else {
+            self.error_prefix()
+        };
+        let report_name = if crate::executor::path::has_path_separator(expanded_name) {
+            crate::executor::substitution_metadata::fold_literal_char_escapes(expanded_name)
+        } else {
+            program.display().to_string()
+        };
+        let diagnostic = format!("{prefix}{report_name}: {message}\n");
+        self.deliver_stage_diagnostic(command, diagnostic, status)
+    }
+
     fn execute_external_pipeline_stage_inner(
         &mut self,
         command: &CommandNode,
@@ -1487,53 +1574,7 @@ impl Executor {
             // found" (execute_cmd.c internal_error via error_prolog) honors
             // gnu_errfmt (rubash#1038).
             let diagnostic = format!("{}{}{}\n", self.error_prefix(), word, message);
-            // Bash applies a pipeline element's redirections before the
-            // command lookup fails (redir.c do_redirection_internal runs for
-            // every command): `2>/dev/null` discards the diagnostic,
-            // `2>file` writes it there, and `2>&1` sends it down this
-            // stage's pipe (issue #70's `git ... 2>/dev/null | sed` idiom).
-            if let Some(redirect) = &command.redirect_err {
-                let target = self.expand_redirect_target(redirect);
-                if redirect_target_fd(&target) == Some(1) {
-                    return Ok(Some((diagnostic, String::new(), 127)));
-                }
-                if !is_closed_redirect_target(&target) && redirect_target_fd(&target).is_none() {
-                    if let Ok(mut file) =
-                        self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)
-                    {
-                        let _ = file.write_all(diagnostic.as_bytes());
-                    }
-                    // rubash#1571: the diagnostic was just delivered
-                    // through the element's own open of the target. The
-                    // driver's routing walk would re-run the ordered
-                    // redirects for this stage and its probe-open
-                    // (open_command_output_target) truncates the file
-                    // again before writing the stage's (empty) captured
-                    // stderr — the delivered diagnostic died for every
-                    // non-first stage. The stage owns its stream
-                    // placement exactly like the shared-file wiring
-                    // below and the function stage's rubash#412 case:
-                    // mark it pre-wired so the driver skips routing.
-                    self.pipeline_stage_fds_pre_wired.set(true);
-                    return Ok(Some((String::new(), String::new(), 127)));
-                }
-            } else if let Some(redirect) = &command.redirect_err_append {
-                let target = self.expand_redirect_target(redirect);
-                if !is_closed_redirect_target(&target) && redirect_target_fd(&target).is_none() {
-                    if let Ok(mut file) =
-                        open_redirect_append(&self.session_path(shell_path_to_windows(
-                            &target,
-                            &self.shell_state.env_vars,
-                        )))
-                    {
-                        let _ = file.write_all(diagnostic.as_bytes());
-                    }
-                    // rubash#1571: same direct delivery as above.
-                    self.pipeline_stage_fds_pre_wired.set(true);
-                    return Ok(Some((String::new(), String::new(), 127)));
-                }
-            }
-            return Ok(Some((String::new(), diagnostic, 127)));
+            return self.deliver_stage_diagnostic(command, diagnostic, 127);
         };
 
         let mut args: Vec<String> = args
@@ -2092,7 +2133,23 @@ impl Executor {
             }
             payloads
         };
-        let mut child = spawned?;
+        let mut child = match spawned {
+            Ok(child) => child,
+            Err(error) => {
+                // rubash#3550: GNU runs every pipeline element inside its
+                // own fork (execute_cmd.c:2620 execute_pipeline ->
+                // execute_simple_command -> execute_disk_command); an
+                // execve refusal is reported by the CHILD through
+                // shell_execve's errno diagnostic on the element's fd 2
+                // and the fork exits 127/126 — the pipeline keeps its
+                // PIPESTATUS shape. Propagating the io::Error collapsed
+                // the member into a bare-word diagnostic with no status.
+                // The operand record stays disarmed (donors untouched),
+                // and dropping `process` closes the pipe ends the dead
+                // fork would have released.
+                return self.stage_spawn_failure(command, &program, &expanded_name, error);
+            }
+        };
         // rubash#2602: the child exists — arm the operand record's
         // deferred finish (disarmed across the setup span above). A
         // failed spawn returns just above with the record still
