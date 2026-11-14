@@ -1669,7 +1669,13 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
                 state.diagnostic_text.as_deref(),
                 state.source_line_offset,
             ),
-            None => unclosed_keyword_eof_node(tokens, i, "if"),
+            None => unclosed_keyword_eof_node(
+                tokens,
+                i,
+                "if",
+                state.diagnostic_text.as_deref(),
+                state.source_line_offset,
+            ),
         };
         // GNU parse.y: line_number at EOF is PHYSICAL — every newline
         // read advances it, including comment-only and blank trailing
@@ -1758,7 +1764,13 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
             .any(|t| t.kind == TokenKind::Keyword && t.value == "done")
         {
             let command = match first_mismatched_closer(&tokens[i + 1..], opener) {
-                None => unclosed_keyword_eof_node(tokens, i, opener),
+                None => unclosed_keyword_eof_node(
+                    tokens,
+                    i,
+                    opener,
+                    state.diagnostic_text.as_deref(),
+                    state.source_line_offset,
+                ),
                 Some(rel) => mismatched_closer_node(
                     tokens,
                     i + 1 + rel,
@@ -1791,7 +1803,13 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
                 state.diagnostic_text.as_deref(),
                 state.source_line_offset,
             ),
-            None => unclosed_keyword_eof_node(tokens, i, opener),
+            None => unclosed_keyword_eof_node(
+                tokens,
+                i,
+                opener,
+                state.diagnostic_text.as_deref(),
+                state.source_line_offset,
+            ),
         };
         state.current_cmd = command;
         state
@@ -1975,7 +1993,13 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
                     return Some(index + 1);
                 }
                 ArithForContinuation::EndOfInput => {
-                    let command = unclosed_keyword_eof_node(tokens, i, "for");
+                    let command = unclosed_keyword_eof_node(
+                        tokens,
+                        i,
+                        "for",
+                        state.diagnostic_text.as_deref(),
+                        state.source_line_offset,
+                    );
                     state.current_cmd = command;
                     state
                         .ast
@@ -2056,7 +2080,13 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
             .any(|t| t.kind == TokenKind::Keyword && t.value == "done")
         {
             let command = match first_mismatched_closer(&tokens[i + 1..], "for") {
-                None => unclosed_keyword_eof_node(tokens, i, "for"),
+                None => unclosed_keyword_eof_node(
+                    tokens,
+                    i,
+                    "for",
+                    state.diagnostic_text.as_deref(),
+                    state.source_line_offset,
+                ),
                 Some(rel) => mismatched_closer_node(
                     tokens,
                     i + 1 + rel,
@@ -2142,7 +2172,13 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
             let command = match tail.first() {
                 // `case x in` + EOF: the empty clause list is legal - only
                 // `esac` is missing.
-                None => Some(unclosed_keyword_eof_node(tokens, i, "case")),
+                None => Some(unclosed_keyword_eof_node(
+                    tokens,
+                    i,
+                    "case",
+                    state.diagnostic_text.as_deref(),
+                    state.source_line_offset,
+                )),
                 Some(first) if first.kind == TokenKind::Word && !clause_prefix => {
                     match tail.get(1) {
                         // `case x in a` EOF - GNU blames the virtual
@@ -2167,9 +2203,13 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
                         }
                         // `a |` continues the pattern - still inside the
                         // clause list at EOF.
-                        Some(next) if next.value == "|" => {
-                            Some(unclosed_keyword_eof_node(tokens, i, "case"))
-                        }
+                        Some(next) if next.value == "|" => Some(unclosed_keyword_eof_node(
+                            tokens,
+                            i,
+                            "case",
+                            state.diagnostic_text.as_deref(),
+                            state.source_line_offset,
+                        )),
                         Some(_) => Some(mismatched_closer_node(
                             tokens,
                             i + 1 + tail_start + 1,
@@ -2179,7 +2219,13 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
                     }
                 }
                 Some(_) if clause_prefix => Some(match first_mismatched_closer(rest, "case") {
-                    None => unclosed_keyword_eof_node(tokens, i, "case"),
+                    None => unclosed_keyword_eof_node(
+                        tokens,
+                        i,
+                        "case",
+                        state.diagnostic_text.as_deref(),
+                        state.source_line_offset,
+                    ),
                     Some(rel) => mismatched_closer_node(
                         tokens,
                         i + 1 + rel,
@@ -2228,7 +2274,13 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
             .any(|t| t.kind == TokenKind::Keyword && t.value == "done")
         {
             let command = match first_mismatched_closer(&tokens[i + 1..], "select") {
-                None => unclosed_keyword_eof_node(tokens, i, "select"),
+                None => unclosed_keyword_eof_node(
+                    tokens,
+                    i,
+                    "select",
+                    state.diagnostic_text.as_deref(),
+                    state.source_line_offset,
+                ),
                 Some(rel) => mismatched_closer_node(
                     tokens,
                     i + 1 + rel,
@@ -2602,10 +2654,35 @@ fn push_unclosed_paren_error(state: &mut ParseState, tokens: &[Token], start: us
     //       line echo (`((X=([a]))]`, `( (echo hi) x`).
     //
     // Scan left to right; the earliest event owns the diagnostic.
+    // rubash#3405: a dangling redirection inside the unclosed `(` is the
+    // same token-level verdict the keyword-EOF arms already report via
+    // `dangling_redirect_in_region` (parse.y:532 `redirection: '>' WORD`
+    // + parse.y:6833 report_syntax_error): the operator's successor —
+    // `newline' at end of input, a closer, ... — is the first offending
+    // token, and it preempts the pure-EOF report exactly when it precedes
+    // every #413 event below. The scan returns whichever event its token
+    // position reaches first, so the dangling candidate is consulted at
+    // the top of each iteration by absolute token index.
+    let (dangling_at, mut dangling_node) = match dangling_redirect_in_region(
+        &tokens[start + 1..],
+        state.diagnostic_text.as_deref(),
+        state.source_line_offset,
+    ) {
+        Some((offending, node)) => (Some(start + 1 + offending), Some(node)),
+        None => (None, None),
+    };
     {
         let mut depth = 1usize;
         let mut scan = start + 1;
         while scan < tokens.len() {
+            if dangling_at == Some(scan) {
+                state.ast.commands.push(
+                    dangling_node
+                        .take()
+                        .expect("dangling node travels with its index"),
+                );
+                return tokens.len();
+            }
             let token = &tokens[scan];
             if token.compound_unclosed {
                 state.current_cmd.line = Some(token.position);
@@ -2869,8 +2946,10 @@ pub(super) fn unclosed_brace_eof_node(
     // `syntax error near unexpected token `X'' at that token — the same
     // foreign-closer verdict the if/loop EOF arms already report — not
     // the end-of-file diagnostic (`{ echo c\n)` names `)', not the EOF).
-    if let Some(rel) = first_mismatched_closer(region, "{") {
-        return mismatched_closer_node(region, rel, diagnostic_text, line_offset);
+    // rubash#3405: a dangling redirection in the region is the same
+    // class of token-level verdict; the earlier offending token wins.
+    if let Some(node) = preempting_token_error_node(region, "{", diagnostic_text, line_offset) {
+        return node;
     }
     compound_eof_error_node("{", brace_line, region, last_line, continuation)
 }
@@ -2885,9 +2964,11 @@ pub(super) fn unclosed_paren_eof_node(
     let paren_line = tokens[paren_index].position;
     let region = &tokens[paren_index + 1..];
     // Same foreign-closer family as the `{` arm: `fi`/`}`/`;;` reaching an
-    // open `(` is a mismatched-closer diagnostic, not EOF (niubash#482).
-    if let Some(rel) = first_mismatched_closer(region, "(") {
-        return mismatched_closer_node(region, rel, diagnostic_text, line_offset);
+    // open `(` is a mismatched-closer diagnostic, not EOF (niubash#482);
+    // a dangling redirection preempts by the same token order
+    // (rubash#3405).
+    if let Some(node) = preempting_token_error_node(region, "(", diagnostic_text, line_offset) {
+        return node;
     }
     let last_line = region
         .iter()
@@ -3065,9 +3146,20 @@ pub(super) fn unclosed_keyword_eof_node(
     tokens: &[Token],
     opener_index: usize,
     opener: &'static str,
+    diagnostic_text: Option<&str>,
+    line_offset: usize,
 ) -> CommandNode {
     let opener_line = tokens[opener_index].position;
     let region = &tokens[opener_index + 1..];
+    // rubash#3405: a dangling redirection inside the compound is a
+    // token-level verdict GNU's parse dies on before input ends
+    // (`while true; do >' names `newline', not the `while' EOF form).
+    // Foreign closers keep their existing caller-side routing
+    // (first_mismatched_closer / the head-offender scans), so only the
+    // dangling scan is consulted here.
+    if let Some((_, node)) = dangling_redirect_in_region(region, diagnostic_text, line_offset) {
+        return node;
+    }
     let last_line = region
         .iter()
         .map(|token| token.position)
@@ -3482,6 +3574,116 @@ pub(super) fn mismatched_closer_node(
         offending_line_text(tokens, bad_index, diagnostic_text, line_offset),
     );
     command
+}
+
+/// The token-level verdict that preempts an unclosed compound's
+/// end-of-file report, if the region carries one. GNU's
+/// report_syntax_error (parse.y:6833) has two disjoint exits: at a
+/// concrete token (current_token != 0, EOF_Reached == 0,
+/// parse.y:6852-6865) it prints the near-token form, and only when
+/// the parse survives to exhaustion does the EOF branch
+/// (parse.y:6890-6901) report the open compound. A parse therefore
+/// dies on the FIRST token-level error in the stream — between the
+/// region's mismatched closer and its first dangling redirection,
+/// whichever offending token comes earlier wins (rubash#3405).
+pub(super) fn preempting_token_error_node(
+    region: &[Token],
+    opener: &'static str,
+    diagnostic_text: Option<&str>,
+    line_offset: usize,
+) -> Option<CommandNode> {
+    let mismatched = first_mismatched_closer(region, opener);
+    let dangling = dangling_redirect_in_region(region, diagnostic_text, line_offset);
+    match (mismatched, dangling) {
+        (Some(rel), Some((offending, _))) if offending > rel => Some(mismatched_closer_node(
+            region,
+            rel,
+            diagnostic_text,
+            line_offset,
+        )),
+        (_, Some((_, node))) => Some(node),
+        (Some(rel), None) => Some(mismatched_closer_node(
+            region,
+            rel,
+            diagnostic_text,
+            line_offset,
+        )),
+        (None, None) => None,
+    }
+}
+
+/// The first dangling redirection in `region`: a redirect operator
+/// whose WORD operand never arrives (GNU parse.y:532 `redirection:
+/// '>' WORD` and its sibling productions). report_syntax_error
+/// (parse.y:6833) fires at the token that follows the operator — the
+/// newline at end of input, a `;', a closer — DURING the parse, so
+/// when input ends inside an unclosed compound whose region carries
+/// such an operator, the near-token verdict precedes every
+/// end-of-file report for the compound (parse.y:6890-6901 is only
+/// reached when yyparse survives to EOF): `X() { (a)>` reports
+/// `syntax error near unexpected token \`newline'', never the
+/// unclosed-`{' EOF form (rubash#3405).
+///
+/// Returns the region index of the OFFENDING token (the operator's
+/// successor, or the operator itself when it is the region's last
+/// token) alongside the error node, so callers can order the verdict
+/// against a mismatched closer in the same region — GNU's reader
+/// meets whichever comes first in the token stream.
+///
+/// A continuation pending at end of input suppresses a candidate on
+/// the region's last line: the newline that would offend was elided
+/// by the trailing backslash and never reached the grammar
+/// (`X() { (a)>\` at EOF keeps the compound-EOF report, the
+/// rubash#3183-locked exception). A candidate on an earlier line
+/// stands — its newline was real. An operator glued to a following
+/// `(` is a process-substitution introducer, not a redirection
+/// awaiting its operand (`echo <(x)` is a word, `echo > (x)` is the
+/// error), so the glued pair is skipped.
+pub(super) fn dangling_redirect_in_region(
+    region: &[Token],
+    diagnostic_text: Option<&str>,
+    line_offset: usize,
+) -> Option<(usize, CommandNode)> {
+    let continuation = region_ends_with_continuation(region);
+    let last_line = region.iter().map(|token| token.position).max().unwrap_or(0);
+    for (index, token) in region.iter().enumerate() {
+        if !matches!(
+            token.kind,
+            TokenKind::RedirectIn
+                | TokenKind::RedirectOut
+                | TokenKind::Append
+                | TokenKind::RedirectErr
+                | TokenKind::RedirectErrAppend
+                | TokenKind::HereDoc
+                | TokenKind::HereString
+        ) {
+            continue;
+        }
+        if region.get(index + 1).is_some_and(|next| {
+            next.kind == TokenKind::Keyword
+                && next.value == "("
+                && next.column == token.column + token.raw.len()
+        }) {
+            continue;
+        }
+        if continuation && token.position >= last_line {
+            continue;
+        }
+        if let Some(node) = super::token_actions::missing_redirect_target_node(
+            region,
+            index,
+            diagnostic_text,
+            line_offset,
+        ) {
+            let offending = if index + 1 < region.len() {
+                index + 1
+            } else {
+                index
+            };
+            return Some((offending, node));
+        }
+    }
+    None
 }
 
 fn compound_eof_error_node(

@@ -202,7 +202,13 @@ fn parse_if_command_after_condition(
         if index >= tokens.len() {
             // GNU parse.y yyerror EOF path: `fi` never arrived —
             // "unexpected end of file from `if' command on line N".
-            let command = unclosed_keyword_eof_node(tokens, start, "if");
+            let command = unclosed_keyword_eof_node(
+                tokens,
+                start,
+                "if",
+                state.diagnostic_text.as_deref(),
+                state.source_line_offset,
+            );
             return Some((command, tokens.len()));
         }
         // GNU reports the token that actually arrived where `fi` was
