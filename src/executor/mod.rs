@@ -1875,6 +1875,28 @@ pub struct Executor {
     /// the plain list loop never adjudicates an Err completion
     /// (rubash#1611).
     pub(crate) timed_dispatch_depth: Cell<u32>,
+    /// rubash#3325: set when a timed statement compound's OWN
+    /// do_redirections failure was deferred to the time branch (the
+    /// absorption arm / the marked-IoError passthrough under
+    /// timed_dispatch_depth). Cleared by execute_time_ast_command before
+    /// its inner dispatch; read after it to decide who owns the ERR
+    /// adjudication (see timed_err_owned_by_body).
+    pub(crate) timed_root_redirect_failure: Cell<bool>,
+    /// rubash#3325: `Some(body_errexit)` when the timed command is a
+    /// statement compound (brace/if/for/while/until/case/select) that
+    /// completed without its own redirection failing — the ast_exec time
+    /// branch then skips its final-status ERR adjudication and takes the
+    /// errexit jump only when a body command's own errexit conversion
+    /// (`body_errexit`, the errexit_status_converted mark) claimed it.
+    /// GNU time_command (execute_cmd.c:1430) only calls
+    /// execute_command_internal on the command; a statement compound
+    /// never runs run_error_trap / the ERREXIT jump at its own level
+    /// except for its do_redirections failure (execute_cmd.c:854-883), so
+    /// its failing inner commands already adjudicated themselves.
+    /// `None`: the time branch adjudicates the final status (simple,
+    /// pipeline, subshell, `(( ))`, `[[ ]]`, function-call roots, and a
+    /// compound root's own redirect failure).
+    pub(crate) timed_err_owned_by_body: Cell<Option<bool>>,
     /// GNU execute_cmd.c:4887-4888 sets `special_builtin_failed = 1` when a
     /// POSIX special builtin returns an error status (> EX_SHERRBASE = 256).
     /// After the command (execute_cmd.c:1004-1017), if `posixly_correct &&
