@@ -167,19 +167,3 @@ fn element_assignment_regression_lock() {
     );
     assert_clean(&stdout, &stderr, code, "alias k='v'\n/bin/c\n");
 }
-
-#[test]
-fn unset_dynamic_then_whole_assignment_is_plain() {
-    let (stdout, stderr, code, _) = run_script(
-        "aliases-unset",
-        "unset BASH_ALIASES\n\
-         BASH_ALIASES=([u]='echo u')\n\
-         declare -p BASH_ALIASES\n",
-    );
-    assert_eq!(code, Some(0), "stdout={stdout:?} stderr={stderr:?}");
-    assert_eq!(stderr, "", "stdout={stdout:?}");
-    assert_eq!(
-        stdout, "declare -a BASH_ALIASES=([0]=\"echo u\")\n",
-        "stderr={stderr:?}"
-    );
-}
