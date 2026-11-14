@@ -36,24 +36,34 @@ fn run_script(dir: &Path, script: &str) -> (String, i32) {
     )
 }
 
-const FILES_AND_PHASES: &str = "\
+// The armed phases share one process. The unarmed phases each need a
+// fresh process: readline's comment-char arming (variables.c:6168
+// sv_histtimefmt) and `history_multiline_entries` (histfile.c:384) are
+// both sticky — unsetting HISTTIMEFORMAT re-arms neither off — so an
+// unarmed read only exists before the first HISTTIMEFORMAT assignment
+// (rubash#3393).
+const ARMED_PHASES: &str = "\
 export TZ=UTC
 HISTTIMEFORMAT='[%s] '
 history -r corrupt.txt
 history
 history -c
-unset HISTTIMEFORMAT
+HISTTIMEFORMAT='[%Y] '
+history -r band.txt
+history
+";
+
+const UNARMED_PLAIN: &str = "\
+export TZ=UTC
 history -r plain.txt
 HISTTIMEFORMAT='[%s] '
 history
-history -c
-unset HISTTIMEFORMAT
+";
+
+const UNARMED_MID: &str = "\
+export TZ=UTC
 history -r mid.txt
 HISTTIMEFORMAT='[%s] '
-history
-history -c
-HISTTIMEFORMAT='[%Y] '
-history -r band.txt
 history
 ";
 
@@ -73,7 +83,7 @@ fn corrupt_stamps_render_gnu_forms_and_unarmed_reads_render_question_marks() {
         "#99999999999999999\ncmd-band17\n#67700000000000000\ncmd-band16\n#253402300799\ncmd-y9999\n",
     )
     .expect("write band.txt");
-    let (stdout, status) = run_script(&dir, FILES_AND_PHASES);
+    let (stdout, status) = run_script(&dir, ARMED_PHASES);
     assert_eq!(status, 0, "script status; stdout: {stdout}");
     assert_eq!(
         stdout,
@@ -81,14 +91,18 @@ fn corrupt_stamps_render_gnu_forms_and_unarmed_reads_render_question_marks() {
          \x20   2  99999999999999999999999999: invalid timestampcmd-overflow\n\
          \x20   3  0: invalid timestampcmd-zero\n\
          \x20   4  [1700000000] cmd-normal\n\
-         \x20   1  ??cmd-one\n\
-         \x20   2  ??cmd-two\n\
-         \x20   1  ??cmd-first\n\
-         \x20   2  ??#1700000000\n\
-         \x20   3  ??cmd-second\n\
          \x20   1  99999999999999999: invalid timestampcmd-band17\n\
          \x20   2  [2145329566] cmd-band16\n\
          \x20   3  [9999] cmd-y9999\n"
+    );
+    let (stdout, status) = run_script(&dir, UNARMED_PLAIN);
+    assert_eq!(status, 0, "script status; stdout: {stdout}");
+    assert_eq!(stdout, "    1  ??cmd-one\n    2  ??cmd-two\n");
+    let (stdout, status) = run_script(&dir, UNARMED_MID);
+    assert_eq!(status, 0, "script status; stdout: {stdout}");
+    assert_eq!(
+        stdout,
+        "    1  ??cmd-first\n    2  ??#1700000000\n    3  ??cmd-second\n"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

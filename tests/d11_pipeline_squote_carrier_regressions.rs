@@ -52,9 +52,8 @@ fn rubash_c(script: &str) -> RunOutcome {
 /// real external python child as argv[1]; the child repr()s it so a
 /// leaked carrier byte shows up as `\x17`. `sink` is the pipeline tail.
 fn d11_probe(payload: &str, sink: &str) -> RunOutcome {
-    let line = format!(
-        "python -c \"import sys; print(ascii(sys.argv[1]))\" \"{payload}\" | {sink}"
-    );
+    let line =
+        format!("python -c \"import sys; print(ascii(sys.argv[1]))\" \"{payload}\" | {sink}");
     rubash_c(&line)
 }
 
@@ -137,9 +136,8 @@ fn d11_no_pipe_backtick_squote_argv_stays_clean() {
     // Elements (1)+(2) without the pipeline: the plain-command argv
     // boundary already decoded (command_prepare.rs
     // materialize_expanded_command_word); unchanged by the fix.
-    let outcome = rubash_c(
-        "python -c \"import sys; print(ascii(sys.argv[1]))\" \"A `echo AAA` B member's\"",
-    );
+    let outcome =
+        rubash_c("python -c \"import sys; print(ascii(sys.argv[1]))\" \"A `echo AAA` B member's\"");
     assert_eq!(outcome.code, Some(0), "{outcome:?}");
     assert_eq!(outcome.stdout.trim(), "\"A AAA B member's\"");
 }
