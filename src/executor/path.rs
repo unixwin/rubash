@@ -7999,3 +7999,72 @@ pub fn shell_pwd_display_path(path: &str) -> String {
         value
     }
 }
+
+/// GNU variables.c:776 get_bash_name: the `$BASH` seed is the INVOCATION
+/// path, never the resolved binary — an absolute argv[0] survives
+/// verbatim (symlinks kept), a `./name` spelling joins $PWD textually, a
+/// bare name resolves through the PATH walk (the join as written), and
+/// any other slash-bearing relative spelling absolutizes onto $PWD —
+/// versus rubash's former `std::env::current_exe`, which canonicalizes
+/// `/tmp/linkbash` to the real binary (rubash#3318). None when nothing
+/// resolves: GNU falls back to the login shell there, and the caller
+/// keeps its existing fallback.
+pub fn bash_invocation_name(argv0: &str, env_vars: &HashMap<String, String>) -> Option<String> {
+    // set_shell_name (shell.c:1795) keeps argv[0] verbatim including a
+    // `-` login mark; for get_bash_name's purposes the mark only ever
+    // precedes the bare name (`-bash`), so strip it for resolution.
+    let name = argv0.strip_prefix('-').unwrap_or(argv0);
+    if name.is_empty() {
+        return None;
+    }
+    if name.starts_with('/') {
+        return Some(name.to_string());
+    }
+    // GNU set_pwd() (shell.c) validates an inherited $PWD against getcwd
+    // and resets it when they are not the same file, so a stale PWD must
+    // not feed the textual joins below.
+    let pwd = || -> Option<String> {
+        let cwd = std::env::current_dir()
+            .ok()
+            .map(|dir| dir.to_string_lossy().into_owned())?;
+        let env_pwd = env_vars.get("PWD").filter(|value| !value.is_empty());
+        match env_pwd {
+            Some(env_pwd)
+                if std::fs::canonicalize(env_pwd)
+                    .map(|resolved| resolved == std::path::Path::new(&cwd))
+                    .unwrap_or(false) =>
+            {
+                Some(env_pwd.clone())
+            }
+            _ => Some(cwd),
+        }
+    };
+    if let Some(rest) = name.strip_prefix("./") {
+        // variables.c:790-799: the `./` fast path joins PWD literally.
+        return pwd().map(|pwd| format!("{pwd}/{rest}"));
+    }
+    if name.contains('/') {
+        // `dir/name` and `../dir/name`: find_user_command does not
+        // PATH-search slash spellings, so GNU lands on file_status +
+        // make_absolute — a textual $PWD join with `.`/`..` components
+        // normalized (full_pathname's contract; symlinks untouched).
+        let joined = format!("{}/{}", pwd()?, name);
+        return Some(
+            std::path::Path::new(&joined)
+                .components()
+                .collect::<std::path::PathBuf>()
+                .to_string_lossy()
+                .into_owned(),
+        );
+    }
+    find_user_command(name, env_vars).map(|path| {
+        let joined = path.to_string_lossy().into_owned();
+        if joined.starts_with('/') {
+            joined
+        } else {
+            // full_pathname (general.c) absolutizes a relative join
+            // against $PWD.
+            pwd().map(|pwd| format!("{pwd}/{joined}")).unwrap_or(joined)
+        }
+    })
+}
