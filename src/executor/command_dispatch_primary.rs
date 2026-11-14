@@ -172,9 +172,16 @@ impl Executor {
                     // runs the in-process emulation, which has no child
                     // to stop, so ^Z becomes a silent no-op while the
                     // emulation keeps sleeping.
-                    && !(cfg!(unix)
-                        && (self.job_control_channel_active()
-                            || self.job_control_channel_active_in_subshell()))
+                    // rubash#3467: the same stand-down on Windows while
+                    // the foreground-stop channel is live — the console
+                    // ^Z stops a real child (the resolvable sleep this
+                    // emulation stands in for; an unresolvable one never
+                    // reaches the emulation at all), while the virtual
+                    // sleep has no process to suspend or resume. On unix
+                    // the channel predicate IS job_control_channel_active,
+                    // so the unix gate is unchanged.
+                    && !(self.foreground_stop_channel_active()
+                        || self.job_control_channel_active_in_subshell())
                     && crate::builtins::sleep::can_execute_fast_path(&cmd.words[1..])
                     // rubash#1497: a stamped -c tail command must reach
                     // the spawn site so it can exec-replace the process
