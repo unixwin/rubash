@@ -172,6 +172,10 @@ fn dollar_command_substitution(
     // when the region disarms, and it lets the `)` that follows
     // close the substitution like its glued twin `in)`.
     let mut case_in_completed_empty = false;
+    // rubash#3623: balance counter for a nested `$(` while inside a
+    // `case` window — the nested unit's `(`/`)` are opaque to the
+    // case machinery (see the loop body for details).
+    let mut dollar_paren_depth = 0usize;
     // GNU read_token (parse.y:3630-3643): `#` introduces a comment only at
     // a token boundary — after whitespace, a separator (`;&|()<>`), or at
     // the start. `word_boundary`/`word.is_empty()` are wrong: `$`, quotes
@@ -232,6 +236,50 @@ fn dollar_command_substitution(
             if let Some((_, next_index)) = backtick_command_substitution(chars, index) {
                 index = next_index;
                 token_boundary = false;
+                continue;
+            }
+        }
+        // Inside a `case` window a `$(` opens a NESTED command
+        // substitution that is opaque to the case machinery — GNU
+        // parse.y:4451 parse_comsub: every `$(` is a fresh parse, and
+        // the subject/pattern state is per-level. rubash#3623: scanned
+        // inline, `(`/`)` cannot touch `depth` while case_depth > 0, so
+        // a one-command `$(ls)` in subject position let `ls` complete
+        // the outer subject word and let its `)` pose as the
+        // substitution's own close (`$(case $(ls) in x) ...` truncated
+        // to `$(case $(ls`). The opacity applies in the SUBJECT window
+        // only (case_in_stage 1/2 — after `case`, before `in` completes):
+        // pattern-region and clause-body `$(` keep the inline scan the
+        // rubash#380/#2789 machinery already balances. Track only the
+        // paren balance inside the nested unit; quote/escape chars still
+        // flow through the shared quote-state arms above so
+        // `$(echo ')')` keeps its `)` quoted.
+        if case_depth > 0 && !single && !double && matches!(case_in_stage, 1 | 2) {
+            if dollar_paren_depth > 0 {
+                // Quote state inside the nested unit is real quoting:
+                // `$(echo ')')` keeps its `)` inside the quote; the
+                // shared single/double flags carry it across this arm.
+                if ch == '\\' && !single {
+                    escaped = true;
+                } else {
+                    match ch {
+                        '\'' if !double => single = !single,
+                        '"' if !single => double = !double,
+                        '(' if !single && !double => dollar_paren_depth += 1,
+                        ')' if !single && !double => dollar_paren_depth -= 1,
+                        _ => {}
+                    }
+                }
+                index += 1;
+                continue;
+            }
+            if ch == '$' && chars.get(index + 1) == Some(&'(') && chars.get(index + 2) != Some(&'(')
+            {
+                if case_pattern_region {
+                    case_pattern_content = true;
+                }
+                dollar_paren_depth = 1;
+                index += 2;
                 continue;
             }
         }
