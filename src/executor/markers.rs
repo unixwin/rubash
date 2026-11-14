@@ -680,6 +680,8 @@ pub(crate) const HASH_ENV_FIELD_SEP: char = SUBSCRIPT_CARRIER;
 // EXACT __RUBASH_READONLY_FUNCTIONS - state key (readonly functions) - serialized across the respawn/subshell boundary; see the owning subsystem
 // EXACT __RUBASH_READONLY_VARS - serialized variable-name set (readonly) for child/subshell state transfer
 // EXACT __RUBASH_READ_STDIN - state key (read stdin) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_RESPAWN_PROOF - per-spawn fd/pipe provenance proof (rubash#3300): 32-hex-char nonce naming the proof pipe; consumed at child entry, never forwarded, never in FORK_TRANSPORT_KEYS — see init.rs respawn_proof_validated
+// EXACT __RUBASH_RESPAWN_PROOF_FD - per-spawn fd/pipe provenance proof (rubash#3300): fd number of the proof pipe read end (>= 100); consumed at child entry, never forwarded, never in FORK_TRANSPORT_KEYS — see init.rs respawn_proof_validated
 // EXACT __RUBASH_RETURN_TRAP_FUNCTION - state key (return trap function) - serialized across the respawn/subshell boundary; see the owning subsystem
 // EXACT __RUBASH_SCRIPT_NAME - state key (script name) - serialized across the respawn/subshell boundary; see the owning subsystem
 // EXACT __RUBASH_SECONDS_OFFSET - state key (seconds offset) - serialized across the respawn/subshell boundary; see the owning subsystem

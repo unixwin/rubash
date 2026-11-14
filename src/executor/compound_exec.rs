@@ -1375,6 +1375,16 @@ impl Executor {
                 Err(error) => return Err(error.into()),
             }
         }
+        // rubash#3300: mint the respawn proof FIRST, before any
+        // carrier dup is created (the stdio / fd>=3 dup loops below
+        // take the lowest free fds; the mint's F_DUPFD_CLOEXEC >= 100
+        // can never collide with them, and minting first guarantees
+        // the proof number is stable for the whole spawn). A mint
+        // failure is fail-open (None): the spawn proceeds without
+        // proof keys, i.e. today's behavior.
+        #[cfg(unix)]
+        let respawn_proof =
+            crate::fd::mint_respawn_proof(&crate::builtins::kill::new_background_wrapper_nonce());
         let exe = std::env::var_os("CARGO_BIN_EXE_rubash")
             .map(std::path::PathBuf::from)
             .or_else(test_rubash_binary_from_current_exe)
@@ -1526,6 +1536,21 @@ impl Executor {
             super::RESPAWN_SPAWNER_PID_KEY.to_string(),
             super::spawner_stamp_value(),
         );
+        // rubash#3300: the per-spawn proof pair (fd number + nonce).
+        // Per-spawn, never forwarded: these keys are NOT in
+        // FORK_TRANSPORT_KEYS / rubash_spawn_inherited_state, so a
+        // grandchild never inherits them — its own spawner mints a
+        // fresh proof for it. The #2356 spill below moves them onto
+        // the state-file transport only if they grow oversized; they
+        // never do (a decimal fd + 32 hex chars).
+        #[cfg(unix)]
+        if let Some((proof_fd, proof_nonce)) = &respawn_proof {
+            env_map.insert(
+                super::RESPAWN_PROOF_FD_KEY.to_string(),
+                proof_fd.to_string(),
+            );
+            env_map.insert(super::RESPAWN_PROOF_KEY.to_string(), proof_nonce.clone());
+        }
         // rubash#2521: this spawn is the whitelist transport
         // (fd::spawn_whitelisted below) — its fd stamps name
         // descriptors delivered AT their stamped numbers, and the
@@ -1893,6 +1918,18 @@ impl Executor {
                 env_map.insert(format!("__RUBASH_FD_WHANDLE_{fd}"), format!("{:#x}", dup));
                 env_map.insert(format!("__RUBASH_FD_WPATH_{fd}"), src_path);
             }
+        }
+
+        // rubash#3300: hand the proof fd to the whitelist transport
+        // (spawn_whitelisted dup2s each extra onto its own number in
+        // pre_exec — a no-op for an already-numbered fd — and the
+        // parent's copy closes with the other owned handles after the
+        // spawn lands). The mint already cleared CLOEXEC, so the fd
+        // survives exec at its number.
+        #[cfg(unix)]
+        if let Some((proof_fd, _)) = respawn_proof {
+            extra_handles.push(proof_fd);
+            owned_handles.push(proof_fd);
         }
 
         // rubash#2356: the composed environment itself is a state
@@ -5376,6 +5413,17 @@ impl Executor {
         // order is preserved exactly; the spill + apply happen just
         // before the spawn, so no temp file exists on the
         // redirect-error / pipe-failure paths in between.
+        // rubash#3300: mint the respawn proof before the carrier
+        // dups are created (apply_coproc_redirects below) — respawn
+        // route only; a direct (foreign) child carries no proof. A
+        // mint failure is fail-open (None): the spawn proceeds
+        // without proof keys, i.e. today's behavior.
+        #[cfg(unix)]
+        let respawn_proof = if direct_plan.is_none() {
+            crate::fd::mint_respawn_proof(&crate::builtins::kill::new_background_wrapper_nonce())
+        } else {
+            None
+        };
         let mut env_entries: Vec<(String, String)> = Vec::new();
         if direct_plan.is_none() {
             // rubash#2486: the snapshot materializes the attribute
@@ -5507,6 +5555,17 @@ impl Executor {
                 super::RESPAWN_SPAWNER_PID_KEY.to_string(),
                 super::spawner_stamp_value(),
             ));
+            // rubash#3300: the per-spawn proof pair (fd number +
+            // nonce). Per-spawn, never forwarded — NOT in
+            // FORK_TRANSPORT_KEYS / rubash_spawn_inherited_state.
+            #[cfg(unix)]
+            if let Some((proof_fd, proof_nonce)) = &respawn_proof {
+                env_entries.push((
+                    super::RESPAWN_PROOF_FD_KEY.to_string(),
+                    proof_fd.to_string(),
+                ));
+                env_entries.push((super::RESPAWN_PROOF_KEY.to_string(), proof_nonce.clone()));
+            }
             // rubash#1074: the coproc body runs in a forked subshell
             // (execute_in_subshell: subshell_level++), so the child's
             // BASH_SUBSHELL starts at this shell's depth + 1.
@@ -5684,6 +5743,27 @@ impl Executor {
             unsafe {
                 use std::os::unix::process::CommandExt as _;
                 child.pre_exec(crate::builtins::kill::child_pre_exec_unblock_sigpipe);
+            }
+            // rubash#3300: the mint already cleared CLOEXEC on the
+            // proof fd; re-clear it here so the fd survives exec at
+            // its number even if a carrier pass re-armed it (the
+            // pin-pass pre_exec above never touches it, but the
+            // guarantee is cheap). The parent's copy closes with the
+            // other numbered-fd dups after the spawn attempt (the
+            // loop at the end of this fn, rubash#2200).
+            #[cfg(unix)]
+            if let Some((proof_fd, _)) = respawn_proof {
+                unsafe {
+                    use std::os::unix::process::CommandExt as _;
+                    child.pre_exec(move || {
+                        let flags = libc::fcntl(proof_fd, libc::F_GETFD);
+                        if flags >= 0 {
+                            libc::fcntl(proof_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+                        }
+                        Ok(())
+                    });
+                }
+                coproc_fd_dups.push(proof_fd);
             }
             suppress_orphan_console(&mut child);
             self.stamp_spawn_cwd(&mut child);

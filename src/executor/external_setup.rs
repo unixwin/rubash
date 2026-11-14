@@ -3779,6 +3779,15 @@ impl Executor {
         // source; the line-offset seed below compensates for it.
         let prelude_newlines = source.matches('\n').count();
         source.push_str(body);
+        // rubash#3300: mint the respawn proof FIRST, before any
+        // carrier dup is created (the spawn-fds loop below takes the
+        // lowest free fds; the mint's F_DUPFD_CLOEXEC >= 100 can never
+        // collide with them). A mint failure is fail-open (None):
+        // the spawn proceeds without proof keys, i.e. today's
+        // behavior.
+        #[cfg(unix)]
+        let respawn_proof =
+            crate::fd::mint_respawn_proof(&crate::builtins::kill::new_background_wrapper_nonce());
         // Same environment transport as the `cmd &` respawn
         // (compound_exec.rs execute_background_ast_command): the process env
         // merged with the shell's env_vars, `__RUBASH_*` keys crossing only
@@ -3816,6 +3825,17 @@ impl Executor {
             super::RESPAWN_SPAWNER_PID_KEY.to_string(),
             super::spawner_stamp_value(),
         );
+        // rubash#3300: the per-spawn proof pair (fd number + nonce).
+        // Per-spawn, never forwarded — NOT in FORK_TRANSPORT_KEYS /
+        // rubash_spawn_inherited_state.
+        #[cfg(unix)]
+        if let Some((proof_fd, proof_nonce)) = &respawn_proof {
+            env_map.insert(
+                super::RESPAWN_PROOF_FD_KEY.to_string(),
+                proof_fd.to_string(),
+            );
+            env_map.insert(super::RESPAWN_PROOF_KEY.to_string(), proof_nonce.clone());
+        }
         // rubash#2032: process_substitute's consumer is a forked child
         // (subst.c:6362), so it inherits the parent's positional
         // parameters (POSITIONAL_PARAMS_TRANSPORT).
@@ -4096,6 +4116,16 @@ impl Executor {
         // expansion-time table, which is what the stamped handle
         // carries. Declaring the delivery mode is the fix: the
         // #2521 key already means "delivered at stamped number".
+        // rubash#3300: the parent's proof copy closes with the other
+        // parent-side dups right after the spawn attempt (the loop
+        // below runs on both the Ok and the Err path). No pre_exec
+        // closure here: the mint already cleared CLOEXEC, and plain
+        // Command::spawn inherits a non-CLOEXEC fd at its own number
+        // (probe-verified on rustc 1.99.1 std).
+        #[cfg(unix)]
+        if let Some((proof_fd, _)) = respawn_proof {
+            parent_side_dups.push(proof_fd);
+        }
         env_map.insert(
             super::FD_DELIVERY_AT_STAMPED_KEY.to_string(),
             "1".to_string(),
