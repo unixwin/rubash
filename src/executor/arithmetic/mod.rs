@@ -749,7 +749,17 @@ impl Executor {
     /// walker's quote toggling disabled and the data carriers restored to
     /// the literal characters evalexp would see.
     pub(crate) fn expand_arithmetic_subscript_mut(&mut self, expression: &str) -> String {
-        let routed = self.route_current_shell_substitutions(expression);
+        // rubash#3613: the resolved subscript text reaches here straight
+        // from a word-expansion pass, so expansion-produced `$`/`` ` ``/`\`/
+        // quotes still ride the E30x data carriers. GNU's array_expand_index
+        // feeds expand_arith_string the plain re-lexed text
+        // (arrayfunc.c:1368) — a produced `$` expands again (`${x}` -> `$y`
+        // -> `` `echo 1` `` triple expansion) and a produced `` ` `` runs.
+        // Decode the carriers so this pass sees the same plain text; the
+        // expanded result re-marks produced bytes itself.
+        let expression =
+            crate::executor::subscript_expansion::decode_subscript_reparse_markers(expression);
+        let routed = self.route_current_shell_substitutions(&expression);
         // The same $#/$- special-parameter substitutions
         // expand_arithmetic_special_parameters performs.
         let routed = routed
@@ -1372,7 +1382,10 @@ impl Executor {
             &self.shell_state.env_vars,
             "array_expand_once",
         ) {
-            resolved
+            // AV_NOEXPAND: the resolved text is verbatim for evalexp —
+            // decode the same carriers so the error-token echo shows
+            // plain bytes (`$y`), not the PUA data form (rubash#3613).
+            crate::executor::subscript_expansion::decode_subscript_reparse_markers(resolved)
                 .replace(DATA_DOLLAR, "$")
                 .replace(crate::executor::markers::DATA_BACKTICK, "`")
                 .replace(crate::executor::markers::DATA_BACKSLASH, "\\")

@@ -2031,6 +2031,29 @@ fn dequote_compound_subscript(sub: &str) -> String {
     )
 }
 
+/// Pass-1 expansion products (`${x}` -> `$y`, a value's `` ` ``/`\`/quotes)
+/// ride data carriers so earlier passes cannot re-read them as syntax.
+/// GNU's subscript evaluator re-lexes the expanded text wholesale —
+/// arrayfunc.c:1368 `array_expand_index` -> `expand_arith_string`
+/// (subst.c:3981 `param_expand` + `sub_append_string` on the RAW text),
+/// so `$y` produced by the first pass expands again and its value parses
+/// as arithmetic (`y='`echo 1`'` -> error token `` `echo 1` `` —
+/// rubash#3613). Decode the carriers back to plain source bytes between
+/// passes; E400-escaped user literals stay escaped.
+pub(in crate::executor) fn decode_subscript_reparse_markers(text: &str) -> String {
+    crate::executor::markers::restore_bare_sentinels(
+        text,
+        &[
+            (crate::executor::markers::ASSIGN_SQ_DOLLAR, "$"),
+            (crate::executor::markers::ASSIGN_SQ_BACKTICK, "`"),
+            (crate::executor::markers::ASSIGN_SQ_BACKSLASH, "\\"),
+            (crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH, "\\"),
+            (crate::executor::markers::ASSIGN_EXPANSION_DQUOTE, "\""),
+            (crate::executor::markers::ASSIGN_EXPANSION_SQUOTE, "'"),
+        ],
+    )
+}
+
 /// Encode a resolved associative compound-element key for the `[key]=value`
 /// token the storage helpers will parse. Keys containing `]`, `=`,
 /// whitespace or quoting characters would corrupt the `[`/`]`/`=` token
