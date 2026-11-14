@@ -239,6 +239,20 @@ fn join_pipe_drain(
 }
 
 #[cfg(any(windows, unix))]
+fn pipe_writer_handle(writer: &os_pipe::PipeWriter) -> crate::fd::HANDLE {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        writer.as_raw_handle() as crate::fd::HANDLE
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        writer.as_raw_fd() as crate::fd::HANDLE
+    }
+}
+
+#[cfg(any(windows, unix))]
 fn internal_pipeline_program_name(program: &std::path::Path) -> Option<&str> {
     let name = program.to_str()?.strip_prefix("<rubash-internal-")?;
     name.strip_suffix('>')
@@ -1757,7 +1771,7 @@ impl Executor {
         // consumer needs a `|&` special case.
         let normalized: Vec<CommandNode> = pipeline
             .iter()
-            .map(|command| normalize_pipeerr_stage(command))
+            .map(|command| fold_trivial_group_stderr(normalize_pipeerr_stage(command)))
             .collect();
         let commands: Vec<&CommandNode> = normalized.iter().collect();
         let first = commands[0];
@@ -2685,8 +2699,15 @@ impl Executor {
                     || (cfg!(windows) && tput_inline_stage(command))
                     || command_has_non_concurrent_pipeline_redirects(command, index, commands.len())
                     || command.redirect_in.is_some()
-                    || command.redirect_err.is_some()
-                    || command.redirect_err_append.is_some()
+                    // A stage's own fd-2 redirect (`2>file`, `2>&1`,
+                    // `2>>file`) is wired by the spawner below: an
+                    // intermediate member gets the resolved target as its
+                    // child stderr, the last member's captured stderr is
+                    // routed by write_concurrent_pipeline_output. Rejecting
+                    // these shapes sent the pipeline to the sequential loop,
+                    // which materializes the producer first — `yes | head -3
+                    // 2>/dev/null` never returned.
+                    || stage_closes_stderr(command)
                     || command
                         .redirects
                         .iter()
@@ -2755,18 +2776,11 @@ impl Executor {
         // would break the profiler's stack discipline — the members' wall
         // time overlaps, which a sequential frame stack cannot represent.
         let _profiler_external_pipeline = super::profiler::enter_external("pipeline");
-        let results = self.spawn_wait_concurrent_external_stages(commands, specs, true)?;
-        let (_, stderr, _) = results.last().unwrap();
-        self.write_pipeline_output(
+        let mut results = self.spawn_wait_concurrent_external_stages(commands, specs, true)?;
+        self.write_concurrent_pipeline_output(
             commands[commands.len() - 1],
-            &results.last().unwrap().0,
-            false,
+            results.last_mut().unwrap(),
         )?;
-        if !stderr.is_empty() {
-            std::io::stderr().write_all(
-                &crate::executor::substitution_metadata::shell_text_to_raw_bytes(stderr),
-            )?;
-        }
         let statuses = results
             .iter()
             .map(|(_, _, status)| *status)
@@ -3089,12 +3103,19 @@ impl Executor {
                 ));
             }
             if index + 1 < consumer_count {
+                // Wire the consumer's own fd-2 redirect before its stdout
+                // pipe writer is transferred (see configure_stage_stderr).
+                let outgoing_stdout = pipes
+                    .get(index + 1)
+                    .and_then(|pipe| pipe.1.as_ref())
+                    .map(pipe_writer_handle);
+                self.configure_stage_stderr(&consumers[index], &mut process, outgoing_stdout)?;
                 // Consumer j's stdout is pipe[j+1]'s write end.
                 let (_, write) = &mut pipes[index + 1];
                 process.stdout(stdio_from_transferred_handle(
                     write.take().expect("pipeline writer already transferred"),
                 ));
-                if capture_intermediate_stderr {
+                if capture_intermediate_stderr && !stage_has_stderr_redirect(&consumers[index]) {
                     process.stderr(Stdio::piped());
                 }
             } else {
@@ -3377,19 +3398,7 @@ impl Executor {
 
         if producer_error.is_none() {
             let final_command = *consumers.last().expect("pipeline has at least two stages");
-            self.write_pipeline_output(final_command, &results[last_index].0, false)?;
-            if !results[last_index].1.is_empty() {
-                // rubash#3308: the last consumer's collected stderr is
-                // the shell's fd-2 output — route it through the
-                // fd-table binding instead of the raw process stderr (a
-                // failing relay write must not fail the pipeline; GNU
-                // has no relay).
-                let _ = self.write_default_stderr(
-                    &crate::executor::substitution_metadata::shell_text_to_raw_bytes(
-                        &results[last_index].1,
-                    ),
-                );
-            }
+            self.write_concurrent_pipeline_output(final_command, &mut results[last_index])?;
         }
 
         let mut statuses = Vec::with_capacity(consumer_count + 1);
@@ -3462,8 +3471,9 @@ impl Executor {
                 },
             )
             || command.redirect_in.is_some()
-            || command.redirect_err.is_some()
-            || command.redirect_err_append.is_some()
+            // fd-2 redirects are expressible here (see the spawner's
+            // configure_stage_stderr); closed ones are not.
+            || stage_closes_stderr(command)
             || command
                 .redirects
                 .iter()
@@ -3671,6 +3681,130 @@ impl Executor {
         }
     }
 
+    /// Route a concurrent pipeline member's captured stream pair through
+    /// its own ordered redirects (GNU redir.c do_redirections runs inside
+    /// every element after execute_pipeline binds the pipe — execute_cmd.c:
+    /// 2620). Returns the routed pair plus the status the walk adjudicated
+    /// (`2>&-` is declined at admission, but a failed open still reports
+    /// through it).
+    #[cfg(any(windows, unix))]
+    fn route_concurrent_stage_output(
+        &mut self,
+        command: &CommandNode,
+        stdout: &str,
+        stderr: &str,
+        status: i32,
+    ) -> Result<(String, String, i32), ExecuteError> {
+        let mut routed_stdout = stdout.to_string();
+        let mut routed_stderr = stderr.to_string();
+        let mut routed_status = status;
+        let routed = self.route_pipeline_stage_streams(
+            command,
+            &mut routed_stdout,
+            &mut routed_stderr,
+            &mut routed_status,
+        )?;
+        if routed {
+            Ok((routed_stdout, routed_stderr, routed_status))
+        } else {
+            Ok((stdout.to_string(), stderr.to_string(), status))
+        }
+    }
+
+    /// Publish the final member's captured streams of a concurrent
+    /// pipeline. The last member's stderr stays on a capture pipe so its
+    /// own redirects (`2>/dev/null`, `2>file`, `2>&1`,
+    /// `>file 2>&1`) apply here, in the same ordered walk the sequential
+    /// loop uses. Before this walk existed the spawners rejected every
+    /// fd-2 redirect, which sent `yes | head -3 2>/dev/null` down the
+    /// sequential path and into an unbounded producer drain.
+    #[cfg(any(windows, unix))]
+    fn write_concurrent_pipeline_output(
+        &mut self,
+        command: &CommandNode,
+        result: &mut (String, String, i32),
+    ) -> Result<(), ExecuteError> {
+        let stdout = std::mem::take(&mut result.0);
+        let stderr = std::mem::take(&mut result.1);
+        let (routed_stdout, routed_stderr, routed_status) =
+            self.route_concurrent_stage_output(command, &stdout, &stderr, result.2)?;
+        if routed_status != 0 {
+            self.exit_code = routed_status;
+        }
+        result.2 = routed_status;
+        self.write_pipeline_output(command, &routed_stdout, true)?;
+        if !routed_stderr.is_empty() {
+            let _ = self.write_default_stderr(
+                &crate::executor::substitution_metadata::shell_text_to_raw_bytes(&routed_stderr),
+            );
+        }
+        Ok(())
+    }
+
+    /// Wire an intermediate pipeline member's own fd-2 redirect onto its
+    /// child stdio. The member's redirect walk runs here once
+    /// (`pipeline_stage_stdio_targets`, which also creates/truncates file
+    /// targets); the final member keeps a capture pipe instead so
+    /// `write_concurrent_pipeline_output` can route its stderr after the
+    /// pipeline, including the `2>&1` merge order.
+    #[cfg(any(windows, unix))]
+    fn configure_stage_stderr(
+        &mut self,
+        command: &CommandNode,
+        process: &mut std::process::Command,
+        outgoing_stdout: Option<crate::fd::HANDLE>,
+    ) -> Result<(), ExecuteError> {
+        if !stage_has_stderr_redirect(command) {
+            return Ok(());
+        }
+        use crate::executor::redirection::OutputTarget;
+        let Some((_, target)) = self.pipeline_stage_stdio_targets(command)? else {
+            return Ok(());
+        };
+        match target {
+            OutputTarget::Null => {
+                process.stderr(Stdio::null());
+            }
+            // `2>&-` never reaches this path (stage_closes_stderr declines
+            // it in the admission probes); keep a harmless fallback.
+            OutputTarget::Closed => {
+                process.stderr(Stdio::null());
+            }
+            OutputTarget::Path(path) => {
+                let file =
+                    open_redirect_append(&shell_path_to_windows(&path, &self.shell_state.env_vars))
+                        .map_err(ExecuteError::IoError)?;
+                process.stderr(Stdio::from(file));
+            }
+            OutputTarget::SharedFile(file) => {
+                let handle = crate::fd::duplicate_handle_inheritable(file.handle)
+                    .map_err(ExecuteError::IoError)?;
+                process.stderr(crate::executor::pipeline_stages::stdio_from_fd_handle(handle));
+            }
+            OutputTarget::Stdout => {
+                // `2>&1` on an intermediate member: both streams must land
+                // on the pipe to the next stage. Two duplicated handles on
+                // one pipe keep GNU's true write order.
+                if let Some(raw) = outgoing_stdout {
+                    let handle = crate::fd::duplicate_handle_inheritable(raw)
+                        .map_err(ExecuteError::IoError)?;
+                    process.stderr(crate::executor::pipeline_stages::stdio_from_fd_handle(handle));
+                }
+            }
+            OutputTarget::Stderr
+            | OutputTarget::ProcessStderr
+            | OutputTarget::ProcessStdout
+            | OutputTarget::ProcessStdoutAt(_)
+            | OutputTarget::CoprocStdin(_)
+            | OutputTarget::FullDevice
+            | OutputTarget::ProcContentWrite
+            | OutputTarget::PipeChannel(_) => {
+                process.stderr(Stdio::inherit());
+            }
+        }
+        Ok(())
+    }
+
     /// Spawn the already-admitted external pipeline members on real OS
     /// pipes (GNU execute_cmd.c:2620 execute_pipeline forks every left
     /// element connected by pipe(2) as it walks the connection list —
@@ -3750,6 +3884,17 @@ impl Executor {
             // its temp into a dup of the outgoing writer after exit.
             // split_at_mut keeps the incoming reader (pipes[index-1].0) and
             // the outgoing writer (pipes[index].1) borrowable at once.
+            // Snapshot the outgoing pipe handle for a `2>&1` member before
+            // the stdin borrow below (the writer itself is transferred to
+            // the child further down).
+            let outgoing_stdout = if index + 1 < commands.len() {
+                pipes
+                    .get(index)
+                    .and_then(|pipe| pipe.1.as_ref())
+                    .map(pipe_writer_handle)
+            } else {
+                None
+            };
             let (before, current) = pipes.split_at_mut(index);
             let dev_stdin = if index == 0 {
                 if stage0_inherits {
@@ -3866,11 +4011,14 @@ impl Executor {
                 ));
             }
             if index + 1 < commands.len() {
+                // The member's own `2>...`/`2>&1` claims its stderr; wire
+                // it before the stdout pipe writer is transferred below.
+                self.configure_stage_stderr(&commands[index], &mut process, outgoing_stdout)?;
                 let (_, write) = &mut pipes[index];
                 process.stdout(stdio_from_transferred_handle(
                     write.take().expect("pipeline writer already transferred"),
                 ));
-                if capture_intermediate_stderr {
+                if capture_intermediate_stderr && !stage_has_stderr_redirect(&commands[index]) {
                     process.stderr(Stdio::piped());
                 }
             } else {
@@ -4330,22 +4478,15 @@ impl Executor {
             }
         }
 
-        let (tail_out, tail_err, tail_status) = match tail_result? {
+        let mut tail_result = match tail_result? {
             Some(triple) => triple,
             None => (String::new(), String::new(), 0),
         };
-        statuses.push(tail_status);
-
-        self.write_pipeline_output(tail, &tail_out, false)?;
-        if !tail_err.is_empty() {
-            // rubash#3308: the tail's collected stderr is the shell's
-            // fd-2 output — route it through the fd-table binding
-            // instead of the raw process stderr (a failing relay write
-            // must not fail the pipeline; GNU has no relay).
-            let _ = self.write_default_stderr(
-                &crate::executor::substitution_metadata::shell_text_to_raw_bytes(&tail_err),
-            );
-        }
+        // The in-shell tail's own fd-2 redirects (`2>/dev/null`, `2>file`,
+        // `2>&1`) are routed here; the prefix producers already died on the
+        // tail's dropped fd 0, so a discarded diagnostic cannot deadlock.
+        self.write_concurrent_pipeline_output(tail, &mut tail_result)?;
+        statuses.push(tail_result.2);
         self.exit_code = self.pipeline_exit_status(&statuses);
         self.set_pipestatus(statuses);
         Ok(Some(()))
@@ -4843,11 +4984,12 @@ impl Executor {
     /// `:`, `false`, `echo`, `printf`, `read`), or a compound body (a loop, a
     /// brace group, an `if`/`case`, a subshell) whose inner readers pull the
     /// same fd 0 — so `yes | while read; do break; done` stops the producer
-    /// exactly when `break` ends the body. Redirects/tempenv/heredocs/procsubs
-    /// on the tail force the existing executor.
+    /// exactly when `break` ends the body. A tail's own fd-2 redirect is
+    /// allowed and routed after the body; redirects that change fd 0/1,
+    /// tempenv, heredocs and procsubs still force the sequential executor.
     #[cfg(any(windows, unix))]
     fn streaming_builtin_tail(&self, command: &CommandNode) -> bool {
-        if !pipeline_streaming_plain_stage(command) {
+        if !pipeline_streaming_tail_stage(command) {
             return false;
         }
         if command_is_compound_pipeline_stage(command) {
@@ -4922,13 +5064,20 @@ impl Executor {
         // The last prefix member's payload becomes the sequential tail's
         // stage input — it must be collected, never streamed away.
         let results = self.spawn_wait_concurrent_external_stages(commands, specs, false)?;
-        let Some((output, stderr, _)) = results.last().cloned() else {
+        let Some((output, stderr, status)) = results.last().cloned() else {
             return Ok(None);
         };
-        let statuses = results
+        // The prefix's last member is an ordinary pipeline element: its own
+        // fd-2 redirect applies before the payload reaches the shell-side
+        // tail (`2>&1` merges into the piped stdout, `2>file` leaves it
+        // empty).
+        let (output, stderr, status) =
+            self.route_concurrent_stage_output(commands[prefix_len - 1], &output, &stderr, status)?;
+        let mut statuses = results
             .iter()
             .map(|(_, _, status)| *status)
             .collect::<Vec<_>>();
+        statuses[prefix_len - 1] = status;
         Ok(Some((prefix_len, output, stderr, statuses)))
     }
 
@@ -8867,6 +9016,31 @@ fn pipeline_streaming_plain_stage(command: &CommandNode) -> bool {
         && !command_has_pipeline_process_substitution(command)
 }
 
+/// A streaming tail may carry its own fd-2 destination: the tail runs
+/// in-shell, and its captured stderr is routed after the body
+/// (write_concurrent_pipeline_output). Anything that changes fd 0/1 or the
+/// body's shape still forces the sequential executor.
+fn pipeline_streaming_tail_stage(command: &CommandNode) -> bool {
+    command.time_command.is_none()
+        && command.redirect_out.is_none()
+        && command.append.is_none()
+        && command.redirect_in.is_none()
+        && command.heredoc.is_none()
+        && command.heredoc_redirects.is_empty()
+        && command.here_string.is_none()
+        && command
+            .redirects
+            .iter()
+            .all(|redirect| redirect.is_output_side() && redirect.fd == Some(2))
+        && command.assignments.is_empty()
+        && command.process_substitutions.is_empty()
+        && !command.inverted
+        && command.inverted_command.is_none()
+        && command.background_command.is_none()
+        && command.coproc_command.is_none()
+        && !command_has_pipeline_process_substitution(command)
+}
+
 /// rubash#761: a streaming-tail PREFIX member — a plain external command (no
 /// compound/subshel/brace shape, non-empty words). Prefix members are spawned
 /// as real external children, so only `pipeline_streaming_plain_stage` plus
@@ -8896,15 +9070,47 @@ fn command_has_non_concurrent_pipeline_redirects(
                 redirect.kind,
                 crate::parser::RedirectKind::HereDoc | crate::parser::RedirectKind::HereString
             );
+        // A member's own fd-2 destination is wired by the concurrent
+        // spawners on every member, not only the last one (see
+        // configure_stage_stderr). Only fd 1 (or an unnumbered output
+        // redirect, which defaults to fd 1) needs the final-stage capture.
+        let is_stderr_output = redirect.is_output_side() && redirect.fd == Some(2);
         let is_final_output = is_last_stage
+            && redirect.fd.is_none_or(|fd| fd == 1)
             && matches!(
                 redirect.kind,
                 crate::parser::RedirectKind::Output
                     | crate::parser::RedirectKind::Append
                     | crate::parser::RedirectKind::ClobberOutput
             );
-        !is_initial_heredoc && !is_final_output
+        !is_initial_heredoc && !is_final_output && !is_stderr_output
     })
+}
+
+/// `2>&-` needs a genuinely closed fd 2, which Rust's `Stdio` cannot
+/// express (it would turn the stage's write failures into silent
+/// successes). Keep such members on the sequential path, which models
+/// the EBADF write-error contract.
+fn stage_closes_stderr(command: &CommandNode) -> bool {
+    command
+        .redirect_err
+        .as_ref()
+        .is_some_and(|redirect| is_closed_redirect_target(&redirect.target))
+        || command
+            .redirect_err_append
+            .as_ref()
+            .is_some_and(|redirect| is_closed_redirect_target(&redirect.target))
+}
+
+/// True when the member carries its own fd-2 destination (a `2>...` /
+/// `2>&N` redirect), as opposed to inheriting the shell's stderr.
+fn stage_has_stderr_redirect(command: &CommandNode) -> bool {
+    command.redirect_err.is_some()
+        || command.redirect_err_append.is_some()
+        || command
+            .redirects
+            .iter()
+            .any(|redirect| redirect.is_output_side() && redirect.fd == Some(2))
 }
 
 // The native concurrent pipeline runs members through CreateProcess with
@@ -9143,6 +9349,70 @@ fn normalize_pipeerr_stage(command: &CommandNode) -> CommandNode {
     normalized.redirects.push(dup.clone());
     normalized.redirect_err = Some(Box::new(dup));
     normalized
+}
+
+/// Fold `{ cmd; } 2>here` (single simple body, otherwise inert wrapper)
+/// into `cmd 2>here` at pipeline normalization. GNU applies the group's
+/// redirections before the body runs (redir.c do_redirections walks the
+/// compound's list first), so prepending them to the body's ordered list is
+/// observably identical — and it lets the concurrent drivers, which admit
+/// external members rather than brace groups, keep streaming an unbounded
+/// producer. Only fd-2 redirects fold; fd 0/1 or a multi-command body keep
+/// the group node for the shell-aware executor.
+fn fold_trivial_group_stderr(command: CommandNode) -> CommandNode {
+    let Some(group) = command.brace_group.as_ref() else {
+        return command;
+    };
+    let inert = command.words.is_empty()
+        && command.assignments.is_empty()
+        && command.redirect_out.is_none()
+        && command.append.is_none()
+        && command.redirect_in.is_none()
+        && command.heredoc.is_none()
+        && command.heredoc_redirects.is_empty()
+        && command.here_string.is_none()
+        && command.process_substitutions.is_empty()
+        && command.time_command.is_none()
+        && !command.subshell
+        && !command.inverted
+        && command.inverted_command.is_none();
+    if !inert || group.body.len() != 1 {
+        return command;
+    }
+    // Every wrapper redirect must be an fd-2 destination; anything else
+    // changes the group's fd 0/1 and needs the group executor.
+    if !command
+        .redirects
+        .iter()
+        .all(|redirect| redirect.is_output_side() && redirect.fd == Some(2))
+    {
+        return command;
+    }
+    // A closed fd cannot be modeled by the concurrent spawners.
+    if command
+        .redirects
+        .iter()
+        .any(|redirect| is_closed_redirect_target(&redirect.target))
+    {
+        return command;
+    }
+    let group_stderr: Vec<_> = command.redirects.iter().cloned().collect();
+    if group_stderr.is_empty() {
+        return command;
+    }
+    let inner = &group.body[0];
+    if inner.brace_group.is_some()
+        || inner.subshell
+        || inner.subshell_command.is_some()
+        || command_is_compound_pipeline_stage(inner)
+    {
+        return command;
+    }
+    let mut folded = inner.clone();
+    let mut redirects = group_stderr;
+    redirects.append(&mut folded.redirects);
+    folded.redirects = redirects;
+    folded
 }
 
 /// Parse the inline grep fast-path argument list: options from the set
