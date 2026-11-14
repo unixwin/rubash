@@ -268,6 +268,13 @@ impl SessionHistory {
 
     /// bashhist.c check_history_control + history_should_ignore, then
     /// add_history with HISTSIZE stifling. Returns true when recorded.
+    /// There is deliberately NO emptiness check here: GNU's
+    /// check_add_history (bashhist.c:789-807) has none — emptiness
+    /// filtering lives at the line-recording call sites
+    /// (pre_process_line's `*return_value`, bashhist.c:643;
+    /// fc_replhist's `*command`, fc.def:770-780), while `history -s`
+    /// (push_history, history.def:421-451) records the empty string as
+    /// a real entry (rubash#3329).
     pub fn record(
         &mut self,
         line: &str,
@@ -275,9 +282,6 @@ impl SessionHistory {
         histignore: &str,
         histsize: Option<usize>,
     ) -> bool {
-        if line.trim().is_empty() {
-            return false;
-        }
         if history_should_ignore(line, histignore, self.entries.last().map(String::as_str)) {
             return false;
         }
@@ -291,7 +295,11 @@ impl SessionHistory {
                 _ => {}
             }
         }
-        if control & 1 != 0 && (line.starts_with(' ') || line.starts_with('\t')) {
+        // bashhist.c:694-708 check_history_control: ignorespace drops
+        // only a line whose FIRST character is exactly ' ' — a
+        // tab-leading line is kept (rubash#3329: `history -s '\t'`
+        // under ignorespace is a real entry in GNU).
+        if control & 1 != 0 && line.starts_with(' ') {
             return false;
         }
         if control & 2 != 0 && self.entries.last().map(String::as_str) == Some(line) {

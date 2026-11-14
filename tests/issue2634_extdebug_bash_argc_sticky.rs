@@ -43,10 +43,6 @@ struct Outcome {
     code: i32,
 }
 
-fn run(script: &str) -> Outcome {
-    run_args(script, &[])
-}
-
 fn run_args(script: &str, extra_args: &[&str]) -> Outcome {
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("-c")

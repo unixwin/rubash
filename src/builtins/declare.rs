@@ -182,21 +182,15 @@ pub(crate) fn sync_typed_assignments(
     variables: &crate::shell::var_table::VarTable,
     store: &mut VariableStore,
 ) {
-    let mut parse_options = true;
-    for arg in args {
-        if parse_options && arg == "--" {
-            parse_options = false;
-            continue;
-        }
-        let Some((raw_name, _)) = arg.split_once('=') else {
-            continue;
-        };
-        let name = raw_name.strip_suffix('+').unwrap_or(raw_name);
-        let Some(base) = declare_base_name(name) else {
-            continue;
-        };
+    // One name's mirror->cell sync, factored out so a nameref operand can
+    // sync its resolved target with the same code (rubash#2655).
+    fn sync_one(
+        base: &str,
+        variables: &crate::shell::var_table::VarTable,
+        store: &mut VariableStore,
+    ) {
         let Some(value) = variables.get(base) else {
-            continue;
+            return;
         };
         if variables.is_marked(DECLARED_UNSET_VARS, base) {
             // A declared-but-unset variable has no value: its mirror
@@ -209,7 +203,7 @@ pub(crate) fn sync_typed_assignments(
             if variables.is_marked(ARRAY_VARS, base) {
                 crate::executor::drop_typed_indexed_array(store, base);
             }
-            continue;
+            return;
         }
         if variables.is_marked(ARRAY_VARS, base) {
             let entries = indexed_array_entries(value);
@@ -226,6 +220,35 @@ pub(crate) fn sync_typed_assignments(
             }
         } else if variables.is_marked(ASSOC_VARS, base) {
             let _ = store.replace_associative_array(base, parse_assoc_words(value));
+        }
+    }
+    let mut parse_options = true;
+    for arg in args {
+        if parse_options && arg == "--" {
+            parse_options = false;
+            continue;
+        }
+        let Some((raw_name, _)) = arg.split_once('=') else {
+            continue;
+        };
+        let name = raw_name.strip_suffix('+').unwrap_or(raw_name);
+        let Some(base) = declare_base_name(name) else {
+            continue;
+        };
+        sync_one(base, variables, store);
+        // rubash#2655: a `declare`/`local` operand naming a nameref binds
+        // the RESOLVED target — the builtin wrote the target's mirror, so
+        // syncing only the operand name left the target's typed cell stale
+        // and the command-boundary verifier panicked on the next check
+        // (nameref18/21/22/23.sub: `declare b+=1` with `b -> a[0]` moved
+        // the mirror to 6 while the cell still held 5). A subscripted
+        // cell resolves to its array base (`a[0]` -> `a`).
+        if let Some((_, target)) = declare_nameref_chain(variables, base) {
+            if let Some(target_base) = declare_base_name(&target) {
+                if target_base != base {
+                    sync_one(target_base, variables, store);
+                }
+            }
         }
     }
 }
@@ -1035,6 +1058,33 @@ where
                 diag.error(DiagKind::Readonly(lhs.to_string()));
                 attr_status = EXECUTION_FAILURE;
                 continue;
+            }
+        }
+        // GNU declare.def:613 + arrayfunc.c:359 assign_array_element: an
+        // assignment to an EMPTY subscript (`declare 'a[]=x'`, also -a/-A,
+        // `+=`, typeset, local-in-function) reports the bare
+        // `a[]: bad array subscript` (err_badarraysub, error.c:440-443),
+        // status failure, and the command continues to later operands
+        // (rubash#3186). The -p face stays `not found` (declare.def:389-406
+        // pflag branch runs before the making-variables machinery), the
+        // no-assignment `declare 'a[]'` stays InvalidId, and
+        // export/readonly keep InvalidId (setattr.def never splits
+        // subscripts).
+        if !print && name.contains('=') {
+            if let Some((assign_lhs, _)) = name.split_once('=') {
+                let assign_lhs = assign_lhs.strip_suffix('+').unwrap_or(assign_lhs);
+                if let Some(base) = assign_lhs.strip_suffix("[]") {
+                    if valid_identifier(base) {
+                        bare_diag_line(
+                            diag,
+                            prolog,
+                            variables,
+                            &format!("{base}[]: bad array subscript"),
+                        );
+                        attr_status = EXECUTION_FAILURE;
+                        continue;
+                    }
+                }
             }
         }
         if !valid_declare_name(name) {
