@@ -253,6 +253,10 @@ pub(crate) use execution_misc::RandomGen;
 // own spawn faces (rubash#3148).
 use execution_misc::*;
 pub(crate) use external_inner::spawn_error_diagnostic;
+// Shared with builtins::exec (rubash#3401 face 3): the simulated-exec
+// waits route through the executor's draining wait; the function lives
+// in external_inner, so it is re-exported here like spawn_error_diagnostic.
+pub(crate) use external_inner::wait_fg_child_draining;
 use external_setup::{
     command_needs_process_substitution_materialization, ProcessSubstitutionFiles,
 };
@@ -718,6 +722,24 @@ pub struct Executor {
     /// sole consumer; parked with the mark across contained-child
     /// spans (executor/external_finish.rs).
     termsig_death_trap_status: Option<i32>,
+    /// rubash#3401 (face 1): the command-substitution conduit. A
+    /// comsub clone shares this process, so the flat-layer guard in
+    /// `observe_signals_while_blocked` never lets it drain the shared
+    /// mailbox — and its own trap table is reset for the subshell
+    /// child, so it could never adjudicate a termsig death against
+    /// the parent's EXIT trap anyway. The clone therefore acts as a
+    /// conduit, not a judge: while `comsub_drain_permit` is set (the
+    /// body span) its blocked-wait drain notices a delivery whose
+    /// parent-side verdict is death, records the raw signal in
+    /// `comsub_termsig_pending`, and aborts the wait; the teardown
+    /// hands the signal to the parent, which adjudicates it against
+    /// its own table. `comsub_parent_exit_armed` snapshots the
+    /// parent's EXIT-trap presence at clone build (propagated through
+    /// nesting: a nested clone inherits the outer clone's snapshot,
+    /// so a grandchild still knows the top shell is armed).
+    comsub_drain_permit: Cell<bool>,
+    comsub_parent_exit_armed: Cell<bool>,
+    comsub_termsig_pending: Cell<Option<i32>>,
     /// GNU exit.def:52 (sourced_logout): ~/.bash_logout runs at most once
     /// per shell process (bash_logout, exit.def:156-166).
     bash_logout_sourced: bool,
@@ -1655,6 +1677,17 @@ pub struct Executor {
     /// takes the stash and places each payload at the target the
     /// ordered walk resolved for that fd at its own position.
     stage_dup_channel_payloads: std::cell::RefCell<Vec<(u32, String)>>,
+    /// rubash#3324: ordered (fd, text) chunks a sequential pipeline
+    /// stage's inline arm produced (trap/printf via OrderedOutputLog).
+    /// The stage result is a (stdout_text, stderr_text) split, which
+    /// cannot represent the production order across the two streams,
+    /// so an arm that writes both streams records its chunks here and
+    /// route_pipeline_stage_streams takes the log and interleaves
+    /// them when both streams resolve to the same target (`2>&1`,
+    /// `1>&2`, `>f 2>&1`). The dispatcher clears it at the start of
+    /// every stage so a stale log can never leak into the next
+    /// stage's routing; the route takes it exactly once.
+    pipeline_stage_ordered_chunks: std::cell::RefCell<Option<Vec<(u8, String)>>>,
     /// rubash#1454: set by the sequential pipeline driver around the LAST
     /// stage's dispatch only. The stage spawner may then hand an external
     /// final member the shell's own stdout (Stdio::inherit) instead of a

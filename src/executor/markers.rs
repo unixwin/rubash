@@ -455,11 +455,15 @@ pub(crate) const COMPOUND_ASSIGNMENT_MARKER_CHAR: char = '\u{E31A}';
 /// still simulates the raw word — carries the verdict in-band, and
 /// the expansion walkers (embedded_parameters.rs /
 /// embedded_mutations.rs) consume the marker on sight and
-/// IFS-protect that one expansion's result span. The marker never
-/// survives a walker, so it has no decode boundary. A bare U+E31B in
+/// IFS-protect that one expansion's result span. A bare U+E31B in
 /// transport is always protocol: a typed `$'\uE31B'` arrives
 /// E400-escaped at entry (push_literal_char), hence
-/// user_reachable == false.
+/// user_reachable == false. The marker is consumed by the walkers —
+/// except on the diagnostic path: the bad-substitution diagnostic
+/// cites the word recorded BEFORE the walk
+/// (PendingDiagnosticWordGuard), so a bare marker reaches the display
+/// decoder (`decode_to_visible_text`, rubash#3433) and that decoder
+/// drops it, the same treatment as the sibling U+E31A marker.
 pub(crate) const QUOTED_EXPANSION_SITE: char = '\u{E31B}';
 /// `&str` companion of QUOTED_EXPANSION_SITE.
 pub(crate) const QUOTED_EXPANSION_SITE_STR: &str = "\u{E31B}";

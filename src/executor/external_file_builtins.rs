@@ -5814,24 +5814,31 @@ impl Executor {
                 // G-02: relative operands anchor at the session cwd.
                 self.shell_state.cwd.join(&windows)
             };
+            // rubash#3425: route the operand stat through the CpNode
+            // machinery — the same root external_cp builds
+            // (cp_operand_root: an anchor-relative root under a
+            // dead cwd, else the plain joined path) — so the
+            // failure class comes from the path walk instead of a
+            // hardcoded ENOENT text. GNU chmod reports fts's errno
+            // verbatim (coreutils 9.4 src/chmod.c:231 `cannot
+            // access` with ent->fts_errno): the walk dies ENOTDIR
+            // at the first non-directory component.
+            let node = CpNode::at_root(self.cp_operand_root(std::path::Path::new(&windows), &host));
             // Base mode for symbolic clauses: unix reads the file's real
             // inode mode (coreutils chmod(1) applies `+x`/`-w` clauses to
             // the file's current mode via chmod(2)); windows keeps the
             // emulated store, which is the only mode source there.
             #[cfg(unix)]
             let (base, is_dir) = {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::metadata(&host)
-                    .map(|metadata| (metadata.permissions().mode(), metadata.is_dir()))
+                node.stat()
+                    .map(|stat| (stat.mode, stat.is_dir))
                     .unwrap_or((0o644, false))
             };
             #[cfg(not(unix))]
             let base = crate::builtins::test::emulated_file_mode(file, &self.shell_state.env_vars)
                 .unwrap_or_else(|| self.default_emulated_mode(&windows));
             #[cfg(not(unix))]
-            let is_dir = std::fs::metadata(&host)
-                .map(|metadata| metadata.is_dir())
-                .unwrap_or(false);
+            let is_dir = node.stat().map(|stat| stat.is_dir).unwrap_or(false);
             match apply_chmod_mode(
                 base,
                 mode,
@@ -5839,27 +5846,49 @@ impl Executor {
                 is_dir,
             ) {
                 Some(new_mode) => {
+                    // rubash#3425: the operand stat is the node's
+                    // classified stat: a walk that dies at a
+                    // non-directory component reports ENOTDIR, a
+                    // genuinely missing component ENOENT — the same
+                    // verdict #3416 built for cp, generalized here
+                    // to the plain host path via the node machinery.
+                    let classified = node.stat_classified();
                     #[cfg(unix)]
                     {
                         // coreutils chmod(1) -> chmod(2): the real inode mode
                         // is the single source of truth on unix; the readonly
                         // attribute + emulated store below is the Windows
                         // port (no POSIX mode bits there).
-                        match std::fs::metadata(&host) {
-                            Ok(metadata) => {
-                                use std::os::unix::fs::PermissionsExt;
-                                let mut permissions = metadata.permissions();
-                                permissions.set_mode(new_mode);
-                                if std::fs::set_permissions(&host, permissions).is_err() {
-                                    failures += 1;
+                        match classified {
+                            Ok(_) => match std::fs::metadata(&host) {
+                                Ok(metadata) => {
+                                    use std::os::unix::fs::PermissionsExt;
+                                    let mut permissions = metadata.permissions();
+                                    permissions.set_mode(new_mode);
+                                    if std::fs::set_permissions(&host, permissions).is_err() {
+                                        failures += 1;
+                                    }
                                 }
-                            }
-                            Err(_) => {
+                                Err(raw) => {
+                                    // The node stat just succeeded
+                                    // (anchor face or a race): keep
+                                    // the raw verdict, unclassified.
+                                    failures += 1;
+                                    writeln!(
+                                        stderr,
+                                        "chmod: cannot access '{}': {}",
+                                        file,
+                                        crate::posix_errors::message(&raw)
+                                    )?;
+                                }
+                            },
+                            Err(error) => {
                                 failures += 1;
                                 writeln!(
                                     stderr,
-                                    "chmod: cannot access '{}': No such file or directory",
-                                    file
+                                    "chmod: cannot access '{}': {}",
+                                    file,
+                                    crate::posix_errors::message(&error)
                                 )?;
                             }
                         }
@@ -5871,23 +5900,38 @@ impl Executor {
                         // attribute, so `>file`/`>>file` fail EACCES like under
                         // GNU-on-WSL (redir12.sub). Sync it for every real path —
                         // relative names resolve against the drive-relative cwd.
-                        match std::fs::metadata(&host) {
-                            Ok(metadata) => {
-                                let readonly = new_mode & 0o222 == 0;
-                                let mut permissions = metadata.permissions();
-                                if permissions.readonly() != readonly {
-                                    permissions.set_readonly(readonly);
-                                    if std::fs::set_permissions(&host, permissions).is_err() {
-                                        failures += 1;
+                        match classified {
+                            Ok(_) => match std::fs::metadata(&host) {
+                                Ok(metadata) => {
+                                    let readonly = new_mode & 0o222 == 0;
+                                    let mut permissions = metadata.permissions();
+                                    if permissions.readonly() != readonly {
+                                        permissions.set_readonly(readonly);
+                                        if std::fs::set_permissions(&host, permissions).is_err() {
+                                            failures += 1;
+                                        }
                                     }
                                 }
-                            }
-                            Err(_) => {
+                                Err(raw) => {
+                                    // The node stat just succeeded
+                                    // (a race): keep the raw verdict,
+                                    // unclassified.
+                                    failures += 1;
+                                    writeln!(
+                                        stderr,
+                                        "chmod: cannot access '{}': {}",
+                                        file,
+                                        crate::posix_errors::message(&raw)
+                                    )?;
+                                }
+                            },
+                            Err(error) => {
                                 failures += 1;
                                 writeln!(
                                     stderr,
-                                    "chmod: cannot access '{}': No such file or directory",
-                                    file
+                                    "chmod: cannot access '{}': {}",
+                                    file,
+                                    crate::posix_errors::message(&error)
                                 )?;
                             }
                         }

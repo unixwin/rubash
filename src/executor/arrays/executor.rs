@@ -1509,6 +1509,17 @@ impl Executor {
             if !array_target(var_name) {
                 return None;
             }
+            // GNU subst.c:10320-10327 (`case '#': case '%':`): removal
+            // skips the pattern expansion entirely when the parameter
+            // word is absent or empty (rubash#3501). The gate reads the
+            // JOINED word, so a one-element list holding "" is silent
+            // only when the word is unquoted — a quoted one-"" list
+            // carries the QUOTED_NULL marker and GNU diagnoses
+            // (follow-up #3581). The scalar entry point already gates
+            // this way; the list entry point expanded unconditionally.
+            if self.pattern_word_is_silent(var_name, !quoted_array_word) {
+                return Some(vec![]);
+            }
             let pattern = self.expand_parameter_pattern_word(pattern);
             return self.array_modified_word_values(var_name, quoted_array_word, |value| {
                 remove_parameter_pattern(value, &pattern, operation, self.extglob_enabled())
@@ -1518,6 +1529,12 @@ impl Executor {
         if let Some((var_name, pattern, replacement, global)) = parse_parameter_replacement(inner) {
             if !array_target(var_name) {
                 return None;
+            }
+            // GNU subst.c:9362-9367 parameter_brace_patsub returns NULL
+            // before getpattern when the value is absent (rubash#3501):
+            // an empty list is absent, but a one-"" list is present.
+            if self.pattern_word_is_silent(var_name, false) {
+                return Some(vec![]);
             }
             let pattern = self.expand_parameter_pattern_word(pattern);
             let replacement = self.expand_patsub_replacement_text(replacement);
@@ -1529,6 +1546,11 @@ impl Executor {
         if let Some((var_name, operation, pattern)) = parse_parameter_case_mod(inner) {
             if !array_target(var_name) {
                 return None;
+            }
+            // GNU subst.c:9604-9608 parameter_brace_casemod: same
+            // absent-value gate as patsub (rubash#3501).
+            if self.pattern_word_is_silent(var_name, false) {
+                return Some(vec![]);
             }
             let pattern = self.expand_embedded_parameters(pattern);
             return self.array_modified_word_values(var_name, quoted_array_word, |value| {

@@ -156,6 +156,15 @@ impl Executor {
             if self.take_read_sigint_abort() {
                 return true;
             }
+            // rubash#3401 (face 2): the `-t` deadline loop polled SIGINT
+            // only — a termsig rode out the whole timeout. Drain it per
+            // slice too; the caller abandons on `read_interrupted_signal`
+            // (the inherited-stdin loop checks it right after this
+            // returns true).
+            #[cfg(unix)]
+            if self.read_termsig_abort() {
+                return true;
+            }
             let remaining = deadline - now;
             let slice = remaining.min(std::time::Duration::from_millis(50));
             if crate::fd::wait_readable(handle, slice) == crate::fd::ReadWait::Timeout {
@@ -205,6 +214,46 @@ impl Executor {
             }
         }
         false
+    }
+
+    /// rubash#3401 (face 2): termsig drain for a blocking `read` — the
+    /// `observe_signals_while_blocked` verdict for a delivery that is
+    /// NOT SIGINT. SIGINT stays on the `take_read_sigint_abort` path
+    /// (consumed there, never re-queued, never a death — GNU read.def
+    /// returns 128+SIGINT and the shell continues). A termsig death is
+    /// recorded on `read_interrupted_signal` so the acquisition cascade
+    /// abandons the read without assigning and without falling through
+    /// to the fallback second read (rubash#1250), and the raw signal is
+    /// re-queued so the next command boundary poll unwinds the shell in
+    /// GNU order (EXIT trap first, then death by the signal; read.def
+    /// :766 CHECK_TERMSIG after every read attempt). Returns true when
+    /// the read must abandon. A SIGINT that raced in between the abort
+    /// check and this drain is consumed as a plain interrupt: `observe`
+    /// may have armed the termsig mark for it (non-interactive + EXIT
+    /// trap), which is undone here — the mark can only be this SIGINT's,
+    /// never a pre-existing one (a set mark stops the reader before any
+    /// command runs, so no command starts with one standing).
+    #[cfg(unix)]
+    fn read_termsig_abort(&mut self) -> bool {
+        match self.observe_signals_while_blocked() {
+            Ok(()) => false,
+            Err(ExecuteError::ExitCode(code)) => {
+                let sig = code - 128;
+                if sig == libc::SIGINT as i32 {
+                    if self.termsig_death_pending() == Some(sig) {
+                        let _ = self.take_termsig_death_pending();
+                        self.termsig_death_trap_status.take();
+                    }
+                    self.read_interrupted_signal = Some(sig);
+                    return true;
+                }
+                self.read_interrupted_signal = Some(sig);
+                crate::builtins::kill::requeue_pending_signals(vec![sig]);
+                true
+            }
+            // observe_signals_while_blocked only raises ExitCode.
+            Err(_) => false,
+        }
     }
 
     pub(in crate::executor) fn read_input_for_command(
@@ -2459,30 +2508,37 @@ impl Executor {
                     }
                     break;
                 }
-                // rubash#1250: with no deadline, a console read blocks
-                // inside read_some (canonical mode holds bytes until a
-                // full line lands, and read_some retries EINTR), so a
-                // Ctrl-C could never surface. While the SIGINT guard is
-                // armed, gate the read on sliced readability instead —
-                // poll() on a canonical tty reports readable only when
-                // a complete line is buffered, so the record shape is
-                // unchanged.
-                if self.read_deadline.is_none() && self.read_sigint_guard_armed {
-                    if crate::fd::is_console_handle(stdin_handle) {
-                        loop {
-                            if self.take_read_sigint_abort() {
-                                return None;
-                            }
-                            if crate::fd::wait_readable(
-                                stdin_handle,
-                                std::time::Duration::from_millis(50),
-                            ) != crate::fd::ReadWait::Timeout
-                            {
-                                break;
-                            }
+                // rubash#3401 (face 2): the blocking byte read below had
+                // no observe point at all — a termsig delivered while
+                // `read` waits on a held-open pipe sat in the mailbox
+                // until the pipe closed. Gate EVERY blocking read on
+                // sliced readability (GNU read.def:766 CHECK_TERMSIG
+                // after every read attempt): each 50ms slice polls the
+                // SIGINT abort first (existing path, consumed, never a
+                // death) and then the termsig drain, which abandons the
+                // read on a death verdict. The gate is no longer confined
+                // to the interactive SIGINT guard: a non-interactive
+                // script's `read` blocks the same way. A readable fd
+                // (data or EOF) breaks at once, so the record shape is
+                // unchanged — poll() on a canonical tty reports readable
+                // only when a complete line is buffered, and a regular
+                // file / data-ready pipe is readable immediately.
+                if self.read_deadline.is_none() {
+                    loop {
+                        if self.take_read_sigint_abort() {
+                            return None;
                         }
-                    } else if self.take_read_sigint_abort() {
-                        return None;
+                        #[cfg(unix)]
+                        if self.read_termsig_abort() {
+                            return None;
+                        }
+                        if crate::fd::wait_readable(
+                            stdin_handle,
+                            std::time::Duration::from_millis(50),
+                        ) != crate::fd::ReadWait::Timeout
+                        {
+                            break;
+                        }
                     }
                 }
                 let buf = crate::fd::read_some(stdin_handle, 1).ok()?;
