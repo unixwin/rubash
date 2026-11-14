@@ -5,6 +5,7 @@
 pub(crate) mod arithmetic;
 pub(crate) mod glob;
 pub(crate) mod path;
+pub(crate) mod strmatch;
 pub(crate) mod types;
 pub(crate) mod wait_status;
 use arithmetic::{

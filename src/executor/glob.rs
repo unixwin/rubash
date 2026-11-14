@@ -1530,34 +1530,22 @@ fn apply_globignore(
 }
 
 fn ignore_pattern_matches(pattern: &str, word: &str, extglob: bool, nocase: bool) -> bool {
-    if extglob && super::parameter_decode::pattern_uses_extglob_syntax(pattern) {
-        if nocase {
-            return super::conditional::extglob_case_pattern_matches_nocase(pattern, word);
-        }
-        return super::conditional::extglob_case_pattern_matches(pattern, word);
+    // pathexp.c:543-546 glob_name_is_acceptable(): GNU runs EVERY
+    // GLOBIGNORE spec through `strmatch(pattern, name, FNM_PATHNAME |
+    // FNMATCH_EXTFLAG | FNMATCH_NOCASEGLOB)` — one matcher, not a
+    // separate engine for extglob patterns. Routing extglob specs through
+    // the conditional case-pattern engine let `*`/`@(...)` reach across
+    // `/` positions strmatch never tries (e.g. `*@(/)cd/efg` vs
+    // `ab/cd/efg`); the unified strmatch port keeps the PATHNAME
+    // `n < endp` bound (sm_loop.c:284-290).
+    let mut flags = super::strmatch::FNM_PATHNAME;
+    if extglob {
+        flags |= super::strmatch::FNM_EXTMATCH;
     }
-    // Plain patterns go through the strmatch FNM_PATHNAME port below —
-    // the case-pattern engine lets `*` cross `/`, which would wrongly
-    // ignore `d/x/inner` under a GLOBIGNORE of `*/inner`.
-    // rubash#1533: byte locale — ASCII-only fold and byte-unit staging
-    // (see glob_vector_expand / case_pattern_matches_nocase).
-    let byte_locale = !crate::locale::is_utf8();
-    let stage = |text: &str| -> Vec<char> {
-        if byte_locale {
-            super::conditional::pattern::split_text_chars_into_byte_units(text.chars().collect())
-        } else {
-            text.chars().collect()
-        }
-    };
     if nocase {
-        let (pattern_lower, word_lower) = if byte_locale {
-            (pattern.to_ascii_lowercase(), word.to_ascii_lowercase())
-        } else {
-            (pattern.to_lowercase(), word.to_lowercase())
-        };
-        return strmatch_pathname(&stage(&pattern_lower), &stage(&word_lower));
+        flags |= super::strmatch::FNM_CASEFOLD;
     }
-    strmatch_pathname(&stage(pattern), &stage(word))
+    super::strmatch::strmatch_bytes(pattern.as_bytes(), word.as_bytes(), flags)
 }
 
 /// Port of bash lib/glob GMATCH (sm_loop.c) under FNM_PATHNAME, as
