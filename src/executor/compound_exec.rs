@@ -7626,20 +7626,58 @@ fn parameter_expansion_assigns(raw: &str) -> bool {
     false
 }
 
-pub(in crate::executor) fn test_rubash_binary_from_current_exe() -> Option<std::path::PathBuf> {
+/// rubash#3292: resolve the real rubash binary for a procsub /
+/// background / coproc child spawned from a test binary. Cargo only
+/// builds the bin (and sets `CARGO_BIN_EXE_rubash`) for full `cargo
+/// test` runs; a lib-only run (`cargo test --lib`) on a fresh target
+/// has neither, and the spawn chain would otherwise fall back to the
+/// lib-test binary itself, which rejects `-c` (`Unrecognized option:
+/// 'c'`, issue2875). Search, in order, the profile dir the test
+/// binary lives under, the `CARGO_TARGET_DIR` target dir
+/// (debug/release), the release sibling of the test binary's profile
+/// dir, and the debug/release profile dirs under each ancestor of the
+/// test binary (nested/workspace layouts). Only a file literally
+/// named `rubash[.exe]` counts — a test binary is `rubash-<hash>`
+/// under `deps/` and never matches. Production behaviour is
+/// unchanged: the `deps/` gate still returns `None` outside a test
+/// binary, so a real shell keeps falling back to `current_exe()`.
+pub(crate) fn test_rubash_binary_from_current_exe() -> Option<std::path::PathBuf> {
     let current = std::env::current_exe().ok()?;
     let deps = current.parent()?;
     if deps.file_name().and_then(|name| name.to_str()) != Some("deps") {
         return None;
     }
-    let debug_dir = deps.parent()?;
     let binary_name = if cfg!(windows) {
         "rubash.exe"
     } else {
         "rubash"
     };
-    let candidate = debug_dir.join(binary_name);
-    candidate.is_file().then_some(candidate)
+    let mut profile_dirs: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(debug_dir) = deps.parent() {
+        profile_dirs.push(debug_dir.to_path_buf());
+        if let Some(target_dir) = debug_dir.parent() {
+            profile_dirs.push(target_dir.join("release"));
+        }
+    }
+    if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR").map(std::path::PathBuf::from) {
+        profile_dirs.push(target_dir.join("debug"));
+        profile_dirs.push(target_dir.join("release"));
+    }
+    let mut ancestor = current.parent();
+    let mut depth = 0usize;
+    while let Some(dir) = ancestor {
+        if depth >= 8 {
+            break;
+        }
+        profile_dirs.push(dir.join("debug"));
+        profile_dirs.push(dir.join("release"));
+        ancestor = dir.parent();
+        depth += 1;
+    }
+    profile_dirs
+        .into_iter()
+        .map(|dir| dir.join(binary_name))
+        .find(|candidate| candidate.is_file())
 }
 
 fn case_pattern_has_extglob(pattern: &str) -> bool {
