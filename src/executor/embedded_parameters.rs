@@ -897,7 +897,17 @@ impl Executor {
                                         "parameter not set".to_string()
                                     }
                                 } else {
-                                    self.expand_parameter_word(&message)
+                                    // rubash#3260: same display-text decode
+                                    // as the pre-scan arm — the `:?` message
+                                    // word keeps quoted whitespace behind the
+                                    // IFS_GLUE carrier for field splitting
+                                    // (GNU subst.c:8216 parameter_brace_expand_error
+                                    // reports the expanded plain text), so
+                                    // decode it through the sanctioned
+                                    // visible-text face before printing.
+                                    crate::locale::decode_to_visible_text(
+                                        &self.expand_parameter_word(&message),
+                                    )
                                 };
                                 self.write_diagnostic_fd2(
                                     format!(
