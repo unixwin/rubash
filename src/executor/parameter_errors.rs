@@ -2818,7 +2818,7 @@ impl Executor {
                             "parameter not set".to_string()
                         };
                         return Some((
-                            name.to_string(),
+                            parameter_error_display_name(name, quote_aware),
                             message,
                             Self::FATAL_PARAMETER_EXPANSION_STATUS,
                         ));
@@ -2849,7 +2849,7 @@ impl Executor {
                         // the whole noninteractive script; subshell, pipeline,
                         // and command-substitution boundaries contain it.
                         return Some((
-                            name.to_string(),
+                            parameter_error_display_name(name, quote_aware),
                             message,
                             Self::FATAL_PARAMETER_EXPANSION_STATUS,
                         ));
@@ -4176,5 +4176,23 @@ impl Executor {
                 }
             }
         }
+    }
+}
+
+/// The `:?`/`?` diagnostic names the parameter as the lexer stored it
+/// (subst.c:8216 parameter_brace_expand_error prints `name`, the text
+/// parameter_brace_expand cut from the word). A `$(...)` inside that text
+/// (a subscript) was replaced at read time by its print_comsub
+/// serialization (parse.y:4451 parse_comsub -> parse.y:4632
+/// print_comsub), so `${a[$(cmd >&2)]:?e}` reports `a[$(cmd 1>&2)]: e`
+/// (rubash#3404). `parser_word` is the scan's `quote_aware` context: a
+/// here-document body (the `false` context) is expanded at run time
+/// without ever passing parse_comsub (redir.c:348 heredoc_expand ->
+/// expand_string), so GNU reports its text raw (`q[$(cmd >&2)]: e`).
+fn parameter_error_display_name(name: &str, parser_word: bool) -> String {
+    if parser_word {
+        super::print_comsub::canonicalize_comsub_spans(name)
+    } else {
+        name.to_string()
     }
 }
