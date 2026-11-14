@@ -160,3 +160,35 @@ fn shared_print_redirection_owner_faces() {
     );
     assert_eq!(code, Some(0));
 }
+
+/// Every parser-word position that reaches the `:?` scan cites the
+/// canonical text: `[[ ]]` operand, for list, case subject, here-string
+/// word, assignment value, pipeline element (r_close_this: `<&-` ->
+/// `0>&-`).
+#[test]
+fn parser_word_positions_cite_canonical_text() {
+    let script = concat!(
+        "a=(x)\n",
+        "( [[ ${a[$(echo 5 <&-)]:?e1} ]] )\n",
+        "( for i in ${a[$(echo 5 <&-)]:?e2}; do :; done )\n",
+        "( case ${a[$(echo 5 <&-)]:?e3} in *) ;; esac )\n",
+        "( cat <<< ${a[$(echo 5 <&-)]:?e4} )\n",
+        "( x=${a[$(echo 5 <&-)]:?e5} )\n",
+        "( : ${a[$(echo 5 <&-)]:?e6} | cat )\n",
+        "echo alive\n",
+    );
+    let (stdout, stderr, code) = rubash_file("positions", script);
+    assert_eq!(stdout, "alive\n");
+    assert_eq!(
+        stderr,
+        concat!(
+            "t.sh: line 2: a[$(echo 5 0>&-)]: e1\n",
+            "t.sh: line 3: a[$(echo 5 0>&-)]: e2\n",
+            "t.sh: line 4: a[$(echo 5 0>&-)]: e3\n",
+            "t.sh: line 5: a[$(echo 5 0>&-)]: e4\n",
+            "t.sh: line 6: a[$(echo 5 0>&-)]: e5\n",
+            "t.sh: line 7: a[$(echo 5 0>&-)]: e6\n",
+        )
+    );
+    assert_eq!(code, Some(0));
+}
