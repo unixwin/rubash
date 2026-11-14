@@ -1,4 +1,5 @@
 use super::*;
+use crate::executor::fd_table::{FdRecordScan, FdScanAction};
 use crate::executor::substitution_metadata::bytes_to_shell_text;
 
 /// Re-emit a consumed stdin unit to the terminal while a one-char console
@@ -20,43 +21,6 @@ fn echo_stdin_unit(guard: &Option<crate::fd::ConsoleOnecharGuard>, unit: &StdinU
                 guard.echo_byte(byte);
             }
         }
-    }
-}
-
-/// Escape-state tracker for byte-wise record loops that ask, per
-/// byte, whether a delimiter match at that byte is suppressed
-/// because the byte is escaped (read.def: the escape introducer
-/// quotes the next byte). Stateful: feed bytes in stream order.
-/// Moved here from fd_table when the fd-table readers adopted the
-/// unified FdRecordScan replay; the coproc loop still drives it.
-pub(in crate::executor) struct ReadEscapeTracker {
-    escape_aware: bool,
-    escaped: bool,
-}
-
-impl ReadEscapeTracker {
-    pub(in crate::executor) fn new(escape_aware: bool) -> Self {
-        Self {
-            escape_aware,
-            escaped: false,
-        }
-    }
-
-    /// Whether a delimiter match on `byte` is suppressed (the byte
-    /// is the escape introducer itself or is quoted by one).
-    pub(in crate::executor) fn suppresses_match(&mut self, byte: u8) -> bool {
-        if !self.escape_aware {
-            return false;
-        }
-        if self.escaped {
-            self.escaped = false;
-            return true;
-        }
-        if byte == b'\\' {
-            self.escaped = true;
-            return true;
-        }
-        false
     }
 }
 
@@ -1735,20 +1699,23 @@ impl Executor {
         };
         let _ = pid;
         let mut bytes = Vec::new();
-        let mut consumed_chars = 0usize;
+        let mut consumed = false;
         let mut ended = false;
         // rubash#2892: EOF (empty read or a read error) ends the loop
         // exactly like a deadline break — in no case does the read
         // close the descriptor (read.def keeps the fd across builtin
         // calls; see the note at the end of this function).
-        // rubash#1300: escaped bytes never terminate the record.
-        let mut escapes = ReadEscapeTracker::new(escape_aware);
-        // Post-escape counting state for the char limit (rubash#1328).
-        let mut escaped = false;
-        // read.def:731-738: a record that is just the delimiter is served
-        // (empty line, GNU rc 0) — tracked so the empty check below cannot
-        // conflate it with EOF (niubash#275).
-        let mut delimiter_found = false;
+        // rubash#3305: the same FdRecordScan replay of GNU's read loop the
+        // fd-table serves drive (read.def:834 delimiter compare against the
+        // `-d` word's FIRST byte, only at a read_mbchar unit start;
+        // read.def:884-886 the -n/-N budget counted per completed unit,
+        // post-escape; an escaped unit and the escape introducer never
+        // terminate, rubash#1300/#1328). The old per-byte compare matched
+        // the delimiter's lead byte inside the record, cut -n units at an
+        // invalid sequence's first byte, and let a continuation-byte
+        // delimiter fire mid-character.
+        let mut scan = FdRecordScan::new(delimiter, char_limit, exact_char_limit, raw);
+        let _ = escape_aware;
 
         // Bash keeps the coprocess descriptor open across read builtin calls.
         // Read only one logical input record (or the requested character
@@ -1765,29 +1732,15 @@ impl Executor {
                     break;
                 }
                 Ok(buf) => {
+                    consumed = true;
                     bytes.push(buf[0]);
-                    let was_escaped = escaped;
-                    if escaped {
-                        if buf[0] != b'\n' {
-                            consumed_chars += 1;
-                        }
-                        escaped = false;
-                    } else if !raw && buf[0] == b'\\' {
-                        escaped = true;
-                    } else {
-                        consumed_chars += 1;
-                    }
-                    let suppressed = escapes.suppresses_match(buf[0]);
-                    if !suppressed
-                        && !was_escaped
-                        && delimiter_byte_matches(buf[0], delimiter)
-                        && !exact_char_limit
-                    {
-                        delimiter_found = true;
-                        break;
-                    }
-                    if let Some(limit) = char_limit {
-                        if consumed_chars >= limit && !escaped {
+                    let seq_end = scan.sequence_ending_at(&bytes, bytes.len());
+                    match scan.on_byte(buf[0], seq_end) {
+                        FdScanAction::Data => {}
+                        FdScanAction::DataLimit => break,
+                        FdScanAction::Delimiter { drop } => {
+                            // Consumed, never returned.
+                            bytes.truncate(bytes.len() - drop);
                             break;
                         }
                     }
@@ -1800,21 +1753,10 @@ impl Executor {
         }
 
         // read.def:949 eof: the pipe drained (or errored) before the
-        // delimiter arrived; a timeout break is not EOF.
-        if ended && !self.read_timed_out && !bytes.is_empty() {
-            self.read_eof_no_delimiter = if escape_aware {
-                // Replay the escape state: an escaped delimiter byte is
-                // record data, not a found delimiter (rubash#1300).
-                let mut replay = ReadEscapeTracker::new(true);
-                !bytes.iter().any(|byte| {
-                    let suppressed = replay.suppresses_match(*byte);
-                    !suppressed && delimiter_byte_matches(*byte, delimiter)
-                })
-            } else {
-                !bytes
-                    .iter()
-                    .any(|byte| delimiter_byte_matches(*byte, delimiter))
-            };
+        // delimiter arrived; a timeout break is not EOF. A delimiter or
+        // budget stop never reaches `ended`.
+        if ended && !self.read_timed_out && consumed {
+            self.read_eof_no_delimiter = true;
         }
         // rubash#2892: EOF on a coproc read end does NOT close the
         // descriptor — GNU's read builtin (builtins/read.def) never
@@ -1826,8 +1768,10 @@ impl Executor {
         // the input here, so the second read failed with
         // "Bad file descriptor".)
         // EOF before any byte: no record. A delimiter-only record (empty
-        // line) IS a record — served as the empty string (niubash#275).
-        if bytes.is_empty() && !delimiter_found {
+        // line, read.def:731-738) IS a record — served as the empty string
+        // (niubash#275); `consumed` keeps the two apart now that the
+        // delimiter byte is dropped from `bytes`.
+        if !consumed {
             return None;
         }
         Some(trim_read_input(
