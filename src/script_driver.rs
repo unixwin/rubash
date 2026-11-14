@@ -5438,40 +5438,140 @@ pub fn acquire_controlling_terminal() {
 #[cfg(not(unix))]
 pub fn acquire_controlling_terminal() {}
 
+/// The outcome of GNU's job-control availability determination
+/// (jobs.c:4731-4869 `initialize_job_control`): a terminal the shell
+/// can take, no terminal at all, or a terminal whose foreground
+/// process group the shell cannot join (the background bail,
+/// jobs.c:4797).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalAvailability {
+    /// Foreground on the controlling terminal: job control on.
+    Available,
+    /// No controlling terminal to take (the #2948 face): monitor
+    /// off, both diagnostics.
+    Unavailable,
+    /// A controlling terminal exists but the shell stayed in a
+    /// background process group through the SIGTTIN wait
+    /// (jobs.c:4786-4810): monitor off, only the background
+    /// diagnostic — the `goto just_bail` skips the second line.
+    BackgroundBail,
+}
+
 /// Whether this process can take a controlling terminal for job
-/// control (GNU jobs.c:4755-4766): stderr is already a terminal, or
-/// /dev/tty opens. GNU reaches for /dev/tty only when
-/// forced_interactive made stderr's shape irrelevant; every caller
-/// of the establishment below is an interactive entry, which is
-/// exactly that population — and the arm is load-bearing there,
-/// since GNU establishes job control when /dev/tty opens while
-/// stdin (and even stderr) is piped. Non-unix hosts have no
-/// /dev/tty: the console on stderr is the whole question (the same
-/// honest port the binary's `-m` arm makes).
+/// control (GNU jobs.c:4731-4869 `initialize_job_control`): stderr
+/// is already a terminal, or /dev/tty opens (jobs.c:4755-4766 — GNU
+/// reaches for /dev/tty only when forced_interactive made stderr's
+/// shape irrelevant; every caller of the establishment below is an
+/// interactive entry, which is exactly that population — and the arm
+/// is load-bearing there, since GNU establishes job control when
+/// /dev/tty opens while stdin (and even stderr) is piped). That is
+/// only the first half: rubash#3321 — a terminal that merely EXISTS
+/// is not one the shell can take. GNU then waits to become the
+/// terminal's foreground process group (jobs.c:4786-4810): while
+/// `tcgetpgrp` says otherwise it restores SIGTTIN to DFL and stops
+/// itself, and after the 18th kill (`tty_sigs++ > 16`, the
+/// comparison uses the pre-increment value) it bails with job
+/// control off. A shell that only asks "is stderr a tty /
+/// does /dev/tty open" never stops and never reports the failure, so
+/// a background process group with a controlling terminal was
+/// misjudged as job-control-available. Non-unix hosts have no
+/// /dev/tty and no process groups: the console on stderr is the
+/// whole question (the same honest port the binary's `-m` arm makes).
 #[cfg(unix)]
-fn controlling_terminal_available() -> bool {
-    if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
-        return true;
-    }
-    // SAFETY: plain open/close of the terminal device; no retained
-    // state.
-    unsafe {
-        let dev_tty = b"/dev/tty\0";
-        let fd = libc::open(
-            dev_tty.as_ptr() as *const libc::c_char,
-            libc::O_RDWR | libc::O_NONBLOCK,
-        );
-        if fd >= 0 {
-            libc::close(fd);
-            return true;
+fn controlling_terminal_available() -> TerminalAvailability {
+    use std::os::unix::io::RawFd;
+    // GNU shell_tty selection (jobs.c:4749-4766): stderr when it is
+    // a tty, else open("/dev/tty"). The fd stays open while the
+    // foreground check runs; an opened /dev/tty is owned and closed
+    // on the way out.
+    let (tty_fd, owned): (RawFd, bool) = if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+        (libc::STDERR_FILENO, false)
+    } else {
+        // SAFETY: plain open of the terminal device; no retained
+        // state.
+        let fd = unsafe {
+            let dev_tty = b"/dev/tty\0";
+            libc::open(
+                dev_tty.as_ptr() as *const libc::c_char,
+                libc::O_RDWR | libc::O_NONBLOCK,
+            )
+        };
+        if fd < 0 {
+            return TerminalAvailability::Unavailable;
+        }
+        (fd, true)
+    };
+    let outcome = {
+        let shell_pgrp = shell_process_group_id();
+        let mut tty_sigs = 0;
+        loop {
+            // SAFETY: tcgetpgrp on a tty fd; -1 on error.
+            let terminal_pgrp = unsafe { libc::tcgetpgrp(tty_fd) };
+            if terminal_pgrp == -1 {
+                // No terminal to take (the fd is not a terminal
+                // after all): the #2948 face.
+                break TerminalAvailability::Unavailable;
+            }
+            if terminal_pgrp == shell_pgrp {
+                break TerminalAvailability::Available;
+            }
+            // Background group (jobs.c:4790-4806): restore SIGTTIN
+            // to DFL and stop until foregrounded. The disposition
+            // is restored right after the kill returns — or after
+            // the process is continued — exactly as GNU restores
+            // `ottin`. A blocked SIGTTIN makes the kill return at
+            // once, so the loop spins to the cap below instead of
+            // stopping.
+            // The stop must be delivered to THIS thread, not to
+            // the process group: rubash's main logic runs on a
+            // spawned worker thread (main.rs, 512MiB stack) while
+            // the OS thread parks in join, so a group-directed
+            // kill(0, SIGTTIN) lands on an arbitrary thread and
+            // the group stop reaches the looping thread only
+            // asynchronously — measured: the kill returns in
+            // 2-3us while the process keeps looping, and the loop
+            // can spin all 18 iterations before any stop takes
+            // effect (or stop a second time after fg). GNU is
+            // single-threaded, so its kill is synchronous by
+            // construction. pthread_kill to the looping thread
+            // stops that thread synchronously inside the call
+            // (measured 270-680us round-trip through fg+CONT in
+            // a C model, one iteration, deterministic over 10
+            // runs); the stop still arrests the whole process
+            // group, so the session leader's waitpid sees it
+            // exactly as with GNU's kill.
+            // SAFETY: signal() with a valid signo always succeeds
+            // and returns the previous disposition; pthread_self
+            // and pthread_kill are valid on this thread.
+            unsafe {
+                let old = libc::signal(libc::SIGTTIN, libc::SIG_DFL);
+                libc::pthread_kill(libc::pthread_self(), libc::SIGTTIN);
+                libc::signal(libc::SIGTTIN, old);
+            }
+            // jobs.c:4798 `if (tty_sigs++ > 16)`: the comparison
+            // uses the pre-increment value, so the 18th kill bails.
+            if tty_sigs > 16 {
+                break TerminalAvailability::BackgroundBail;
+            }
+            tty_sigs += 1;
+        }
+    };
+    if owned {
+        // SAFETY: fd was opened above and is no longer needed.
+        unsafe {
+            libc::close(tty_fd);
         }
     }
-    false
+    outcome
 }
 
 #[cfg(not(unix))]
-fn controlling_terminal_available() -> bool {
-    std::io::IsTerminal::is_terminal(&std::io::stderr())
+fn controlling_terminal_available() -> TerminalAvailability {
+    if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+        TerminalAvailability::Available
+    } else {
+        TerminalAvailability::Unavailable
+    }
 }
 
 /// The process-group number GNU's job-control diagnostics print:
@@ -5505,7 +5605,10 @@ pub fn shell_process_group_id() -> i32 {
 /// suppress it when the terminal can be taken (GNU `+m -i -c` under
 /// a PTY: `himBHc`). Establishment failure prints jobs.c:4844
 /// "cannot set terminal process group (%d)" and jobs.c:4858
-/// "no job control in this shell".
+/// "no job control in this shell" — except the background bail
+/// (jobs.c:4797), which prints only jobs.c:4797
+/// "initialize_job_control: no job control in background" and skips
+/// the second line via `goto just_bail`.
 ///
 /// This is the engine's single establishment funnel (rubash#2948):
 /// the binary's startup (main.rs apply_startup_job_control), the
@@ -5519,18 +5622,36 @@ pub fn establish_interactive_job_control(executor: &mut Executor) {
     if crate::executor::RESPAWNED_CHILD.load(std::sync::atomic::Ordering::Relaxed) {
         return;
     }
-    let established = controlling_terminal_available();
-    executor.set_shell_option("monitor", established);
-    if !established {
-        let shell_name = executor
-            .get_env("__RUBASH_SHELL_NAME")
-            .or_else(|| executor.get_env("BASH_ARGV0"))
-            .unwrap_or("bash");
-        eprintln!(
-            "{shell_name}: cannot set terminal process group ({}): Inappropriate ioctl for device",
-            shell_process_group_id()
-        );
-        eprintln!("{shell_name}: no job control in this shell");
+    let shell_name: String = executor
+        .get_env("__RUBASH_SHELL_NAME")
+        .or_else(|| executor.get_env("BASH_ARGV0"))
+        .unwrap_or("bash")
+        .to_string();
+    match controlling_terminal_available() {
+        TerminalAvailability::Available => {
+            executor.set_shell_option("monitor", true);
+        }
+        TerminalAvailability::Unavailable => {
+            executor.set_shell_option("monitor", false);
+            eprintln!(
+                "{shell_name}: cannot set terminal process group ({}): Inappropriate ioctl for device",
+                shell_process_group_id()
+            );
+            eprintln!("{shell_name}: no job control in this shell");
+        }
+        TerminalAvailability::BackgroundBail => {
+            executor.set_shell_option("monitor", false);
+            // jobs.c:4797 bails with `goto just_bail`, which skips
+            // the internal_error "no job control in this shell"
+            // line: this face prints only the background
+            // diagnostic. The strerror is GNU's deterministic errno
+            // for this face (EBADF, verified on both stderr shapes
+            // against 5.3.20); the pin asserts the stable prefix,
+            // not the suffix.
+            eprintln!(
+                "{shell_name}: initialize_job_control: no job control in background: Bad file descriptor"
+            );
+        }
     }
 }
 
