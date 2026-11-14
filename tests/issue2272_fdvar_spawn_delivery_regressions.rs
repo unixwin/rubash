@@ -30,7 +30,9 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
+#[cfg(unix)]
+use std::process::Stdio;
 
 const RUBASH: &str = env!("CARGO_BIN_EXE_rubash");
 
@@ -57,6 +59,7 @@ fn rubash_in(dir: &Path, script: &str) -> (String, String, Option<i32>) {
     )
 }
 
+#[cfg(unix)]
 fn rubash_in_stdin_file(
     dir: &Path,
     script: &str,
