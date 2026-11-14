@@ -911,7 +911,13 @@ impl Executor {
         // through xtrace_enabled/shell_option_flags, so both routes agree.
         let suspended = self.shell_state.xtrace_suspended.get();
         self.shell_state.xtrace_suspended.set(suspended + 1);
-        let expanded = self.expand_embedded_parameters(&decoded);
+        // rubash#3542: PS4 expands through the same containment channel
+        // as PS1/`${var@P}` — GNU expand_prompt_string (subst.c:4392-4418)
+        // runs the pass under no_longjmp_on_fatal_error and falls back to
+        // the DECODED string on any verdict, so `${q:?err}` reports
+        // `q: err` and the prefix stays `+${q:?err}` instead of
+        // substituting the message (`+err`).
+        let expanded = self.expand_embedded_parameters_double_quoted(&decoded);
         self.shell_state.xtrace_suspended.set(suspended);
         let expanded = strip_prompt_ignore_markers(&expanded);
         // Decode the transport pairs before the indirection repeat so the
