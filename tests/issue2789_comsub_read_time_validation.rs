@@ -138,6 +138,30 @@ fn unterminated_case_body_file_aborts_2() {
     );
 }
 
+/// The spaced variant via `-c`: a blank between `in` and `)` takes
+/// the same body-grammar classification (the parser arm's completion
+/// latch covers what its stage bookkeeping cannot see).
+#[test]
+fn unterminated_case_body_space_variant_dash_c_aborts_127() {
+    let s = Scratch::new();
+    check_read_abort(s.dash_c("echo $(case x in )"), 127, "-c $(case x in )");
+}
+
+/// The spaced variant followed by another substitution: without the
+/// completion latch the extractor scans past the case's own `)` to
+/// the NEXT substitution's close, the malformed body is never
+/// bounded, and the string is silently accepted (status 0). GNU
+/// aborts 127.
+#[test]
+fn unterminated_case_body_space_variant_followed_dash_c_aborts_127() {
+    let s = Scratch::new();
+    check_read_abort(
+        s.dash_c("echo $(case x in ) $(echo ok)"),
+        127,
+        "-c $(case x in ) followed",
+    );
+}
+
 /// A bad body inside a file SOURCED from a `-c` string still takes
 /// the string driver's 127 remap.
 #[test]

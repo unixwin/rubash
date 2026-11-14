@@ -293,6 +293,56 @@ fn case_pattern_paren_does_not_close_command_substitution() {
 }
 
 #[test]
+fn unclosed_case_body_paren_closes_command_substitution() {
+    // rubash#2789: at the close-char gate, a `)` that no case token
+    // can own — the pattern region is still empty, or the paren is
+    // glued to `in` / to the case subject — closes the command
+    // substitution for the body parser (parse.y:4451 parse_comsub
+    // takes the whole unit; parse.y:4519-4521 raises the grammar
+    // error there) instead of being held as case syntax until EOF
+    // turns it into an incomplete-input diagnostic. Until #3241 only
+    // the glued forms escaped the detention; the gate predicate now
+    // also covers the shapes the pattern-content witness cannot
+    // tell apart (separator tail, an outer case's pattern polluting
+    // the witness). Asserted on the gate oracle itself; the
+    // staged twin's agreement at every line prefix is pinned by
+    // close_char_residual_incremental_tests. (The composite
+    // has_unclosed_input_syntax additionally consults the comsub
+    // residual family — a separate surface with its own verdicts.)
+    let gate = |src: &str| super::continuation::unclosed_input_close_char_posix(src, false);
+    for src in [
+        "echo $(case x in)",
+        "echo $(case x in )",
+        "echo \"$(case x in)\"",
+        "echo $(case x)",
+        "echo $(case x in a|)",
+        "echo $(case x in a| )",
+        "case a in a) echo $(case x in);; esac",
+    ] {
+        assert!(
+            gate(src).is_none(),
+            "gate should release the unit to the body parser: {src}"
+        );
+    }
+    // Controls: pattern content present, or a complete case — the
+    // detention boundary does not move.
+    assert!(gate("echo $(case x in a) echo x)").is_some());
+    // Two shapes the mirror predicate does NOT cover, in either
+    // machine: the pattern-list opener disarms the pattern region
+    // (stage 4), so no close condition can judge the `)` after it
+    // (and a trailing opener leaves the unit open); and a clause
+    // terminator re-arms the region only when the next clause's
+    // pattern begins, so a `)` immediately after `;;` finds no
+    // armed region. Both stay held here exactly as the parser arm
+    // leaves them.
+    assert!(gate("echo $(case x in ()").is_some());
+    assert!(gate("echo $(case x in (").is_some());
+    assert!(gate("echo $(case x in a;;)").is_some());
+    assert!(gate("echo $(case x in a|b) x;; esac)").is_none());
+    assert!(gate("echo $(case x in esac)").is_none());
+}
+
+#[test]
 fn nested_heredoc_in_command_substitution_is_collected_before_next_command() {
     let tokens = tokenize("echo $(cat <<EOF)\nfoo\nbar\nEOF\necho after");
     let substitution = tokens
@@ -798,9 +848,11 @@ fn extglob_group_swallows_bracket_for_subscript_scan() {
         unclosed_array_subscript_line("shopt -s extglob\necho +(a|b[)*\n"),
         None
     );
-    // Without the shopt the old (extglob-off) model is unchanged: GNU's
-    // error there is the yacc `(` syntax error, not a `]` EOF.
-    assert!(unclosed_array_subscript_line("echo +(a|b[)*\n").is_some());
+    // Without the shopt the answer is still None (rubash#3208): the `(`
+    // arm consumes a `(` after a word-final pattern char as a group
+    // opener regardless of the mirror — GNU's error there is the yacc
+    // `(` syntax error owned by the parser, never a `]` EOF.
+    assert_eq!(unclosed_array_subscript_line("echo +(a|b[)*\n"), None);
     // A genuinely unclosed group is a `)`-shaped EOF, owned by the generic
     // close-char scan, not this one.
     assert_eq!(
@@ -810,10 +862,12 @@ fn extglob_group_swallows_bracket_for_subscript_scan() {
     // Unchanged true positive: `|` puts `b` at command position, `[` opens
     // the subscript (parse.y:5635-5643, rubash#221).
     assert_eq!(unclosed_array_subscript_line("a | b[c\n"), Some((1, false)));
-    // shopt -u restores the extglob-off model mid-script.
-    assert!(
-        unclosed_array_subscript_line("shopt -s extglob\nshopt -u extglob\necho +(a|b[)*\n")
-            .is_some()
+    // shopt -u restores the extglob-off model mid-script; the `(` arm's
+    // group consumption (rubash#3208) is mirror-independent, so this
+    // still reports no `]` EOF.
+    assert_eq!(
+        unclosed_array_subscript_line("shopt -s extglob\nshopt -u extglob\necho +(a|b[)*\n"),
+        None
     );
 }
 

@@ -1,6 +1,28 @@
 use super::*;
 
 impl Executor {
+    /// The definition-site source recorded for a function definition
+    /// (rubash#2732). GNU make_cmd.c:746-762 `make_function_def`: the
+    /// recorded `source_file` is BASH_SOURCE[0] at definition time when
+    /// the array is non-empty; when it is empty the default runs
+    /// "environment" (before shell initialization — unreachable here,
+    /// environment imports never pass through `define_function`),
+    /// then `"main"` for an interactive shell, then `dollar_vars[0]`
+    /// for the `-c` form. The engine's stack top is BASH_SOURCE[0]
+    /// whenever a frame exists (a script file, a sourced file, the
+    /// `-c` seed), so only the empty-stack interactive case diverges:
+    /// a function defined at the interactive top level records
+    /// `"main"`, not the shell-name seed `current_bash_source`
+    /// falls back to. `current_bash_source` itself is left alone —
+    /// its other consumer (the call-frame fallback for imported
+    /// functions) and the diagnostic name faces share it.
+    pub(in crate::executor) fn definition_source(&self) -> String {
+        if self.shell_state.bash_source_stack.is_empty() && self.invocation_interactive() {
+            return "main".to_string();
+        }
+        self.current_bash_source()
+    }
+
     pub(in crate::executor) fn define_function(
         &mut self,
         cmd: &CommandNode,
@@ -18,7 +40,19 @@ impl Executor {
         let mut function = function;
         let mut body_alias_expanded = false;
         if let Some((source, base_line)) = function.unparsed_body_source.clone() {
-            if let Some(body) = self.retry_function_body_with_aliases(&source, base_line) {
+            if let Some(mut body) = self.retry_function_body_with_aliases(&source, base_line) {
+                // rubash#3209: the retried body never passed the
+                // function parser, so apply the definition-line
+                // restamp it would have received there (bare `name()`
+                // definitions only).
+                if !function.keyword && function.has_parentheses {
+                    if let Some(definition_line) = cmd.line {
+                        crate::parser::restamp_function_body_first_command(
+                            &mut body,
+                            definition_line,
+                        );
+                    }
+                }
                 function_storage = FunctionCommand {
                     body,
                     unparsed_body_source: None,
@@ -82,7 +116,19 @@ impl Executor {
         let invalid_identifier =
             function.name.contains('$') || name_quoted || procsubst_like || name_raw.contains('`');
         let posix_mode = self.posix_mode_enabled();
-        let name_error_line = function.body_end_line.or(cmd.line);
+        // The definition executes as a command under the ambient line
+        // (execute_cmd.c: the definition's diagnostics use the global
+        // line_number, which the reader/enclosing frame pinned — a
+        // top-level definition reports its own parse-end line, one
+        // inside `( ... )' the subshell's `)' line, rubash#3183). The
+        // body's own end line is only the last-resort fallback for
+        // frames that pinned nothing.
+        let name_error_line = self
+            .ambient_line
+            .get()
+            .or(cmd.end_line)
+            .or(cmd.line)
+            .or(function.body_end_line);
         let name_error_prefix = |executor: &Self| {
             name_error_line.map_or_else(
                 || executor.diagnostic_prefix(),
@@ -209,7 +255,7 @@ impl Executor {
                 function.name.clone(),
                 FunctionDefinitionLocation {
                     line,
-                    source: self.current_bash_source(),
+                    source: self.definition_source(),
                     body_open_line: function.body_open_line,
                 },
             );

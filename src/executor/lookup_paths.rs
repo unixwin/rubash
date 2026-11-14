@@ -2,7 +2,7 @@ use super::*;
 
 impl Executor {
     pub(in crate::executor) fn command_path(&self, name: &str, force_path: bool) -> Option<String> {
-        self.command_path_with_bridge(name, force_path, true)
+        self.command_path_with_bridge(name, force_path, true, true)
     }
 
     /// Bridge-free command lookup, for execution decisions only.
@@ -20,7 +20,7 @@ impl Executor {
         name: &str,
         force_path: bool,
     ) -> Option<String> {
-        self.command_path_with_bridge(name, force_path, false)
+        self.command_path_with_bridge(name, force_path, false, false)
     }
 
     fn command_path_with_bridge(
@@ -28,6 +28,7 @@ impl Executor {
         name: &str,
         force_path: bool,
         allow_bridge: bool,
+        describe_spelling: bool,
     ) -> Option<String> {
         if !force_path {
             if let Some(path) = crate::builtins::hash::hashed_path(&self.shell_state.env_vars, name)
@@ -79,8 +80,32 @@ impl Executor {
         if let Some(dot_path) = self.command_path_in_dot(name) {
             return Some(dot_path);
         }
-        find_user_command(name, &self.shell_state.env_vars)
-            .map(|path| shell_display_path(&path.to_string_lossy().replace('\\', "/")))
+        let found = find_user_command(name, &self.shell_state.env_vars)?;
+        // rubash#3147: the describe faces (describe_spelling) print
+        // the walk's ONE constructed string — the as-written
+        // `<elem>/<name>` join (findcmd.c:553 sh_makepath) that
+        // describe_command takes from find_user_command and prints
+        // verbatim (builtins/type.def:379, :425/:427). The anchored
+        // resolution form (`/tmp/<fixture>/./rel1/foo`, `/./` residue
+        // included) is the execution answer, not the display:
+        // recorded_resolution_spelling applies the same
+        // anchor-equality determination as the hash recording
+        // (rubash#2696) — the join is the display exactly when
+        // anchoring it lands on the file the walk produced, and any
+        // other resolution keeps the anchored display form. The
+        // execution-decision face (command_path_without_bridge)
+        // always keeps the anchored form.
+        if describe_spelling {
+            Some(crate::executor::path::recorded_resolution_spelling(
+                name,
+                &found,
+                &self.shell_state.env_vars,
+            ))
+        } else {
+            Some(shell_display_path(
+                &found.to_string_lossy().replace('\\', "/"),
+            ))
+        }
     }
 
     /// Whether an in-process emulation of the external command `name`
@@ -279,7 +304,21 @@ impl Executor {
         if let Some(path_value) = self.shell_state.env_vars.get("PATH") {
             for dir in split_shell_path(path_value) {
                 let candidate = shell_path_to_windows(&dir, &self.shell_state.env_vars).join(name);
-                if candidate.is_file() {
+                // rubash#3147: the existence probe resolves against
+                // the SESSION cwd, exactly like the single-match walk
+                // (find_in_path_walk_unix anchors its candidate with
+                // anchor_at_session_cwd — GNU file_status resolves
+                // the constructed name against the shell's cwd, not
+                // the process cwd). The unanchored probe lost every
+                // relative-element match after a `cd`. The DISPLAYED
+                // string stays the as-written join itself (the
+                // candidate before anchoring), never the anchored
+                // form.
+                let anchored = crate::executor::path::anchor_at_session_cwd(
+                    candidate.clone(),
+                    &self.shell_state.env_vars,
+                );
+                if anchored.is_file() {
                     paths.push(shell_display_path(
                         &candidate.to_string_lossy().replace('\\', "/"),
                     ));

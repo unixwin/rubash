@@ -43,12 +43,18 @@ pub fn execute(args: &[String]) -> io::Result<ShiftAction> {
         .expect("shift row in BUILTIN_TABLE");
     let mut diag = Diag::new(row, &mut stderr);
     let action = execute_with_io(row, args, &mut diag, &mut stdout)?;
-    diag.flush_with(|| Prolog {
-        interactive: false,
-        shell_basename: "rubash".to_string(),
-        error_name: "rubash".to_string(),
-        script_file: std::env::var("__RUBASH_SCRIPT_NAME").ok(),
-        line: std::env::var("__RUBASH_CURRENT_LINE").ok(),
+    diag.flush_with(|| {
+        // The name cells derive from the single argv[0] carrier
+        // chain (builtins::prefix, rubash#2791), as in exit's
+        // standalone entry.
+        let get = |key: &str| std::env::var(key).ok();
+        Prolog {
+            interactive: false,
+            shell_basename: crate::builtins::prefix::shell_basename(&get),
+            error_name: crate::builtins::prefix::fallback_error_name(&get),
+            script_file: std::env::var("__RUBASH_SCRIPT_NAME").ok(),
+            line: std::env::var("__RUBASH_CURRENT_LINE").ok(),
+        }
     });
     Ok(action)
 }

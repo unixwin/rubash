@@ -245,12 +245,205 @@ impl Executor {
         Some(self.apply_parameter_transform_value(&value, transform))
     }
 
+    /// GNU pattern-word gate (rubash#3501): whether the pattern word of a
+    /// `${...}` pattern operator must NOT be expanded, because the parameter
+    /// word it would operate on is absent — and, for `#`/`%`, empty.
+    ///
+    /// Anchors (bash 5.3, subst.c):
+    /// - `parameter_brace_patsub` (9362-9367) and `parameter_brace_casemod`
+    ///   (9604-9608) both start with `if (value == 0) return NULL`: the
+    ///   `getpattern` call — and with it any diagnostic from expanding the
+    ///   pattern — never runs for an unset parameter. A set-but-empty value
+    ///   still expands its pattern.
+    /// - `parameter_brace_expand`'s `case '#': case '%':` (10320-10327)
+    ///   breaks out before `parameter_brace_remove_pattern` when
+    ///   `value == 0 || *value == '\0'`: removal additionally skips an
+    ///   empty value.
+    /// - The "value" is the parameter's expanded word. For `/` and
+    ///   `^`/`,`/`~` the test is only `value == 0`, so a one-element list
+    ///   holding "" is present (a quoted null) and DOES diagnose. For
+    ///   `#`/`%` the test is `value == 0 || *value == '\0'` on the
+    ///   JOINED word: one "" element joins to "" and is silent, while
+    ///   two "" elements join to " " and diagnose (oracle-verified;
+    ///   the first lane's "single '' still diagnoses" claim was wrong
+    ///   for removal). List-shaped subjects are therefore gated on
+    ///   the joined word for `#`/`%` and on list emptiness otherwise;
+    ///   scalar-shaped ones on the string.
+    ///
+    /// `empty_is_silent` selects the gate: true for `#`/`%` (absent or
+    /// empty), false for `/` and `^`/`,`/`~` (absent only). Callers return
+    /// the empty expansion when this is true — every arm's skip-case
+    /// result is "" — and expand the pattern otherwise.
+    pub(in crate::executor) fn pattern_word_is_silent(
+        &self,
+        var_name: &str,
+        empty_is_silent: bool,
+    ) -> bool {
+        // Indirect (`!name`): the value word is the target's value word
+        // (subst.c:7883 parameter_brace_expand_indir). A nameref holder's
+        // value is the target NAME itself, never absent. A holder with no
+        // entry at all is left to the existing flow — GNU reports
+        // "invalid indirect expansion" there, not silence.
+        if let Some(indirect_name) = var_name.strip_prefix('!') {
+            if self.nameref_target_name(indirect_name).is_some() {
+                return false;
+            }
+            // Resolve the holder to its target expression: a numeric holder
+            // names a positional, a special holder names its own value, an
+            // element holder names the element's value, anything else names
+            // the variable of that name.
+            let target_owned;
+            let target_expr: &str = if indirect_name.parse::<usize>().is_ok()
+                || is_special_parameter_name(indirect_name)
+            {
+                target_owned = self.expand_parameter_named_value(indirect_name);
+                &target_owned
+            } else if let Some(value) = self.array_element_parameter_value(indirect_name) {
+                target_owned = value;
+                &target_owned
+            } else if parse_array_subscript(indirect_name).is_some() {
+                // Unresolvable element holder: GNU reports invalid
+                // indirect expansion; leave the existing flow alone.
+                return false;
+            } else {
+                match self.shell_state.env_vars.get(indirect_name) {
+                    Some(value) => value,
+                    None => return false,
+                }
+            };
+            if let Some(array_name) = target_expr
+                .strip_suffix("[@]")
+                .or_else(|| target_expr.strip_suffix("[*]"))
+            {
+                return self.pattern_subject_array_word_is_empty(array_name, empty_is_silent);
+            }
+            let values = self.indirect_target_values(target_expr);
+            if values.is_empty() {
+                return true;
+            }
+            return empty_is_silent && values.iter().all(|value| value.is_empty());
+        }
+        // `@` / `*`: the value word is the positional list. An empty list
+        // is absent for every operator. For `#`/`%` the gate reads the
+        // JOINED word (subst.c:10320): one "" element joins to "" and is
+        // silent, two "" elements join to " " and diagnose. For `/` and
+        // casemod the value is present whenever the list is non-empty.
+        if matches!(var_name, "@" | "*") {
+            let window = self.shell_state.positional_window();
+            return window.is_empty()
+                || (empty_is_silent && window.len() == 1 && window[0].is_empty());
+        }
+        // Single-char specials. "0" is special AND numeric, so this must
+        // precede the numeric arm (subst.c:9837 VALID_SPECIAL_LENGTH_PARAM).
+        // Only `$!` with no async pid has a NULL word in GNU; the rest
+        // always have one, so the patsub/casemod gate skips only `!`.
+        if is_special_parameter_name(var_name) {
+            let value = self.expand_parameter_named_value(var_name);
+            return if empty_is_silent {
+                value.is_empty()
+            } else {
+                var_name == "!" && value.is_empty()
+            };
+        }
+        // Single positional parameter.
+        if let Ok(index) = var_name.parse::<usize>() {
+            return match self
+                .shell_state
+                .positional_window()
+                .get(index.saturating_sub(1))
+            {
+                None => true,
+                Some(value) => empty_is_silent && value.is_empty(),
+            };
+        }
+        // Array element (`name[sub]`): `@`/`*` subscripts never resolve
+        // here (array_element_parameter_value_uncached returns None for
+        // them), so a Some value is a real element.
+        if let Some(value) = self.array_element_parameter_value(var_name) {
+            return empty_is_silent && value.is_empty();
+        }
+        // Whole array (`name[@]` / `name[*]`): gate on the parameter
+        // WORD — the joined value word GNU's removal gate reads. A
+        // scalar base is a one-element list, so `${x[@]...}` with x=""
+        // joins to "" and is silent for `#`/`%`, while it still
+        // expands its pattern for `/` and casemod (value is present).
+        if let Some(array_name) = var_name
+            .strip_suffix("[@]")
+            .or_else(|| var_name.strip_suffix("[*]"))
+        {
+            return self.pattern_subject_array_word_is_empty(array_name, empty_is_silent);
+        }
+        // A subscripted reference the element fetch could not resolve is
+        // an absent value word.
+        if parse_array_subscript(var_name).is_some() {
+            return true;
+        }
+        // Plain scalar (namerefs included: parameter_pattern_scalar_value
+        // resolves them, and a bare array name reads element [0]).
+        if is_shell_name(var_name) {
+            return match self.parameter_pattern_scalar_value(var_name) {
+                None => true,
+                Some(value) => empty_is_silent && value.is_empty(),
+            };
+        }
+        // Anything else keeps the existing flow (exotic names the arms do
+        // not resolve reach their own diagnostics elsewhere).
+        false
+    }
+
+    /// The element list of `array_name` (a `[@]`/`[*]` subject): None
+    /// when there is no storage at all (absent word); otherwise the
+    /// elements in order. Mirrors `array_base_element_values`
+    /// (arrays/executor.rs) — a scalar base contributes its whole
+    /// string as one element. The storage string itself IS the scalar
+    /// value (arrays store "(...)" / prefixed forms, handled above),
+    /// so it is used directly: `array_values("")` would collapse a
+    /// scalar "" to `[]`, losing the present-but-empty word.
+    fn pattern_subject_array_values(&self, array_name: &str) -> Option<Vec<String>> {
+        let storage = self.parameter_array_storage(array_name)?;
+        let resolved = self
+            .resolved_variable_name(array_name)
+            .unwrap_or_else(|| array_name.to_string());
+        if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, &resolved) {
+            Some(assoc_hash_ordered_values(
+                &storage,
+                assoc_nbuckets(&self.shell_state.env_vars, &resolved),
+            ))
+        } else if self.parameter_is_array_variable(array_name) {
+            Some(array_values(&storage))
+        } else {
+            Some(vec![storage])
+        }
+    }
+
+    /// Whether the parameter WORD of a `[@]`/`[*]` subject is absent —
+    /// or, for `#`/`%` (`empty_is_silent`), empty. GNU's removal gate
+    /// reads the JOINED value word (subst.c:10320-10327): a one-element
+    /// list holding "" joins to "" and is silent, while two "" elements
+    /// join to " " and diagnose (oracle-verified). patsub/casemod only
+    /// test `value == 0`, so they need just the absent case.
+    fn pattern_subject_array_word_is_empty(&self, array_name: &str, empty_is_silent: bool) -> bool {
+        match self.pattern_subject_array_values(array_name) {
+            None => true,
+            Some(values) => {
+                values.is_empty() || (empty_is_silent && values.len() == 1 && values[0].is_empty())
+            }
+        }
+    }
+
     pub(in crate::executor) fn expand_parameter_pattern_removal(
         &self,
         var_name: &str,
         pattern: &str,
         operation: PatternRemoval,
     ) -> Option<String> {
+        // GNU subst.c:10320-10327 (`case '#': case '%':`): removal skips
+        // the pattern expansion entirely when the parameter word is absent
+        // or empty (rubash#3501).
+        let silent = self.pattern_word_is_silent(var_name, true);
+        if silent {
+            return Some(String::new());
+        }
         let pattern = self.expand_parameter_pattern_word(pattern);
         if matches!(var_name, "@" | "*") {
             let result = self
@@ -519,9 +712,47 @@ impl Executor {
     pub(in crate::executor) fn assoc_subscript_key(&self, key: &str) -> String {
         // A `\x1d` marker is the lexer's wholly-double-quoted word bookkeeping
         // and never part of the key text.
-        self.expand_subscript_string(key)
-            .trim_matches(STORAGE_WORD_PREFIX)
-            .to_string()
+        // rubash#2595: the error pre-scan already resolved this subscript
+        // (its evaluating fetch) — reuse the resolved text instead of
+        // re-executing it; the real expansion reads the element live.
+        // Out of scope (pre-scan) a resolution is PEEKED, not consumed:
+        // identical fragments share the scan's single evaluation, and
+        // the entry stays for the real expansion. In scope (real
+        // expansion) it is CONSUMED: each fragment's fetch takes
+        // exactly one entry, so a later identical fragment re-expands
+        // — GNU evaluates the substitution once per fragment.
+        let in_word_scope = crate::executor::expand_braced_indices::word_ctx_active();
+        let carried = if in_word_scope {
+            crate::executor::expand_braced_indices::scan_carry_take(key)
+        } else {
+            crate::executor::expand_braced_indices::scan_carry_peek(key)
+        };
+        let expanded = match carried {
+            Some(expanded) => expanded,
+            None => {
+                let writes_before =
+                    crate::executor::expand_braced_indices::PENDING_SUBSCRIPT_WRITES
+                        .with(|w| w.borrow().len());
+                let expanded = self.expand_subscript_string(key);
+                // Only carry a pre-scan resolution the real expansion
+                // may replay: no deferred writes were queued during the
+                // resolution (a `$((i++))` inside the subscript must be
+                // re-evaluated, not replayed from stale text), and the
+                // raw text is carryable (no `$?`, no reference to a
+                // simulated bind). A real-expansion fetch never stores:
+                // its re-expansion belongs to this fragment alone.
+                if !in_word_scope
+                    && crate::executor::expand_braced_indices::PENDING_SUBSCRIPT_WRITES
+                        .with(|w| w.borrow().len())
+                        == writes_before
+                    && crate::executor::expand_braced_indices::scan_carry_may_store(key)
+                {
+                    crate::executor::expand_braced_indices::scan_carry_store(key, expanded.clone());
+                }
+                expanded
+            }
+        };
+        expanded.trim_matches(STORAGE_WORD_PREFIX).to_string()
     }
 
     pub(in crate::executor) fn apply_array_element_parameter_assignment(

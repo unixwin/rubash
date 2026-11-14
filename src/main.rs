@@ -233,6 +233,14 @@ fn run_main() -> i32 {
     // AND shell_name, so "BASH_ARGV0=this-bash bash -c 'echo $0 $BASH_ARGV0'"
     // prints this-bash twice. The executable path is only the fallback when
     // the environment did not supply a value.
+    // rubash#3413: the test is EXISTENCE, never non-emptiness — GNU
+    // marks every imported env string att_imported
+    // (initialize_shell_variables: bind_variable + VSETATTR
+    // att_imported) and set_argv0 (variables.c:1547-1555) asks only
+    // `v && imported_p (v)`; assign_bash_argv0 (variables.c:1528-1545)
+    // copies the value verbatim, empty string included. "Set to
+    // empty" therefore seeds an empty $0 (and empty diagnostic name);
+    // only a genuinely absent BASH_ARGV0 falls back to argv[0].
     // rubash#590: the invocation face read above (NIU_INVOKED_AS, else
     // argv[0]) reconstructs the argv[0] the shim erased, per GNU
     // set_shell_name (shell.c:1778-1806): it feeds dollar_vars[0]/shell_name
@@ -240,10 +248,7 @@ fn run_main() -> i32 {
     // BASH_ARGV0 import — variables.c:1547-1555 ranks the environment value
     // above argv[0] ("BASH_ARGV0=this-bash bash -c 'echo $0 $BASH_ARGV0'"
     // prints this-bash twice).
-    match env::var("BASH_ARGV0")
-        .ok()
-        .filter(|value| !value.is_empty())
-    {
+    match env::var("BASH_ARGV0").ok() {
         Some(imported) => {
             // rubash#3105: this re-seed reads the RAW process
             // environment, so it entry-encodes like every raw-data
@@ -255,18 +260,35 @@ fn run_main() -> i32 {
         }
         None => {
             if let Some(shell_name) = &invocation_name {
-                // rubash#331 (#224 legacy): a full-path argv[0] the parent
-                // handed over in Windows form is OUR produced `$0` value —
-                // render it POSIX (/d/...) so `-c 'echo $0'` matches the
-                // PWD family. Relative and bare names stay verbatim; a
-                // shim-forwarded face is a bare name by construction.
-                let display = rubash::executor::shell_pwd_display_path(shell_name);
-                executor.set_env("__RUBASH_SHELL_NAME", &display);
-                // rubash#3105: BASH_ARGV0 is a shell-visible
-                // variable seeded from raw argv[0] — entry-encode
-                // the display spelling (the __RUBASH_SHELL_NAME
-                // carrier above keeps the raw spelling).
-                executor.set_env("BASH_ARGV0", &entry_encode_argv_value(&display));
+                // rubash#3355: GNU shell.c:1779-1806 set_shell_name binds
+                // dollar_vars[0] to argv[0] VERBATIM and only afterwards
+                // rescues an empty shell_name to PROGRAM ("bash") — the
+                // rescue never reaches $0. The old code ran the name
+                // through shell_pwd_display_path, whose empty-input arm
+                // returns "/", so an empty argv[0] seeded $0 as "/" and
+                // every diagnostic printed "/: ...". Keep the two
+                // carriers apart: BASH_ARGV0 ($0) keeps argv[0] verbatim
+                // (empty stays empty); __RUBASH_SHELL_NAME (shell_name)
+                // takes the display form, or PROGRAM when argv[0] is
+                // empty. (shell_pwd_display_path's "" -> "/" arm itself
+                // is correct for PWD and stays untouched.)
+                if shell_name.is_empty() {
+                    executor.set_env("__RUBASH_SHELL_NAME", "bash");
+                    executor.set_env("BASH_ARGV0", "");
+                } else {
+                    // rubash#331 (#224 legacy): a full-path argv[0] the parent
+                    // handed over in Windows form is OUR produced `$0` value —
+                    // render it POSIX (/d/...) so `-c 'echo $0'` matches the
+                    // PWD family. Relative and bare names stay verbatim; a
+                    // shim-forwarded face is a bare name by construction.
+                    let display = rubash::executor::shell_pwd_display_path(shell_name);
+                    executor.set_env("__RUBASH_SHELL_NAME", &display);
+                    // rubash#3105: BASH_ARGV0 is a shell-visible
+                    // variable seeded from raw argv[0] — entry-encode
+                    // the display spelling (the __RUBASH_SHELL_NAME
+                    // carrier above keeps the raw spelling).
+                    executor.set_env("BASH_ARGV0", &entry_encode_argv_value(&display));
+                }
             }
         }
     }
@@ -955,12 +977,31 @@ fn run_args(executor: &mut Executor, args: &[String], argv0: Option<&str>) -> i3
                         // `&` children) inherit the parent's script name
                         // through init.rs — GNU's forked subshell keeps
                         // $0, so do not clobber it here.
-                        let invocation_name = executor
-                            .get_env("BASH_ARGV0")
-                            .filter(|value| !value.is_empty())
-                            .unwrap_or("bash")
-                            .to_string();
-                        executor.set_env("__RUBASH_SCRIPT_NAME", &invocation_name);
+                        // rubash#3355: a present-but-empty $0 (empty
+                        // argv[0]) must stay empty — GNU error.c:90-120
+                        // get_name_for_error stops at dollar_vars[0] ==
+                        // "" and prints an empty name, so planting
+                        // "bash" in the reader-name carrier here would
+                        // make the script-name arm report "bash"
+                        // instead of the empty $0. Only the
+                        // no-carrier-at-all case (library host /
+                        // argc==0) takes PROGRAM; an empty $0 leaves
+                        // the carrier absent so the $0 arm owns the
+                        // prolog (BASH_SOURCE[0] is empty for -c in
+                        // GNU too).
+                        // Owned copy: get_env borrows the executor,
+                        // set_env needs it mutably.
+                        let invocation_name: Option<String> =
+                            executor.get_env("BASH_ARGV0").map(str::to_string);
+                        match invocation_name.as_deref() {
+                            Some(value) if !value.is_empty() => {
+                                executor.set_env("__RUBASH_SCRIPT_NAME", value);
+                            }
+                            Some(_) => {}
+                            None => {
+                                executor.set_env("__RUBASH_SCRIPT_NAME", "bash");
+                            }
+                        }
                     }
                     executor.set_env("__RUBASH_IS_C", "1");
                     apply_interactive_alias_default(executor, alias_expansion_override);
@@ -1126,8 +1167,8 @@ fn cli_shell_flag_name(flag: char) -> Option<&'static str> {
 /// jobs_m_flag) ends with jobs.c:4869 `change_flag ('m', job_control ? '-' :
 /// '+')`. Without a terminal to take a process group on, give_terminal_to /
 /// tcgetpgrp fail with ENOTTY, job_control stays 0, and two
-/// sys_error/internal_error lines are printed (jobs.c:4841 "cannot set
-/// terminal process group (%d)" and jobs.c:4856 "no job control in this
+/// sys_error/internal_error lines are printed (jobs.c:4844 "cannot set
+/// terminal process group (%d)" and jobs.c:4858 "no job control in this
 /// shell") before `m` is dropped from `$-`. Windows has no POSIX terminal
 /// process groups, so stderr-not-a-terminal is the honest port of that
 /// branch for the non-interactive `-m` arm below: the option is turned back
@@ -1182,9 +1223,11 @@ fn apply_startup_job_control(executor: &mut Executor) {
         .get_env("__RUBASH_SHELL_NAME")
         .or_else(|| executor.get_env("BASH_ARGV0"))
         .unwrap_or("bash");
+    // jobs.c:4844 prints shell_pgrp (jobs.c:4737 getpgid (0)), not
+    // the shell's pid (rubash#2774) — the shared helper owns the value.
     eprintln!(
         "{shell_name}: cannot set terminal process group ({}): Inappropriate ioctl for device",
-        std::process::id()
+        rubash::script_driver::shell_process_group_id()
     );
     eprintln!("{shell_name}: no job control in this shell");
 }
@@ -1584,12 +1627,25 @@ fn run_command_string_with_init(
     // frame for the run so the discard catches fold the same way
     // (rubash#2369: `bash -c 'echo ${BASH_SOURCE:=X}'` exits 1).
     let saved_frame = executor.enter_parse_and_execute_frame();
-    let status =
-        if script_uses_history(&command) || script_uses_aliases(&command, alias_live_at_start) {
-            run_script_with_history(executor, &command, None)
-        } else {
-            run_source_with_line_offset(executor, &command, interactive, line_offset, None, None)
-        };
+    let status = if script_uses_history(&command)
+        || script_uses_aliases(&command, alias_live_at_start)
+        || rubash::script_driver::script_may_toggle_verbose(&command)
+    {
+        run_script_with_history(executor, &command, None)
+    } else {
+        // rubash#2773: GNU reads a `-c` string line by line like any
+        // other input (flags.c:284 echo_input_at_read = verbose_flag;
+        // parse.y:2712 prints each line as read, under the flag state
+        // then in effect — verified against GNU bash 5.3.20: a
+        // mid-string `set +v` stops the echo, a mid-string `set -v`
+        // starts it). The scan above routed every string that may
+        // toggle the flag to the grouped reader, whose per-line read
+        // point samples the live state; on this fast path the entry
+        // state is the state at every line's read, so one boundary
+        // echo of the whole string is the same answer.
+        rubash::script_driver::echo_verbose_input_lines(executor, &command);
+        run_source_with_line_offset(executor, &command, interactive, line_offset, None, None)
+    };
     executor.exit_parse_and_execute_frame(saved_frame);
     executor.set_root_line_span_run_armed(false);
     // rubash#2928: a `-c` string has no second read after its last
@@ -1801,7 +1857,17 @@ fn run_script_file_with_init(
     // unit boundary to consult at.
     let uses_onecmd = script_may_set_onecmd(&contents)
         || executor.get_env("__RUBASH_SETOPT_onecmd").as_deref() == Some("1");
-    let status = if uses_hist || uses_alias || uses_parse_gates || uses_onecmd {
+    // rubash#2773: `set -v` echo is a READ-time effect (flags.c:284
+    // echo_input_at_read = verbose_flag; parse.y:2712 prints the line
+    // as read, under the flag state then in effect). A script that
+    // may toggle verbose mid-read — or one entered with the flag
+    // already on — needs the grouped reader's per-line read point;
+    // the whole-file fast path parses every line before any of them
+    // executes, so it can neither start echoing at a mid-script
+    // `set -v` nor stop at a `set +v`.
+    let uses_verbose = rubash::script_driver::script_may_toggle_verbose(&contents)
+        || executor.shell_option_enabled("verbose");
+    let status = if uses_hist || uses_alias || uses_parse_gates || uses_onecmd || uses_verbose {
         run_script_with_history(executor, &contents, None)
     } else {
         run_source(executor, &contents, interactive)
@@ -1836,7 +1902,15 @@ fn apply_init_interactive_defaults(executor: &mut Executor) {
     // word (niubash#660 — the unconditional set made an opted-out shell
     // record and save anyway).
     apply_interactive_history_defaults(executor);
-    executor.set_shell_option("histexpand", true);
+    // GNU shell.c:1839 init_interactive seeds histexp_flag from the
+    // invocation-time state (bashhist.c: the interactive default is
+    // HISTEXPAND_DEFAULT) — an explicit `+H` on the command line has
+    // already written the carrier by now and must survive the default
+    // (rubash#2733). Same set-if-unset shape as the history default
+    // in apply_interactive_history_defaults.
+    if executor.get_env("__RUBASH_SETOPT_histexpand").is_none() {
+        executor.set_shell_option("histexpand", true);
+    }
     if executor.get_env("__RUBASH_NO_EDITING").as_deref() == Some("1") {
         return;
     }

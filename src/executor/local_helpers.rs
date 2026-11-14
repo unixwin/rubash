@@ -6,16 +6,23 @@ pub(in crate::executor) fn validate_local_options(args: &[String]) -> Result<(),
         if arg == "--" {
             return Ok(());
         }
+        // GNU declare.def CASE_HELPOPT: an exact `--help` in option
+        // position prints the long help (the core's BuiltinOpt emits
+        // it) — it is not an invalid-option cluster. `--foo`/`--hel`
+        // still fail below on the leading `-`.
+        if arg == "--help" {
+            return Ok(());
+        }
         if (!arg.starts_with('-') && !arg.starts_with('+')) || arg == "-" || arg == "+" {
             return Ok(());
         }
         for option in arg[1..].chars() {
             // rubash#2582: the letter set is the single GNU table
-            // (declare.def:145 DECLARE_OPTS) shared with
-            // scan_declare_options — this hand-copied list was missing
+            // (declare.def:145 DECLARE_OPTS), derived from the row
+            // (Stage-2 ④ Phase 4) — the hand-copied list was missing
             // `c` (capcase) and `G`, so `local -c x` was rejected even
             // though GNU accepts it.
-            if super::declare_local::DECLARE_OPTION_LETTERS.contains(option) {
+            if super::declare_local::declare_option_letters().contains(option) {
             } else {
                 return Err(option);
             }
@@ -26,6 +33,26 @@ pub(in crate::executor) fn validate_local_options(args: &[String]) -> Result<(),
 
 pub(in crate::executor) fn local_args_request_inherit(args: &[String]) -> bool {
     declare_args_contain_option(args, 'I', true) || declare_args_contain_option(args, 'I', false)
+}
+
+/// Whether an invocation carries `--help` in the option region
+/// (before `--`/the first operand): GNU's getopt reports Help there
+/// and the long help prints before any operand processing — the
+/// function-depth check, the frame save, and the -p missing-name
+/// reports below must not run for it.
+pub(in crate::executor) fn local_args_request_help(args: &[String]) -> bool {
+    for arg in args {
+        if arg == "--" {
+            return false;
+        }
+        if (!arg.starts_with('-') && !arg.starts_with('+')) || arg == "-" || arg == "+" {
+            return false;
+        }
+        if arg == "--help" {
+            return true;
+        }
+    }
+    false
 }
 
 pub(in crate::executor) fn declare_args_force_global(args: &[String]) -> bool {
@@ -44,6 +71,11 @@ pub(in crate::executor) fn declare_args_contain_option(
     for arg in args {
         if arg == "--" {
             return false;
+        }
+        // GNU bashgetopt CASE_HELPOPT: `--help` is the help word, not
+        // an option-letter cluster (`--help` contains `l`/`p`).
+        if arg == "--help" {
+            continue;
         }
         if (!arg.starts_with('-') && !arg.starts_with('+')) || arg == "-" || arg == "+" {
             return false;

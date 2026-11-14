@@ -397,23 +397,44 @@ where
     }
 
     if index >= args.len() || print_trap_commands || print_actions {
-        let signals = normalized_signals(&args[index..], env_vars, stderr)?;
-        if signals.invalid {
-            return Ok(1);
+        if args[index..].is_empty() {
+            print_traps(env_vars, None, stdout, print_actions, print_trap_commands)?;
+            return Ok(0);
         }
-        let selected = if args[index..].is_empty() {
-            None
-        } else {
-            Some(signals.signals.as_slice())
-        };
-        print_traps(
-            env_vars,
-            selected,
-            stdout,
-            print_actions,
-            print_trap_commands,
-        )?;
-        return Ok(i32::from(signals.invalid));
+        // GNU builtins/trap.def:333 display_traps walks the operand list
+        // one item at a time: a decodable signal is shown on the spot, an
+        // undecodable one draws `sh_invalidsig` on the spot and processing
+        // CONTINUES with the next operand; the result is EXECUTION_FAILURE
+        // if any operand was invalid. Decoding the whole list up front
+        // (normalized_signals) and returning early on `signals.invalid`
+        // dropped every valid item (rubash#2638), and even without the
+        // early return the diagnostics would all precede the listings
+        // instead of interleaving in operand order — so the -p/-P face
+        // walks the operands itself, printing each item where it stands.
+        // print_traps keeps owning each item's rendering (POSIX
+        // `trap -- - NAME` for untrapped selections, the DISP_ACTIONONLY
+        // hard-ignore skip for -P), so a single-signal selection per
+        // operand changes nothing about what an item prints.
+        let prefix = diagnostic_prefix(env_vars);
+        let mut invalid = false;
+        for arg in &args[index..] {
+            match normalize_signal(arg) {
+                Some(signal) => {
+                    print_traps(
+                        env_vars,
+                        Some(std::slice::from_ref(&signal)),
+                        stdout,
+                        print_actions,
+                        print_trap_commands,
+                    )?;
+                }
+                None => {
+                    invalid = true;
+                    writeln!(stderr, "{prefix}trap: {arg}: invalid signal specification")?;
+                }
+            }
+        }
+        return Ok(i32::from(invalid));
     }
 
     let action = args[index].as_str();

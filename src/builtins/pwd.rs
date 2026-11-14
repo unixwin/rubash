@@ -39,14 +39,19 @@ where
         .into_iter()
         .collect();
     // Standalone entry (no session): the process cwd is the only cwd.
+    // A one-shot process is a fresh shell, so its logical cwd is the
+    // set_pwd adoption of the inherited $PWD (variables.c:907), or the
+    // process cwd itself when the inherited value does not name it.
     let cwd = env::current_dir().unwrap_or_default();
-    execute_with_env_and_io(args, &env_vars, &cwd, stdout, stderr)
+    let logical = adopted_logical_pwd(&env_vars, &cwd).unwrap_or_else(|| shell_display_path(&cwd));
+    execute_with_env_and_io(args, &env_vars, &cwd, Some(&logical), stdout, stderr)
 }
 
 pub(crate) fn execute_with_env_and_io<'a, I, W, E>(
     args: I,
     env_vars: &HashMap<String, String>,
     cwd: &Path,
+    logical_cwd: Option<&str>,
     stdout: &mut W,
     stderr: &mut E,
 ) -> io::Result<i32>
@@ -78,17 +83,18 @@ where
                 'P' => mode = Mode::Physical,
                 other => {
                     // rubash#705 R7.4: GNU's get_name_for_error shape —
-                    // `<script>: line N:` in script mode, `bash: line N:`
-                    // under -c, bare `bash:` with neither. The old
-                    // hardcoded `rubash: pwd:` prefix was the
-                    // mixed-branding holdout on this path.
-                    let prefix = match (
-                        env_vars.get("__RUBASH_SCRIPT_NAME"),
-                        env_vars.get("__RUBASH_CURRENT_LINE"),
-                    ) {
-                        (Some(script), Some(line)) => format!("{script}: line {line}: "),
-                        _ => "bash: ".to_string(),
-                    };
+                    // `<script>: line N:` in script mode, the argv[0]
+                    // name with its line under -c, the bare argv[0]-
+                    // derived name with neither (error.c:90-120 via
+                    // builtins/common.c:83-96). The fallback derives
+                    // from the single argv[0] carrier chain
+                    // (builtins::prefix, rubash#2791); the old
+                    // hard-coded `"bash: "` arm discarded a present
+                    // script/line arm and named every renamed shell
+                    // "bash".
+                    let prefix = crate::builtins::prefix::diagnostic_prefix(&|key: &str| {
+                        env_vars.get(key).cloned()
+                    });
                     writeln!(stderr, "{prefix}pwd: -{other}: invalid option")?;
                     writeln!(stderr, "pwd: usage: pwd [-LP]")?;
                     return Ok(EX_USAGE);
@@ -97,7 +103,26 @@ where
         }
     }
 
-    let Some(directory) = current_directory(mode, env_vars, cwd)? else {
+    // rubash#3268 (e): the session cwd is the unknown birth state
+    // (empty field: born in a deleted directory, the birth getcwd
+    // failed, no cd has succeeded since). GNU's pwd has no cached
+    // string to print there either, so it calls
+    // get_working_directory("pwd"), which prints this line and fails
+    // (builtins/cd.def pwd_builtin -> builtins/common.c:592) —
+    // nothing on stdout, status 1. (Master's #3298 guard, kept ahead
+    // of the #2796-#2799 current_directory port: the ported function
+    // prints the same line itself for a deleted-but-named cwd, so
+    // this branch must not also print.)
+    if cwd.as_os_str().is_empty() {
+        writeln!(
+            stderr,
+            "pwd: error retrieving current directory: \
+             getcwd: cannot access parent directories: No such file or directory"
+        )?;
+        return Ok(EXECUTION_FAILURE);
+    }
+
+    let Some(directory) = current_directory(mode, env_vars, cwd, logical_cwd, stderr)? else {
         return Ok(EXECUTION_FAILURE);
     };
 
@@ -105,23 +130,95 @@ where
     Ok(EXECUTION_SUCCESS)
 }
 
-fn current_directory(
+fn current_directory<E>(
     mode: Mode,
     env_vars: &HashMap<String, String>,
     cwd: &Path,
-) -> io::Result<Option<String>> {
+    logical_cwd: Option<&str>,
+    stderr: &mut E,
+) -> io::Result<Option<String>>
+where
+    E: Write,
+{
     if mode == Mode::Physical {
         if let Some(physical) = env_vars.get("__RUBASH_PHYSICAL_PWD") {
             return Ok(Some(physical.clone()));
+        }
+        // GNU builtins/cd.def pwd_builtin: physical mode runs
+        // sh_physpath on the_current_working_directory; when that
+        // fails it resets through get_working_directory
+        // (builtins/common.c:592), whose getcwd() call fails for a
+        // deleted cwd and prints the diagnostic with the caller name
+        // "pwd" — pwd then returns EXECUTION_FAILURE and prints
+        // nothing (rubash#2798). The session cwd field is this port's
+        // getcwd truth (G-02), so its resolvability is the gate: a
+        // deleted cwd no longer canonicalizes.
+        if let Err(error) = cwd.canonicalize() {
+            writeln!(
+                stderr,
+                "pwd: error retrieving current directory: getcwd: \
+                 cannot access parent directories: {}",
+                crate::posix_errors::message(&error)
+            )?;
+            return Ok(None);
         }
     }
     // G-02: the physical truth is the session cwd field, not the
     // process cwd.
     let physical = cwd.to_path_buf();
+    // rubash#3268 (e): the empty field is the unknown birth state —
+    // there is no directory to display (GNU fails in
+    // get_working_directory; see the caller's diagnostic). Returning
+    // the empty string here would print a blank line with status 0,
+    // the same shape of lie as the "/" fabrication this state
+    // replaced.
+    if physical.as_os_str().is_empty() {
+        return Ok(None);
+    }
 
     if mode == Mode::Logical {
+        // GNU cd.def pwd_builtin prints the_current_working_directory
+        // — the shell's own logical cwd — never the $PWD variable: a
+        // bare assignment to $PWD desynchronizes the variable and the
+        // logical value stands (rubash#2797). The stored value prints
+        // verbatim; it was canonicalized when cd (or startup adoption)
+        // established it, and the one uncanonicalized form GNU stores
+        // (the canon-failed `cd .` make_absolute form) prints verbatim
+        // too.
+        if let Some(tcwd) = logical_cwd {
+            if logical_value_names_cwd(tcwd, &physical, env_vars) {
+                return Ok(Some(tcwd.replace('\\', "/")));
+            }
+        }
+        // Windows bridge state: cd's logical bridge branch (and
+        // popd's bridged inner cd) moved ONLY the logical state —
+        // the bridged POSIX name has no physical directory — and
+        // marked the state with __RUBASH_PHYSICAL_PWD. A bridged
+        // value can never pass the same-directory judgment above
+        // (the physical field deliberately stayed put), so without
+        // this arm the face falls through to the physical display
+        // and the bridged name is lost — after `cd /`, `pwd` printed
+        // the birth directory instead of `/` (the redir goldens
+        // slice). Under the marker the cd family itself treats a
+        // '/'-spelled $PWD as the logical truth
+        // (paths::validated_logical_pwd, the same condition), and
+        // the pre-port session fast path echoed it under the same
+        // marker; print it the same way.
+        if cfg!(windows) && env_vars.contains_key("__RUBASH_PHYSICAL_PWD") {
+            if let Some(pwd) = env_vars.get("PWD") {
+                if pwd.starts_with('/') {
+                    return Ok(Some(pwd.replace('\\', "/")));
+                }
+            }
+        }
+        // No stored logical value (or a mover outside the cd family
+        // invalidated it): derive it from $PWD as before, but print
+        // the CANONICAL spelling — GNU's logical value was
+        // canonicalized by sh_canonpath when it was established, so a
+        // valid-but-non-canonical $PWD spelling (`/.`, trailing `/`,
+        // `/../` components) never reaches the output (rubash#2797).
         if let Some(logical) = logical_pwd_if_current(&physical, env_vars) {
-            return Ok(Some(logical));
+            return Ok(Some(canonical_logical_spelling(&logical)));
         }
     }
 
@@ -176,6 +273,78 @@ pub(crate) fn logical_pwd_if_current(
     }
 }
 
+/// Textual canonicalization of a logical path spelling: `.`
+/// components drop, `..` pops the previous component, empty
+/// components collapse — the sh_canonpath result for a spelling whose
+/// components name real directories (builtins/cd.def
+/// change_to_directory's PATH_CHECKDOTDOT processing), WITHOUT
+/// resolving symlinks. Exactly two leading slashes survive (the POSIX
+/// `//` root, rubash#1415); three or more collapse to one.
+pub(crate) fn canonical_logical_spelling(path: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    let joined = parts.join("/");
+    let normalized = if path.starts_with('/') {
+        format!("/{joined}")
+    } else if joined.is_empty() {
+        ".".to_string()
+    } else {
+        joined
+    };
+    if path.starts_with("//") && !path.starts_with("///") && !normalized.starts_with("//") {
+        format!("/{normalized}")
+    } else {
+        normalized
+    }
+}
+
+/// Whether a logical cwd VALUE names the session's current directory
+/// — the `same_file(temp_string, ".")` judgment of variables.c:907
+/// set_pwd, in the runtime form logical_pwd_if_current already uses:
+/// canonical equality when both sides resolve. When either side
+/// cannot be resolved (a deleted cwd resolves on neither side), the
+/// judgment falls back to canonical-spelling equality: the stored
+/// logical value and the session cwd field spell the same directory,
+/// which is the only same-directory evidence a deleted cwd leaves.
+pub(crate) fn logical_value_names_cwd(
+    value: &str,
+    cwd: &Path,
+    env_vars: &HashMap<String, String>,
+) -> bool {
+    let value_fs = crate::executor::path::shell_path_to_windows(value, env_vars);
+    if let (Ok(value_physical), Ok(current_physical)) =
+        (value_fs.canonicalize(), cwd.canonicalize())
+    {
+        return value_physical == current_physical;
+    }
+    canonical_logical_spelling(value) == canonical_logical_spelling(&shell_display_path(cwd))
+}
+
+/// The startup adoption of an inherited $PWD (variables.c:907
+/// set_pwd): when the imported value is absolute and names the
+/// current directory, the shell's logical cwd is its sh_canonpath
+/// canonicalization (spelling canonicalization, NO symlink
+/// resolution). The $PWD variable itself is a separate question —
+/// set_pwd leaves the imported spelling in the variable in
+/// non-POSIX mode (rubash#2799). None when the value names another
+/// directory (or no directory), in which case the logical cwd is
+/// the physical cwd.
+pub(crate) fn adopted_logical_pwd(
+    env_vars: &HashMap<String, String>,
+    cwd: &Path,
+) -> Option<String> {
+    let verbatim = logical_pwd_if_current(cwd, env_vars)?;
+    Some(canonical_logical_spelling(&verbatim))
+}
+
 fn shell_display_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
@@ -228,6 +397,7 @@ mod tests {
             ["-P"].iter().copied(),
             &env_vars,
             &verbatim,
+            None,
             &mut stdout,
             &mut stderr,
         )
@@ -256,6 +426,58 @@ mod tests {
             Some(value) => env::set_var("PWD", value),
             None => env::remove_var("PWD"),
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn logical_mode_prints_bridged_name_in_bridge_state() {
+        // After cd's Windows bridge branch (`cd /` with no configured
+        // shell root; popd's bridged inner cd is the twin), the
+        // session's logical position is the bridged POSIX name: $PWD
+        // and the stored logical cwd hold it, __RUBASH_PHYSICAL_PWD
+        // marks the state, and the physical cwd field deliberately
+        // stayed in the real directory. Logical pwd must print the
+        // bridged name, not the physical directory — the shape the
+        // redir goldens slice records (redir6.sub: `cd /`, `pwd`).
+        let cwd = env::temp_dir();
+        let mut env_vars = HashMap::new();
+        env_vars.insert("PWD".to_string(), "/".to_string());
+        env_vars.insert("__RUBASH_PHYSICAL_PWD".to_string(), "/".to_string());
+        for args in [&["-L"][..], &[][..]] {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let status = execute_with_env_and_io(
+                args.iter().copied(),
+                &env_vars,
+                &cwd,
+                Some("/"),
+                &mut stdout,
+                &mut stderr,
+            )
+            .unwrap();
+            assert_eq!(status, EXECUTION_SUCCESS);
+            assert_eq!(String::from_utf8(stdout).unwrap(), "/\n");
+        }
+
+        // Negative control: the same values WITHOUT the bridge marker
+        // are a desynchronized $PWD, not a bridge state — the face
+        // must not print the stored spelling; it derives the physical
+        // directory instead (rubash#2797).
+        env_vars.remove("__RUBASH_PHYSICAL_PWD");
+        let expected = crate::executor::path::shell_pwd_display_path(&shell_display_path(&cwd));
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let status = execute_with_env_and_io(
+            ["-L"].iter().copied(),
+            &env_vars,
+            &cwd,
+            Some("/"),
+            &mut stdout,
+            &mut stderr,
+        )
+        .unwrap();
+        assert_eq!(status, EXECUTION_SUCCESS);
+        assert_eq!(String::from_utf8(stdout).unwrap(), format!("{expected}\n"));
     }
 
     #[cfg(windows)]

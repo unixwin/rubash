@@ -23,6 +23,15 @@ file (`MSYS_NO_PATHCONV=1 wsl bash /mnt/d/<path>`), never `wsl bash -c`.
   `bash -n` rc=0; rubash at filing: rc=2
   `line 2: syntax error: unexpected end of file from '{' command on line 1`.
 
+## mvdan-sh/ (full corpus, execution differential — rubash#2906)
+
+All 560 snippets (559 numbered + tSKIP appendix) extracted from the
+pinned mvdan/sh commit above, with the GNU oracle ledger and the
+tracked-divergence ledger, exercised at execution depth by
+`tests/issue2906_mvdan_sh_execution_differential.rs`. See
+`mvdan-sh/README.md` for the isolation rules, the pinning state and
+the CI boundary (#3033 decides CI wiring; nothing is wired here).
+
 ## mvdan-n/ (16 of 559 snippets diverged on `-n` exit code)
 
 Run: `<shell> -n <file>`; GNU rc vs rubash rc at filing, issue:

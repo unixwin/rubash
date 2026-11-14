@@ -17,10 +17,10 @@
 //! The `-c` exit status for the `$(` shapes (GNU 127 vs rubash 2) is
 //! an OWNER-DECISION item and deliberately NOT pinned here; every
 //! `$(` case below runs in file mode, where both shells exit 2.
-//! The offending-line ECHO is likewise pinned only where it is
-//! byte-exact (the backtick shapes): for `$(` bodies GNU echoes the
-//! enclosing line while rubash echoes the stored body fragment —
-//! see issue2751_dollar_echo_is_the_body_fragment_documented.
+//! The offending-line ECHO for `$(` bodies is the enclosing line
+//! since rubash#2783 (the driver parks the reader unit's text on the
+//! shell state for the unit's extent) —
+//! see issue2751_dollar_echo_is_the_enclosing_line.
 //!
 //! Expectations measured against GNU bash 5.3.20 (2026-11-04).
 
@@ -238,18 +238,17 @@ fn issue2751_following_lines_never_run() {
 }
 
 #[test]
-fn issue2751_dollar_echo_is_the_body_fragment_documented() {
-    // DOCUMENTED REMAINING FACE: GNU echoes the enclosing line
-    // (`echo $(if then)'); rubash echoes the body fragment stored on
-    // the error node, because no driver→executor channel carries the
-    // enclosing line's text today. The diagnostic line above is
-    // GNU-exact; this test pins the current echo so the divergence
-    // stays visible until the channel exists.
+fn issue2751_dollar_echo_is_the_enclosing_line() {
+    // rubash#2783: GNU echoes the enclosing line (`echo $(if then)',
+    // print_offending_line over shell_input_line, parse.y:6814). The
+    // driver now parks the reader unit's source text on the shell
+    // state for the unit's extent, and the body reporter reads the
+    // physical line back out of it — the echo is byte-exact GNU.
     let run = run_file("echo-doc", "echo $(if then)\n");
     assert_eq!(
         run.stderr,
         "case.sh: line 1: syntax error near unexpected token `then' while looking for matching `)'\n\
-         case.sh: line 1: `if then'\n",
+         case.sh: line 1: `echo $(if then)'\n",
         "echo-doc: stderr"
     );
 }

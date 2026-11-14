@@ -711,7 +711,7 @@ pub(super) fn parse_function_command_with_diagnostic(
 }
 
 fn finish_function_command(
-    command: CommandNode,
+    mut command: CommandNode,
     tokens: &[Token],
     index: usize,
 ) -> (CommandNode, usize) {
@@ -726,6 +726,19 @@ fn finish_function_command(
     if let Some(function) = command.function_command.as_ref() {
         if let Some(error) = find_body_parse_error(&function.body) {
             return (error, index);
+        }
+    }
+    // rubash#3209: a bare `name()` definition plants the body's
+    // first-command stamp at the name's line (GNU parse.y:5849-5851
+    // via the command-position word capture; the `function` keyword
+    // forms plant nothing because the name follows the FUNCTION
+    // token). The definition node's own line is the name token's
+    // line on every construction path above.
+    if let Some(definition_line) = command.line {
+        if let Some(function) = command.function_command.as_mut() {
+            if !function.keyword && function.has_parentheses {
+                restamp_function_body_first_command(&mut function.body, definition_line);
+            }
         }
     }
     let (command, mut next_i) = finish_compound_command(command, tokens, index);

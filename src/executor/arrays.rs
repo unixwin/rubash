@@ -409,6 +409,155 @@ fn field_split_with_raw_byte_markers(value: &str, ifs: &str) -> Vec<String> {
         .collect()
 }
 
+/// IFS splitting under single-byte locale semantics (rubash#2819): the
+/// byte-domain twin of the char-domain branches in
+/// field_split_values_with_ifs. Value and IFS are decoded to bytes with
+/// glue provenance exactly as in field_split_with_raw_byte_markers,
+/// separator membership is per BYTE (GNU's ifs_cmap when
+/// MB_CUR_MAX == 1), the three field shapes (whitespace-only / mixed /
+/// non-whitespace) mirror their char-domain counterparts step for step,
+/// and fields are re-encoded to storage text — a field whose bytes form
+/// valid UTF-8 re-forms its characters, a split multibyte character
+/// stays as raw-byte markers. Re-encoding goes through the canonical
+/// storage encoder (substitution_metadata::bytes_to_shell_text), the
+/// same one field_split_with_raw_byte_markers uses since
+/// rubash#3103/#3115: carrier bytes are pair-tagged again rather than
+/// emitted bare, so a field's data bytes are never re-read as protocol
+/// by char-domain consumers downstream.
+fn field_split_values_with_ifs_bytes(value: &str, ifs: &str) -> Vec<String> {
+    use crate::executor::substitution_metadata::{
+        decode_raw_byte_markers, decode_raw_byte_markers_with_glue, RAW_BYTE_MARKER_ESCAPE,
+    };
+
+    let sentinel = char::from_u32(RAW_BYTE_MARKER_ESCAPE).expect("sentinel is valid");
+
+    let (value_bytes, value_glue) = if value.contains(sentinel) {
+        decode_raw_byte_markers_with_glue(value.as_bytes())
+    } else {
+        (
+            value.as_bytes().to_vec(),
+            value.as_bytes().iter().map(|byte| *byte == 0x1c).collect(),
+        )
+    };
+    let ifs_bytes = if ifs.contains(sentinel) {
+        decode_raw_byte_markers(ifs.as_bytes())
+    } else {
+        ifs.as_bytes().to_vec()
+    };
+
+    let mut ifs_set = [false; 256];
+    for byte in &ifs_bytes {
+        ifs_set[*byte as usize] = true;
+    }
+    let is_ws_byte = |byte: u8| matches!(byte, b' ' | b'\t' | b'\n');
+    let ifs_has_ws = ifs_bytes.iter().any(|byte| is_ws_byte(*byte));
+    let ifs_all_ws = !ifs_bytes.is_empty() && ifs_bytes.iter().all(|byte| is_ws_byte(*byte));
+
+    let mut fields: Vec<Vec<u8>> = Vec::new();
+    let mut current: Vec<u8> = Vec::new();
+    let mut index = 0;
+    // Consume a glue marker at `index`: the following byte is data.
+    // Returns true when a marker was consumed.
+    macro_rules! take_glue {
+        () => {
+            if value_bytes[index] == 0x1c && value_glue[index] {
+                index += 1;
+                if index < value_bytes.len() {
+                    current.push(value_bytes[index]);
+                    index += 1;
+                }
+                true
+            } else {
+                false
+            }
+        };
+    }
+
+    if ifs_all_ws {
+        while index < value_bytes.len() {
+            if take_glue!() {
+                continue;
+            }
+            let byte = value_bytes[index];
+            if ifs_set[byte as usize] {
+                if !current.is_empty() {
+                    fields.push(std::mem::take(&mut current));
+                }
+            } else {
+                current.push(byte);
+            }
+            index += 1;
+        }
+        if !current.is_empty() {
+            fields.push(current);
+        }
+    } else if ifs_has_ws {
+        while index < value_bytes.len() {
+            if take_glue!() {
+                continue;
+            }
+            let byte = value_bytes[index];
+            if !ifs_set[byte as usize] {
+                current.push(byte);
+                index += 1;
+                continue;
+            }
+            if is_ws_byte(byte) {
+                while index < value_bytes.len()
+                    && ifs_set[value_bytes[index] as usize]
+                    && is_ws_byte(value_bytes[index])
+                {
+                    index += 1;
+                }
+                if index < value_bytes.len()
+                    && !is_ws_byte(value_bytes[index])
+                    && ifs_set[value_bytes[index] as usize]
+                {
+                    continue;
+                }
+                if !current.is_empty() {
+                    fields.push(std::mem::take(&mut current));
+                }
+                continue;
+            }
+            fields.push(std::mem::take(&mut current));
+            index += 1;
+            while index < value_bytes.len()
+                && ifs_set[value_bytes[index] as usize]
+                && is_ws_byte(value_bytes[index])
+            {
+                index += 1;
+            }
+        }
+        if !current.is_empty() {
+            fields.push(current);
+        }
+    } else {
+        while index < value_bytes.len() {
+            if take_glue!() {
+                continue;
+            }
+            let byte = value_bytes[index];
+            if ifs_set[byte as usize] {
+                fields.push(std::mem::take(&mut current));
+                index += 1;
+                continue;
+            }
+            current.push(byte);
+            index += 1;
+        }
+        fields.push(current);
+        if fields.last().is_some_and(|field| field.is_empty()) && fields.len() > 1 {
+            fields.pop();
+        }
+    }
+
+    fields
+        .into_iter()
+        .map(|bytes| crate::executor::substitution_metadata::bytes_to_shell_text(&bytes))
+        .collect()
+}
+
 /// Split a byte sequence into individual characters (UTF-8 aware).
 /// Invalid UTF-8 bytes are treated as single-byte characters.
 fn split_into_chars(bytes: &[u8]) -> Vec<Vec<u8>> {
@@ -473,6 +622,19 @@ pub(super) fn field_split_values_with_ifs(value: &str, ifs: Option<&str>) -> Vec
     // Other Unicode whitespace remains data unless explicitly listed in IFS.
     if ifs == " \t\n" {
         return split_ifs_whitespace(value, ifs);
+    }
+
+    // rubash#2819: under a single-byte locale GNU's separator membership
+    // is per byte — string_extract_verbatim (subst.c:1148) matches whole
+    // characters via wcschr only in a multibyte locale; with
+    // MB_CUR_MAX == 1 membership is the per-byte ifs_cmap setifs builds,
+    // so a multibyte IFS character separates on EACH of its bytes. The
+    // branches above are locale-invariant (unset/empty IFS, default
+    // whitespace IFS: no byte >= 0x80 can equal 0x20/0x09/0x0A). Route
+    // every other single-byte-locale split to the byte-domain twin; the
+    // multibyte-locale paths below are untouched.
+    if !crate::locale::is_multi_byte_active() {
+        return field_split_values_with_ifs_bytes(value, ifs);
     }
 
     // When the value or IFS contains raw-byte markers (multibyte chars

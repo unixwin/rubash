@@ -172,6 +172,14 @@ pub(crate) fn word_value_from_raw(
 /// re-derivation. Inside a `$'...'` span every `\` starts an escape; the
 /// escaped-backslash `\\` form consumes its follower, so only a `\`
 /// directly followed by `u`/`U` counts.
+/// Cheap admission for the rubash#2772 read-time extquote re-derivation:
+/// the raw word mentions a `$'...'` span inside a `${...}` unit — the
+/// only shape whose cooked form depends on the line's read-time
+/// extquote state.
+pub(crate) fn raw_has_dolbrace_ansi_c(raw: &str) -> bool {
+    raw.contains("${") && raw.contains("$'")
+}
+
 pub(crate) fn raw_has_ansi_u_escape(raw: &str) -> bool {
     let bytes = raw.as_bytes();
     let mut index = 0usize;

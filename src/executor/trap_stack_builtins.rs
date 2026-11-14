@@ -18,6 +18,67 @@ fn decode_raw_byte_marker_bytes(bytes: &[u8]) -> Vec<u8> {
     crate::executor::substitution_metadata::shell_text_to_raw_bytes(text)
 }
 
+/// Ordered per-operand output log (rubash#2699): a builtin that emits
+/// both stdout lines and stderr diagnostics must interleave them per
+/// operand in a merged stream (GNU type.def describe loop writes
+/// through the descriptors as it goes; builtin_error is unbuffered).
+/// The shared buffered-output path collected the two streams into
+/// separate Vec buffers and emitted all of stdout before any of
+/// stderr, so the diagnostic for operand N landed after the output
+/// for operand N+1. Each writer appends one chunk per `write` call,
+/// so the log preserves the production order across both fds.
+pub(in crate::executor) struct OrderedOutputLog {
+    chunks: std::rc::Rc<std::cell::RefCell<Vec<(u8, Vec<u8>)>>>,
+}
+
+impl OrderedOutputLog {
+    pub(in crate::executor) fn new() -> Self {
+        OrderedOutputLog {
+            chunks: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+        }
+    }
+
+    pub(in crate::executor) fn stdout_writer(&self) -> OrderedChunkWriter {
+        OrderedChunkWriter {
+            fd: 1,
+            log: self.chunks.clone(),
+        }
+    }
+
+    pub(in crate::executor) fn stderr_writer(&self) -> OrderedChunkWriter {
+        OrderedChunkWriter {
+            fd: 2,
+            log: self.chunks.clone(),
+        }
+    }
+
+    pub(in crate::executor) fn is_empty(&self) -> bool {
+        self.chunks.borrow().is_empty()
+    }
+
+    pub(in crate::executor) fn chunks(&self) -> std::cell::Ref<'_, Vec<(u8, Vec<u8>)>> {
+        self.chunks.borrow()
+    }
+}
+
+pub(in crate::executor) struct OrderedChunkWriter {
+    fd: u8,
+    log: std::rc::Rc<std::cell::RefCell<Vec<(u8, Vec<u8>)>>>,
+}
+
+impl std::io::Write for OrderedChunkWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if !buf.is_empty() {
+            self.log.borrow_mut().push((self.fd, buf.to_vec()));
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 impl Executor {
     pub(in crate::executor) fn write_buffered_builtin_output(
         &mut self,
@@ -25,28 +86,14 @@ impl Executor {
         stdout: &[u8],
         stderr: &[u8],
     ) -> Result<(), ExecuteError> {
-        self.write_buffered_builtin_output_ordered(cmd, stdout, stderr, false)
-    }
-
-    /// printf variant (rubash#1134): GNU emits printf's diagnostics
-    /// unbuffered while its output flushes at builtin exit, so the
-    /// stderr buffer is routed before the stdout buffer.
-    pub(in crate::executor) fn write_buffered_builtin_output_stderr_first(
-        &mut self,
-        cmd: &CommandNode,
-        stdout: &[u8],
-        stderr: &[u8],
-    ) -> Result<(), ExecuteError> {
-        self.write_buffered_builtin_output_ordered(cmd, stdout, stderr, true)
-    }
-
-    fn write_buffered_builtin_output_ordered(
-        &mut self,
-        cmd: &CommandNode,
-        stdout: &[u8],
-        stderr: &[u8],
-        stderr_first: bool,
-    ) -> Result<(), ExecuteError> {
+        // rubash#3324: the old printf-only stderr-first variant is
+        // gone — GNU line-buffers stdout (shell.c:1921-1922), so a
+        // builtin's diagnostics interleave with its output in
+        // production order, and printf routes its ordered log
+        // (write_buffered_builtin_output_chunks) instead. The pair
+        // route below keeps its plain stdout-then-stderr fallback
+        // for builtins whose two buffers have no cross-stream order
+        // to preserve.
         // Silent-builtin short-circuit (perf): `shift` and friends succeed
         // with empty stdout/stderr buffers on the hot path. GNU runs such a
         // builtin's writes through its redirected descriptors, but a zero-
@@ -116,12 +163,69 @@ impl Executor {
         // marker-free and non-UTF-8 slices pass through untouched.
         let stdout = decode_raw_byte_marker_bytes(stdout);
         let stderr = decode_raw_byte_marker_bytes(stderr);
-        if self.route_builtin_buffered_output_ordered(cmd, &stdout, &stderr, stderr_first, false)? {
+        if self.route_builtin_buffered_output_ordered(cmd, &stdout, &stderr, false)? {
             return Ok(());
         }
-        if stderr_first {
-            self.write_buffered_stderr_block(cmd, &stderr)?;
-            return self.write_buffered_stdout_block(cmd, &stdout);
+        self.write_buffered_stdout_block(cmd, &stdout)?;
+        self.write_buffered_stderr_block(cmd, &stderr)
+    }
+
+    /// Chunk-ordered flush for the `OrderedOutputLog` (rubash#2699):
+    /// the preamble is item-for-item the pair path's — the same
+    /// empty-log short-circuit, the same input-redirect-error
+    /// branch, the same per-chunk marker decode — then the chunks
+    /// route in log order; a route that declines (apply walk
+    /// refused and no closed-fd/coproc arm matched) falls back to
+    /// the pair block write, stdout block then stderr block.
+    pub(in crate::executor) fn write_buffered_builtin_output_chunks(
+        &mut self,
+        cmd: &CommandNode,
+        log: &OrderedOutputLog,
+    ) -> Result<(), ExecuteError> {
+        if log.is_empty()
+            && cmd.redirects.is_empty()
+            && cmd.redirect_in.is_none()
+            && cmd.redirect_out.is_none()
+            && cmd.append.is_none()
+            && cmd.redirect_err.is_none()
+            && cmd.redirect_err_append.is_none()
+            && cmd.heredoc.is_none()
+            && cmd.heredoc_body.is_none()
+            && cmd.here_string.is_none()
+            && cmd.here_string_carrier.is_none()
+            && cmd.heredoc_redirects.is_empty()
+        {
+            self.last_builtin_write_failed.set(false);
+            return Ok(());
+        }
+        if let Some(error) = self.buffered_builtin_input_redirect_error(cmd) {
+            let mut line = Vec::new();
+            let _ = writeln!(
+                &mut line,
+                "{}{}",
+                self.diagnostic_prefix(),
+                crate::posix_errors::message(&error)
+            );
+            let _ = self.write_redirect_diagnostic_routed(cmd, &line);
+            self.exit_code = 1;
+            self.last_builtin_write_failed.set(true);
+            return Ok(());
+        }
+        let decoded: Vec<(u8, Vec<u8>)> = log
+            .chunks()
+            .iter()
+            .map(|(fd, bytes)| (*fd, decode_raw_byte_marker_bytes(bytes)))
+            .collect();
+        if self.route_builtin_buffered_output_chunks(cmd, &decoded, false)? {
+            return Ok(());
+        }
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        for (fd, bytes) in &decoded {
+            match fd {
+                1 => stdout.extend_from_slice(bytes),
+                _ => stderr.extend_from_slice(bytes),
+            }
         }
         self.write_buffered_stdout_block(cmd, &stdout)?;
         self.write_buffered_stderr_block(cmd, &stderr)
@@ -195,7 +299,8 @@ impl Executor {
             } else if redirect_target_fd(&target) == Some(1) {
                 super::write_stdout_bytes(&stdout)?;
             } else {
-                let mut file = self.create_redirect_output(&target, redirect.clobber)?;
+                let mut file =
+                    self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?;
                 file.write_all(&stdout)?;
             }
         } else if let Some(redirect) = &cmd.append {
@@ -244,7 +349,8 @@ impl Executor {
                     super::write_stdout_bytes(&stderr)?;
                 }
             } else if !is_null_device(&target) {
-                let mut file = self.create_redirect_output(&target, redirect.clobber)?;
+                let mut file =
+                    self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?;
                 file.write_all(&stderr)?;
             }
         } else if let Some(redirect) = &cmd.redirect_err_append {
@@ -282,15 +388,20 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<i32, ExecuteError> {
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
+        // rubash#2638: GNU display_traps (builtins/trap.def:333) emits
+        // each operand's listing or invalid-spec diagnostic in operand
+        // order through the command's descriptors; the separate-Vec
+        // flush emitted every listing before any diagnostic, so a
+        // merged stream (2>&1) reordered them. The OrderedOutputLog
+        // (rubash#2699) preserves the production order across both fds.
+        let log = OrderedOutputLog::new();
         let status = crate::builtins::trap::execute_with_io(
             &cmd.words[1..],
             &mut self.shell_state.env_vars,
-            &mut stdout,
-            &mut stderr,
+            &mut log.stdout_writer(),
+            &mut log.stderr_writer(),
         )?;
-        self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+        self.write_buffered_builtin_output_chunks(cmd, &log)?;
         // GNU execute_cmd.c:4886-4888: a special builtin whose status
         // exceeds EX_SHERRBASE has it converted (EX_USAGE 258 ->
         // EX_BADUSAGE 2, EX_UTILERROR 263 -> EXECUTION_FAILURE 1) and
@@ -336,8 +447,22 @@ impl Executor {
     ) -> Result<i32, ExecuteError> {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let status =
-            crate::builtins::help::execute_with_io(&cmd.words[1..], &mut stdout, &mut stderr)?;
+        // help.def's listing reads COLUMNS through get_string_value
+        // (general.c default_columns) and picks its column renderer by
+        // the active locale's MB_CUR_MAX — both are session state, so
+        // they travel from this variable table, not the process env.
+        let layout = crate::builtins::help::HelpListingLayout {
+            columns_var: self.shell_state.env_vars.get("COLUMNS").cloned(),
+            multibyte: crate::locale::locale_name_selects_utf8(
+                &crate::locale::locale_name_from_vars(&self.shell_state.env_vars),
+            ),
+        };
+        let status = crate::builtins::help::execute_with_io_and_layout(
+            &cmd.words[1..],
+            &mut stdout,
+            &mut stderr,
+            &layout,
+        )?;
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
         Ok(status)
     }
@@ -356,6 +481,27 @@ impl Executor {
             .unwrap_or_else(|| panic!("{name} row in BUILTIN_TABLE"));
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
+        // rubash#3336: pushd/popd move the session cwd exactly the way
+        // cd does — every GNU route goes through cd_builtin
+        // (builtins/pushd.def:298 the Dir operand, :265/:284 the
+        // rotations via change_to_temp -> cd_to_string, :400 popd's
+        // top via cd_to_string), and cd_builtin moves the PROCESS cwd
+        // with chdir (builtins/cd.def:600 change_to_directory), so a
+        // GNU child simply inherits it (execute_cmd.c:5771
+        // execute_disk_command forks via make_child, no chdir). Under
+        // G-02 the process never chdirs, so the spawn stamp can only
+        // place a child in a deleted directory through the cwd-anchor
+        // fd — and the anchor is warmed by the cd funnels only. A
+        // pushd-entered directory therefore left the anchor naming the
+        // pre-pushd directory; once the entered directory was deleted,
+        // the stamp found no anchor for the session cwd and fell
+        // through unstamped, running children in the process (startup)
+        // cwd. Warm the anchor whenever the builtin moved the session
+        // cwd, mirroring execute_cd — gated on the move, not the
+        // status, because a readonly-bind failure still leaves the
+        // chdir standing (pushd.rs G-02), and a no-move success
+        // (pushd -n, dirs) needs no refresh.
+        let cwd_before = self.shell_state.cwd.clone();
         let status = {
             let mut diag = super::builtin_diag::Diag::new(row, &mut stderr);
             let status = crate::builtins::pushd::execute_with_io(
@@ -370,8 +516,37 @@ impl Executor {
             diag.flush_with(|| self.diagnostic_prolog());
             status?
         };
+        // GNU pushd.def:296-302 delegates the Dir operand to
+        // cd_builtin, so pushd/popd are cd-family movers: a move must
+        // maintain the same session cwd state cd maintains
+        // (rubash#3335) — the stored logical cwd
+        // (the_current_working_directory, builtins/common.c:589) and
+        // the cwd inode anchor (rubash#3198). Without the anchor, a
+        // later cd from a deleted cwd strands on the dead spelling
+        // (`cd ..` rc 1 after a pushd entry); without the logical
+        // value, the make_absolute base falls back to the physical
+        // spelling (a symlinked pushd entry binds "$R/a/real/."
+        // instead of "$R/link/."). -n moves nothing and dirs never
+        // moves, so both updates are gated on an actual move; the
+        // bound PWD is the logical value, exactly as cd's bindpwd
+        // binds it.
+        let moved = status == 0 && self.shell_state.cwd != cwd_before;
+        if moved {
+            if let Some(pwd) = self.shell_state.env_vars.get("PWD").cloned() {
+                self.shell_state.logical_cwd = Some(pwd);
+            }
+        }
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
         self.sync_cd_variables();
+        // rubash#3198: warm the cwd inode anchor at the moment the
+        // directory is entered, as execute_cd does, so a later unlink
+        // of the directory cannot strand the verbatim fallback. The
+        // gate is the move itself (rubash#3336), which subsumes the
+        // status-0 case: a readonly-bind failure still leaves the
+        // chdir standing.
+        if self.shell_state.cwd != cwd_before {
+            self.refresh_cwd_anchor();
+        }
         Ok(status)
     }
 }

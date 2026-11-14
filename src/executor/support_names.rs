@@ -330,7 +330,14 @@ fn snapshot_parent_process_id() -> Option<u32> {
 }
 
 pub(in crate::executor) fn declare_args_request_integer(args: &[String]) -> bool {
-    args.iter().any(|arg| {
+    // rubash#3338: only the option region carries options. A `-i`
+    // behind the first operand (or behind `--`) is a NAME in GNU
+    // (internal_getopt stops there, builtins/bashgetopt.c:77-84);
+    // the old whole-list scan let it switch the command into
+    // integer pre-evaluation, so `declare x -i y=zz` bound y=0
+    // where GNU binds the literal y=zz.
+    let region = super::builtin_opt::option_region_end(args, true);
+    args[..region].iter().any(|arg| {
         arg.starts_with('-')
             && arg != "-"
             && !arg.starts_with("--")

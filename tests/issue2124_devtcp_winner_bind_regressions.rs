@@ -97,15 +97,6 @@ fn start_listener() -> Listener {
 }
 
 impl Listener {
-    fn connections(&self) -> usize {
-        std::thread::sleep(Duration::from_millis(500));
-        let mut last = 0;
-        while let Ok(count) = self.rx.try_recv() {
-            last = count;
-        }
-        last
-    }
-
     /// Poll until the count reaches `want` (3s deadline) — the
     /// accept thread's reports can lag under parallel test load, so
     /// a positive expectation waits instead of sampling once.

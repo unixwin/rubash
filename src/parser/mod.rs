@@ -38,6 +38,13 @@ pub fn command_substitutions_in_word_public(word: &str) -> Vec<CommandSubstituti
     command_substitution::command_substitutions_in_word(word)
 }
 
+/// Executor-facing wrapper for the read-time screen's live-context
+/// scan (rubash#2789): like the scan above, but single-quoted and
+/// backslash-escaped openers are literal text and yield no node.
+pub fn command_substitutions_in_word_live_public(word: &str) -> Vec<CommandSubstitutionNode> {
+    command_substitution::command_substitutions_in_word_live(word)
+}
+
 /// Executor-facing wrapper for the word-quote scan: the conditional `=~`
 /// operand-quoting check (GNU parse.y cond.c / subst.c quoted-regex
 /// semantics) re-derives a raw word's quote spans on demand (wt44/parse4).

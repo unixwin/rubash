@@ -811,12 +811,19 @@ impl Executor {
             // niubash#177: same operand resolution as the argv funnel —
             // a virtual-root file operand may exist only under its `.exe`
             // spelling on disk.
-            fs::read(
-                self.session_path(crate::executor::path::windows_operand_file_path(
-                    shell_path_to_windows(path, &self.shell_state.env_vars),
-                    &self.shell_state.env_vars,
-                )),
-            )
+            // rubash#3268(a): the read itself spends the cwd anchor,
+            // in the same shape as the emulated cat's operand read —
+            // this ladder runs IN the shell process, so a relative
+            // operand escaping a deleted session cwd via `..` died on
+            // the joined path string, where GNU's comsub child (a
+            // fork sitting in the cwd inode, subst.c:7143
+            // command_substitute) reads it fine.
+            let native = crate::executor::path::windows_operand_file_path(
+                shell_path_to_windows(path, &self.shell_state.env_vars),
+                &self.shell_state.env_vars,
+            );
+            let joined = self.session_path(native.clone());
+            self.read_session_anchored(&native, &joined)
         }
     }
 

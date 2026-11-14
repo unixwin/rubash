@@ -636,9 +636,15 @@ fn test_mapfile_u_reports_bad_fd_for_unopened_or_closed_fd() {
     let error_path = "target/rubash-mapfile-u-bad-fd-error.txt";
     let _ = fs::remove_file(output_path);
     let _ = fs::remove_file(error_path);
+    // #2631: this pin used fd 3, which a sibling test thread in the same
+    // process may hold open as a live pipe during full parallel runs —
+    // mapfile -u3 then blocks reading it instead of reporting a bad fd
+    // (the product matches GNU; the hang was a harness artifact). Use the
+    // high fd 93, which the harness never holds; GNU's diagnostic has the
+    // same shape for 93 as for 3 (measured on GNU 5.3.20).
     let input = format!(
-        "mapfile -u3 arr 2> {error_path}; echo unopened:$? > {output_path}; \
-         readarray -u 3 arr 3<&- 2>> {error_path}; echo closed:$? >> {output_path}"
+        "mapfile -u93 arr 2> {error_path}; echo unopened:$? > {output_path}; \
+         readarray -u 93 arr 93<&- 2>> {error_path}; echo closed:$? >> {output_path}"
     );
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
@@ -653,8 +659,8 @@ fn test_mapfile_u_reports_bad_fd_for_unopened_or_closed_fd() {
         "unopened:1\nclosed:1\n"
     );
     let error = fs::read_to_string(error_path).unwrap();
-    assert!(error.contains("mapfile: 3: invalid file descriptor: Bad file descriptor"));
-    assert!(error.contains("readarray: 3: invalid file descriptor: Bad file descriptor"));
+    assert!(error.contains("mapfile: 93: invalid file descriptor: Bad file descriptor"));
+    assert!(error.contains("readarray: 93: invalid file descriptor: Bad file descriptor"));
     let _ = fs::remove_file(output_path);
     let _ = fs::remove_file(error_path);
 }

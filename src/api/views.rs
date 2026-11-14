@@ -326,9 +326,13 @@ impl VariablesView<'_> {
 
     /// Bind a scalar through the host write path (the designed form
     /// of `set_env`: the mirror write that also syncs the typed
-    /// scalar cell in place).
+    /// scalar cell in place). The value is RAW host data: entry-encode
+    /// it at this boundary (rubash#3207, the #3105 contract) so carrier
+    /// bytes survive finalization instead of being stripped as live
+    /// protocol.
     pub fn set(&mut self, name: &str, value: &str) {
-        self.executor.set_env(name, value);
+        let encoded = crate::executor::env_helpers::entry_encode_imported_env_value(name, value);
+        self.executor.set_env(name, &encoded);
     }
 
     /// Whole-value bind of an indexed array from typed cells,
@@ -338,13 +342,35 @@ impl VariablesView<'_> {
     /// execution (§7.6's rule). False on a refused bind (negative
     /// index, or the name is an associative array).
     pub fn set_array(&mut self, name: &str, cells: &[(i64, String)]) -> bool {
-        self.executor.view_set_indexed_array(name, cells)
+        // rubash#3207: each cell value is RAW host data — entry-encode
+        // at this boundary (fail-first: unencoded cells lost the
+        // carrier byte at finalization, like the scalar `set`).
+        let encoded: Vec<(i64, String)> = cells
+            .iter()
+            .map(|(index, value)| {
+                (
+                    *index,
+                    crate::executor::env_helpers::entry_encode_imported_env_value(name, value),
+                )
+            })
+            .collect();
+        self.executor.view_set_indexed_array(name, &encoded)
     }
 
     /// Whole-value bind of an associative array from typed cells;
     /// same contract as [`VariablesView::set_array`].
     pub fn set_assoc(&mut self, name: &str, cells: &[(String, String)]) -> bool {
-        self.executor.view_set_assoc_array(name, cells)
+        // rubash#3207: same entry-encoding as `set_array` (rubash#3207).
+        let encoded: Vec<(String, String)> = cells
+            .iter()
+            .map(|(key, value)| {
+                (
+                    key.clone(),
+                    crate::executor::env_helpers::entry_encode_imported_env_value(name, value),
+                )
+            })
+            .collect();
+        self.executor.view_set_assoc_array(name, &encoded)
     }
 
     /// Set or clear the exported attribute, through the same mark

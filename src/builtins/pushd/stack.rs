@@ -135,10 +135,21 @@ pub(super) fn normalize_stack_dir(dir: &str, env_vars: &HashMap<String, String>)
         .get("PWD")
         .map(|value| value.replace('\\', "/"))
         .unwrap_or_else(|| "/".to_string());
-    let combined = if dir.starts_with('/') || is_drive_absolute(&dir) {
-        dir
+    let absolute = dir.starts_with('/') || is_drive_absolute(&dir);
+    let combined = if absolute {
+        dir.clone()
     } else {
         format!("{base}/{dir}")
+    };
+    // The exactly-two-slashes evidence is the spelling the path was
+    // built FROM — the operand itself for an absolute operand, the
+    // base $PWD for a relative one — never the joined text, which
+    // manufactures a double slash at the seam (the rule
+    // cd/paths.rs logical_destination_display follows, rubash#2211).
+    let slash_evidence = if absolute {
+        dir.as_str()
+    } else {
+        base.as_str()
     };
 
     let (prefix, rest) = if combined.starts_with('/') {
@@ -160,7 +171,7 @@ pub(super) fn normalize_stack_dir(dir: &str, env_vars: &HashMap<String, String>)
     }
 
     let joined = parts.join("/");
-    if prefix == "/" {
+    let result = if prefix == "/" {
         if joined.is_empty() {
             "/".to_string()
         } else {
@@ -172,7 +183,13 @@ pub(super) fn normalize_stack_dir(dir: &str, env_vars: &HashMap<String, String>)
         format!("{prefix}/")
     } else {
         format!("{prefix}/{joined}")
-    }
+    };
+    // POSIX leaves exactly two leading slashes implementation-defined
+    // and GNU preserves them through canonicalization (change_to_
+    // directory -> sh_canonpath); three or more collapse to one
+    // (rubash#3197). The component walk above cannot represent the
+    // prefix, so re-apply it through cd's own preservation helper.
+    crate::builtins::cd::paths::preserve_leading_double_slash(slash_evidence, &result)
 }
 
 fn is_drive_absolute(path: &str) -> bool {

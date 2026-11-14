@@ -1539,6 +1539,12 @@ pub struct WhitelistedSpawn {
     /// passed as CreateProcessW's lpCurrentDirectory. None keeps the
     /// process cwd (host-level spawns with no session).
     pub cwd: Option<std::path::PathBuf>,
+    /// rubash#3268 (e): the spawning session's cwd anchor fd, spent by
+    /// the Unix backend to fchdir the child into a deleted session
+    /// cwd. Unix-only semantics (Windows cannot hold a deleted
+    /// directory as a process cwd); accepted for struct parity and
+    /// ignored by this backend.
+    pub cwd_anchor_fd: Option<i32>,
     /// rubash#2241: job-control process grouping for async respawns.
     /// Unix-only semantics (Windows has no process groups); accepted
     /// for struct parity and ignored by this backend.
