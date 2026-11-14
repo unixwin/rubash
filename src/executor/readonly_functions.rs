@@ -405,6 +405,17 @@ impl Executor {
                 || !crate::executor::local_helpers::shell_assignment_needs_process_env(&name)
                 || (name.starts_with("__RUBASH_TRAP")
                     && name != crate::builtins::trap::TRAP_ORIG_IGNORES)
+                // rubash#2983: the variable-attribute transport keys
+                // (__RUBASH_*_VARS) never cross the exec boundary to an
+                // external child — they are the fork-substitute
+                // transport (the wrapper/comsub env_map rebuilds them
+                // from env_vars_snapshot), and a descendant rubash that
+                // re-imports them would inherit the parent's
+                // non-exported attributes (a readonly array) in a
+                // process that is not a fork substitute. GNU
+                // variables.c:4850 make_env_array_from_var_list passes
+                // only exported variables to a child.
+                || crate::executor::types::is_variable_attribute_transport_key(&name)
                 || !is_valid_process_env(&name, &value)
             {
                 continue;

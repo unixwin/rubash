@@ -125,6 +125,28 @@ pub const INVISIBLE_VARS: &str = "__RUBASH_INVISIBLE_VARS";
 // re-materialize. Rubash materializes dynamic values on demand, so the
 // unbind is recorded here instead of deleting an env slot.
 pub const UNSET_DYNAMIC_VARS: &str = "__RUBASH_UNSET_DYNAMIC_VARS";
+/// Whether `name` is one of the variable-attribute transport keys
+/// (`__RUBASH_*_VARS`): the structured lists a parent rubash leaves in
+/// the environment so a fork-substitute respawn (the `rubash -c`
+/// wrapper, command substitution) can rebuild the parent's variable
+/// table — exported, readonly, integer, case, nameref, trace, array,
+/// assoc, declared-unset, invisible, unset-dynamic. These keys are
+/// INTERNAL transport, not environment: they must never cross an exec
+/// boundary to an external child. GNU variables.c:4850
+/// make_env_array_from_var_list passes only exported variables to a
+/// child (array/assoc `continue` — "XXX array vars cannot yet be
+/// exported", ARRAY_EXPORT off); a descendant rubash that re-imports
+/// the transport keys via VarTable::from_values recreates the
+/// parent's non-exported attributes in a process that is not a fork
+/// substitute — rubash#2983: a background job's wrapper child handed
+/// the nested bats run a readonly BATS_TEST_TAGS, crashing it before
+/// any test ran. The fork substitutes do not go through
+/// compose_child_environment — they build env_map directly from
+/// env_vars_snapshot() — so excluding the keys here costs them
+/// nothing.
+pub(crate) fn is_variable_attribute_transport_key(name: &str) -> bool {
+    name.starts_with("__RUBASH_") && name.ends_with("_VARS")
+}
 pub const COMPOUND_ASSIGNMENT_MARKER: &str = crate::executor::markers::COMPOUND_ASSIGNMENT_MARKER;
 /// Lead-in byte inside a `( ... )` compound-assignment body marking it as a
 /// whole-single-quoted declare operand whose expansion GNU defers to the
