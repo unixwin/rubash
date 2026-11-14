@@ -242,6 +242,83 @@ class GateTest(unittest.TestCase):
         self.assertNotEqual(rc, 0)
         self.assertEqual(inh, [])
 
+    def test_member_missing_from_packages_fails_closed(self):
+        # workspace_members names a package id that packages[] lacks:
+        # filtering it away must not pass silently.
+        meta = make_meta(
+            [make_pkg("path+file:///D:/repo/proj#pkg-a@1.0", "2021",
+                      [r"D:\repo\proj\src\lib.rs"])],
+            ["path+file:///D:/repo/proj#pkg-a@1.0",
+             "path+file:///D:/repo/proj#pkg-missing@1.0"])
+        rc, _cap, inh = self.run_gate(meta=meta)
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(inh, [])
+
+    def test_target_missing_src_path_fails_closed(self):
+        # One valid target beside one without src_path: dropping the
+        # incomplete target would silently shrink coverage.
+        pkg = make_pkg("path+file:///D:/repo/proj#pkg@1.0", "2021",
+                       [r"D:\repo\proj\src\lib.rs"])
+        pkg["targets"].append({"kind": ["test"], "name": "broken"})
+        meta = make_meta([pkg], ["path+file:///D:/repo/proj#pkg@1.0"])
+        rc, _cap, inh = self.run_gate(meta=meta)
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(inh, [])
+
+    def test_member_with_empty_targets_fails_closed(self):
+        good = make_pkg("path+file:///D:/repo/proj#pkg-a@1.0", "2021",
+                        [r"D:\repo\proj\src\a.rs"])
+        empty = make_pkg("path+file:///D:/repo/proj#pkg-b@1.0", "2021", [])
+        meta = make_meta(
+            [good, empty],
+            ["path+file:///D:/repo/proj#pkg-a@1.0",
+             "path+file:///D:/repo/proj#pkg-b@1.0"])
+        rc, _cap, inh = self.run_gate(meta=meta)
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(inh, [])
+
+    def test_malformed_metadata_shapes_fail_closed(self):
+        good_pkg = make_pkg("path+file:///D:/repo/proj#pkg@1.0", "2021",
+                            [r"D:\repo\proj\src\lib.rs"])
+        good_meta = make_meta(
+            [dict(good_pkg)], ["path+file:///D:/repo/proj#pkg@1.0"])
+
+        cases = {
+            "root-not-object": [],
+            "packages-not-list": dict(good_meta, packages="nope"),
+            "package-entry-not-object": dict(
+                good_meta, packages=[["not-a-dict"]]),
+            "package-id-missing": dict(
+                good_meta,
+                packages=[dict(good_pkg, id="")]),
+            "package-id-duplicate": dict(
+                good_meta,
+                packages=[dict(good_pkg), dict(good_pkg)]),
+            "members-not-list": dict(good_meta, workspace_members="x"),
+            "member-id-empty": dict(
+                good_meta, workspace_members=[""]),
+            "member-id-duplicate": dict(
+                good_meta,
+                workspace_members=["path+file:///D:/repo/proj#pkg@1.0"] * 2),
+            "targets-not-list": dict(
+                good_meta,
+                packages=[dict(good_pkg, targets="nope")]),
+            "target-entry-not-object": dict(
+                good_meta,
+                packages=[dict(good_pkg, targets=["nope"])]),
+            "target-src-path-empty": dict(
+                good_meta,
+                packages=[dict(
+                    good_pkg,
+                    targets=[dict(good_pkg["targets"][0],
+                                  src_path="")])]),
+        }
+        for label, meta in cases.items():
+            with self.subTest(case=label):
+                rc, _cap, inh = self.run_gate(meta=meta)
+                self.assertNotEqual(rc, 0)
+                self.assertEqual(inh, [])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

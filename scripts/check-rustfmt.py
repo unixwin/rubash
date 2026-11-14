@@ -87,19 +87,78 @@ def load_workspace_targets(repo_root, cargo, manifest_path=None):
     except (ValueError, UnicodeDecodeError) as exc:
         raise GateError(f"cargo metadata produced invalid JSON: {exc}")
 
-    packages = {p.get("id"): p for p in meta.get("packages") or []}
-    members = set(meta.get("workspace_members") or [])
-    member_pkgs = [packages[pid] for pid in members if pid in packages]
-    if not member_pkgs:
-        raise GateError("cargo metadata reported no workspace member packages")
+    if not isinstance(meta, dict):
+        raise GateError("cargo metadata root is not a JSON object")
+
+    packages = meta.get("packages")
+    if not isinstance(packages, list):
+        raise GateError("cargo metadata 'packages' is not a list")
+    packages_by_id = {}
+    for pkg in packages:
+        if not isinstance(pkg, dict):
+            raise GateError("cargo metadata package entry is not an object")
+        pkg_id = pkg.get("id")
+        if not isinstance(pkg_id, str) or not pkg_id:
+            raise GateError(
+                "cargo metadata package has a missing or invalid id"
+            )
+        if pkg_id in packages_by_id:
+            raise GateError(
+                f"duplicate package id in cargo metadata: {pkg_id}"
+            )
+        packages_by_id[pkg_id] = pkg
+
+    members = meta.get("workspace_members")
+    if not isinstance(members, list) or not members:
+        raise GateError(
+            "cargo metadata 'workspace_members' is not a non-empty list"
+        )
+    member_ids = set()
+    for member_id in members:
+        if not isinstance(member_id, str) or not member_id:
+            raise GateError(
+                "cargo metadata workspace member id is not a "
+                "non-empty string"
+            )
+        if member_id in member_ids:
+            raise GateError(
+                f"duplicate workspace member id in cargo metadata: "
+                f"{member_id}"
+            )
+        member_ids.add(member_id)
+
+    member_pkgs = []
+    for member_id in members:
+        pkg = packages_by_id.get(member_id)
+        if pkg is None:
+            raise GateError(
+                "cargo metadata workspace member is missing from "
+                f"packages: {member_id}"
+            )
+        targets = pkg.get("targets")
+        if not isinstance(targets, list) or not targets:
+            raise GateError(
+                f"workspace member {member_id} reports no targets"
+            )
+        for target in targets:
+            if not isinstance(target, dict):
+                raise GateError(
+                    f"workspace member {member_id} has a non-object "
+                    "target entry"
+                )
+            src = target.get("src_path")
+            if not isinstance(src, str) or not src:
+                raise GateError(
+                    f"workspace member {member_id} has a target with a "
+                    "missing or invalid src_path"
+                )
+        member_pkgs.append(pkg)
 
     by_edition = {}
     for pkg in member_pkgs:
         pkg_edition = pkg.get("edition") or "2015"
-        for target in pkg.get("targets") or []:
-            src = target.get("src_path")
-            if not src:
-                continue
+        for target in pkg["targets"]:
+            src = target["src_path"]
             edition = target.get("edition") or pkg_edition
             path = os.path.normpath(os.path.abspath(os.fspath(src)))
             by_edition.setdefault(edition, set()).add(path)
