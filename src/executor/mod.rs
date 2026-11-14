@@ -1935,12 +1935,14 @@ pub struct Executor {
     /// byte char (e.g. U+009C for byte 0x9C) is indistinguishable from
     /// a genuine char of the same code point in the folded literal,
     /// so the spelling cannot be re-derived at open time
-    /// (rubash#3218). Keyed by the folded literal; every later
-    /// literal outcome for the same string in the same command span
-    /// replaces the record — and a no-transport outcome clears it —
-    /// because the redirect walks expand and open in list order, so
-    /// an open must see its OWN redirect's verdict, never an earlier
-    /// same-spelling target's (rubash#3218 face 2). Cleared at each
+    /// (rubash#3218). Keyed by the folded literal; a later
+    /// transport-carrying outcome for the same string in the same
+    /// command span overwrites the record, but a no-transport outcome
+    /// does NOT remove it (note_redirect_target_transport returns
+    /// early) — so this map can hand one redirect another same-string
+    /// redirect's verdict, and every consumer that holds the node must
+    /// read `redirect_target_node_spellings` instead (rubash#3218 face
+    /// 2, rubash#3372). Cleared at each
     /// execute_command entry like redirect_target_memo. Only the
     /// literal arms of expand_redirect_operand_fields record it;
     /// glob matches, procsub carriers and heredoc delimiters never

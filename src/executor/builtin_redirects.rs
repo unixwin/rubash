@@ -266,7 +266,11 @@ impl Executor {
                     if !plain_file_target {
                         continue;
                     }
-                    crate::executor::shell_options::probe_output_redirect_append(self, &target)
+                    crate::executor::shell_options::probe_output_redirect_append(
+                        self,
+                        Some(redirect),
+                        &target,
+                    )
                 }
                 RedirectKind::Input => {
                     if !plain_file_target {
@@ -714,7 +718,7 @@ impl Executor {
                 // open, or the renderer's message-only text drops the word
                 // (issue #518 background/append repro). The open itself
                 // classifies through the registry (rubash#1964).
-                self.open_append_target(&target)
+                self.open_append_target_for(Some(redirect), &target)
                     .map_err(|e| crate::posix_errors::path_error(&target, e))?;
             }
         }
@@ -748,7 +752,7 @@ impl Executor {
             } else if !is_closed_redirect_target(&target) && redirect_target_fd(&target).is_none() {
                 // Classified append open (rubash#1964), same
                 // path_error shaping as the fd-1 arm above.
-                self.open_append_target(&target)
+                self.open_append_target_for(Some(redirect), &target)
                     .map_err(|e| crate::posix_errors::path_error(&target, e))?;
             }
         }
@@ -801,7 +805,7 @@ impl Executor {
                         // session_path anchoring the fd-1 arm always
                         // had applies here too — the previous raw
                         // fallback opened against the process cwd.
-                        self.open_append_target(&target)
+                        self.open_append_target_for(Some(redirect), &target)
                             .map_err(|e| crate::posix_errors::path_error(&target, e))?;
                     }
                 }

@@ -3453,7 +3453,7 @@ impl Executor {
                     // this validation is an append open, so it must
                     // succeed and fail for exactly the shapes the
                     // real append does.
-                    self.open_append_target(&target)
+                    self.open_append_target_for(Some(redirect), &target)
                         .map(|_| ())
                         .map_err(|e| crate::posix_errors::path_error(&target, e))
                 }
