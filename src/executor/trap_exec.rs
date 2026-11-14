@@ -1550,7 +1550,19 @@ impl Executor {
             .env_vars
             .insert("__RUBASH_TRAP_CONTEXT".to_string(), "exit trap".to_string());
         let tokens = crate::lexer::tokenize(&action);
-        let mut ast = crate::parser::parse(&tokens);
+        // rubash#3328: GNU trap.c:1071 parse_and_execute reads the
+        // action string as parser input, so parser_error echoes the
+        // action's own line verbatim (error.c:300-316) — thread the
+        // string as the diagnostic source instead of the bare parse(),
+        // whose token-join fallback re-serializes it (`echo inaction
+        // ; echo (` for `echo inaction; echo (`).
+        let mut ast = crate::parser::parse_with_options(
+            &tokens,
+            crate::parser::ParseLoopOptions {
+                source_text: Some(action.as_str().into()),
+                ..Default::default()
+            },
+        );
         if let Some(redirect_cmd) = redirect_cmd {
             self.apply_inherited_command_output_redirects(redirect_cmd, &mut ast)?;
         }
@@ -1777,7 +1789,17 @@ impl Executor {
                 Some((key, cached_ast, base)) if key == action => (cached_ast, base),
                 _ => {
                     let tokens = crate::lexer::tokenize(&action);
-                    (crate::parser::parse(&tokens), 1)
+                    // rubash#3328: thread the spliced action as the
+                    // diagnostic source (same shape as the EXIT-trap
+                    // site): the bare parse() re-serialized the echo line.
+                    let ast = crate::parser::parse_with_options(
+                        &tokens,
+                        crate::parser::ParseLoopOptions {
+                            source_text: Some(action.as_str().into()),
+                            ..Default::default()
+                        },
+                    );
+                    (ast, 1)
                 }
             }
         };
@@ -1852,7 +1874,17 @@ impl Executor {
             self.shell_state.function_depth + self.source_nest_depth,
         );
         let tokens = crate::lexer::tokenize(&action);
-        let mut ast = crate::parser::parse(&tokens);
+        // rubash#3328: thread the action as the diagnostic source
+        // (same shape as the EXIT-trap site): GNU _run_trap_internal
+        // parses the action string as fresh input, so the echo line
+        // is the action's own line verbatim, not a token-join rebuild.
+        let mut ast = crate::parser::parse_with_options(
+            &tokens,
+            crate::parser::ParseLoopOptions {
+                source_text: Some(action.into()),
+                ..Default::default()
+            },
+        );
         // GNU trap.c:_run_trap_internal:1196 only sets SEVAL_RESETLINE for
         // ordinary signal traps; the RETURN trap keeps the caller's current
         // line_number, so $LINENO inside the action (and the DEBUG fire for
@@ -2517,7 +2549,17 @@ impl Executor {
                 },
             );
             let tokens = crate::lexer::tokenize(&action);
-            let ast = crate::parser::parse(&tokens);
+            // rubash#3328: thread the action as the diagnostic source
+            // (same shape as the EXIT-trap site): GNU trap.c:496 runs
+            // the action through parse_and_execute, so the echo line
+            // is the action's own line verbatim.
+            let ast = crate::parser::parse_with_options(
+                &tokens,
+                crate::parser::ParseLoopOptions {
+                    source_text: Some(action.as_str().into()),
+                    ..Default::default()
+                },
+            );
             // trap.c:496 runs the action through parse_and_execute: the
             // xtrace indirection level rises by one for the action.
             let result = self.with_xtrace_indirection(|executor| executor.execute_ast(&ast));
@@ -3056,7 +3098,16 @@ impl Executor {
         let failed_line = line_override.or(command.line);
         let action = self.comsub_body_alias_splice(&action);
         let tokens = crate::lexer::tokenize(&action);
-        let mut ast = crate::parser::parse(&tokens);
+        // rubash#3328: thread the spliced action as the diagnostic
+        // source (same shape as the EXIT-trap site): the bare parse()
+        // re-serialized the echo line.
+        let mut ast = crate::parser::parse_with_options(
+            &tokens,
+            crate::parser::ParseLoopOptions {
+                source_text: Some(action.as_str().into()),
+                ..Default::default()
+            },
+        );
         if let Some(line) = failed_line {
             // rubash#1166: rebase the whole action onto the failed
             // command's line, nested nodes included (see
@@ -3146,10 +3197,20 @@ impl Executor {
         }
         let saved_exit = self.exit_code;
         self.signal_trap_running = true;
+        // rubash#3328: the action text is the diagnostic source for
+        // every re-parse in the loop below (same shape as the
+        // EXIT-trap site): the bare parse() re-serialized the echo line.
+        let action_source: std::rc::Rc<str> = action.as_str().into();
         let mut result: Result<(), ExecuteError> = Ok(());
         loop {
             let tokens = crate::lexer::tokenize(&action);
-            let ast = crate::parser::parse(&tokens);
+            let ast = crate::parser::parse_with_options(
+                &tokens,
+                crate::parser::ParseLoopOptions {
+                    source_text: Some(action_source.clone()),
+                    ..Default::default()
+                },
+            );
             result = self.with_xtrace_indirection(|executor| executor.execute_ast(&ast));
             if result.is_err() {
                 break;
