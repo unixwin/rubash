@@ -2180,8 +2180,25 @@ fn start_debugger(executor: &mut Executor) {
 
 fn run_init_file(executor: &mut Executor, init_file: &str) -> i32 {
     let path = executor.resolve_shell_path(init_file);
+    // GNU builtins/evalfile.c:133-138 _evalfile: the fstat'd descriptor
+    // is checked for S_ISDIR before any read and reported as `%s: is a
+    // directory` (internal_error). Windows refuses to open a directory
+    // for reading at all (PermissionDenied), so test the file type first
+    // to keep GNU's text instead of the open error's.
+    if std::fs::metadata(&path).is_ok_and(|meta| meta.is_dir()) {
+        eprintln!("rubash: {init_file}: is a directory");
+        return 1;
+    }
     let contents = match rubash::script_driver::read_script_bytes(&path) {
         Ok(contents) => contents,
+        // GNU shell.c run_startup_files sources every startup file through
+        // builtins/evalfile.c:339 maybe_execute_file, whose flags carry
+        // FEVAL_ENOENTOK: a file that does not exist is skipped without a
+        // diagnostic (evalfile.c:120 `if (((flags & FEVAL_ENOENTOK) == 0)
+        // || errno != ENOENT) file_error (filename);`) and the call returns
+        // 0 (evalfile.c:130). Every other open failure (EACCES, ...) is
+        // still reported (rubash#3457).
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return 0,
         Err(e) => {
             eprintln!(
                 "rubash: {}: {}",
