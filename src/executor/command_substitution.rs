@@ -760,6 +760,12 @@ impl Executor {
         // full parsing/execution. This handles the alias4.sub form
         // `$(eval echo b)` so alias-expanded command substitutions participate
         // in word expansion.
+        // rubash#2785: the untrimmed body text is threaded to the
+        // body-error report separately — its trailing blank is the
+        // only evidence that a `)` closing the substitution was NOT
+        // glued to the body's last token, and the conditional
+        // near-token walk in the report reads exactly that.
+        let raw_source = source;
         let source = source.trim();
         if source.is_empty() {
             self.last_command_substitution_status.set(Some(0));
@@ -852,7 +858,8 @@ impl Executor {
             && crate::builtins::trap::active_trap_action_ref(&self.shell_state.env_vars, "DEBUG")
                 .is_some()
         {
-            if let Some(output) = self.command_list_substitution_output(source, context) {
+            if let Some(output) = self.command_list_substitution_output(source, context, raw_source)
+            {
                 return output;
             }
             return String::new();
@@ -879,7 +886,9 @@ impl Executor {
         // edge.
         if let Some(name) = comsub_first_word(source) {
             if self.shell_state.functions.contains_key(name) {
-                if let Some(output) = self.command_list_substitution_output(source, context) {
+                if let Some(output) =
+                    self.command_list_substitution_output(source, context, raw_source)
+                {
                     return output;
                 }
                 return String::new();
@@ -957,7 +966,8 @@ impl Executor {
             || self.xtrace_enabled()
             || self.err_trap_inherited_into_comsub()
         {
-            if let Some(output) = self.command_list_substitution_output(source, context) {
+            if let Some(output) = self.command_list_substitution_output(source, context, raw_source)
+            {
                 return output;
             }
             return String::new();
@@ -1311,7 +1321,7 @@ impl Executor {
         // Fallback: run the source through the real parser/executor in a
         // subshell and capture stdout (function calls, pipelines, compound
         // commands that the special-case dispatch above does not cover).
-        if let Some(output) = self.command_list_substitution_output(source, context) {
+        if let Some(output) = self.command_list_substitution_output(source, context, raw_source) {
             return output;
         }
 
@@ -1540,6 +1550,7 @@ impl Executor {
         &self,
         source: &str,
         context: SubstitutionQuoteContext,
+        body_text: &str,
     ) -> Option<SubstitutionOutput> {
         // The body was extracted from the current word; keep GNU's in-place
         // line counter so body diagnostics report the original script line
@@ -1638,14 +1649,27 @@ impl Executor {
             self.last_command_substitution_status.set(Some(2));
             return Some(SubstitutionOutput::readback(Vec::new(), 2, context));
         }
-        let mut ast = crate::parser::parse(&tokens);
+        // GNU parses the body as its own input (subst.c parse_and_execute)
+        // and echoes the offending line verbatim (parse.y print_offending_line
+        // over the body's shell_input_line) — thread the body text so the
+        // near guard slices it instead of joining tokens (`( 1 + 2)x', not
+        // `( 1 + 2 ) x', rubash#2677). Tokens are seeded at body_start_line,
+        // so the offset maps them back to lines of the body text.
+        let mut ast = crate::parser::parse_with_options(
+            &tokens,
+            crate::parser::ParseLoopOptions {
+                source_text: Some(source.into()),
+                source_line_offset: body_start_line - 1,
+                ..crate::parser::ParseLoopOptions::default()
+            },
+        );
         normalize_comsub_body_statement_lines(&mut ast, &tokens);
 
         // GNU reports the body's syntax error (parse.y yyerror) even
         // though the enclosing command is what dies — emit the stored
         // diagnostic instead of silently swallowing it (case-pattern
         // `$(esac;x)` in comsub-posix6.sub).
-        if self.report_comsub_body_error_if_any(&ast.commands, Some(source)) {
+        if self.report_comsub_body_error_if_any(&ast.commands, Some(body_text)) {
             return Some(SubstitutionOutput::readback(Vec::new(), 2, context));
         }
 
@@ -1860,12 +1884,15 @@ impl Executor {
     }
 
     /// Legacy String boundary for callers that still build AST words as text.
+    /// `body_text` is the untrimmed extracted body, carried only for
+    /// the body-error report (rubash#2785).
     fn command_list_substitution_output(
         &self,
         source: &str,
         context: SubstitutionQuoteContext,
+        body_text: &str,
     ) -> Option<String> {
-        self.command_list_substitution_output_typed(source, context)
+        self.command_list_substitution_output_typed(source, context, body_text)
             .map(|output| output.text_lossy())
     }
 
@@ -1940,7 +1967,9 @@ impl Executor {
             signal_discard_pending: false,
             errexit_unwind_pending: false,
             errexit_unwind_armed: false,
+            errexit_suppressed_terminal: Cell::new(false),
             unit_signal_discard: false,
+            unit_expansion_error_discard: false,
             termsig_death_pending: None,
             termsig_death_trap_status: None,
             // GNU exit.def bash_logout: subshells never source ~/.bash_logout
@@ -1961,13 +1990,11 @@ impl Executor {
             arithmetic_last_error_expression: std::cell::RefCell::new(String::new()),
             arithmetic_last_eval_input: std::cell::RefCell::new(String::new()),
             assignment_command_name: None,
-            buffer_assignment_diagnostics: false,
             getopts_optind_arith_fatal: false,
             defer_stage_time_report: false,
             pending_stage_time_report: None,
             defer_list_time_report: false,
             pending_list_time_reports: Vec::new(),
-            pending_assignment_diagnostics: Vec::new(),
             parameter_assignment_failure: Cell::new(false),
             parameter_assignment_failure_prev_status: Cell::new(None),
             no_closing_brace_failure: Cell::new(false),
@@ -2014,6 +2041,7 @@ impl Executor {
             exec_replace_shlvl_snapshot: Cell::new(None),
             line_lex_locales: std::cell::RefCell::new(HashMap::new()),
             unit_lex_locale: std::cell::RefCell::new(None),
+            line_lex_extquotes: std::cell::RefCell::new(HashMap::new()),
             ambient_line: Cell::new(None),
             conditional_invert_pending: Cell::new(false),
             inside_compound_condition: Cell::new(false),
@@ -2098,6 +2126,10 @@ impl Executor {
             signal_trap_running: false,
             error_trap_running: false,
             exit_trap_running: false,
+            // rubash#2824: a fork copy is a fresh GNU process image; the
+            // parent's SEVAL_NOHIST unit depth never propagates — the
+            // child's own units raise it as they run.
+            nohist_parse_depth: std::cell::Cell::new(0),
             subshell_element_root_depth: std::cell::Cell::new(None),
             subshell_fork_collapse: std::cell::Cell::new(false),
             trap_saved_exit_value: None,
@@ -2128,6 +2160,7 @@ impl Executor {
             pipeline_stdin_consumed: Cell::new(None),
             pipeline_stage_fds_pre_wired: std::cell::Cell::new(false),
             stage_dup_channel_payloads: std::cell::RefCell::new(Vec::new()),
+            pipeline_stage_ordered_chunks: std::cell::RefCell::new(None),
             pipeline_final_stage: std::cell::Cell::new(false),
             pipeline_stage_pre_traced: std::cell::Cell::new(false),
             pipeline_stage_restricted_refused: std::cell::Cell::new(false),
@@ -2140,6 +2173,7 @@ impl Executor {
             comsub_error_reported_out: Cell::new(false),
             last_command_substitution_parse_error_backtick: Cell::new(false),
             backtick_body_diagnostic: Cell::new(false),
+            arith_fallback_comsub_body: Cell::new(false),
             parser_error_errexited: Cell::new(false),
             last_command_inverted: Cell::new(false),
             // rubash#846: a forked comsub child is a fresh GNU frame with no
@@ -2160,12 +2194,15 @@ impl Executor {
             alias_introduced_words: Cell::new(0),
             redirect_target_memo: RefCell::new(HashMap::new()),
             redirect_target_single_glob_match: RefCell::new(std::collections::HashSet::new()),
+            redirect_target_transport_spellings: RefCell::new(HashMap::new()),
+            redirect_target_node_spellings: RefCell::new(HashMap::new()),
             assignment_expansion_memo: RefCell::new(HashMap::new()),
             alias_select_scan_memo: RefCell::new(None),
             fd_var_external_undo: Vec::new(),
             fd_var_deferred_closes: Vec::new(),
             fd_var_pending_closes: Vec::new(),
             fd_var_close_generation: 0,
+            fd_var_apply_snapshot: self.fd_var_apply_snapshot.clone(),
             fd_var_pending_close_generation: 0,
             fd_var_close_restore: Vec::new(),
             deferred_varredir_closes: Vec::new(),
@@ -2504,12 +2541,35 @@ impl Executor {
         let [file_word] = words.as_slice() else {
             return ambiguity(strip_matching_quotes(target));
         };
+        // The finalized word is a FILENAME from here on: GNU
+        // open_redir_file (builtins/evalstring.c:759) opens the
+        // expanded word verbatim, so fold any carrier pair it
+        // carries through the shared name-boundary gate + decoder
+        // (rubash#3104). This face finalizes its own word and never
+        // passes redirect_operand_literal, so a stored raw-byte
+        // pair otherwise reached the open — and its diagnostic —
+        // verbatim.
+        // Whether the word carried transport is recorded before the
+        // fold (rubash#3104 p23): the folded string cannot tell a
+        // byte char from a genuine char of the same code point, so a
+        // high-byte name must probe as raw bytes here.
+        let file_word_had_transport =
+            crate::executor::markers::contains_decodable_transport(file_word);
+        let folded_file_word =
+            crate::executor::substitution_metadata::fold_literal_char_escapes(file_word);
+        let file_word: &str = &folded_file_word;
         // Model the Linux open(dir, O_RDONLY)+read dance: open succeeds and
         // the first zread fails EISDIR, so read_comsub (subst.c:6700-6712)
         // returns NULL with EXECUTION_SUCCESS — a directory operand is
         // silent, empty, rc 0. Windows CreateFile on a directory would
         // surface "Permission denied" instead.
-        let read_path = shell_path_to_windows(file_word, &self.shell_state.env_vars);
+        let read_path = if file_word_had_transport {
+            crate::executor::path::path_buf_from_folded_name(
+                &shell_path_to_windows(file_word, &self.shell_state.env_vars).to_string_lossy(),
+            )
+        } else {
+            shell_path_to_windows(file_word, &self.shell_state.env_vars)
+        };
         // A materialized input process substitution resolves to /dev/fd/N
         // (subst.c process_substitute + move_to_high_fd): the bytes live in
         // the fd table's ProcessSubstitution endpoint, not on disk. Reading
@@ -2595,6 +2655,9 @@ impl Executor {
         // to the is_dir arm below (silent, rc 0). The empty word
         // therefore reaches the open attempt un-joined, exactly as
         // spelled, and fails there like any other unopenable name.
+        // The pre-join form is the operand the anchored read below
+        // spends; the joined spelling is the plain route's form.
+        let operand_path = read_path.clone();
         let read_path = if read_path.is_absolute() || file_word.is_empty() {
             read_path
         } else {
@@ -2604,10 +2667,48 @@ impl Executor {
             self.last_command_substitution_status.set(Some(0));
             return String::new();
         }
-        match fs::read_to_string(&read_path) {
-            Ok(value) => {
+        // rubash#3268(a): the read itself spends the cwd anchor, in
+        // the emulated-cat operand shape — a relative operand
+        // escaping a deleted session cwd via `..` died on the joined
+        // string, where GNU's open_redir_file (builtins/
+        // evalstring.c:759) opens the word inside the forked comsub
+        // child sitting in the cwd inode (subst.c:7143). Two shapes
+        // around the route keep their existing modelling:
+        // - The empty word stays on the plain read: it names nothing
+        //   in any directory, and the anchor walk would substitute
+        //   the anchor directory itself for it — it keeps its
+        //   as-spelled ENOENT (see the join comment above).
+        // - A directory the anchor walk reaches: its open succeeds
+        //   and the read fails EISDIR, which is GNU's read_comsub
+        //   shape (subst.c:6700-6712) — the is_dir arm above models
+        //   it for spellings whose stat still resolves; the EISDIR
+        //   mapping below models it for the anchored route, where
+        //   the joined spelling's stat is dead.
+        // The anchored read returns bytes; the string conversion
+        // keeps read_to_string's exact failure (InvalidData, same
+        // text) on the fail() path — only the byte source changed.
+        let read = if file_word.is_empty() {
+            fs::read(&read_path)
+        } else {
+            self.read_session_anchored(&operand_path, &read_path)
+        };
+        match read {
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(value) => {
+                    self.last_command_substitution_status.set(Some(0));
+                    value.trim_capture_terminator().to_string()
+                }
+                Err(_) => fail(
+                    file_word,
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "stream did not contain valid UTF-8",
+                    ),
+                ),
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::IsADirectory => {
                 self.last_command_substitution_status.set(Some(0));
-                value.trim_capture_terminator().to_string()
+                String::new()
             }
             Err(error) => fail(file_word, error),
         }
@@ -3007,7 +3108,7 @@ impl Executor {
         else {
             return false;
         };
-        if self.backtick_body_diagnostic.get() {
+        if self.comsub_body_parse_is_contained() {
             self.report_command_parse_error(command);
         } else {
             // GNU's read-time shape — suffixed / re-presented at the
@@ -3022,6 +3123,380 @@ impl Executor {
         self.last_command_substitution_status.set(Some(2));
         true
     }
+
+    /// rubash#2789: the READ-TIME counterpart of the execution screen
+    /// above. GNU validates a substitution body when the enclosing
+    /// command is read (parse.y:4451 parse_comsub hands the body to
+    /// the grammar while the word is being lexed), so a body grammar
+    /// failure kills the input unit before anything in it executes —
+    /// a body the program would skip (`false && echo $(a |)`) fails
+    /// exactly like an executed one. The grouped reader calls this on
+    /// each freshly parsed non-interactive unit; on a hit the error
+    /// is reported ONCE here, in the same read-time shape the
+    /// execution screen produces, and the abort status is the
+    /// driver's own (comsub_parse_error_abort_status: a `-c` string
+    /// takes shell.c:1471-1472's 127 remap, a file takes 2) — the
+    /// caller returns it without executing the unit, and the
+    /// parse-error latch keeps the driver's own reporting stood down,
+    /// so the execution screen never double-reports if the unit is
+    /// reached anyway. Returns the abort status on a hit.
+    pub fn screen_comsub_bodies_at_read(&mut self, commands: &[CommandNode]) -> Option<i32> {
+        let (command, body_text) = read_time_body_error(commands, 0)?;
+        self.report_comsub_body_parse_error(&command, Some(&body_text));
+        self.last_command_substitution_error_reported.set(true);
+        self.comsub_error_reported_out.set(true);
+        self.latch_command_substitution_parse_error();
+        self.last_command_substitution_status.set(Some(2));
+        let status = self.comsub_parse_error_abort_status();
+        self.exit_code = status;
+        self.mark_parse_error();
+        Some(status)
+    }
+}
+
+/// rubash#2789: first substitution-body parse error in a freshly read
+/// command list, as (marker node, failing body text). The walk is
+/// recursive over everything a reader unit can contain: process
+/// substitutions carry parsed bodies directly; substitutions inside
+/// word-shaped text are re-extracted on demand (the AST stores no
+/// substitution nodes); nested command bodies are walked in the
+/// descent shape of script_driver's command_tree_walk_nested.
+/// Backquote bodies are NOT screened — GNU parses those in the
+/// substituted child at execution time, so a bad one kills only the
+/// child (see command_substitution_node). Here-document bodies are
+/// data and are never walked: they live in dedicated fields, not in
+/// any text collected here.
+fn read_time_body_error(
+    commands: &[CommandNode],
+    frame_offset: usize,
+) -> Option<(CommandNode, String)> {
+    commands
+        .iter()
+        .find_map(|command| read_time_body_error_in_command(command, frame_offset))
+}
+
+fn read_time_body_error_in_command(
+    command: &CommandNode,
+    frame_offset: usize,
+) -> Option<(CommandNode, String)> {
+    // A command's own line is recorded in the frame it was parsed in:
+    // the reader unit's frame at the top level (frame_offset 0), a
+    // substitution body's frame below it (body line 1 maps to unit
+    // line frame_offset + 1). A substitution hanging off this command
+    // opens on the command's absolute line, so its body's frame
+    // offset in unit lines is the command's absolute line minus one.
+    let command_offset = frame_offset + command.line.unwrap_or(1).saturating_sub(1);
+    for procsub in &command.process_substitutions {
+        if let Some(marker) = comsub_body_error_marker(&procsub.commands) {
+            let mut marker = marker.clone();
+            adjust_marker_line_frame(&mut marker, command_offset);
+            return Some((marker, procsub.source.clone()));
+        }
+        if let Some(hit) = read_time_body_error(&procsub.commands, command_offset) {
+            return Some(hit);
+        }
+    }
+    for text in command_word_texts(command) {
+        for node in crate::parser::command_substitutions_in_word_live_public(text) {
+            if node.backtick {
+                continue;
+            }
+            let node_offset = command_offset + substitution_line_offset(text, &node);
+            if let Some(marker) = comsub_body_error_marker(&node.commands) {
+                let mut marker = marker.clone();
+                adjust_marker_line_frame(&mut marker, node_offset);
+                return Some((marker, node.source.clone()));
+            }
+            if let Some(hit) = read_time_body_error(&node.commands, node_offset) {
+                return Some(hit);
+            }
+        }
+    }
+    let mut bodies: Vec<&[CommandNode]> = Vec::new();
+    if let Some(pipeline) = &command.pipeline_command {
+        bodies.push(&pipeline.stages);
+    }
+    if let Some(list) = &command.and_or_list {
+        bodies.push(&list.commands);
+    }
+    if let Some(for_command) = &command.for_command {
+        bodies.push(&for_command.body);
+    }
+    if let Some(select) = &command.select_command {
+        bodies.push(&select.body);
+    }
+    if let Some(if_command) = &command.if_command {
+        bodies.push(&if_command.condition);
+        bodies.push(&if_command.then_body);
+        for branch in &if_command.elif_branches {
+            bodies.push(&branch.condition);
+            bodies.push(&branch.body);
+        }
+        if let Some(else_body) = &if_command.else_body {
+            bodies.push(else_body);
+        }
+    }
+    if let Some(loop_command) = &command.loop_command {
+        bodies.push(&loop_command.condition);
+        bodies.push(&loop_command.body);
+    }
+    if let Some(subshell) = &command.subshell_command {
+        bodies.push(&subshell.body);
+    }
+    if let Some(case_command) = &command.case_command {
+        for clause in &case_command.clauses {
+            bodies.push(&clause.body);
+        }
+    }
+    if let Some(function) = &command.function_command {
+        bodies.push(&function.body);
+    }
+    if let Some(brace_group) = &command.brace_group {
+        bodies.push(&brace_group.body);
+    }
+    if let Some(coproc) = &command.coproc_command {
+        if let Some(body) = &coproc.body {
+            bodies.push(body);
+        }
+    }
+    for body in bodies {
+        if let Some(hit) = read_time_body_error(body, frame_offset) {
+            return Some(hit);
+        }
+    }
+    if let Some(time) = &command.time_command {
+        if let Some(hit) = read_time_body_error_in_command(&time.command, frame_offset) {
+            return Some(hit);
+        }
+    }
+    if let Some(background) = &command.background_command {
+        if let Some(hit) = read_time_body_error_in_command(&background.command, frame_offset) {
+            return Some(hit);
+        }
+    }
+    if let Some(inverted) = &command.inverted_command {
+        if let Some(hit) = read_time_body_error_in_command(&inverted.command, frame_offset) {
+            return Some(hit);
+        }
+    }
+    None
+}
+
+/// Line offset of a substitution's body within its enclosing word:
+/// the body's first line sits on the word line the substitution span
+/// starts on, so the offset is the number of newlines in the word
+/// text before the span (`node.text` is the full extracted span; the
+/// body `source` is the fallback locator).
+fn substitution_line_offset(text: &str, node: &crate::parser::CommandSubstitutionNode) -> usize {
+    let span = if node.text.is_empty() {
+        node.source.as_str()
+    } else {
+        node.text.as_str()
+    };
+    match text.find(span) {
+        Some(pos) => text[..pos].chars().filter(|ch| *ch == '\n').count(),
+        None => 0,
+    }
+}
+
+/// Translate a cloned substitution-body parse-error marker from the
+/// body's own line frame into the reader unit's frame (rubash#2789):
+/// a body is parsed standalone at intake, so its markers record
+/// body-relative lines — a bad body on unit line 2 parks line 1 — but
+/// the report names unit lines, exactly as GNU's read-time report
+/// and the execution screen's re-parse do (a skipped bad body on a
+/// later unit line must report that line, rubash#2783). `offset` is
+/// the unit line of the body's first line minus one. Applied to the
+/// marker node's own line (the plain / EOF report arms read it) and
+/// to the line fields of the NEAR and COND spec encodings; the
+/// stored parse source text is already in the unit frame, so the
+/// echoed offending line follows the same translation. The parked
+/// original is untouched — the execution screen consumes it in its
+/// own frame.
+fn adjust_marker_line_frame(marker: &mut CommandNode, offset: usize) {
+    if offset == 0 {
+        return;
+    }
+    if let Some(line) = marker.line {
+        marker.line = Some(line + offset);
+    }
+    let sep = crate::executor::markers::PARSE_ERROR_FIELD_SEP;
+    for (name, value) in marker.assignments.iter_mut() {
+        // NEAR spec: `{token}{SEP}{line}` — the line is field 1.
+        // COND spec: `{shape}{SEP}{near}{SEP}{line}` followed by
+        // `{line}\u{1}{message}` fields — the line is field 2 and
+        // each message field carries its own line prefix.
+        let field = match name.as_str() {
+            "__RUBASH_PARSE_ERROR_NEAR__" => 1,
+            "__RUBASH_PARSE_ERROR_COND__" => 2,
+            _ => continue,
+        };
+        let mut fields: Vec<String> = value.split(sep).map(str::to_string).collect();
+        let mut changed = false;
+        if let Some(slot) = fields.get_mut(field) {
+            if let Ok(n) = slot.parse::<usize>() {
+                *slot = (n + offset).to_string();
+                changed = true;
+            }
+        }
+        if field == 2 {
+            for extra in fields.iter_mut().skip(3) {
+                if let Some((line, message)) = extra.split_once('\u{1}') {
+                    if let Ok(n) = line.parse::<usize>() {
+                        *extra = format!("{}{}{}", n + offset, '\u{1}', message);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if changed {
+            *value = fields.join(&sep.to_string());
+        }
+    }
+}
+
+/// First parse-error marker in a substitution body for the read-time
+/// screen. Unlike the execution screen's first-marker filter (which
+/// stands down entirely when the first marker found is an extglob
+/// recovery candidate), the read-time search SKIPS a candidate at
+/// every level and keeps looking: at read time there is no live gate
+/// reparse yet, and a real grammar error later in the same body must
+/// not be masked by an earlier candidate (rubash#2789).
+fn comsub_body_error_marker(commands: &[CommandNode]) -> Option<&CommandNode> {
+    commands
+        .iter()
+        .find_map(command_parse_error_marker_non_candidate)
+}
+
+fn command_parse_error_marker_non_candidate(command: &CommandNode) -> Option<&CommandNode> {
+    let carries_marker = command.has_assignment("__RUBASH_PARSE_ERROR__")
+        || command.has_assignment("__RUBASH_PARSE_ERROR_NEAR__")
+        || command.has_assignment("__RUBASH_PARSE_ERROR_COND__")
+        || command.has_assignment("__RUBASH_PARSE_ERROR_EOF__")
+        || command.has_assignment("__RUBASH_PARSE_ERROR_EOF_COMPOUND__");
+    if carries_marker && !command_is_extglob_recovery_candidate(command) {
+        return Some(command);
+    }
+    command
+        .and_or_list
+        .as_ref()
+        .and_then(|list| {
+            list.commands
+                .iter()
+                .find_map(command_parse_error_marker_non_candidate)
+        })
+        .or_else(|| {
+            command.pipeline_command.as_ref().and_then(|pipeline| {
+                pipeline
+                    .stages
+                    .iter()
+                    .find_map(command_parse_error_marker_non_candidate)
+            })
+        })
+}
+
+/// Every word-shaped text a command carries, for on-demand
+/// substitution extraction. Raw spellings (which keep their quotes)
+/// and expanded values are both collected, deduplicated: extraction
+/// is text-level, and either form can be the one that exposes a
+/// substitution the other hides. Here-documents are deliberately
+/// absent: a here-document redirect is skipped as a whole, so
+/// neither its body (data, never screened) nor its target word
+/// is collected.
+fn command_word_texts<'a>(command: &'a CommandNode) -> Vec<&'a str> {
+    fn push<'a>(texts: &mut Vec<&'a str>, text: &'a str) {
+        if !text.is_empty() && !texts.contains(&text) {
+            texts.push(text);
+        }
+    }
+    let mut texts: Vec<&str> = Vec::new();
+    for (index, word) in command.words.iter().enumerate() {
+        if let Some(metadata) = command.word_metadata.get(index) {
+            push(&mut texts, metadata.raw.as_str());
+        }
+        push(&mut texts, word.as_str());
+    }
+    for (index, (_, value)) in command.assignments.iter().enumerate() {
+        push(&mut texts, value.as_str());
+        if let Some(raw) = command.assignment_raws.get(index) {
+            push(&mut texts, raw.as_str());
+        }
+    }
+    for compound in &command.compound_assignments {
+        push(&mut texts, compound.value.as_str());
+        for element in &compound.elements {
+            push(&mut texts, element.value.as_str());
+            if let Some(subscript) = &element.subscript {
+                push(&mut texts, subscript.as_str());
+            }
+        }
+    }
+    for element in &command.array_element_assignments {
+        push(&mut texts, element.value.as_str());
+        push(&mut texts, element.raw_value.as_str());
+        push(&mut texts, element.subscript.as_str());
+    }
+    for redirect in &command.redirects {
+        if redirect.kind != crate::parser::RedirectKind::HereDoc {
+            push(&mut texts, redirect.target.as_str());
+            push(&mut texts, redirect.target_metadata.raw.as_str());
+        }
+    }
+    for redirect in [
+        command.redirect_in.as_deref(),
+        command.redirect_out.as_deref(),
+        command.append.as_deref(),
+        command.redirect_err.as_deref(),
+        command.redirect_err_append.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if redirect.kind != crate::parser::RedirectKind::HereDoc {
+            push(&mut texts, redirect.target.as_str());
+            push(&mut texts, redirect.target_metadata.raw.as_str());
+        }
+    }
+    if let Some(here_string) = &command.here_string {
+        push(&mut texts, here_string.as_str());
+    }
+    if let Some(conditional) = &command.conditional_command {
+        for arg in &conditional.args {
+            push(&mut texts, arg.as_str());
+        }
+    }
+    if let Some(arithmetic) = &command.arithmetic_command {
+        push(&mut texts, arithmetic.expression.as_str());
+    }
+    if let Some(for_command) = &command.for_command {
+        for word in &for_command.words {
+            push(&mut texts, word.as_str());
+        }
+    }
+    if let Some(select) = &command.select_command {
+        for word in &select.words {
+            push(&mut texts, word.as_str());
+        }
+    }
+    if let Some(case_command) = &command.case_command {
+        push(&mut texts, case_command.word.as_str());
+        for clause in &case_command.clauses {
+            for pattern in &clause.patterns {
+                push(&mut texts, pattern.as_str());
+            }
+        }
+    }
+    if let Some(coproc) = &command.coproc_command {
+        for word in &coproc.words {
+            push(&mut texts, word.as_str());
+        }
+    }
+    if let Some(time) = &command.time_command {
+        for word in &time.prefix_words {
+            push(&mut texts, word.as_str());
+        }
+    }
+    texts
 }
 
 /// The rubash#1093 candidate: a NEAR node blaming `(' may be a

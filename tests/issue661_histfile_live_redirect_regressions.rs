@@ -21,7 +21,6 @@
 //! - the bare `history -w` form writes the live HISTFILE (history.def
 //!   resolves the filename from the variable per call).
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;

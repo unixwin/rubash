@@ -133,7 +133,12 @@ fn test_times_redirects_stderr() {
     assert_eq!(executor.last_exit_code(), 0);
     assert_eq!(fs::read_to_string(status_path).unwrap(), "2\n");
     let error = fs::read_to_string(error_path).unwrap();
-    assert!(error.contains("rubash: times: -x: invalid option"));
+    // rubash#3357: the error-name prefix is derived through the name-source
+    // chain, not the interactive bare-name form. This embedded executor
+    // carries no name (no argv[0]), so the chain falls back to `bash`
+    // (error.c:90 get_name_for_error) and the non-interactive form adds
+    // the `line 1: ` segment (builtins/common.c:83 builtin_error_prolog).
+    assert!(error.contains("bash: line 1: times: -x: invalid option"));
     assert!(error.contains("times: usage: times"));
     let _ = fs::remove_file(error_path);
     let _ = fs::remove_file(status_path);
@@ -156,7 +161,11 @@ fn test_times_appends_stderr() {
     assert_eq!(executor.last_exit_code(), 2);
     let error = fs::read_to_string(error_path).unwrap();
     assert!(error.starts_with("before\n"));
-    assert!(error.contains("rubash: times: -x: invalid option"));
+    // rubash#3357: derived name prefix, same as test_times_redirects_stderr
+    // above — no-name carrier falls back to `bash`, non-interactive adds
+    // `line 1: ` (error.c:90 get_name_for_error;
+    // builtins/common.c:83 builtin_error_prolog).
+    assert!(error.contains("bash: line 1: times: -x: invalid option"));
     assert!(error.contains("times: usage: times"));
     let _ = fs::remove_file(error_path);
 }

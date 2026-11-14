@@ -25,6 +25,12 @@ impl<'a> Lexer<'a> {
         // update_command_substitution_case_depth.
         let mut case_in_stage = 0u8;
         let mut case_pattern_region = false;
+        // rubash#2784: pattern-content witness — mirror of the skip.rs
+        // oracle's (see skip_parenthesized_unit_corrected): no pattern
+        // seen since the current list was armed means a `)` closes this
+        // substitution for the body parser instead of reading as case
+        // syntax (GNU parse_comsub, parse.y:4451).
+        let mut case_pattern_seen = false;
         // rubash#380: the last significant unquoted char fed to the case
         // word machine — the previous-token witness for the `esac`
         // pattern-text rule (parse.y:3181/3183).
@@ -82,6 +88,18 @@ impl<'a> Lexer<'a> {
             if esac_prev_token_char(c) {
                 prev_sig = Some(c);
             }
+            // rubash#2784 pattern-content witness advance (mirror of
+            // the oracle's advance in skip_parenthesized_unit_corrected).
+            if case_depth == 0 {
+                case_pattern_seen = false;
+            } else if c == ';' && matches!(next, Some(';') | Some('&')) && case_pattern_region {
+                case_pattern_seen = false;
+            } else if case_in_stage == 3
+                && case_pattern_region
+                && (!word.is_empty() || (!c.is_whitespace() && c != ')'))
+            {
+                case_pattern_seen = true;
+            }
             match c {
                 '`' => {
                     self.skip_backtick();
@@ -89,7 +107,13 @@ impl<'a> Lexer<'a> {
                     continue;
                 }
                 '(' if case_depth == 0 => depth += 1,
-                ')' if case_depth == 0 => {
+                // rubash#2784: a `)` while a case preamble is
+                // unfinished closes this substitution (mirror of the
+                // skip.rs oracle arm).
+                ')' if case_depth == 0
+                    || matches!(case_in_stage, 1 | 2)
+                    || (case_in_stage == 3 && !case_pattern_seen) =>
+                {
                     depth -= 1;
                     if depth == 0 {
                         break;
@@ -1844,6 +1868,15 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
     // update_command_substitution_case_depth.
     let mut case_in_stage = 0u8;
     let mut case_pattern_region = false;
+    // rubash#2784: has any pattern content been seen since the current
+    // pattern list was armed (`in`, or a `;;`-family re-arm)? GNU
+    // parse_comsub (parse.y:4451) PARSES the body, so a `)` that
+    // arrives while the case preamble is unfinished (no `in` yet, or
+    // `in` with no pattern read) is rejected BY THE BODY PARSER at
+    // that paren — the extractor must therefore treat it as the
+    // substitution's closer and hand the body over, not swallow it
+    // as case syntax and run to EOF.
+    let mut case_pattern_seen = false;
     // rubash#380: previous significant unquoted char fed to the case
     // word machine (the `esac` previous-token witness,
     // parse.y:3181/3183).
@@ -1948,6 +1981,20 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
                 prev_sig = Some(ch);
             }
         }
+        // rubash#2784 pattern-content witness (see the declaration):
+        // a `;;`-family re-arm starts a fresh list; any other
+        // non-whitespace char (or an in-progress pattern word) while
+        // the region is armed is pattern content.
+        if case_depth == 0 {
+            case_pattern_seen = false;
+        } else if ch == ';' && matches!(next, Some(';') | Some('&')) && case_pattern_region {
+            case_pattern_seen = false;
+        } else if case_in_stage == 3
+            && case_pattern_region
+            && (!word.is_empty() || (!ch.is_whitespace() && ch != ')'))
+        {
+            case_pattern_seen = true;
+        }
         match ch {
             '\'' => single = true,
             '"' => double = true,
@@ -2021,7 +2068,15 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
                 }
             }
             '(' if case_depth == 0 => depth += 1,
-            ')' if case_depth == 0 => {
+            // rubash#2784: a `)` while a case preamble is unfinished
+            // (subject/`in` still pending, or `in` read but no pattern
+            // seen) is NOT case syntax — it closes this substitution
+            // and the body parser rejects the body at it, exactly like
+            // GNU parse_comsub (parse.y:4451).
+            ')' if case_depth == 0
+                || matches!(case_in_stage, 1 | 2)
+                || (case_in_stage == 3 && !case_pattern_seen) =>
+            {
                 depth = depth.saturating_sub(1);
                 if depth == 0 {
                     return Some(index + 1);
@@ -2247,7 +2302,7 @@ pub(crate) fn command_substitutions_balanced(input: &str) -> bool {
 /// not a command-position identifier; `x=a[b` has no identifier prefix
 /// (`a` after `=` fails token_is_ident) and stays an assignment value.
 pub fn unclosed_array_subscript_line(input: &str) -> Option<(usize, bool)> {
-    unclosed_array_subscript_walk(input, false)
+    unclosed_array_subscript_walk(input, false, super::parse_extended_glob())
         .map(|(line, _closer, _construct_line, compassign)| (line, compassign))
 }
 
@@ -2266,12 +2321,470 @@ pub fn unclosed_array_subscript_line(input: &str) -> Option<(usize, bool)> {
 /// `unclosed_array_subscript_line` with the quote-open bookkeeping
 /// surfaced.
 pub fn unclosed_array_subscript_eof(input: &str) -> Option<(usize, char, usize, bool)> {
-    unclosed_array_subscript_walk(input, true)
+    unclosed_array_subscript_walk(input, true, super::parse_extended_glob())
+}
+
+/// rubash#3229: the subscript-EOF router with the walk's
+/// `extended_glob` mirror seeded from the reader's EXECUTED gate
+/// state. In a grouped (multi-line) run the `shopt -s extglob` line
+/// is an earlier, already-executed group, so the group text alone
+/// never shows the gate live and the walk's own shopt mirror stays
+/// dark — an extglob group inside the text is then misread as a
+/// subscript hunt (the `echo @(a[b` cell reported `]'` instead of
+/// the group's `)'` EOF).
+pub fn unclosed_array_subscript_eof_seeded(
+    input: &str,
+    extglob_seed: bool,
+) -> Option<(usize, char, usize, bool)> {
+    unclosed_array_subscript_walk(input, true, extglob_seed)
+}
+
+/// Whether the word accumulated so far could open an array subscript
+/// at a `[`: GNU parse.y:5635-5643 admits the P_ARRAYSUB scan only
+/// for a pure identifier at a command position
+/// (assignment_acceptable).
+fn word_at_command_position(command_position: bool, word: &str) -> bool {
+    command_position && is_pure_identifier(word)
+}
+
+/// Whether the word accumulated so far ends with a PATTERN_CHAR
+/// (`@*+?!`, syntax.h:90-92) — the only shape whose following `(`
+/// read_token_word hands to the extglob matched pair
+/// (parse.y:5466-5489).
+fn word_ends_extglob_operator(word: &str) -> bool {
+    matches!(word.chars().last(), Some('@' | '*' | '+' | '?' | '!'))
+}
+
+/// Whether the word accumulated so far is a compound-assignment
+/// opener: `name=` or `name[subscript]=` (the subscript span is word
+/// data by the time the `(` arrives). The `(` that follows opens a
+/// PST_COMPASSIGN list (parse.y:5653-5658).
+fn word_is_assignment_list_opener(word: &str) -> bool {
+    let Some(name) = word.strip_suffix('=') else {
+        return false;
+    };
+    let base = match name.strip_suffix(']') {
+        Some(rest) => match rest.rfind('[') {
+            Some(open) => &rest[..open],
+            None => return false,
+        },
+        None => name,
+    };
+    is_pure_identifier(base)
+}
+
+/// rubash#3229: the unclosed-extglob-group EOF oracle — the line the
+/// group opened on, when GNU read_token_word's matched-pair scan
+/// owns the diagnostic. GNU parse.y:5466-5489: while
+/// `extended_glob` is live, a PATTERN_CHAR (syntax.h:90-92)
+/// immediately followed by `(` hands the whole group to
+/// parse_matched_pair; EOF inside it reports `unexpected EOF while
+/// looking for matching `)'' at the line the group opened
+/// (parse.y:3901-3912, start_lineno) and exits 2. rubash's word
+/// tokenizer folds a group into the word instead of failing, so no
+/// other read-time scan can see this EOF: the close-char scan opens
+/// no frame for a word-internal `(`, and the group text of a grouped
+/// run may not even contain the `shopt` line that armed the gate.
+///
+/// The walk mirrors read_token_word over the whole input — quotes,
+/// `$(...)`/`${...}`/backtick/`$[...]` units and heredoc bodies are
+/// consumed whole, `[...]` subscript spans are data
+/// (`arraysub_span_len`), balanced groups are consumed by
+/// `skip_extglob_group_chars` — and returns the open line of the
+/// first group whose pair never closes. The gate state starts from
+/// `extglob_seed` (the caller's executed state, for grouped runs
+/// whose `shopt` line is an earlier group) and follows bare `shopt`
+/// commands inside the text through the `shopt_line_sets_extglob`
+/// mirror, refreshed at command boundaries the way GNU's
+/// incremental reader executes them.
+///
+/// Ownership boundaries — an earlier diagnostic family keeps its
+/// verdict, so the walk does not claim:
+/// - inside `[[ ... ]]`: pattern words there are the conditional
+///   parser's (PST_EXTPAT), including their EOF shapes;
+/// - inside a compound assignment: the close-char family's
+///   array-list verdict owns the unclosed tail;
+/// - when an unclosed quote, substitution or subscript is met
+///   first: that construct's own EOF family reports it.
+pub fn unclosed_extglob_group_line(input: &str, extglob_seed: bool) -> Option<usize> {
+    // Fast reject: a group opens only at a glued PATTERN_CHAR + `(`
+    // byte pair; with no pair in the text no group can be open.
+    let bytes = input.as_bytes();
+    let mut any_pair = false;
+    for pair in bytes.windows(2) {
+        if pair[1] == b'(' && matches!(pair[0], b'@' | b'*' | b'+' | b'?' | b'!') {
+            any_pair = true;
+            break;
+        }
+    }
+    if !any_pair {
+        return None;
+    }
+    let chars: Vec<char> = input.chars().collect();
+    let mut index = 0usize;
+    let mut single = false;
+    let mut double = false;
+    let mut ansi_single = false;
+    let mut escaped = false;
+    let mut in_comment = false;
+    // Command-position tracking (parse.y:5899 assignment_acceptable),
+    // the same model as the subscript walk above.
+    let mut command_position = true;
+    let mut word = String::new();
+    // Compound-assignment `name=( ... )` depth (PST_COMPASSIGN); at
+    // element start a `[` opens a subscript with no identifier
+    // prefix needed.
+    let mut compassign_depth = 0usize;
+    let mut element_start = false;
+    let mut in_cond = false;
+    let mut line = 1usize;
+    let mut extglob = extglob_seed;
+    let mut line_start = 0usize;
+    let mut seg_start = 0usize;
+
+    while index < chars.len() {
+        let ch = chars[index];
+        if in_comment {
+            if ch != '\n' {
+                index += 1;
+                continue;
+            }
+            in_comment = false;
+        }
+        if escaped {
+            escaped = false;
+            // A quoted newline is a line continuation: the physical
+            // line still advances, so a group opened after it is
+            // attributed to its own line.
+            if ch == '\n' {
+                line += 1;
+                line_start = index + 1;
+                seg_start = index + 1;
+            }
+            index += 1;
+            continue;
+        }
+        if ansi_single {
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '\'' {
+                ansi_single = false;
+            } else if ch == '\n' {
+                line += 1;
+            }
+            index += 1;
+            continue;
+        }
+        if single {
+            if ch == '\'' {
+                single = false;
+            } else if ch == '\n' {
+                line += 1;
+            }
+            index += 1;
+            continue;
+        }
+        if double {
+            // Inside double quotes `$(...)`, `${...}` and `` `...` ``
+            // stay grouping constructs with fresh quote state (the
+            // subscript walk's double-quote arm, parse.y:4044-4051);
+            // skip balanced units, anything else is literal handling.
+            if ch == '$' && chars.get(index + 1) == Some(&'(') {
+                if let Some(end) = skip_parenthesized_unit_corrected(&chars, index + 1) {
+                    line += chars[index..end].iter().filter(|c| **c == '\n').count();
+                    index = end;
+                    continue;
+                }
+            } else if ch == '$' && chars.get(index + 1) == Some(&'{') {
+                let (end, newlines, closed) = skip_braced_unit_scan(&chars, index + 1);
+                if closed {
+                    line += newlines;
+                    index = end;
+                    continue;
+                }
+            } else if ch == '`' {
+                if let Some(end) = skip_backtick_corrected(&chars, index) {
+                    line += chars[index..end].iter().filter(|c| **c == '\n').count();
+                    index = end;
+                    continue;
+                }
+            }
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                double = false;
+            } else if ch == '\n' {
+                line += 1;
+            }
+            index += 1;
+            continue;
+        }
+        // Top-level heredoc: the body is raw text (make_cmd.c:512),
+        // so its parens never feed this scan (the subscript walk's
+        // heredoc arm).
+        if ch == '<' && chars.get(index + 1) == Some(&'<') && chars.get(index + 2) != Some(&'<') {
+            if let Some((next, _terminator_found)) =
+                super::heredoc_scan::skip_heredoc_top_level(&chars, index)
+            {
+                line += chars[index..next].iter().filter(|c| **c == '\n').count();
+                command_position = true;
+                word.clear();
+                element_start = false;
+                line_start = next;
+                seg_start = next;
+                index = next;
+                continue;
+            }
+        }
+        // `<<<` here-string (parse.y:3690-3706): one operator.
+        if ch == '<' && chars.get(index + 1) == Some(&'<') && chars.get(index + 2) == Some(&'<') {
+            index += 3;
+            continue;
+        }
+        // A standalone `[[` word at a command position opens a
+        // conditional command: pattern words inside are the
+        // conditional parser's, so the walk only tracks the region
+        // (a token-start `]]` ends it; a glued `]]` is word text,
+        // exactly as GNU reads it).
+        if ch == '['
+            && !in_cond
+            && word.is_empty()
+            && command_position
+            && chars.get(index + 1) == Some(&'[')
+            && chars
+                .get(index + 2)
+                .is_none_or(|c| matches!(c, ' ' | '\t' | '\n' | ';' | '&' | '|'))
+        {
+            in_cond = true;
+            command_position = false;
+            index += 2;
+            continue;
+        }
+        if ch == ']' && in_cond && word.is_empty() && chars.get(index + 1) == Some(&']') {
+            in_cond = false;
+            command_position = false;
+            index += 2;
+            continue;
+        }
+        // GNU parse.y:5466-5489 (read_token_word): while
+        // `extended_glob` is live, a PATTERN_CHAR immediately
+        // followed by `(` hands the whole balanced group to
+        // parse_matched_pair. A balanced group is word data; an
+        // unclosed one is the matched-pair EOF at the group's own
+        // line — unless an outer family owns the tail (compound
+        // assignment, above).
+        if ch == '(' && extglob && !in_cond && word_ends_extglob_operator(&word) {
+            match skip_extglob_group_chars(&chars, index) {
+                Some(end) => {
+                    line += chars[index..end].iter().filter(|c| **c == '\n').count();
+                    index = end;
+                    // The group is consumed: the word continues after
+                    // it, and a following `(` needs its own operator.
+                    word.push(')');
+                    element_start = false;
+                    continue;
+                }
+                None => {
+                    if compassign_depth == 0 {
+                        return Some(line);
+                    }
+                    return None;
+                }
+            }
+        }
+        match ch {
+            '\\' => {
+                escaped = true;
+                word.clear();
+                index += 1;
+                continue;
+            }
+            '#' if word.is_empty() => {
+                in_comment = true;
+                index += 1;
+                continue;
+            }
+            '\'' => {
+                single = true;
+                word.clear();
+                index += 1;
+                continue;
+            }
+            '"' => {
+                double = true;
+                word.clear();
+                index += 1;
+                continue;
+            }
+            '$' if chars.get(index + 1) == Some(&'\'') => {
+                ansi_single = true;
+                word.clear();
+                index += 2;
+                continue;
+            }
+            '$' if chars.get(index + 1) == Some(&'{') => {
+                // parse_matched_pair ('{', '}') consumes the body at
+                // the word level; an unclosed body is the close-char
+                // family's `}' EOF, not this walk's claim.
+                let (end, newlines, closed) = skip_braced_unit_scan(&chars, index + 1);
+                if !closed {
+                    return None;
+                }
+                line += newlines;
+                index = end;
+                word.clear();
+                continue;
+            }
+            '$' if chars.get(index + 1) == Some(&'[') => {
+                // The `$[...]` legacy-arithmetic body is a grouping
+                // scan of its own (parse.y:5527); its EOF belongs to
+                // the dollar-bracket family.
+                match dollar_word_group_len(&chars, index + 1, '[', ']') {
+                    Some(end) => {
+                        line += chars[index..end].iter().filter(|c| **c == '\n').count();
+                        index = end;
+                        word.clear();
+                        continue;
+                    }
+                    None => return None,
+                }
+            }
+            '$' if chars.get(index + 1) == Some(&'(') => {
+                // Command-substitution body: skip the balanced unit.
+                // An unclosed one falls through as word text so a
+                // group inside the body still meets the arm above —
+                // the body's own word read owns that EOF.
+                if let Some(end) = skip_parenthesized_unit_corrected(&chars, index + 1) {
+                    line += chars[index..end].iter().filter(|c| **c == '\n').count();
+                    index = end;
+                    word.clear();
+                    continue;
+                }
+            }
+            '`' => {
+                // Old-style substitution: skip the balanced unit; an
+                // unclosed one is the backquote family's own EOF.
+                match skip_backtick_corrected(&chars, index) {
+                    Some(end) => {
+                        line += chars[index..end].iter().filter(|c| **c == '\n').count();
+                        index = end;
+                        word.clear();
+                        continue;
+                    }
+                    None => return None,
+                }
+            }
+            '\n' => {
+                line += 1;
+                command_position = true;
+                word.clear();
+                element_start = false;
+                extglob = shopt_line_sets_extglob(&chars[line_start..index], extglob);
+                line_start = index + 1;
+                seg_start = index + 1;
+                index += 1;
+                continue;
+            }
+            ';' | '&' | '|' => {
+                // A completed command at the boundary: GNU executes
+                // it before reading the next, so a `shopt` flip in
+                // the segment just ended applies from here on.
+                extglob = shopt_line_sets_extglob(&chars[seg_start..index], extglob);
+                seg_start = index + 1;
+                command_position = true;
+                word.clear();
+                element_start = false;
+                index += 1;
+                continue;
+            }
+            '<' | '>' => {
+                word.clear();
+                index += 1;
+                continue;
+            }
+            '{' | '}' => {
+                command_position = true;
+                word.clear();
+                element_start = false;
+                index += 1;
+                continue;
+            }
+            '[' if (word_at_command_position(command_position, &word)
+                || (compassign_depth > 0 && element_start && word.is_empty()))
+                && !in_cond =>
+            {
+                // parse_matched_pair ('[', ']'): the span is word
+                // data (parse.y:5635-5651). An unclosed span is the
+                // subscript family's own EOF — do not claim.
+                match arraysub_span_len(&chars[index..]) {
+                    Some(len) => {
+                        line += chars[index..index + len]
+                            .iter()
+                            .filter(|c| **c == '\n')
+                            .count();
+                        index += len;
+                        word.clear();
+                        element_start = false;
+                        command_position = false;
+                        continue;
+                    }
+                    None => return None,
+                }
+            }
+            '(' => {
+                // `name=(` opens a compound-assignment list; any
+                // other `(` is a subshell/grouping whose body starts
+                // a fresh command position.
+                if word_is_assignment_list_opener(&word) {
+                    compassign_depth += 1;
+                    element_start = true;
+                } else if compassign_depth > 0 {
+                    compassign_depth += 1;
+                } else {
+                    command_position = true;
+                }
+                word.clear();
+                index += 1;
+                continue;
+            }
+            ')' => {
+                if compassign_depth > 0 {
+                    compassign_depth -= 1;
+                } else {
+                    command_position = true;
+                }
+                element_start = false;
+                word.clear();
+                index += 1;
+                continue;
+            }
+            _ => {}
+        }
+        if ch.is_whitespace() {
+            // `if`, `then`, `while`, ... keep the next word in
+            // command position — but only when they themselves stood
+            // at command position; a command word like `echo` ends
+            // it (the subscript walk's whitespace rule).
+            if !word.is_empty() {
+                command_position = command_position && is_command_position_boundary(&word);
+            }
+            word.clear();
+            if compassign_depth > 0 {
+                element_start = true;
+            }
+            index += 1;
+            continue;
+        }
+        word.push(ch);
+        index += 1;
+    }
+    None
 }
 
 fn unclosed_array_subscript_walk(
     input: &str,
     quote_aware: bool,
+    extglob_seed: bool,
 ) -> Option<(usize, char, usize, bool)> {
     let chars: Vec<char> = input.chars().collect();
     let mut index = 0usize;
@@ -2298,7 +2811,23 @@ fn unclosed_array_subscript_walk(
     // consumption on the live `extended_glob`). Track those commands so
     // extglob pattern groups are consumed as word units, exactly like
     // read_token_word does.
-    let mut extglob = false;
+    // Seeding policy (rubash#2680 + rubash#3229, merged): the caller
+    // supplies the gate in effect when the walk's unit STARTED. The
+    // unseeded entry points pass the live parse gate
+    // (`super::parse_extended_glob()`): a `shopt` executed by an
+    // earlier reader unit is not textually present in this unit, and
+    // seeding `false` made the walk claim a `[` inside a live extglob
+    // group as a subscript, pre-empting the close-char route's `)'
+    // verdict for the unclosed group (rubash#2680; gathered groups pin
+    // the gate to their entry value for the unit's re-lex,
+    // rubash#3205, so the live gate IS the entry gate there). The
+    // seeded entry point passes the reader's EXECUTED gate state
+    // instead (rubash#3229): in a grouped run the executed `shopt`
+    // lives in an earlier, already-executed group, so neither this
+    // unit's text nor the parse-time gate can show it live. Textual
+    // `shopt` lines inside the unit keep flipping the mirror per line
+    // below.
+    let mut extglob = extglob_seed;
     let mut line_start = 0usize;
 
     while index < chars.len() {
@@ -2627,6 +3156,39 @@ fn unclosed_array_subscript_walk(
                         command_position = false;
                         continue;
                     }
+                }
+            }
+            // A `(` directly after a word-final PATTERN_CHAR (`@*+?!`,
+            // syntax.h:90-92) is an extglob group opener, never a
+            // subshell boundary: GNU read_token_word hands the whole
+            // balanced group to parse_matched_pair whenever
+            // extended_glob is live (parse.y:5466-5489), and with
+            // extglob off the `(` is a syntax-error token — in neither
+            // case does the text after it start a command position
+            // whose identifier could open a P_ARRAYSUB hunt. The
+            // extglob arm above only fires while this walk's
+            // text-derived mirror is on; a `shopt -s extglob` that
+            // already executed in an earlier source group is invisible
+            // to it (scripts run group-by-group), so without the same
+            // consumption here `@(a[b)` misreports a `]` EOF
+            // (rubash#3208). Consume the balanced group exactly like
+            // the extglob arm — the body's `[`/`|`/`(` never feed
+            // token-level decisions; an unbalanced group is a
+            // `)`-shaped EOF owned by the generic close-char scan, so
+            // bail out to it. Exception: a word that is exactly `!` at
+            // command position is the negation keyword — its `(` really
+            // is a subshell opener, and a genuinely unclosed subscript
+            // inside (`!(a[1)`) still reports `]`.
+            if matches!(word.chars().last(), Some('@' | '*' | '+' | '?' | '!'))
+                && !(word == "!" && command_position)
+            {
+                match skip_extglob_group_chars(&chars, index) {
+                    Some(end) => {
+                        word.push('(');
+                        index = end;
+                        continue;
+                    }
+                    None => return None,
                 }
             }
             // `name=(` opens a compound-assignment list; any other `(` is a
@@ -3044,11 +3606,26 @@ pub fn unclosed_comsub_eof_shape(
     // `unexpected EOF while looking for matching `)'', issue #516
     // follow-up). `echo ((` has no command-position root and keeps the
     // token-error class.
-    if let Some(&(root_idx, _, root_kind)) = stack.first() {
+    if let Some(&(root_idx, root_line, root_kind)) = stack.first() {
         if root_kind == OpenerKind::Plain
             && (opens_in_command_position(&chars, root_idx) || arith_for_pair_at(&chars, root_idx))
             && chars.get(root_idx + 1) == Some(&'(')
         {
+            // rubash#2780: the arithmetic-`for' root is the one dparen
+            // root whose EOF report the generic close-char scan gets
+            // wrong: its word machine does not carry `for' as a
+            // command-position keyword, so no frame is pushed for the
+            // pair and the scan's verdict reports the EOF line. GNU's
+            // header read is parse_arith_cmd's parse_matched_pair
+            // (parse.y:4957), whose EOF report names the pair's
+            // start_lineno (parse.y:3908-3915) like every matched pair —
+            // classify it here, where the pair is recognized. The pair's
+            // interior is that one scan in GNU, so no token-error class
+            // below can preempt it. A command-position `((` root keeps
+            // the deferral: the generic scan reports it correctly.
+            if arith_for_pair_at(&chars, root_idx) {
+                return Some((UnclosedComsubShape::ArithEof { line: root_line }, root_line));
+            }
             return None;
         }
     }
@@ -3317,7 +3894,7 @@ fn main_level_paren_token_name(chars: &[char], idx: usize) -> String {
 /// body (GNU parse_matched_pair, parse.y:3877: quotes nest, backslash
 /// escapes, nested `(`/`)` count). `open` is the index of the `(`; returns
 /// the index past its matching `)` or `None` when EOF is reached first.
-fn skip_extglob_group_chars(chars: &[char], open: usize) -> Option<usize> {
+pub(crate) fn skip_extglob_group_chars(chars: &[char], open: usize) -> Option<usize> {
     let mut depth = 1usize;
     let mut index = open + 1;
     let mut single = false;

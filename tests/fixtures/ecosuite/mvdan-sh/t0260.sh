@@ -1,0 +1,1 @@
+${signals[(i)QUIT]}

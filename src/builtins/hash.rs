@@ -24,6 +24,23 @@ const HASH_TABLE: &str = "__RUBASH_HASH_TABLE";
 /// Stage-2 ④ Phase 2: the option scan is the (table row + `BuiltinOpt` +
 /// `Diag`) triple (`internal_getopt (list, "dlp:rt")`,
 /// builtins/hash.def:95); every diagnostic speaks through `diag`.
+/// GNU builtins/hash.def:86-90 — the hash prologue, shared by the
+/// handler and the `--help` gate (rubash#3340): when hashing is
+/// disabled (`set +h`), the entire `hash` builtin refuses with
+/// "hash: hashing disabled" and returns failure, before any option
+/// parsing. The gate replays this prologue before the long help, so
+/// `set +h; hash --help` refuses with status 1 and prints no help.
+/// Returns `true` when the builtin may proceed; when it returns
+/// `false` the diagnostic is recorded in `diag` and the caller
+/// flushes it and returns `EXECUTION_FAILURE`.
+pub(crate) fn check_hashing_enabled(env_vars: &VarTable, diag: &mut Diag<'_>) -> bool {
+    if !crate::builtins::set::shell_option_enabled(env_vars, "hashall") {
+        diag.free(format_args!("hashing disabled"));
+        return false;
+    }
+    true
+}
+
 pub(crate) fn execute_with_io_and_functions<'a, W>(
     row: &'a BuiltinRow,
     args: &'a [String],
@@ -35,11 +52,7 @@ pub(crate) fn execute_with_io_and_functions<'a, W>(
 where
     W: Write,
 {
-    // GNU builtins/hash.def:86-90: when hashing is disabled (set +h), the
-    // entire `hash` builtin refuses with "hash: hashing disabled" and
-    // returns failure, before any option parsing.
-    if !crate::builtins::set::shell_option_enabled(env_vars, "hashall") {
-        diag.free(format_args!("hashing disabled"));
+    if !check_hashing_enabled(env_vars, diag) {
         return Ok(EXECUTION_FAILURE);
     }
 
@@ -604,13 +617,24 @@ pub(crate) fn record_standard_path_resolution(
 pub(crate) fn record_command_resolution(env_vars: &mut VarTable, name: &str, shell_path: &str) {
     let name = crate::executor::substitution_metadata::fold_literal_char_escapes(name);
     let mut table = hash_table(env_vars);
-    if let Some((_, hits, _)) = table.get_mut(name.as_str()) {
+    let recorded = if let Some((stored, hits, _)) = table.get_mut(name.as_str()) {
         *hits += 1;
+        stored.clone()
     } else {
         table.insert(
             name.to_string(),
             (shell_path.to_string(), 1, next_hash_seq(&table)),
         );
-    }
+        shell_path.to_string()
+    };
     store_hash_table(env_vars, &table);
+    // GNU search_for_command consults hashed_filenames FIRST on the
+    // next lookup (findcmd.c:367-380) and shell_execve executes the
+    // recorded string verbatim — the lookup mirror must serve the
+    // same recorded spelling, or execution re-walks PATH under the
+    // new cwd and a relative spelling (`./rel1/foo`) is lost after
+    // `cd` (rubash#2696). record_standard_path_resolution syncs its
+    // mirror entry for the same reason (rubash#1648).
+    let cached_path = crate::executor::path::shell_path_to_windows(&recorded, env_vars);
+    crate::executor::path::set_command_lookup_cache(&name, Some(cached_path), env_vars);
 }

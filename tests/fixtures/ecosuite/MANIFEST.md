@@ -23,6 +23,15 @@ file (`MSYS_NO_PATHCONV=1 wsl bash /mnt/d/<path>`), never `wsl bash -c`.
   `bash -n` rc=0; rubash at filing: rc=2
   `line 2: syntax error: unexpected end of file from '{' command on line 1`.
 
+## mvdan-sh/ (full corpus, execution differential — rubash#2906)
+
+All 560 snippets (559 numbered + tSKIP appendix) extracted from the
+pinned mvdan/sh commit above, with the GNU oracle ledger and the
+tracked-divergence ledger, exercised at execution depth by
+`tests/issue2906_mvdan_sh_execution_differential.rs`. See
+`mvdan-sh/README.md` for the isolation rules, the pinning state and
+the CI boundary (#3033 decides CI wiring; nothing is wired here).
+
 ## mvdan-n/ (16 of 559 snippets diverged on `-n` exit code)
 
 Run: `<shell> -n <file>`; GNU rc vs rubash rc at filing, issue:
@@ -46,6 +55,37 @@ Run: `<shell> -n <file>`; GNU rc vs rubash rc at filing, issue:
 | t0525.sh | 2 | 0 | rubash#220 |
 | t0526.sh | 2 | 0 | rubash#220 |
 
+## git-contrib/ (rubash#2907)
+
+- `driver.sh` + `make-repos.sh` — chain harness for the REAL
+  git-completion.bash / git-prompt.sh. Those two scripts are GPL and
+  are **not vendored** (same partition discipline as
+  `tests/regression/corpus/PROVENANCE.txt`); the harness discovers
+  them on the host (`RUBASH_GIT_CONTRIB_DIR`, else the host git
+  installation's shipped pair). `make-repos.sh` builds deterministic
+  repositories in eight states (clean / dirty / staged / untracked /
+  all+stash / detached / ahead, plus a seeded bare remote);
+  `driver.sh` sources the real scripts and drives their live entry
+  points (`__git_wrap__git_main` for completion, `__git_ps1` for the
+  prompt), each case feeding the next.
+- Pin: `tests/issue2907_git_contrib_chain.rs` runs the chain under
+  rubash and under a GNU bash oracle over the same repositories and
+  requires byte-identical stdout. First run as eco-2907 on master
+  `6eb861b8` (git 2.43.0 contrib scripts, GNU bash 5.3.20): chain A
+  (16 cases) all SAME; chain B differed on the detached cell only —
+  the assignment-carrier leak filed as #3034 (root of closed #3005)
+  and fixed by PR #3056; the A15 stderr filename divergence was
+  filed as #3035 and fixed by PR #3047.
+
+## mvdan-n re-check (rubash#2907)
+
+The 16 parse fixtures above are re-checked in-repo by
+`tests/issue2907_git_contrib_chain.rs` (`-n` exit code per file,
+rubash vs GNU bash oracle). This is a re-check of the pinned
+reproducers only: whether the full 559-snippet execution
+differential is wired into CI or stays a periodic chain is the
+decision recorded in rubash#3033, which this pin does not pre-empt.
+
 ## bats/
 
 - `zero_pwd_form.sh` — issue rubash#224. Invoke by absolute /d/-style path;
@@ -54,3 +94,26 @@ Run: `<shell> -n <file>`; GNU rc vs rubash rc at filing, issue:
 
 Raw run artifacts: `target/issue-suites/results/ecosuite/` (modernish/,
 mvdan-n/, nvm/, bats-core/).
+
+## Manual-run list (rubash#2910)
+
+Some ecosuite faces cannot be chained in automation — live TUI interaction,
+live-session rendering, network-heavy installs. Per the 2026-11-06 ruling
+(manual local runs are acceptable coverage when recorded), those faces sit on
+one recorded list with a named procedure per face and a run log: the list
+lives in the ecosuite warehouse as `MANUAL-RUNS.md` (warehouse-local git,
+`ecosuite` commit `483c2bb`), and covers:
+
+- fzf: the real junegunn/fzf `shell/key-bindings.bash` /
+  `shell/completion.bash` (never vendored or sourced by any harness) + live
+  fzf TUI interaction (Ctrl-R / Ctrl-T / Alt-C / `**` completion).
+- ble.sh (pin v0.4.0-devel3): multiline editing + completion rendering in a
+  live session (`ble-attach` is unreliable in automation).
+- oh-my-niu bundle: end-to-end exercise from an installed location + the
+  theme-gallery visual pass.
+- nvm (pin v0.40.8): `test/slow` + `test/installation_iojs` (real-network
+  runs; never run on any shell so far).
+
+A manual pass counts as coverage only when it is logged in that document
+(date, operator, binary/version, result). As of the list's creation
+(2026-11-08), no manual runs are recorded yet for any of the four faces.

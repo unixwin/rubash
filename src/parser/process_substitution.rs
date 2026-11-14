@@ -134,6 +134,48 @@ pub(super) fn process_substitutions_in_word_with_raw(
     substitutions
 }
 
+/// End index (just past the closer) of the `$`-introduced group whose
+/// `$` sits at `dollar` in `chars` — `$(`/`${`/`$[` — or None when the
+/// `$` introduces no group or the group never closes. GNU
+/// expand_word_internal consumes these units whole in its `$` arm
+/// (subst.c:10915 extract_arithmetic_subst for `$((`, the comsub and
+/// brace arms likewise), so a `<`/`>` inside one is data for the inner
+/// construct and never reaches the `<`/`>` process-substitution arms
+/// (subst.c:11365-11378) at this word's level. The balanced skip is
+/// the lexer's own parse_matched_pair walker (dollar_word_group_len),
+/// the same rules the P_ARITH span scan uses (rubash#2648:
+/// `$(( 4>(2+3) ? 1 : 32))` executed `2+3` as a command).
+fn dollar_group_end(chars: &[char], dollar: usize) -> Option<usize> {
+    let (open, close) = match chars.get(dollar + 1) {
+        Some('(') => ('(', ')'),
+        Some('{') => ('{', '}'),
+        Some('[') => ('[', ']'),
+        _ => return None,
+    };
+    crate::lexer::dollar_word_group_len(chars, dollar + 1, open, close)
+}
+
+/// End index (just past the closing backquote) of the backquote command
+/// substitution whose opening backquote sits at `tick` in `chars` — or
+/// None when the span never closes. GNU expand_word_internal consumes
+/// a backquote unit whole in its own switch arm (subst.c:11572: the
+/// body is pulled out by string_extract and executed by
+/// command_substitute, subst.c:7143), so a `<`/`>` inside one is data
+/// for the inner command text and never reaches the `<`/`>`
+/// process-substitution arms (subst.c:11364-11378) at this word's
+/// level — the same opacity the `$` arm gives `$(`/`${`/`$[`
+/// (dollar_group_end, rubash#3132), extended to the backquote group
+/// (rubash#3337). The span walk is the lexer's own backquote walker
+/// (skip_backtick_corrected), the same rules the tokenizer uses.
+/// Unlike the `$` groups, a backquote span also opens inside double
+/// quotes (the backquote arm is not suppressed by Q_DOUBLE_QUOTES —
+/// only the `<`/`>` arms are), so the skip arms gate on `!single`
+/// only; skipping there also keeps a `"` in the body from corrupting
+/// the walker's quote state.
+fn backquote_group_end(chars: &[char], tick: usize) -> Option<usize> {
+    crate::lexer::skip_backtick_corrected(chars, tick)
+}
+
 /// Quote-aware extraction of every UNQUOTED `<(`/`>(` span at raw offset > 0
 /// (word-initial spans belong to the token-shape scan in
 /// process_substitutions_in_word_with_raw). The paren matcher honors the
@@ -167,6 +209,25 @@ fn embedded_process_substitutions_in_raw(raw: &str) -> Vec<ProcessSubstitution> 
             double = !double;
             index += 1;
             continue;
+        }
+        if !single && !double && ch == '$' {
+            // A `$(`/`${`/`$[` unit is opaque at this word's level
+            // (dollar_group_end): its interior belongs to the inner
+            // construct's own scan.
+            if let Some(end) = dollar_group_end(&chars, index) {
+                index = end;
+                continue;
+            }
+        }
+        if !single && ch == '`' {
+            // A backquote unit is opaque at this word's level
+            // (backquote_group_end): its interior is the inner
+            // command text, whose own execution materializes any
+            // process substitution inside it.
+            if let Some(end) = backquote_group_end(&chars, index) {
+                index = end;
+                continue;
+            }
         }
         if !single
             && !double
@@ -232,6 +293,26 @@ fn embedded_procsub_close(chars: &[char], open: usize) -> Option<usize> {
             index += 1;
             continue;
         }
+        if !single && ch == '`' {
+            // A backquote unit is opaque at this span's level
+            // (backquote_group_end, the lexer's own backquote walker
+            // from PR #3351): its interior — an unmatched `(` or a
+            // quote that would corrupt this walker's quote state —
+            // belongs to the inner command text, never to this
+            // span's paren depth (GNU parse.y:3877
+            // parse_matched_pair consumes nested quote units whole
+            // via the shellquote arm; subst.c:1311
+            // extract_process_subst -> xparse_dolparen (parse.y:4686)
+            // re-parses the body with the real parser, rubash#3354).
+            // The gate is `!single` only, like the sibling scans in
+            // this file: a backquote group stays active inside
+            // double quotes. An unclosed group falls through to the
+            // plain walk below.
+            if let Some(end) = backquote_group_end(&chars, index) {
+                index = end;
+                continue;
+            }
+        }
         if !single && !double {
             if ch == '(' {
                 depth += 1;
@@ -296,6 +377,24 @@ pub(crate) fn verbatim_process_substitution_span(
             index += 1;
             continue;
         }
+        if !single && !double && ch == '$' {
+            // Same opacity rule as the extraction scan
+            // (dollar_group_end): a span inside a `$(`/`${`/`$[` unit
+            // belongs to the inner construct, not to this word.
+            if let Some(end) = dollar_group_end(&plain, index) {
+                index = end;
+                continue;
+            }
+        }
+        if !single && ch == '`' {
+            // Same opacity rule as the extraction scan
+            // (backquote_group_end): a span inside a backquote unit
+            // belongs to the inner command text, not to this word.
+            if let Some(end) = backquote_group_end(&plain, index) {
+                index = end;
+                continue;
+            }
+        }
         if !single
             && !double
             && ch == want
@@ -355,6 +454,26 @@ pub(crate) fn raw_word_has_unquoted_process_substitution(raw: &str) -> bool {
             double = !double;
             index += 1;
             continue;
+        }
+        if !single && !double && ch == '$' {
+            // A `$(`/`${`/`$[` unit is opaque at this word's level
+            // (dollar_group_end): a `<(`/`>(` inside one — e.g. the
+            // comparison in `$(( 4>(2+3) ))` — is not this word's
+            // process substitution.
+            if let Some(end) = dollar_group_end(&chars, index) {
+                index = end;
+                continue;
+            }
+        }
+        if !single && ch == '`' {
+            // A backquote unit is opaque at this word's level
+            // (backquote_group_end): a `<(`/`>(` inside one — e.g. a
+            // process substitution in a backquoted pipeline — is not
+            // this word's process substitution.
+            if let Some(end) = backquote_group_end(&chars, index) {
+                index = end;
+                continue;
+            }
         }
         if !single && !double && matches!(ch, '<' | '>') && chars.get(index + 1) == Some(&'(') {
             return true;

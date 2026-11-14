@@ -44,20 +44,25 @@ impl Executor {
             }
             scan += 1;
         }
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
+        // rubash#3324: run against the ordered log (#2699) and route
+        // the chunks in production order — GNU line-buffers stdout
+        // (shell.c:1921-1922 sh_setlinebuf), so a conversion
+        // diagnostic lands between the values around it in a merged
+        // stream (`printf '%d\n' 5 bad 7` -> 5, diagnostic, 0, 7).
+        // The old pair route emitted all of stderr first (the #1134
+        // model, built on full stdio buffering — wrong for multi-arg
+        // shapes; the single-arg case it pinned still holds, since
+        // the diagnostic for a conversion precedes that conversion's
+        // own value).
+        let log = super::trap_stack_builtins::OrderedOutputLog::new();
         let status = crate::builtins::printf::execute_with_io_and_store(
             words.iter().map(String::as_str),
             &mut self.shell_state.env_vars,
             Some(&mut self.shell_state.variables),
-            &mut stdout,
-            &mut stderr,
+            &mut log.stdout_writer(),
+            &mut log.stderr_writer(),
         )?;
-        // GNU printf.def emits conversion diagnostics through
-        // builtin_error (unbuffered) while the converted output sits in
-        // stdout's stdio buffer until the builtin returns: in a merged
-        // 2>&1 stream the diagnostics come first (rubash#1134).
-        self.write_buffered_builtin_output_stderr_first(cmd, &stdout, &stderr)?;
+        self.write_buffered_builtin_output_chunks(cmd, &log)?;
         // GNU builtins/printf.def printf_builtin returns
         // sh_chkwrite(format/operands success): a failed flush (a closed
         // stdout fd) folds the write failure into the builtin's status —
@@ -445,6 +450,13 @@ impl Executor {
         // must therefore funnel through the one sync point below.
         let status = self.execute_cd_redirect_bound(cmd)?;
         self.sync_cd_variables();
+        // rubash#3198: warm the cwd inode anchor at the moment the
+        // directory is entered, so a later unlink of the directory
+        // cannot strand every spawn on a path that no longer resolves
+        // (see stamp_spawn_cwd in external_inner.rs).
+        if status == 0 {
+            self.refresh_cwd_anchor();
+        }
         Ok(status)
     }
 
@@ -550,10 +562,34 @@ impl Executor {
                 (None, None, true) => CdErrSink::Null,
                 (None, None, false) => CdErrSink::Default(&mut stderr_default),
             };
+            // rubash#3268: lend the cd builtin the cwd anchor for
+            // its verbatim fallback (change_to_directory's tail).
+            // The closure borrows only the anchor cell plus a cwd
+            // snapshot — disjoint from the &mut borrows of the env
+            // table and the cwd slot passed alongside it.
+            let anchor_cwd = self.shell_state.cwd.clone();
+            let anchor_cell = &self.shell_state.cwd_anchor;
+            let anchor_resolver = |operand: &std::path::Path| {
+                #[cfg(unix)]
+                {
+                    super::external_inner::cd_target_via_cwd_anchor(
+                        anchor_cell,
+                        &anchor_cwd,
+                        operand,
+                    )
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = (operand, anchor_cell, &anchor_cwd);
+                    None
+                }
+            };
             let status = crate::builtins::cd::execute_with_io(
                 cmd.words[1..].iter().map(String::as_str),
                 &mut self.shell_state.env_vars,
                 &mut self.shell_state.cwd,
+                Some(&anchor_resolver),
+                &mut self.shell_state.logical_cwd,
                 &mut stdout_sink,
                 &mut stderr_sink,
             )?;

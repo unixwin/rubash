@@ -1,17 +1,20 @@
 use super::*;
 
 pub(in crate::executor) fn unset_args_need_builtin_diagnostics(args: &[String]) -> bool {
+    // GNU builtins/set.def unset_builtin scans with internal_getopt,
+    // which stops at the first operand (builtins/bashgetopt.c:77-84):
+    // only the option region can carry -f/-v or an unknown option
+    // letter. Reuse the shared option_region_end definition (rubash
+    // #3338/#3342) instead of a hand scan — a word past the first
+    // operand is a NAME, never an option. (The hand scan also read
+    // `--help` as unknown option letters; the region ends before it,
+    // and the executor route's lib call still dispatches help there,
+    // so the outcome is unchanged.)
+    let region = &args[..super::builtin_opt::option_region_end(args, false)];
     let mut functions = false;
     let mut variables = false;
 
-    for arg in args {
-        if arg == "--" || arg == "-" {
-            break;
-        }
-        if !arg.starts_with('-') {
-            break;
-        }
-
+    for arg in region {
         for option in arg[1..].chars() {
             match option {
                 'f' => functions = true,
@@ -222,6 +225,51 @@ pub(in crate::executor) fn command_sets_own_line(cmd: &CommandNode) -> bool {
         && !command_is_time_prefixed_compound(cmd)
 }
 
+/// Whether a failure opening THIS command's own redirections reports
+/// at the command's COMPLETION line (its parse-end line) rather than
+/// its first line. GNU's parser stamps cm_arith / cm_cond nodes when
+/// the closing token is read, so a construct completed on a later
+/// physical line (continuation, multiline condition) reports that
+/// later line from do_redirections and from the executing_line_number
+/// special case alike (execute_cmd.c:412-428); cm_arith_for keeps the
+/// `for' keyword's line (rubash#3183, measured).
+pub(in crate::executor) fn redirect_error_uses_completion_line(cmd: &CommandNode) -> bool {
+    cmd.arithmetic_command.is_some() || cmd.conditional_command.is_some()
+}
+
+/// Whether a failure opening THIS command's own redirections reports
+/// at the ambient line instead of the command's own line. GNU
+/// execute_cmd.c:854 do_redirections runs before the dispatch switch
+/// stamps any line, and error_prolog reads the global line_number —
+/// the reader/enclosing frame's line — for every command kind except
+/// cm_cond / cm_arith / cm_arith_for, whose executing_line_number
+/// (execute_cmd.c:412-428) substitutes the node's own line. Simple
+/// commands keep their own line (cm_simple stamps Simple->line before
+/// its redirections are serviced, execute_cmd.c:936). Everything
+/// compound that is not in the special set is ambient (rubash#3183).
+pub(in crate::executor) fn compound_redirect_error_is_ambient(cmd: &CommandNode) -> bool {
+    let own_line_special = cmd.conditional_command.is_some()
+        || cmd.arithmetic_command.is_some()
+        || cmd
+            .for_command
+            .as_ref()
+            .is_some_and(|for_command| for_command.arithmetic.is_some());
+    if own_line_special {
+        return false;
+    }
+    cmd.for_command.is_some()
+        || cmd.select_command.is_some()
+        || cmd.loop_command.is_some()
+        || cmd.if_command.is_some()
+        || cmd.case_command.is_some()
+        || cmd.function_command.is_some()
+        || cmd.brace_group.is_some()
+        || cmd.subshell_command.is_some()
+        || cmd.coproc_command.is_some()
+        || cmd.pipeline_command.is_some()
+        || cmd.and_or_list.is_some()
+}
+
 /// GNU `Simple->line` for a plain simple command is `simplecmd_lineno`
 /// (parse.y:316), which read_token_word captures at the END of the first
 /// word in command position (parse.y:5849-5851 `simplecmd_lineno =
@@ -287,6 +335,22 @@ pub(in crate::executor) fn simple_command_first_word_end_line(cmd: &CommandNode)
         Some(stamped) if stamped >= start => Some(stamped.max(text_based)),
         _ => Some(text_based),
     }
+}
+
+/// rubash#3210: the process-substitution body seed line — the enclosing
+/// simple command's first-element end line (GNU execute_cmd.c:936
+/// `SET_LINE_NUMBER (command->value.Simple->line)`), which the fork
+/// inherits (subst.c:6362 `make_child`) and the child counts up from
+/// (evalstring.c:315). This is the value `set_current_line` already
+/// computes; spawn sites that pass `cmd.line` (the command's START
+/// line) under-report split first elements (d8: 1 instead of 2).
+/// Falls back to `cmd.line` when no stamp exists. Non-simple commands
+/// (compounds) return their start line here — GNU leaves those on the
+/// ambient line instead (execute_cmd.c:854), a separate residual family,
+/// so this helper must NOT be used to seed compound stdin procsubs
+/// beyond the start line it already returns.
+pub(in crate::executor) fn procsub_body_seed_line(cmd: &CommandNode) -> Option<usize> {
+    simple_command_first_word_end_line(cmd).or(cmd.line)
 }
 
 /// GNU print_cmd.c prints the command node's OWN redirection list. A

@@ -201,8 +201,23 @@ pub(in crate::executor) fn extglob_split_alternatives(inner: &[char]) -> Vec<Vec
     let mut result = Vec::new();
     let mut current = Vec::new();
     let mut depth = 0;
-    for &ch in inner {
+    let mut i = 0;
+    while i < inner.len() {
+        let ch = inner[i];
         match ch {
+            // GNU lib/glob/sm_loop.c:676 PATSCAN skips `\` + char pairs
+            // while scanning a patlist: an escaped character is never a
+            // split point and never moves the paren depth. Quoted
+            // characters inside a group reach the pattern in this
+            // escaped spelling (pathexp.c:212 quote_string_for_globbing),
+            // so `\|` is literal text and `\(`/`\)` are literal parens
+            // (rubash#3231). extglob_group_end above already skips pairs
+            // the same way; this splitter must agree with it.
+            '\\' if i + 1 < inner.len() => {
+                current.push(ch);
+                current.push(inner[i + 1]);
+                i += 1;
+            }
             '(' => {
                 depth += 1;
                 current.push(ch);
@@ -218,6 +233,7 @@ pub(in crate::executor) fn extglob_split_alternatives(inner: &[char]) -> Vec<Vec
                 current.push(ch);
             }
         }
+        i += 1;
     }
     // Keep empty alternatives: GNU PATSCAN splits `@(|foo)` into an empty
     // first alternative and `foo`, and the empty alternative matches the empty

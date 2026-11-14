@@ -53,8 +53,22 @@ impl Iterator for StorageWordIter<'_> {
             // its whitespace into the word so assoc kv-pairs keep them;
             // indexed callers re-split on the marker. The \x1c
             // IFS-protection sentinel takes the same glued form here.
+            // So does CTLESC (\x11, markers.rs): GNU quote_string
+            // (subst.c:4773) prefixes EVERY character of a quoted string
+            // with CTLESC, so a protected character is data, never syntax
+            // — dequote_string (subst.c:4807) strips the pairs only at the
+            // end. Without this glue a protected `"` toggled the quote
+            // state: the declare operand path wraps each literal element
+            // as a `\x10"..."` transport word whose interior quotes ride
+            // CTLESC-protected (compound_element_glob_pattern), so the
+            // `"` inside `'a"b'` closed the wrapper's span and the space
+            // between elements read as inside-quotes — `declare -a
+            // a=('a"b' 'c')` stored ONE element with the \x10 boundary
+            // marker leaking into its value (rubash#3350). A protected
+            // space split an element mid-word the same way (`'a"b c'`).
             if ch == crate::executor::markers::IFS_GLUE
                 || ch == crate::executor::COMPOUND_EXPANSION_WS_TAG
+                || ch == crate::executor::markers::CTLESC
             {
                 word.push(ch);
                 escaped = true;
@@ -302,19 +316,28 @@ pub(in crate::builtins::declare) fn unquote_storage_value(value: &str) -> String
     };
 
     let mut unquoted = String::new();
-    let mut escaped = false;
-    for ch in inner.chars() {
-        if escaped {
+    let mut chars = inner.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
             unquoted.push(ch);
-            escaped = false;
-        } else if ch == '\\' {
-            escaped = true;
-        } else {
-            unquoted.push(ch);
+            continue;
         }
-    }
-    if escaped {
-        unquoted.push('\\');
+        // A whole-token `"..."` here is the sh_double_quote serialization
+        // of an already-expanded value (arrays/storage.rs quote_array_value
+        // emits exactly this form), and shquote.c:134 sh_double_quote
+        // escapes only slashify_in_quotes (syntax.h:26): `\`, `$`, `"` and
+        // `` ` ``. Decoding any other `\x` pair ate the backslash of data
+        // that sh_double_quote never touched — `local -a d=("a\b")` stored
+        // `ab`, and the same happened to every quoted compound element of a
+        // declaration builtin while the plain `d=("a\b")` assignment stayed
+        // correct (issue #995). A backslash before anything else is data.
+        match chars.peek() {
+            Some(next) if matches!(next, '\\' | '$' | '"' | '\u{60}') => {
+                unquoted.push(*next);
+                chars.next();
+            }
+            _ => unquoted.push('\\'),
+        }
     }
     // E309 is registry-zone — a typed `$'\uE309'` arrives E400-escaped
     // and is user data; strip only the BARE tag (rubash#840).

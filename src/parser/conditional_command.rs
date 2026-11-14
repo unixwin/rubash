@@ -44,6 +44,8 @@ pub(super) fn parse_conditional_command(
         true,
         stream_eof_line(tokens, diagnostic_text, source_line_offset),
         cond_follower_text(tokens, end),
+        diagnostic_text,
+        source_line_offset,
     ) {
         command.insert_assignment("__RUBASH_PARSE_ERROR_COND__".to_string(), spec);
         if let Some(source) = conditional_offending_line(
@@ -178,6 +180,8 @@ pub(super) fn conditional_syntax_error_spec(
     closed: bool,
     stream_eof_line: usize,
     follower: Option<String>,
+    diagnostic_text: Option<&std::rc::Rc<str>>,
+    source_line_offset: usize,
 ) -> Option<(String, Option<usize>)> {
     let open_line = args.first().map(|(_, _, _, line)| *line).unwrap_or(1);
     let mut cursor = CondCursor {
@@ -216,7 +220,16 @@ pub(super) fn conditional_syntax_error_spec(
             },
         },
     };
-    Some(fail.encode(args, follower.as_deref()))
+    // Only a real collected argument can be the token GNU's reader had
+    // just consumed when report_syntax_error ran; virtual/EOF offenders
+    // anchor on a token boundary of their own and get no source char.
+    let source_extra = match (&fail.offending, diagnostic_text) {
+        (CondOffending::Index(index), Some(text)) => {
+            source_char_after_arg(args, *index, text, source_line_offset)
+        }
+        _ => None,
+    };
+    Some(fail.encode(args, follower.as_deref(), source_extra))
 }
 
 /// The line of the `\n' token GNU's cond reader reports: a newline ending
@@ -273,7 +286,12 @@ impl CondFail {
     /// Returns (spec, echo_line): echo_line is the offending input line GNU
     /// prints via print_offending_line (parse.y:6814) — None for the EOF
     /// shape, which echoes nothing.
-    fn encode(self, args: &[CondArg], follower: Option<&str>) -> (String, Option<usize>) {
+    fn encode(
+        self,
+        args: &[CondArg],
+        follower: Option<&str>,
+        source_extra: Option<char>,
+    ) -> (String, Option<usize>) {
         let sep = crate::executor::markers::PARSE_ERROR_FIELD_SEP;
         let last_line = args.last().map(|(_, _, _, line)| *line).unwrap_or(1);
         let open_line = args.first().map(|(_, _, _, line)| *line).unwrap_or(1);
@@ -343,7 +361,7 @@ impl CondFail {
                             _ => None,
                         }
                     })
-                    .unwrap_or_else(|| walk_back_near_token(args, *index)),
+                    .unwrap_or_else(|| walk_back_near_token(args, *index, source_extra)),
                 args[*index].3,
                 args[*index].3,
             ),
@@ -366,20 +384,20 @@ impl CondFail {
             CondOffending::VirtualNewline(anchor) => {
                 let last = (*anchor).min(args.len()).saturating_sub(1);
                 (
-                    walk_back_near_token(args, last),
+                    walk_back_near_token(args, last, None),
                     newline_line(args, *anchor),
                     newline_line(args, *anchor),
                 )
             }
             // Unreachable — Eof encodes the `eof' shape above.
             CondOffending::Eof => (
-                walk_back_near_token(args, args.len().saturating_sub(1)),
+                walk_back_near_token(args, args.len().saturating_sub(1), None),
                 last_line,
                 last_line,
             ),
             // Unreachable — BareEof encodes the `bare' shape above.
             CondOffending::BareEof => (
-                walk_back_near_token(args, args.len().saturating_sub(1)),
+                walk_back_near_token(args, args.len().saturating_sub(1), None),
                 last_line,
                 last_line,
             ),
@@ -500,12 +518,195 @@ fn unclosed_regex_paren_line_in_raw(raw: &str, base_line: usize) -> Option<usize
     (depth > 0).then_some(open_line)
 }
 
+/// parse.y:5466-5489 read_token_word under PST_EXTPAT (`==` / `!=` /
+/// `=`): the pattern word is read with the extglob group machinery
+/// armed, so a PATTERN_CHAR (`@ * + ? !`, syntax.h:90-92) directly
+/// before `(` hands the group to parse_matched_pair — when the group
+/// never closes, the scan dies at EOF. Returns the line the group's
+/// `(` sits on, or None when every group closes. The value form (the
+/// word was one unquoted fragment): only backslash escapes state; a
+/// `(` counts only as a PATTERN_CHAR tail at depth 0 — inside a group
+/// every paren nests, exactly as parse_matched_pair counts.
+fn unclosed_pattern_group_line(word: &str, base_line: usize) -> Option<usize> {
+    let mut depth = 0isize;
+    let mut open_line = base_line;
+    let mut line = base_line;
+    let mut escaped = false;
+    let mut prev_op = false;
+    for ch in word.chars() {
+        if ch == '\n' {
+            line += 1;
+        }
+        if escaped {
+            escaped = false;
+            prev_op = false;
+            continue;
+        }
+        match ch {
+            '\\' => {
+                escaped = true;
+                prev_op = false;
+            }
+            '(' => {
+                if depth == 0 {
+                    if prev_op {
+                        open_line = line;
+                        depth = 1;
+                    }
+                } else {
+                    depth += 1;
+                }
+                prev_op = false;
+            }
+            ')' => {
+                if depth > 0 {
+                    depth -= 1;
+                }
+                prev_op = false;
+            }
+            '@' | '*' | '+' | '?' | '!' => prev_op = true,
+            _ => prev_op = false,
+        }
+    }
+    (depth > 0).then_some(open_line)
+}
+
+/// The same group scan over a merged RHS argument's RAW text
+/// (rubash#3229, mirroring `unclosed_regex_paren_line_in_raw`): quote
+/// characters are consumed as nested matched pairs whose contents
+/// never supply a PATTERN_CHAR (parse.y:4040-4051), so a quoted or
+/// escaped operator never opens a group.
+fn unclosed_pattern_group_line_in_raw(raw: &str, base_line: usize) -> Option<usize> {
+    let mut depth = 0isize;
+    let mut open_line = base_line;
+    let mut line = base_line;
+    let mut escaped = false;
+    let mut quote: Option<char> = None;
+    let mut quote_dollar_single = false;
+    let mut prev_op = false;
+    let mut prev = '\0';
+    for ch in raw.chars() {
+        if ch == '\n' {
+            line += 1;
+        }
+        match quote {
+            Some('\'') => {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' && quote_dollar_single {
+                    escaped = true;
+                } else if ch == '\'' {
+                    quote = None;
+                }
+                prev_op = false;
+            }
+            Some(q) => {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == q {
+                    quote = None;
+                }
+                prev_op = false;
+            }
+            None => {
+                if escaped {
+                    escaped = false;
+                    prev_op = false;
+                } else {
+                    match ch {
+                        '\\' => {
+                            escaped = true;
+                            prev_op = false;
+                        }
+                        '\'' | '"' | '`' => {
+                            quote_dollar_single = ch == '\'' && prev == '$';
+                            quote = Some(ch);
+                            prev_op = false;
+                        }
+                        '(' => {
+                            if depth == 0 {
+                                if prev_op {
+                                    open_line = line;
+                                    depth = 1;
+                                }
+                            } else {
+                                depth += 1;
+                            }
+                            prev_op = false;
+                        }
+                        ')' => {
+                            if depth > 0 {
+                                depth -= 1;
+                            }
+                            prev_op = false;
+                        }
+                        '@' | '*' | '+' | '?' | '!' => prev_op = true,
+                        _ => prev_op = false,
+                    }
+                }
+            }
+        }
+        prev = ch;
+    }
+    (depth > 0).then_some(open_line)
+}
+
+/// The character at GNU's reader index immediately after the collected
+/// argument at `index`, when that character never reached the argument
+/// list. A token-initial `#' comments out the rest of the physical line
+/// in rubash's lexer (scanner.rs, on parse.y:3630-3643), so a fragment
+/// glued to the offending token can vanish entirely (`[[ a == (#i)bar ]]'
+/// collects only `a', `==', `('). GNU's cond parser reports the `('
+/// before reading that fragment, and error_token_from_text
+/// (parse.y:6772-6808) derives the near token from the raw line — the
+/// reader index still sits on the `#' — so consult the same raw line
+/// here. Returns that one character when it is not one of
+/// error_token_from_text's break characters (` \n\t;|&`); any
+/// reconstruction mismatch falls back to no character (the args-only
+/// behaviour).
+fn source_char_after_arg(
+    args: &[CondArg],
+    index: usize,
+    text: &str,
+    source_line_offset: usize,
+) -> Option<char> {
+    let line = args.get(index)?.3;
+    // Only this conditional's fragments on the offending argument's own
+    // physical line can anchor the span: walk back over same-line
+    // fragments (a fragment whose leading whitespace carries a newline
+    // starts the line's span).
+    let mut start = index;
+    while start > 0 && args[start - 1].3 == line && !args[start].2.contains('\n') {
+        start -= 1;
+    }
+    let mut span = String::new();
+    for (_, raw, ws, _) in &args[start..=index] {
+        span.push_str(ws);
+        span.push_str(raw);
+    }
+    let span = span.rsplit('\n').next()?;
+    if span.is_empty() {
+        return None;
+    }
+    let line_text = line
+        .checked_sub(source_line_offset)
+        .and_then(|in_text| super::parse_loop::source_line_by_number(text, in_text))?;
+    // Anchor the search at this conditional's own `[[` so an identical
+    // fragment run elsewhere on the line cannot supply the character.
+    let search_from = line_text.rfind("[[")?;
+    let end = search_from + line_text[search_from..].find(span)? + span.len();
+    let c = line_text[end..].chars().next()?;
+    (!matches!(c, ' ' | '\n' | '\t' | ';' | '|' | '&')).then_some(c)
+}
+
 /// error_token_from_text (parse.y:6772-6808): the reported token is the
 /// run of non-break characters (` \n\t;|&` are the breaks) ending at
 /// token_end — glued fragments BEFORE the offending one merge into it
 /// whole, but past the offending token the run extends by at most the
 /// single character at the reader index (see the forward step below).
-fn walk_back_near_token(args: &[CondArg], index: usize) -> String {
+fn walk_back_near_token(args: &[CondArg], index: usize, source_extra: Option<char>) -> String {
     // Raw text (quote/escape forms intact): GNU's error_token_from_text
     // names the source form of the offending word (`syntax error near
     // `\<'', not `<').
@@ -566,13 +767,26 @@ fn walk_back_near_token(args: &[CondArg], index: usize) -> String {
     } else {
         near.push_str(&args[orig].1);
     }
-    if !extra_spent {
+    let mut extra_taken = extra_spent;
+    if !extra_taken {
         if let Some(next) = args.get(orig + 1).filter(|next| next.2.is_empty()) {
             if let Some(c) = next.1.chars().next() {
                 if !matches!(c, ' ' | '\t' | '\n' | ';' | '|' | '&') {
                     near.push(c);
+                    extra_taken = true;
                 }
             }
+        }
+    }
+    if !extra_taken {
+        // No collected fragment carries the character at the reader
+        // index — it may have been swallowed before tokenization (a
+        // glued comment is the known shape). error_token_from_text
+        // reads it from the raw line either way (parse.y:6787-6789);
+        // `source_extra' is that character, precomputed by the caller
+        // from the raw line (see source_char_after_arg).
+        if let Some(c) = source_extra {
+            near.push(c);
         }
     }
     near
@@ -919,6 +1133,12 @@ fn cond_term(cursor: &mut CondCursor) -> Result<(), CondFail> {
                     CondTok::Word => cursor.args[index.unwrap()].0 == "=~",
                     _ => false,
                 };
+                let op_is_pattern = match &tok {
+                    CondTok::Word => {
+                        matches!(cursor.args[index.unwrap()].0.as_str(), "==" | "!=" | "=")
+                    }
+                    _ => false,
+                };
                 let (tok, line, index, anchor) = cursor.next();
                 // parse.y:5443-5460 read_token_word under PST_REGEXP: an
                 // unquoted `(' in the regex word opens parse_matched_pair
@@ -953,6 +1173,40 @@ fn cond_term(cursor: &mut CondCursor) -> Result<(), CondFail> {
                             messages: vec![
                                 (
                                     paren_line,
+                                    "unexpected EOF while looking for matching `)'".to_string(),
+                                ),
+                                (
+                                    eof_line,
+                                    "unexpected argument to conditional binary operator"
+                                        .to_string(),
+                                ),
+                            ],
+                            offending: CondOffending::BareEof,
+                        });
+                    }
+                }
+                // parse.y:5466-5489 read_token_word under PST_EXTPAT:
+                // the pattern word is read with the extglob group
+                // machinery armed, so a PATTERN_CHAR tail's group goes
+                // to parse_matched_pair and its EOF is the same pair of
+                // reports as the PST_REGEXP arm above (the pair EOF at
+                // the group's line, then the dangling-operator report
+                // at the EOF line, PST_NOERROR suppressing the tail) —
+                // rubash#3229: `[[ ab == @(ab ]]` printed the generic
+                // `]]' EOF shape instead.
+                if op_is_pattern && tok == CondTok::Word {
+                    let (value, raw, _, arg_line) = &cursor.args[index.unwrap()];
+                    let group_line = if raw == value {
+                        unclosed_pattern_group_line(value, *arg_line)
+                    } else {
+                        unclosed_pattern_group_line_in_raw(raw, *arg_line)
+                    };
+                    if let Some(group_line) = group_line {
+                        let eof_line = cursor.stream_eof_line;
+                        return Err(CondFail {
+                            messages: vec![
+                                (
+                                    group_line,
                                     "unexpected EOF while looking for matching `)'".to_string(),
                                 ),
                                 (
@@ -1601,6 +1855,8 @@ pub(super) fn conditional_eof_error_command(
         false,
         stream_eof_line(tokens, diagnostic_text, source_line_offset),
         follower,
+        diagnostic_text,
+        source_line_offset,
     )
     .unwrap_or_else(|| {
         let sep = crate::executor::markers::PARSE_ERROR_FIELD_SEP;

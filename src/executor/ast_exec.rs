@@ -57,6 +57,7 @@ impl Executor {
         self.unit_lex_locale
             .replace(Some(crate::locale::locale_name()));
         self.line_lex_locales.borrow_mut().clear();
+        self.line_lex_extquotes.borrow_mut().clear();
 
         // G-01: EXECUTION_LOCK is no longer held for the whole run.
         // EXECUTION_LOCK_DEPTH is now only the run-nesting marker (it
@@ -245,20 +246,11 @@ impl Executor {
     /// (`( :; ) 2>cap.txt > /missing` lands in cap.txt, rubash#940 R1).
     /// Any other IoError (body write errors, rubash#440 closed-output)
     /// keeps the direct stderr write so the reported bytes are identical.
-    fn report_io_error_routed(
+    pub(in crate::executor) fn report_io_error_routed(
         &mut self,
         command: &CommandNode,
         error: &std::io::Error,
     ) -> Result<(), ExecuteError> {
-        let mut stderr = Vec::new();
-        // GNU redir.c:135 redirection_error (internal_error family) honors
-        // gnu_errfmt (rubash#1038).
-        writeln!(
-            &mut stderr,
-            "{}{}",
-            self.error_prefix(),
-            crate::posix_errors::message(error)
-        )?;
         let mut owner = command;
         loop {
             if let Some(inner) = &owner.inverted_command {
@@ -271,6 +263,60 @@ impl Executor {
                 break;
             }
         }
+        // GNU execute_cmd.c:854 do_redirections runs BEFORE the switch
+        // stamps the command's own line — only cm_cond / cm_arith /
+        // cm_arith_for report through executing_line_number's own-line
+        // special case (execute_cmd.c:412-428) — so a compound command's
+        // own redirect-open failure reports the AMBIENT line (the
+        // enclosing frame's pinned line), not the compound's first line
+        // the funnel stamped into CURRENT_LINE (rubash#3183: a multiline
+        // top-level `for' reports its `done' line; inside `( ... )' the
+        // subshell's `)' line; inside a function the definition's body
+        // line). The cm_arith / cm_cond owners excluded from the
+        // ambient class report at their COMPLETION line instead (their
+        // parser stamp lands on the closing token). Try the
+        // specially-composed message first for either class; when
+        // identification fails the original composition below runs
+        // byte-identical, so non-redirect IoErrors and simple commands
+        // are untouched.
+        let report_line = if super::command_text::compound_redirect_error_is_ambient(owner) {
+            self.ambient_line.get().or(owner.end_line).or(owner.line)
+        } else if super::command_text::redirect_error_uses_completion_line(owner) {
+            owner.end_line.or(owner.line)
+        } else {
+            None
+        };
+        if let Some(line) = report_line {
+            let prefix = self.error_prefix_at_line(line);
+            let mut ambient_stderr = Vec::new();
+            writeln!(
+                &mut ambient_stderr,
+                "{}{}",
+                prefix,
+                crate::posix_errors::message(error)
+            )?;
+            if self
+                .failing_open_redirect_index_with_prefix(owner, &ambient_stderr, &prefix)
+                .is_some()
+            {
+                let _ = self.write_redirect_diagnostic_routed_with_prefix(
+                    owner,
+                    &ambient_stderr,
+                    &prefix,
+                );
+                self.exit_code = 1;
+                return Ok(());
+            }
+        }
+        let mut stderr = Vec::new();
+        // GNU redir.c:135 redirection_error (internal_error family) honors
+        // gnu_errfmt (rubash#1038).
+        writeln!(
+            &mut stderr,
+            "{}{}",
+            self.error_prefix(),
+            crate::posix_errors::message(error)
+        )?;
         if self.failing_open_redirect_index(owner, &stderr).is_some() {
             // A routed write that itself fails (closed fd 2) is lost like
             // GNU's builtin_error — never a second diagnostic (rubash#699).
@@ -961,6 +1007,21 @@ impl Executor {
                             .borrow_mut()
                             .entry(line)
                             .or_insert_with(crate::locale::locale_name);
+                        // rubash#2772: same first-reach record for the
+                        // extquote state — the state GNU's parser applies
+                        // to this line's `$'...'` translation verdicts
+                        // (parse.y:4053's extended_quote gate is evaluated
+                        // when the line is READ, and the first command of
+                        // the line fixes it for the whole list).
+                        self.line_lex_extquotes
+                            .borrow_mut()
+                            .entry(line)
+                            .or_insert_with(|| {
+                                crate::builtins::shopt::option_enabled(
+                                    &self.shell_state.env_vars,
+                                    "extquote",
+                                )
+                            });
                     }
                 }
                 // GNU eval.c:181 (reader_loop/parse_and_execute): stdin_redir
@@ -2210,6 +2271,20 @@ impl Executor {
                     // SIGPIPE, reports the failed write with status 1 and
                     // keeps executing the list.
                     self.report_io_error_routed(command, &error)?;
+                    // rubash#2659: GNU execute_cmd.c:854-883 — the
+                    // group's OWN do_redirections failure is an ordinary
+                    // command failure: run_error_trap runs (under
+                    // was_error_trap, independent of errexit) before the
+                    // ERREXIT promotion below. The compound_redirect_failed
+                    // mark certifies the redirect-failure origin (the
+                    // prepare pass / with_command_input_redirects); an
+                    // IoError raised by the body itself carries no mark
+                    // and keeps the body-produced treatment. The fire
+                    // call's own gates keep inverted, and-or and
+                    // suppressed contexts exempt.
+                    if self.compound_redirect_failed.get() {
+                        self.maybe_run_error_trap(command)?;
+                    }
                     // rubash#2359: the group is fully handled here. Falling
                     // through to the simple-pipeline dispatch below
                     // re-dispatched the same group, and the re-dispatch's

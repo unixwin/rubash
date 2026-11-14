@@ -71,9 +71,15 @@ impl Executor {
                 // $0 bottom entry, which a script parent's respawn
                 // child never has in its raw stack; the inherited view
                 // goes beneath.
+                // rubash#3125: pop the bottom entry only when it
+                // really is the recorded seed (same rule as the
+                // dynamic_stack_array_values view).
                 let inherited = self.shell_state.inherited_fork_frames.as_ref();
                 let inherited_main = inherited.is_some_and(|frames| frames.has_main_frame);
-                if !self.has_script_main_frame() && !inherited_main && !stack.is_empty() {
+                if !self.has_script_main_frame()
+                    && !inherited_main
+                    && self.bash_source_bottom_is_seed(&stack)
+                {
                     stack.pop();
                 }
                 if let Some(inherited) = inherited {
@@ -658,6 +664,30 @@ impl Executor {
             // while `'x'` survives as literal text (sq is data in dq context)
             // and evalexp then rejects it as a string operand — `a[' ']`
             // fails "' ': operand expected" where `a[" "]` resolves to 0.
+            // rubash#3085: a `$'...'` span in the raw subscript is ANSI-C
+            // decoded to BARE content before the arith-context pass — GNU
+            // expand_subscript_string -> expand_word_internal's `$'` arm
+            // (ansicstr) — so `${a[$'1+2']}` evaluates `1+2` and
+            // `${a[$'x y']}` errors on the trailing `y`, exactly like the
+            // decoded text was written bare. Without this the span reached
+            // the pass raw and its `$` plus the lexer's \x17 carrier
+            // leaked into the error token. The decoded bytes ride the
+            // span-data carriers (transform_arith_ansi_c_spans, Decode)
+            // so the arith pass cannot re-read them as syntax; runs
+            // before the `$"` decode below, the same order
+            // expand_subscript_string_inner uses (a `$"` produced inside
+            // a `$'...'` span is single-quoted data, and the locale
+            // decoder's sq tracking leaves it alone).
+            let decoded_ansi;
+            let key = if key.contains("$'") {
+                decoded_ansi = crate::executor::subscript_expansion::transform_arith_ansi_c_spans(
+                    key,
+                    crate::executor::subscript_expansion::ArithAnsiSpanMode::Decode,
+                );
+                decoded_ansi.as_str()
+            } else {
+                key
+            };
             // rubash#3023: a `$"..."` span in the raw subscript is a
             // double-quoted span with quote-syntax markup (the lexer cooks
             // it that way, but raw subscript text bypasses the lexer).
@@ -671,11 +701,58 @@ impl Executor {
             } else {
                 key
             };
-            let expanded = self.expand_arithmetic_special_parameters(key);
-            if expanded.len() >= 2 && expanded.starts_with('"') && expanded.ends_with('"') {
-                expanded[1..expanded.len() - 1].to_string()
+            // rubash#2595: the error pre-scan already resolved this
+            // subscript (its evaluating fetch) — reuse the resolved text
+            // instead of re-executing it; the real expansion reads the
+            // element live. Out of scope (pre-scan) a resolution is
+            // PEEKED, not consumed: identical fragments share the
+            // scan's single evaluation, and the entry stays for the
+            // real expansion. In scope (real expansion) it is
+            // CONSUMED: each fragment's fetch takes exactly one entry,
+            // so a later identical fragment re-expands — GNU evaluates
+            // the substitution once per fragment.
+            let in_word_scope = crate::executor::expand_braced_indices::word_ctx_active();
+            let carried = if in_word_scope {
+                crate::executor::expand_braced_indices::scan_carry_take(key)
             } else {
-                expanded
+                crate::executor::expand_braced_indices::scan_carry_peek(key)
+            };
+            match carried {
+                Some(expanded) => expanded,
+                None => {
+                    let writes_before =
+                        crate::executor::expand_braced_indices::PENDING_SUBSCRIPT_WRITES
+                            .with(|w| w.borrow().len());
+                    let expanded = self.expand_arithmetic_special_parameters(key);
+                    let expanded = if expanded.len() >= 2
+                        && expanded.starts_with('"')
+                        && expanded.ends_with('"')
+                    {
+                        expanded[1..expanded.len() - 1].to_string()
+                    } else {
+                        expanded
+                    };
+                    // Only carry a pre-scan resolution the real expansion
+                    // may replay: no deferred writes were queued during
+                    // the resolution (a `$((i++))` inside the subscript
+                    // must be re-evaluated, not replayed from stale
+                    // text), and the raw text is carryable (no `$?`, no
+                    // reference to a simulated bind). A real-expansion
+                    // fetch never stores: its re-expansion belongs to
+                    // this fragment alone.
+                    if !in_word_scope
+                        && crate::executor::expand_braced_indices::PENDING_SUBSCRIPT_WRITES
+                            .with(|w| w.borrow().len())
+                            == writes_before
+                        && crate::executor::expand_braced_indices::scan_carry_may_store(key)
+                    {
+                        crate::executor::expand_braced_indices::scan_carry_store(
+                            key,
+                            expanded.clone(),
+                        );
+                    }
+                    expanded
+                }
             }
         };
         if key.trim() == "*" || key.trim() == "@" {

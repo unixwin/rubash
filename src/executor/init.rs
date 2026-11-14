@@ -25,6 +25,33 @@ fn shell_pwd_display_impl(path: &str) -> String {
 fn shell_pwd_display_impl(path: &str) -> String {
     path.to_string()
 }
+
+/// rubash#3268 (e): the strerror text of a failed birth getcwd, for
+/// the shell-init line — GNU prints strerror(errno) verbatim
+/// (builtins/common.c:611-614 get_working_directory).
+#[cfg(unix)]
+fn getcwd_strerror(error: &std::io::Error) -> String {
+    match error.raw_os_error() {
+        Some(code) => {
+            // SAFETY: strerror returns a static string (or NULL for
+            // an unknown code); it is only read, never freed.
+            let text = unsafe { libc::strerror(code) };
+            if text.is_null() {
+                error.to_string()
+            } else {
+                unsafe { std::ffi::CStr::from_ptr(text) }
+                    .to_string_lossy()
+                    .into_owned()
+            }
+        }
+        None => error.to_string(),
+    }
+}
+
+#[cfg(not(unix))]
+fn getcwd_strerror(error: &std::io::Error) -> String {
+    error.to_string()
+}
 /// Process-global flag: this process is a respawned internal `rubash -c`
 /// child (the __RUBASH_SHELL_PID/__RUBASH_COPROC_CHILD marker was seen at
 /// Executor::new AND its provenance validated — see
@@ -501,15 +528,34 @@ impl Executor {
         for name in imported_functions.keys() {
             mark_env_name(&mut env_vars, EXPORTED_FUNCTIONS, name);
         }
-        // GNU variables.c import refusal (the ShellShock guard) reports
-        // both lines under the shell's invocation name (rubash#1276).
-        if !failed_function_imports.is_empty() {
+        // GNU variables.c import refusals report under the shell's
+        // invocation name, split by failure class (rubash#2728): a
+        // parse failure prints the parser's own diagnostics first
+        // (evalstring.c parse_command failure arm), a parsed-but-not-
+        // a-definition attempt prints only the warning
+        // (evalstring.c:478); both end with variables.c:441's single
+        // error line and leave last_command_exit_value at
+        // EXECUTION_FAILURE (variables.c:440), seeded below.
+        let function_import_failed = !failed_function_imports.is_empty();
+        if function_import_failed {
             let shell_name = std::env::args()
                 .next()
                 .unwrap_or_else(|| "rubash".to_string());
-            for name in &failed_function_imports {
-                eprintln!("{shell_name}: warning: {name}: ignoring function definition attempt");
-                eprintln!("{shell_name}: error importing function definition for `{name}'");
+            for failure in &failed_function_imports {
+                match failure {
+                    ImportedFunctionFailure::Parse { name, diagnostics } => {
+                        for (line, message) in diagnostics {
+                            eprintln!("{shell_name}: {name}: line {line}: {message}");
+                        }
+                        eprintln!("{shell_name}: error importing function definition for `{name}'");
+                    }
+                    ImportedFunctionFailure::IgnoredAttempt { name } => {
+                        eprintln!(
+                            "{shell_name}: warning: {name}: ignoring function definition attempt"
+                        );
+                        eprintln!("{shell_name}: error importing function definition for `{name}'");
+                    }
+                }
             }
         }
         // GNU variables.c:397-446 (initialize_shell_variables,
@@ -750,9 +796,89 @@ impl Executor {
         mirror_env_remove(crate::executor::path::COMPATIBLE_SHELL_PATH_ENV);
         // Birth context: the session cwd field (set in the ShellState
         // literal below) starts at the process cwd.
-        Self::initialize_fresh_shell_env_vars(
+        //
+        // rubash#3268 (e): the birth cwd is captured ONCE, here, and
+        // the single value feeds both this env seed and the ShellState
+        // field below — the two used to call current_dir()
+        // independently and could disagree across a getcwd boundary.
+        // A FAILED capture has no honest string form: GNU keeps no
+        // cwd string state at all (the process inode IS the state;
+        // variables.c:907 set_pwd seeds only $PWD), so the field
+        // takes the empty path — the "unknown" spelling, which never
+        // resolves and never equals a real directory — in place of
+        // the old "/" fabrication, which transplanted the whole
+        // session to the root directory (pwd printed /, children
+        // were stamped into /, relative operands resolved against
+        // /). The inode itself is still known — the process sits in
+        // it — so the literal below opens the birth anchor on "."
+        // and the two-state anchor machinery (stamp_spawn_cwd /
+        // read_session_anchored) serves the session from the inode
+        // until the first successful cd replaces field and anchor.
+        let (birth_cwd, birth_anchor): (PathBuf, Option<crate::shell::state::CwdAnchor>) =
+            match std::env::current_dir() {
+                Ok(path) => (path, None),
+                Err(error) => {
+                    // GNU prints the shell-init line once at startup
+                    // when set_pwd's get_working_directory fails
+                    // (variables.c:907 -> builtins/common.c:611, errstr
+                    // general.c:70). A validated respawn is GNU's forked
+                    // child (execute_cmd.c), which never re-runs startup,
+                    // so it stays silent; the per-command
+                    // job-working-directory repeats GNU prints after
+                    // later commands are its working-directory cache
+                    // bookkeeping and are deliberately not followed.
+                    if !internal_respawn {
+                        eprintln!(
+                            "shell-init: error retrieving current directory: \
+                         getcwd: cannot access parent directories: {}",
+                            getcwd_strerror(&error)
+                        );
+                    }
+                    // The respawned child's fork snapshot is its
+                    // inheritance: GNU's fork child keeps
+                    // the_current_working_directory verbatim, with no
+                    // set_pwd revalidation, so a validated respawn adopts
+                    // the transported PWD as its field when it names an
+                    // absolute path — its spawner stamped it into the
+                    // very inode that string names (stamp_spawn_cwd, or
+                    // the whitelisted spawn's anchor fchdir), and the
+                    // #3275 identity gate keeps the adopted string from
+                    // ever being mistaken for a resolution of it. Any
+                    // other birth leaves the field empty: an ambient PWD
+                    // is never trusted, because variables.c:907's
+                    // same_file gate cannot pass for a directory the
+                    // kernel can no longer stat through its name.
+                    let adopted = if internal_respawn {
+                        env_vars.get("PWD").and_then(|transported| {
+                            let candidate = PathBuf::from(transported);
+                            candidate.is_absolute().then_some(candidate)
+                        })
+                    } else {
+                        None
+                    };
+                    let field = adopted.unwrap_or_default();
+                    // The process sits in the birth inode even though
+                    // its name is gone: open "." once so the anchor can
+                    // name the field from birth. Off Unix the anchor
+                    // holds no directory handle, so none is constructed
+                    // (the spawn stamp there falls back to the
+                    // unstamped spawn, as before).
+                    #[cfg(unix)]
+                    let anchor =
+                        std::fs::File::open(".")
+                            .ok()
+                            .map(|dir| crate::shell::state::CwdAnchor {
+                                path: field.clone(),
+                                dir: std::sync::Arc::new(dir),
+                            });
+                    #[cfg(not(unix))]
+                    let anchor: Option<crate::shell::state::CwdAnchor> = None;
+                    (field, anchor)
+                }
+            };
+        let startup_logical_cwd = Self::initialize_fresh_shell_env_vars(
             &mut env_vars,
-            &std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+            &birth_cwd,
             internal_respawn,
             process_exit,
         );
@@ -1011,8 +1137,26 @@ impl Executor {
                 // G-02: a root session is born in the process cwd (the
                 // host's directory at Executor::new, exactly what GNU's
                 // startup getcwd reports); from here on the field, not
-                // the process, carries the session's cwd.
-                cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+                // the process, carries the session's cwd. The value is
+                // the single birth capture taken above (rubash#3268
+                // (e)): empty when the capture failed — the honest
+                // "unknown" — never a fabricated "/".
+                cwd: birth_cwd,
+                // rubash#3198: the cwd inode anchor is a lazy cache —
+                // it is opened by the first spawn stamp (or cd) that
+                // finds the path resolvable, never at construction.
+                // rubash#3268 (e): the one birth exception — when the
+                // birth capture failed, the process still sits in the
+                // inode it was born in, so the anchor opens "."
+                // eagerly and names the (empty or respawn-adopted)
+                // field; the two-state machinery then serves the
+                // session from that inode. A successful capture keeps
+                // the anchor lazy: no per-birth open is added to the
+                // respawn-hot path.
+                cwd_anchor: std::cell::RefCell::new(birth_anchor),
+                // variables.c:907 set_pwd via initialize_fresh_shell_env_vars
+                // above: the adopted-or-physical logical cwd.
+                logical_cwd: Some(startup_logical_cwd),
                 array_compact_budget: HashMap::new(),
                 // rubash#2130: born unshaped — the ambient carriers
                 // were stripped from the import above (#2259), and
@@ -1064,6 +1208,7 @@ impl Executor {
                 ),
                 bash_lineno_stack: Vec::new(),
                 bash_source_stack: Vec::new(),
+                bash_source_seed: None,
                 exit_unwind_leaked_frames: std::cell::Cell::new(0),
                 inherited_fork_frames: respawn_inherited_frames,
                 respawn_function_line_spans,
@@ -1113,6 +1258,7 @@ impl Executor {
                 // process boundary (rubash#2487).
                 job_control: Cell::new(false),
                 subshell_source_text: None,
+                reader_unit_source: std::cell::RefCell::new(None),
                 in_command_substitution: Cell::new(false),
                 stdin_redir: Cell::new(false),
                 xtrace_indirection_level: Cell::new(0),
@@ -1122,8 +1268,8 @@ impl Executor {
                 last_procsub_pid: None,
                 coproc_names: HashMap::new(),
                 completion_specs: crate::builtins::complete::CompletionRegistry::new(),
-                pcomp_curcs: None,
-                pcomp_curcmd: None,
+                pcomp_curcs: std::rc::Rc::new(std::cell::RefCell::new(None)),
+                pcomp_curcmd: std::rc::Rc::new(std::cell::RefCell::new(None)),
                 line_completion_depth: 0,
                 bind_registry: std::rc::Rc::new(std::cell::RefCell::new(
                     crate::shell::bind_registry::BindRegistry::default(),
@@ -1146,14 +1292,20 @@ impl Executor {
                 procsub_streams: std::cell::RefCell::new(HashMap::new()),
                 procsub_adhoc_carriers: std::cell::RefCell::new(Vec::new()),
                 fork_saved_process_umask: None,
+                fork_saved_process_rlimits: None,
             },
             fd_table: FdTable::new(),
-            exit_code: 0,
+            // variables.c:440: a refused function import leaves
+            // last_command_exit_value = EXECUTION_FAILURE, so the
+            // first command observes `$?` = 1 (rubash#2728).
+            exit_code: if function_import_failed { 1 } else { 0 },
             parse_error_occurred: false,
             signal_discard_pending: false,
             errexit_unwind_pending: false,
             errexit_unwind_armed: false,
+            errexit_suppressed_terminal: Cell::new(false),
             unit_signal_discard: false,
+            unit_expansion_error_discard: false,
             termsig_death_pending: None,
             termsig_death_trap_status: None,
             bash_logout_sourced: false,
@@ -1231,13 +1383,11 @@ impl Executor {
             arithmetic_last_error_expression: std::cell::RefCell::new(String::new()),
             arithmetic_last_eval_input: std::cell::RefCell::new(String::new()),
             assignment_command_name: None,
-            buffer_assignment_diagnostics: false,
             getopts_optind_arith_fatal: false,
             defer_stage_time_report: false,
             pending_stage_time_report: None,
             defer_list_time_report: false,
             pending_list_time_reports: Vec::new(),
-            pending_assignment_diagnostics: Vec::new(),
             parameter_assignment_failure: Cell::new(false),
             parameter_assignment_failure_prev_status: Cell::new(None),
             no_closing_brace_failure: Cell::new(false),
@@ -1264,6 +1414,7 @@ impl Executor {
             command_expansion_failed: Cell::new(false),
             err_trap_fired_at_dispatch: Cell::new(false),
             exit_trap_ran: Cell::new(false),
+            nohist_parse_depth: Cell::new(0),
             err_trap_armed_sample: Cell::new(None),
             evalerror_exec_depth: Cell::new(0),
             reader_command_line: Cell::new(None),
@@ -1281,6 +1432,7 @@ impl Executor {
             exec_replace_shlvl_snapshot: Cell::new(None),
             line_lex_locales: std::cell::RefCell::new(HashMap::new()),
             unit_lex_locale: std::cell::RefCell::new(None),
+            line_lex_extquotes: std::cell::RefCell::new(HashMap::new()),
             ambient_line: Cell::new(None),
             inside_compound_condition: Cell::new(false),
             conditional_invert_pending: Cell::new(false),
@@ -1291,6 +1443,7 @@ impl Executor {
             pipeline_stdin_consumed: Cell::new(None),
             pipeline_stage_fds_pre_wired: std::cell::Cell::new(false),
             stage_dup_channel_payloads: std::cell::RefCell::new(Vec::new()),
+            pipeline_stage_ordered_chunks: std::cell::RefCell::new(None),
             pipeline_final_stage: std::cell::Cell::new(false),
             pipeline_stage_pre_traced: std::cell::Cell::new(false),
             pipeline_stage_restricted_refused: std::cell::Cell::new(false),
@@ -1303,6 +1456,7 @@ impl Executor {
             comsub_error_reported_out: Cell::new(false),
             last_command_substitution_parse_error_backtick: Cell::new(false),
             backtick_body_diagnostic: Cell::new(false),
+            arith_fallback_comsub_body: Cell::new(false),
             parser_error_errexited: Cell::new(false),
             last_command_inverted: Cell::new(false),
             compound_redirect_failed: Cell::new(false),
@@ -1318,12 +1472,15 @@ impl Executor {
             alias_introduced_words: Cell::new(0),
             redirect_target_memo: RefCell::new(HashMap::new()),
             redirect_target_single_glob_match: RefCell::new(std::collections::HashSet::new()),
+            redirect_target_transport_spellings: RefCell::new(HashMap::new()),
+            redirect_target_node_spellings: RefCell::new(HashMap::new()),
             assignment_expansion_memo: RefCell::new(HashMap::new()),
             alias_select_scan_memo: RefCell::new(None),
             fd_var_external_undo: Vec::new(),
             fd_var_deferred_closes: Vec::new(),
             fd_var_pending_closes: Vec::new(),
             fd_var_close_generation: 0,
+            fd_var_apply_snapshot: None,
             fd_var_pending_close_generation: 0,
             fd_var_close_restore: Vec::new(),
             deferred_varredir_closes: Vec::new(),
@@ -1463,22 +1620,48 @@ impl Executor {
         // anti-leak heuristic: their "environment" is a parent
         // session's serialization or a shared host process env.
         process_startup: bool,
-    ) {
+    ) -> String {
         env_vars.remove("BASH_ARGV0");
         env_vars.remove("BASH_EXECUTION_STRING");
-        // GNU Bash derives PWD from the real working directory at startup
-        // (variables.c initialize_shell_variables): it only trusts an
-        // inherited PWD that still matches the current directory, and
-        // otherwise falls back to getcwd(). WSL interop forwards the Windows
-        // session's PWD (e.g. D:/repo/rubash) rather than the WSL shell's
-        // actual CWD; trusting it desynchronized cd/OLDPWD, so `cd $OLDPWD`
-        // (assoc.tests) landed in the wrong directory and subsequent
-        // `./assocN.sub` lookups failed. Always align PWD with the real CWD.
-        // G-02: the "real CWD" is the caller's session cwd field, passed in
-        // (at process birth it is the process cwd; for an in-process fresh
-        // shell it is the parent session's cwd).
-        let pwd = shell_pwd_display(&cwd.to_string_lossy().replace('\\', "/"));
-        env_vars.insert("PWD".to_string(), pwd);
+        // GNU variables.c:907 set_pwd: an imported $PWD that is
+        // absolute and names the current directory (same_file with
+        // ".") is ADOPTED as the shell's logical cwd,
+        // the_current_working_directory, canonicalized by sh_canonpath
+        // — and the $PWD variable keeps its imported spelling in
+        // non-POSIX mode. Only a value naming ANOTHER directory (or no
+        // directory) is replaced: WSL interop forwards the Windows
+        // session's PWD (e.g. D:/repo/rubash) rather than the WSL
+        // shell's actual CWD, and trusting THAT value desynchronized
+        // cd/OLDPWD (`cd $OLDPWD` in assoc.tests landed in the wrong
+        // directory). The unconditional overwrite also discarded a
+        // VALID inherited logical PWD — a child shell born in a
+        // symlinked directory reset its logical cwd to the physical
+        // path (rubash#2799). G-02: the "real CWD" is the caller's
+        // session cwd field, passed in (at process birth it is the
+        // process cwd; for an in-process fresh shell it is the parent
+        // session's cwd). The adopted-or-physical logical cwd is this
+        // function's return value; the caller stores it in
+        // ShellState::logical_cwd.
+        //
+        // rubash#3268 (e): an empty cwd is the unknown birth state
+        // (the birth getcwd failed). GNU does not rebind PWD there:
+        // set_pwd calls get_working_directory("shell-init"), which
+        // fails WITHOUT binding the variable (variables.c:907), so an
+        // imported PWD keeps its stale value and an absent one stays
+        // unbound; no logical value is adopted either — the readers
+        // gate on the empty field itself.
+        let physical_pwd = shell_pwd_display(&cwd.to_string_lossy().replace('\\', "/"));
+        let startup_logical_cwd = if cwd.as_os_str().is_empty() {
+            String::new()
+        } else {
+            match crate::builtins::pwd::adopted_logical_pwd(env_vars, cwd) {
+                Some(logical) => logical,
+                None => {
+                    env_vars.insert("PWD".to_string(), physical_pwd.clone());
+                    physical_pwd
+                }
+            }
+        };
         // Windows-only: suites write $TMPDIR/$HOME into generated scripts
         // unquoted (posix2.tests conftest2: `$TMPDIR/conftest2 "$@"`; exp.tests
         // `${x#$HOME}`), and an inherited Windows backslash path is escape
@@ -1839,5 +2022,6 @@ impl Executor {
         mark_env_name(env_vars, INTEGER_VARS, "UID");
         mark_env_name(env_vars, INTEGER_VARS, "EUID");
         mark_env_name(env_vars, INTEGER_VARS, "PPID");
+        startup_logical_cwd
     }
 }

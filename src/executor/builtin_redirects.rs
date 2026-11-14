@@ -223,6 +223,28 @@ impl Executor {
                     }
                 }
             }
+            // rubash#2635: the probes below are GNU's redir_open (their
+            // side effects stand); the dup2 onto a redirector at/above
+            // the RLIMIT_NOFILE soft limit then fails EBADF naming the
+            // redirector (redir.c r_output_direction /
+            // r_input_direction). This walk serves the no-output
+            // builtins (true / : / false), whose mirror applier below
+            // keeps no fd >= 3 verdict of its own. The null device
+            // needs no probe (its open trivially succeeds in GNU), so
+            // its gate stands alone here.
+            let gate_fd = match redirect.kind {
+                RedirectKind::Input | RedirectKind::ReadWrite => redirect.fd.unwrap_or(0),
+                _ => redirect.fd.unwrap_or(1),
+            };
+            if is_null_device(&target) {
+                if self.redirect_fd_over_limit(gate_fd) {
+                    return Ok(Some(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("{gate_fd}: Bad file descriptor"),
+                    )));
+                }
+                continue;
+            }
             let opened: Result<(), io::Error> = match redirect.kind {
                 RedirectKind::Output
                 | RedirectKind::ClobberOutput
@@ -278,6 +300,15 @@ impl Executor {
             };
             if let Err(error) = opened {
                 return Ok(Some(error));
+            }
+            // rubash#2635: see the gate note above — the probe open
+            // succeeded (GNU's redir_open), so an over-limit
+            // redirector now fails its dup2.
+            if self.redirect_fd_over_limit(gate_fd) {
+                return Ok(Some(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{gate_fd}: Bad file descriptor"),
+                )));
             }
         }
         Ok(None)
@@ -660,9 +691,9 @@ impl Executor {
                 // >file 2>&1) - open WORD for output instead of treating
                 // it as an unusable dup source.
                 let path = target.strip_prefix('&').unwrap_or(&target);
-                self.create_redirect_output(path, redirect.clobber)?;
+                self.create_redirect_output_for(Some(redirect), path, redirect.clobber)?;
             } else {
-                self.create_redirect_output(&target, redirect.clobber)?;
+                self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?;
             }
         }
 
@@ -701,7 +732,7 @@ impl Executor {
                 && !is_null_device(&target)
                 && redirect_target_fd(&target).is_none()
             {
-                self.create_redirect_output(&target, redirect.clobber)?;
+                self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?;
             }
         }
 
@@ -757,7 +788,7 @@ impl Executor {
                     } else if let Some(source_fd) = dup_spelling_source_fd(&target) {
                         self.validate_builtin_dup_source(cmd, index, source_fd)?;
                     } else if !target.starts_with("<(") && !target.starts_with(">(") {
-                        self.create_redirect_output(&target, redirect.clobber)?;
+                        self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?;
                     }
                 }
                 crate::parser::RedirectKind::Append => {

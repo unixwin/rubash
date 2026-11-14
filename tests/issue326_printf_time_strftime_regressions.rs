@@ -21,8 +21,9 @@
 //!
 //! Platform notes: %Z renders the Windows registry StandardName (here
 //! the localized "中国标准时间") where GNU shows the POSIX abbreviation
-//! (CST) — text-only, offsets and every numeric spec are exact; Olson
-//! TZ names (America/New_York) need tzdata files and stay UTC.
+//! (CST) — text-only, offsets and every numeric spec are exact. Olson
+//! TZ names (America/New_York) resolve through the TZif database
+//! since rubash#2705; they stay UTC only where no tzdata exists.
 //!
 //! Expected outputs are byte-verified against WSL GNU Bash 5.3.0
 //! (/usr/local/bin/bash, script-file probes 2026-09-28).

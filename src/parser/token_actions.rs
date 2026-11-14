@@ -237,13 +237,23 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
             if let Some((value, raw, next_i)) =
                 collect_adjacent_process_substitution_word(tokens, *i)
             {
-                push_synthetic_process_substitution_word(&mut state.current_cmd, &value, &raw);
+                push_synthetic_process_substitution_word(
+                    &mut state.current_cmd,
+                    &value,
+                    &raw,
+                    tokens[next_i].end_position,
+                );
                 *i = next_i;
             } else if state.current_cmd.words.is_empty() {
                 if let Some((value, raw, next_i)) =
                     collect_split_array_element_assignment_word(tokens, *i)
                 {
-                    push_synthetic_process_substitution_word(&mut state.current_cmd, &value, &raw);
+                    push_synthetic_process_substitution_word(
+                        &mut state.current_cmd,
+                        &value,
+                        &raw,
+                        tokens[next_i].end_position,
+                    );
                     *i = next_i;
                 } else {
                     push_command_word(&mut state.current_cmd, token);
@@ -273,6 +283,13 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                             rhs
                         );
                         let word_index = state.current_cmd.words.len();
+                        note_time_prefix_first_element(
+                            &mut state.current_cmd,
+                            &token.value,
+                            &token.raw,
+                            &token.kind,
+                            token.end_position,
+                        );
                         state
                             .current_cmd
                             .word_metadata
@@ -426,6 +443,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                         &var_value,
                         &raw_assignment_value,
                         None,
+                        token.extglob_gate,
                     );
                     state.current_cmd.insert_assignment_with_raw(
                         var_name,
@@ -589,8 +607,16 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                             value,
                             raw_assignment_value,
                             Some(word_index),
+                            token.extglob_gate,
                         );
                     }
+                    note_time_prefix_first_element(
+                        &mut state.current_cmd,
+                        &token.value,
+                        &token.raw,
+                        &token.kind,
+                        token.end_position,
+                    );
                     state
                         .current_cmd
                         .word_metadata
@@ -696,6 +722,13 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     if redirect.fd_var.is_none() && redirect.fd.unwrap_or(0) == 0 {
                         state.current_cmd.redirect_in = Some(Box::new(redirect));
                     }
+                    // rubash#3053: procsub target correction — the
+                    // target token is the closing `)` (see
+                    // redirect_assign.rs for the model).
+                    correct_first_word_end_for_redirect_target(
+                        &mut state.current_cmd,
+                        &tokens[next_i],
+                    );
                     *i = next_i;
                 } else if let Some((mut process_substitution, next_i)) =
                     process_substitution_word_target(tokens, *i)
@@ -740,18 +773,47 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                             &mut state.current_cmd,
                             &value,
                             &raw,
+                            tokens[joined_i].end_position,
                         );
                         *i = joined_i;
                     } else {
-                        process_substitution.word_index = Some(state.current_cmd.words.len());
-                        let target = process_substitution.target.clone();
+                        // rubash#2802: every word intake pairs the word
+                        // with its metadata (push_command_word, the
+                        // compound-operand arm, the replace arm above) —
+                        // the words/word_metadata index alignment is the
+                        // invariant index-based consumers read by (the
+                        // respawn serializer in command_text.rs). This
+                        // arm pushed the word alone, so the serializer
+                        // matched no metadata for the procsub word (nor
+                        // for any word after it) and single-quoted it
+                        // as literal data: async/coproc respawns ran
+                        // `cat '<(echo via)'`. Assemble the word the
+                        // replace arm's way — span plus glued suffix,
+                        // one word (GNU parse.y:5305 read_token_word
+                        // builds the word in one pass) — with its
+                        // metadata, and consume the suffix tokens.
+                        let word_index = state.current_cmd.words.len();
+                        process_substitution.word_index = Some(word_index);
+                        let value = format!("{}{}", process_substitution.target, suffix);
+                        let raw = format!("{}{}", process_substitution.target, suffix_raw);
                         state
                             .current_cmd
                             .process_substitutions
                             .push(process_substitution);
-                        state.current_cmd.words.push(target);
+                        note_time_prefix_first_element(
+                            &mut state.current_cmd,
+                            &value,
+                            &raw,
+                            &TokenKind::Word,
+                            tokens[joined_i].end_position,
+                        );
+                        state
+                            .current_cmd
+                            .word_metadata
+                            .push(build_word_metadata(word_index, &value, &raw));
+                        state.current_cmd.words.push(value);
                         state.current_cmd.word_kinds.push(TokenKind::Word);
-                        *i = next_i;
+                        *i = joined_i;
                     }
                 } else if *i + 1 < tokens.len() && is_redirect_target_token(&tokens[*i + 1]) {
                     let (dup_value, dup_raw) =
@@ -834,6 +896,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     redirect_node(&token.value, Some(2), &target, false, token.value == "2>|");
                 state.current_cmd.redirects.push(redirect.clone());
                 state.current_cmd.redirect_err = Some(Box::new(redirect));
+                correct_first_word_end_for_redirect_target(&mut state.current_cmd, &tokens[next_i]);
                 *i = next_i;
             } else if let Some(next_i) =
                 assign_redirect_err_target(tokens, *i, &mut state.current_cmd)
@@ -864,6 +927,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                 let redirect = redirect_node(&token.value, Some(2), &target, true, false);
                 state.current_cmd.redirects.push(redirect.clone());
                 state.current_cmd.redirect_err_append = Some(Box::new(redirect));
+                correct_first_word_end_for_redirect_target(&mut state.current_cmd, &tokens[next_i]);
                 *i = next_i;
             } else if let Some(next_i) =
                 assign_redirect_err_append_target(tokens, *i, &mut state.current_cmd)
@@ -950,6 +1014,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     process_substitution,
                     redirect_fd_var_prefix(tokens, *i),
                 );
+                correct_first_word_end_for_redirect_target(&mut state.current_cmd, &tokens[next_i]);
                 *i = next_i;
             } else if *i + 1 < tokens.len() && is_redirect_target_token(&tokens[*i + 1]) {
                 // GNU parse.y:664 `redirection: LESS_LESS_LESS WORD` — the
@@ -1501,8 +1566,19 @@ fn adjacent_word_token(token: &Token) -> bool {
     )
 }
 
-fn push_synthetic_process_substitution_word(cmd: &mut CommandNode, value: &str, raw: &str) {
-    let token = Token::new_with_raw(TokenKind::Word, value, raw, 0);
+fn push_synthetic_process_substitution_word(
+    cmd: &mut CommandNode,
+    value: &str,
+    raw: &str,
+    end_line: usize,
+) {
+    let mut token = Token::new_with_raw(TokenKind::Word, value, raw, 0);
+    // rubash#3053: the assembled word's end line is its last
+    // fragment's — push_command_word's first-element accounting
+    // (including the post-`time`-prefix candidate) reads it from
+    // the token, and the synthetic token has no source position of
+    // its own.
+    token.end_position = end_line;
     push_command_word(cmd, &token);
     if let Some(metadata) = cmd.word_metadata.last() {
         cmd.process_substitutions
@@ -1538,7 +1614,7 @@ fn process_substitution_is_adjacent_to_previous_word(tokens: &[Token], index: us
     adjacent_word_token(previous) && tokens[index].column == previous.column + previous.raw.len()
 }
 
-fn collect_process_substitution_suffix(
+pub(super) fn collect_process_substitution_suffix(
     tokens: &[Token],
     close_index: usize,
 ) -> (String, String, usize) {
@@ -1683,6 +1759,11 @@ fn reject_compound_assignment_position(
 
 /// Name-side validator for atomic compound assignments: optional
 /// `name[subscript]` head, then identifier rules (GNU arrayfunc.c).
+/// GNU general.c:288 valid_identifier: the FIRST character must be a
+/// legal starter (ASCII letter or `_`) — a digit-leading head such as
+/// `9bad` is not a compound-assignment LHS (rubash#3186), so the word
+/// stays plain and the builtin reports InvalidId on the flat word
+/// instead of the compound arm leaking markers into the diagnostic.
 fn valid_compound_assignment_lhs(lhs: &str) -> bool {
     // GNU general.c:519 assignment(): `name+=` is an assignment word (`+` is
     // valid only immediately before `=`), so `name+=(list)` opens a compound
@@ -1703,6 +1784,7 @@ fn valid_compound_assignment_lhs(lhs: &str) -> bool {
     };
     let bytes = head.as_bytes();
     !bytes.is_empty()
+        && (bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
         && bytes
             .iter()
             .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
@@ -1718,12 +1800,55 @@ fn valid_compound_assignment_lhs(lhs: &str) -> bool {
 /// are consumed as part of a WORD token, so control operators inside
 /// them are NOT syntax errors at the compound-assignment level. This
 /// scanner must skip those constructs the same way.
-fn find_unquoted_ctrl_op(value: &str, extglob: bool) -> Option<char> {
+/// The token text GNU's yyerror names when read_token (parse.y
+/// read_token's operator table) produces an operator at byte `i` of a
+/// compound-assignment element: the FULL operator (`<>' / `>>' / `;&' /
+/// `<<<' ...), never its first byte alone. A `<`/`>` immediately after
+/// a word consisting solely of digits is read as the IO_NUMBER token
+/// first (parse.y read_token's io_number production), so the digits are
+/// the named token (`a=( 2> )` names `2'). `word_begin` is the byte
+/// index where the current element word started.
+fn ctrl_op_token_text(bytes: &[u8], i: usize, word_begin: usize) -> String {
+    let c = bytes[i];
+    if (c == b'<' || c == b'>')
+        && i > word_begin
+        && bytes[word_begin..i]
+            .iter()
+            .all(|byte| byte.is_ascii_digit())
+    {
+        return String::from_utf8_lossy(&bytes[word_begin..i]).into_owned();
+    }
+    let rest = &bytes[i..];
+    let candidates: &[&[u8]] = match c {
+        b'<' => &[b"<<-", b"<<<", b"<<", b"<&", b"<>"],
+        b'>' => &[b">>", b">&", b">|"],
+        b'&' => &[b"&>>", b"&>", b"&&"],
+        b'|' => &[b"||", b"|&"],
+        b';' => &[b";;&", b";;", b";&"],
+        _ => &[],
+    };
+    for candidate in candidates {
+        if rest.starts_with(candidate) {
+            return String::from_utf8_lossy(candidate).into_owned();
+        }
+    }
+    // `c` is one of the ASCII operator bytes matched above (or the
+    // caller's `(`), so the one-byte slice is always valid UTF-8.
+    std::str::from_utf8(&bytes[i..i + 1])
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn find_unquoted_ctrl_op(value: &str, extglob: bool) -> Option<String> {
     let bytes = value.as_bytes();
     let mut i = 0;
     if i < bytes.len() && bytes[i] == b'(' {
         i += 1;
     }
+    // Byte index where the current element word began (after the last
+    // blank or the opening paren) — the io_number look-back in
+    // ctrl_op_token_text reads the digit run from here.
+    let mut word_begin = i;
     let mut in_single = false;
     let mut in_double = false;
     let mut escaped = false;
@@ -1832,7 +1957,7 @@ fn find_unquoted_ctrl_op(value: &str, extglob: bool) -> Option<char> {
                 continue;
             }
             b'&' | b'|' | b';' | b'<' | b'>' if !in_single && !in_double => {
-                return Some(c as char);
+                return Some(ctrl_op_token_text(bytes, i, word_begin));
             }
             // GNU parse.y:7104-7160 parse_compound_assignment's element
             // loop accepts only WORD and ASSIGNMENT_WORD tokens: a `('
@@ -1868,11 +1993,14 @@ fn find_unquoted_ctrl_op(value: &str, extglob: bool) -> Option<char> {
                     word_start = false;
                     continue;
                 }
-                return Some('(');
+                return Some("(".to_string());
             }
             _ => {}
         }
         word_start = matches!(c, b' ' | b'\t' | b'\n' | b'\r');
+        if word_start {
+            word_begin = i + 1;
+        }
         if !word_start {
             prev_word_byte = c;
         } else {
@@ -1948,12 +2076,41 @@ fn skip_dollar_paren(bytes: &[u8], mut i: usize) -> usize {
     i
 }
 
+/// Index just past the closing backquote of the backquote command
+/// substitution whose opening backquote sits at `tick` in `bytes` —
+/// or None when the span never closes. Byte twin of the lexer's
+/// `skip_backtick_corrected` (lexer/skip.rs), same rules: a
+/// backslash carries the next byte, the first other backquote
+/// closes. Used by skip_procsub_paren so a backquote group is
+/// skipped whole (rubash#3354).
+fn skip_backtick_bytes(bytes: &[u8], mut i: usize) -> Option<usize> {
+    i += 1;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'`' {
+            return Some(i + 1);
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Skip from just after the `(` of a `<(`/`>(` process substitution to the
 /// index just past the matching `)`. Quote/escape/nesting rules mirror
 /// GNU parse_matched_pair (parse.y:3877) as invoked by the read_token_word
 /// shellexp arm (parse.y:5490-5524). Returns `None` when the group never
 /// closes (the caller then treats the `<`/`>` as an operator, matching the
 /// yyerror a truncated word produces).
+///
+/// A backquote group is skipped whole (skip_backtick_bytes, the byte
+/// twin of the lexer's skip_backtick_corrected): its interior — an
+/// unmatched `(` or a quote that would corrupt this walker's quote
+/// state — belongs to the inner command text, never to this span's
+/// paren depth (rubash#3354; the char twin is embedded_procsub_close
+/// in parser/process_substitution.rs).
 fn skip_procsub_paren(bytes: &[u8], mut i: usize) -> Option<usize> {
     let mut depth = 1i32;
     let mut in_single = false;
@@ -1970,6 +2127,16 @@ fn skip_procsub_paren(bytes: &[u8], mut i: usize) -> Option<usize> {
             b'\\' if !in_single => escaped = true,
             b'\'' if !in_double => in_single = !in_single,
             b'"' if !in_single => in_double = !in_double,
+            // A backquote group is a unit at this span's level (see the
+            // fn doc): skip it whole so its interior parens/quotes
+            // never touch this walker's depth or quote state. The
+            // gate is `!in_single` only — a backquote group stays
+            // active inside double quotes. An unclosed group falls
+            // through to the plain walk below.
+            b'`' if !in_single && let Some(end) = skip_backtick_bytes(bytes, i) => {
+                i = end;
+                continue;
+            }
             b'$' if !in_single
                 && !in_double
                 && i + 1 < bytes.len()

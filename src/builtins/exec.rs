@@ -3,7 +3,7 @@
 //! GNU Bash source ownership:
 //! - builtins/exec.def (`exec_builtin`)
 
-use super::diagnostic::diagnostic_prefix;
+use super::diagnostic::{diagnostic_prefix, sys_error_prefix};
 use std::io::{self, Write};
 use std::process::{Command, Stdio};
 
@@ -155,7 +155,7 @@ pub(crate) fn replace_process_image(
     let index = parse_options(
         args,
         &mut io::sink(),
-        "rubash: ",
+        &diagnostic_prefix(env_vars),
         &mut clean_env,
         &mut login,
         &mut argv0,
@@ -217,19 +217,16 @@ pub(crate) fn replace_process_image(
     if error.raw_os_error() == Some(libc::ENOEXEC) {
         return None;
     }
-    let status = if error.raw_os_error() == Some(libc::ENOENT) {
-        EX_NOTFOUND
-    } else {
-        EX_NOEXEC
-    };
     let mut stderr = io::stderr().lock();
-    let _ = writeln!(
-        stderr,
-        "{}exec: {}: {}",
-        diagnostic_prefix(env_vars),
-        program.display(),
-        error
-    );
+    // The failed execve is reported exactly as the simulation reports
+    // it (rubash#3148): the shared shell_execve classification, not
+    // the bare `(errno == ENOENT) ? 127 : 126` switch with the raw
+    // error text — the doc contract above (the caller's
+    // finish_exec_replacement applies the returned status unchanged)
+    // already promises GNU's failed_exec statuses. A failed stderr
+    // write cannot change the status (GNU ignores the fprintf result).
+    let status = report_exec_spawn_failure(&program, command, env_vars, cwd, &error, &mut stderr)
+        .unwrap_or(EX_NOEXEC);
     Some(Ok(status))
 }
 
@@ -245,7 +242,7 @@ where
     W: Write,
     E: Write,
 {
-    execute_impl(args, env_vars, cwd, stdout, stderr, None, child_stdin)
+    execute_impl(args, env_vars, cwd, stdout, stderr, None, child_stdin, &[])
 }
 
 pub(crate) fn execute_with_child_stdio<W, E>(
@@ -270,6 +267,43 @@ where
         stderr,
         Some((child_stdout, child_stderr)),
         child_stdin,
+        &[],
+    )
+}
+
+/// execute_with_child_stdio plus genuinely closed child std fds
+/// (rubash#2803): a `>&-` binding is a CLOSED descriptor in GNU —
+/// the child's writes fail EBADF and the child reports them itself
+/// (redir.c r_close_this). Stdio::null() would let the writes
+/// silently succeed, so the spawner inherits the descriptor and
+/// closes it in the child before execve, the same realization the
+/// external-command spawn uses for closed slots
+/// (external_redirects.rs register_pre_exec_close).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_with_child_stdio_closing<W, E>(
+    args: &[String],
+    env_vars: &crate::shell::var_table::VarTable,
+    cwd: &std::path::Path,
+    stdout: &mut W,
+    stderr: &mut E,
+    child_stdout: Stdio,
+    child_stderr: Stdio,
+    child_stdin: Stdio,
+    close_fds: &[u32],
+) -> io::Result<i32>
+where
+    W: Write,
+    E: Write,
+{
+    execute_impl(
+        args,
+        env_vars,
+        cwd,
+        stdout,
+        stderr,
+        Some((child_stdout, child_stderr)),
+        child_stdin,
+        close_fds,
     )
 }
 
@@ -281,6 +315,7 @@ fn execute_impl<W, E>(
     stderr: &mut E,
     child_stdio: Option<(Stdio, Stdio)>,
     child_stdin: Stdio,
+    close_fds: &[u32],
 ) -> io::Result<i32>
 where
     W: Write,
@@ -352,6 +387,32 @@ where
             let folded_command =
                 crate::executor::substitution_metadata::fold_literal_char_escapes(command);
             let command = folded_command.as_str();
+            // GNU builtins/exec.def:163-166: whatever the spelling, an
+            // operand that IS a directory as written is classified before
+            // the generic not-found report — file_isdir(args[0]) probes
+            // the operand itself, so `exec .` and `exec somedir` (no
+            // slash; the PATH walk discarded the directory per findcmd.c
+            // FS_NODIRS) report "cannot execute: Is a directory"
+            // (EX_NOEXEC), not "not found" (rubash#2661). The probe
+            // anchors at the session cwd (G-02), like the slash branch
+            // below.
+            let as_written = crate::executor::path::shell_path_to_windows(command, env_vars);
+            let as_written = if as_written.is_absolute() {
+                as_written
+            } else {
+                cwd.join(&as_written)
+            };
+            if std::fs::metadata(&as_written)
+                .map(|metadata| metadata.is_dir())
+                .unwrap_or(false)
+            {
+                writeln!(
+                    stderr,
+                    "{}exec: {command}: cannot execute: Is a directory",
+                    diagnostic_prefix(env_vars)
+                )?;
+                return Ok(EX_NOEXEC);
+            }
             // GNU builtins/exec.def:151: a slash-containing operand bypasses
             // search_for_command and is handed to shell_execve directly, so
             // the diagnostic is the execve errno text (exec.def:231 ->
@@ -366,9 +427,13 @@ where
                 } else {
                     cwd.join(&candidate)
                 };
-                let metadata = std::fs::metadata(&candidate)
-                    .or_else(|_| std::fs::metadata(cwd.join(command)))
-                    .ok();
+                let (metadata, probe_error) = match std::fs::metadata(&candidate) {
+                    Ok(metadata) => (Some(metadata), None),
+                    Err(_) => match std::fs::metadata(cwd.join(command)) {
+                        Ok(metadata) => (Some(metadata), None),
+                        Err(error) => (None, Some(error)),
+                    },
+                };
                 match metadata {
                     None => {
                         // exec.def:166-168 full_pathname: the failing path is
@@ -383,6 +448,26 @@ where
                             format!("{}/{}", cwd.to_string_lossy().replace('\\', "/"), command)
                                 .replace("/./", "/")
                         };
+                        // A regular file as a path component fails the
+                        // probe ENOTDIR; GNU's file_error classification
+                        // (execute_cmd.c:6126-6159) reports that errno
+                        // with EX_NOEXEC, not the ENOENT wording
+                        // (rubash#3182). The kind comparison is the
+                        // portable form of the errno test: std maps
+                        // ENOTDIR to NotADirectory on unix, and the
+                        // shared code must not name the unix-only libc
+                        // crate (Windows E0433).
+                        if probe_error
+                            .is_some_and(|error| error.kind() == io::ErrorKind::NotADirectory)
+                        {
+                            writeln!(
+                                stderr,
+                                "{}{}: Not a directory",
+                                diagnostic_prefix(env_vars),
+                                full
+                            )?;
+                            return Ok(EX_NOEXEC);
+                        }
                         writeln!(
                             stderr,
                             "{}{}: No such file or directory",
@@ -430,6 +515,7 @@ where
                 child_stderr,
                 child_stdin,
                 stderr,
+                close_fds,
             ),
             None => run_external_exec(
                 &program,
@@ -447,6 +533,19 @@ where
     }
 
     Ok(EXECUTION_SUCCESS)
+}
+
+/// The option-parse prolog for this file's two shape-only probes
+/// ([`status_is_option_parse_failure`] and [`command_operand_index`]):
+/// their diagnostics are written to `io::sink`, so the string is
+/// never observable — but it still derives from the single argv[0]
+/// carrier chain (`builtins::prefix`, rubash#3256) instead of
+/// restating a local literal, so this file carries no second voice
+/// if a probe's sink ever becomes a real stream. The getter reads
+/// the process environment, where the executor mirrors the current
+/// file/line carriers — the same getter the `kill` stdio face uses.
+fn sink_option_prefix() -> String {
+    crate::builtins::prefix::diagnostic_prefix(&|key: &str| std::env::var(key).ok())
 }
 
 /// Whether `status` — the return of an execute_with_io /
@@ -470,7 +569,7 @@ pub(crate) fn status_is_option_parse_failure(args: &[String], status: i32) -> bo
         parse_options(
             args,
             &mut io::sink(),
-            "rubash: ",
+            &sink_option_prefix(),
             &mut clean_env,
             &mut login,
             &mut argv0,
@@ -488,7 +587,7 @@ pub(crate) fn command_operand_index(args: &[String]) -> Option<usize> {
     parse_options(
         args,
         &mut io::sink(),
-        "rubash: ",
+        &sink_option_prefix(),
         &mut clean_env,
         &mut login,
         &mut argv0,
@@ -564,6 +663,83 @@ where
     Ok(Some(index))
 }
 
+/// The reported name for a failed spawn on the exec face: GNU
+/// builtins/exec.def:172 hands shell_execve `full_pathname (command)`
+/// (general.c:931-943) — the typed word for a slash-bearing name
+/// (findcmd.c:385-387 savestring), the PATH walk's as-written join
+/// otherwise — made absolute against the cwd with dot components
+/// removed (sh_makepath, MP_DOCWD|MP_RMDOT). The resolved `program`
+/// cannot be re-rendered into this form: the session-cwd anchor that
+/// produced it keeps the join's `/./` residue (rubash#3148).
+fn exec_report_name(
+    command_name: &str,
+    program: &std::path::Path,
+    env_vars: &crate::shell::var_table::VarTable,
+    cwd: &std::path::Path,
+) -> String {
+    // Folded like every other probe and diagnostic in this file
+    // (rubash#3076): the recorded join names the raw file.
+    let folded = crate::executor::substitution_metadata::fold_literal_char_escapes(command_name);
+    let construction = if crate::executor::path::has_path_separator(&folded) {
+        folded
+    } else {
+        crate::executor::path::find_user_command_as_written(&folded, env_vars)
+            .unwrap_or_else(|| program.display().to_string())
+    };
+    let construction = construction.replace('\\', "/");
+    // full_pathname: an absolute construction is returned verbatim
+    // (general.c:937-938).
+    if construction.starts_with('/') || construction.as_bytes().get(1) == Some(&b':') {
+        return construction;
+    }
+    let cwd = cwd.to_string_lossy().replace('\\', "/");
+    let joined = format!("{cwd}/{construction}");
+    // sh_makepath MP_RMDOT canonicalizes the joined form textually:
+    // "." components drop, ".." consumes the preceding component,
+    // empty components collapse.
+    let root_prefix = if joined.starts_with('/') { "/" } else { "" };
+    let mut parts: Vec<&str> = Vec::new();
+    for part in joined.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            _ => parts.push(part),
+        }
+    }
+    format!("{root_prefix}{}", parts.join("/"))
+}
+
+/// GNU shell_execve (execute_cmd.c:6126-6198) reporting for a failed
+/// spawn on the exec builtin face, shared by every spawn site in this
+/// file (the process-replacement attempt and both simulation arms):
+/// the classification is the executor's `spawn_error_diagnostic`
+/// (rubash#2755) — the bad-interpreter refusal takes the sys_error
+/// prolog (error.c:275: no line segment, and no `exec:` infix; this
+/// is not a builtin_error report), the sibling classifications keep
+/// the line segment, and the reported name is the exec.def:172
+/// full_pathname form. Returns the exit status.
+fn report_exec_spawn_failure<E: Write>(
+    program: &std::path::Path,
+    command_name: &str,
+    env_vars: &crate::shell::var_table::VarTable,
+    cwd: &std::path::Path,
+    error: &io::Error,
+    stderr: &mut E,
+) -> io::Result<i32> {
+    let (message, status, sys_error) =
+        crate::executor::spawn_error_diagnostic(&program.to_path_buf(), cwd, error);
+    let prefix = if sys_error {
+        sys_error_prefix(env_vars)
+    } else {
+        diagnostic_prefix(env_vars)
+    };
+    let name = exec_report_name(command_name, program, env_vars, cwd);
+    writeln!(stderr, "{prefix}{name}: {message}")?;
+    Ok(status)
+}
+
 fn run_external_exec<W, E>(
     program: &std::path::Path,
     command_name: &str,
@@ -615,14 +791,7 @@ where
             ))
         }
         Err(error) => {
-            writeln!(
-                stderr,
-                "{}exec: {}: {}",
-                diagnostic_prefix(env_vars),
-                program.display(),
-                error
-            )?;
-            Ok(126)
+            report_exec_spawn_failure(program, command_name, env_vars, cwd, &error, stderr)
         }
     }
 }
@@ -639,6 +808,7 @@ fn run_external_exec_with_stdio<E>(
     child_stderr: Stdio,
     child_stdin: Stdio,
     stderr: &mut E,
+    close_fds: &[u32],
 ) -> io::Result<i32>
 where
     E: Write,
@@ -653,6 +823,24 @@ where
         cwd,
     );
     process.stdout(child_stdout).stderr(child_stderr);
+    // rubash#2803: genuinely closed std fds (see
+    // execute_with_child_stdio_closing): std arranges the inherited
+    // descriptors first, then the pre_exec closures run, so the
+    // close lands on the arranged slot before execve.
+    #[cfg(unix)]
+    if !close_fds.is_empty() {
+        let close_fds = close_fds.to_vec();
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            process.pre_exec(move || {
+                for fd in &close_fds {
+                    libc::close(*fd as std::os::unix::io::RawFd);
+                }
+                Ok(())
+            });
+        }
+    }
+    let _ = close_fds;
     // Explicit for symmetry with run_external_exec: `.status()` would
     // inherit by default, but every spawn site of the exec builtin must
     // state its child-stdin source (fd-table endpoint 0 resolution),
@@ -672,14 +860,7 @@ where
             Ok(crate::executor::wait_status::process_exit_status(&status))
         }
         Err(error) => {
-            writeln!(
-                stderr,
-                "{}exec: {}: {}",
-                diagnostic_prefix(env_vars),
-                program.display(),
-                error
-            )?;
-            Ok(126)
+            report_exec_spawn_failure(program, command_name, env_vars, cwd, &error, stderr)
         }
     }
 }

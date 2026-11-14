@@ -4,6 +4,20 @@ use crate::executor::markers::{PARSE_ERROR_FIELD_SEP, STORAGE_WORD_PREFIX};
 impl Executor {
     /// Execute an AST
     pub fn execute_command(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
+        // rubash#2652: a command dispatched outside suppression owns
+        // the terminal status from here — clear any stale
+        // suppressed-terminal record from an earlier command in the
+        // unit, so it cannot exempt this command's own failure (the
+        // `false || false` shape: the first `false` records the
+        // exemption, the last `false` must clear it before its own
+        // gate fires). A command dispatched under suppression keeps
+        // the record: its `with_errexit_suppressed` wrapper
+        // re-records it from the outcome. A pass-through compound
+        // clears here too, then re-records inside its body if its
+        // terminal failure was suppressed.
+        if self.suppress_errexit == 0 {
+            self.errexit_suppressed_terminal.set(false);
+        }
         // rubash#545 (cell 2): the command owns every input-procsub fd its
         // words materialize — expansion registers them into the scoped vec
         // and the close below runs at the command's very end, giving the
@@ -18,6 +32,13 @@ impl Executor {
         let result = self.execute_command_with_procsub_scope(cmd, procsub_fd_base);
         self.close_command_scoped_procsub_input_fds_from(procsub_fd_base);
         self.drain_deferred_varredir_closes(varredir_close_base);
+        // rubash#3107: the dynamic associative variables' owner tables
+        // (aliases, hashed_filenames) mutate without a mirror write, so
+        // a materialized typed cell goes stale at this boundary;
+        // reconcile it from the owner before the verifier below (and
+        // before any later read trusts the cell). See
+        // Executor::sync_dynamic_assoc_cells.
+        self.sync_dynamic_assoc_cells();
         // Debug-only systemic regression net for the typed-cell ↔ mirror
         // invariant: after every command boundary every fresh (undirty)
         // structured array cell must still equal its mirror projection.
@@ -46,6 +67,10 @@ impl Executor {
         // re-executed node (loop body, function body) expands fresh.
         self.redirect_target_memo.borrow_mut().clear();
         self.redirect_target_single_glob_match.borrow_mut().clear();
+        self.redirect_target_transport_spellings
+            .borrow_mut()
+            .clear();
+        self.redirect_target_node_spellings.borrow_mut().clear();
         self.assignment_expansion_memo.borrow_mut().clear();
         // Commit any deferred arithmetic writes queued by `&self` redirect
         // target expansion during the previous command (GNU redirection_expand
@@ -183,6 +208,52 @@ impl Executor {
                 }
                 return Err(self.errexit_exit(self.exit_code));
             }
+            // rubash#2659: GNU execute_cmd.c:854-883 — a compound
+            // command's OWN do_redirections failure is an ordinary
+            // command failure: run_error_trap under was_error_trap,
+            // then the ERREXIT jump (the simple-command twin sits at
+            // execute_cmd.c:993-1010). The compound wrappers propagate
+            // that failure as an IoError with the
+            // compound_redirect_failed mark set (prepare pass /
+            // with_command_input_redirects); unconverted, it bubbles
+            // to the ast_exec loop, whose IoError arm only reports it
+            // and whose Ok-path adjudication treats these compounds'
+            // status as body-produced — no ERR trap, no errexit.
+            // Convert it here, at the funnel that dispatched the
+            // compound: report the diagnostic once, record status 1,
+            // fire the ERR trap, and take the errexit exit when
+            // errexit is active. The fire call's own gates keep
+            // inverted, and-or and suppressed contexts exempt, and
+            // its fired-at-dispatch record keeps a caller's own look
+            // (the loop's, for the pass-through forms) from firing a
+            // second time. Unmarked IoErrors are body-stage failures
+            // and keep the passthrough below.
+            // rubash#1611 + PR #3269 review R1: inside a timed
+            // dispatch this conversion must NOT intercept at all.
+            // err_trap_fired_at_dispatch means "the ERR trap already
+            // fired at dispatch" (the #2117 suppression gate in
+            // maybe_run_error_trap) — setting it without firing, and
+            // converting the failure into an Ok completion, blocks
+            // the ast_exec time branch's own adjudication look, so
+            // the timed compound's redirect failure lost its ERR
+            // trap entirely (the timed branch of this conversion did
+            // exactly that when first written). Let the marked
+            // IoError propagate in its unconverted shape instead:
+            // the time branch reports it once (report_io_error_routed
+            // records status 1) and adjudicates ERR / errexit
+            // against the final status, exactly as the pre-#2659
+            // base did.
+            if self.timed_dispatch_depth.get() == 0 && self.compound_redirect_failed.get() {
+                if let Err(ExecuteError::IoError(error)) = &result {
+                    self.report_io_error_routed(cmd, error)?;
+                    self.exit_code = 1;
+                    self.maybe_run_error_trap(cmd)?;
+                    if self.errexit_enabled() && self.errexit_is_active() {
+                        return Err(self.errexit_exit(1));
+                    }
+                    return Ok(());
+                }
+            }
             return result;
         }
 
@@ -279,6 +350,7 @@ impl Executor {
                 {
                     self.shell_state.arithmetic_expansion_error.set(false);
                     if self.expansion_error_is_interactive_discard() {
+                        self.note_unit_expansion_error_discard();
                         self.exit_code = 1;
                         return Err(ExecuteError::ExpansionFailure(1));
                     }
@@ -295,6 +367,7 @@ impl Executor {
         if self.shell_state.arithmetic_nounset_error.replace(false) {
             self.shell_state.arithmetic_expansion_error.set(false);
             if self.expansion_error_is_interactive_discard() {
+                self.note_unit_expansion_error_discard();
                 self.exit_code = 1;
                 return Err(ExecuteError::ExpansionFailure(1));
             }
@@ -507,8 +580,9 @@ impl Executor {
         // owns its fd_var redirects itself (execute_stdio_only_exec_redirect
         // applies them in list order with persistent semantics), so it is
         // excluded here.
+        let fd_var_walk_undoable = self.redirect_walk_is_undoable(&cmd);
         if cmd.words.first().map(String::as_str) != Some("exec")
-            && self.apply_dynamic_fd_var_redirects(&cmd, true)?
+            && self.apply_dynamic_fd_var_redirects(&cmd, true, fd_var_walk_undoable)?
         {
             // rubash#2125: the applier rendered the diagnostic and set
             // status 1, but the failure never becomes an IoError at the
@@ -569,14 +643,45 @@ impl Executor {
                 let mut stderr = Vec::new();
                 // GNU redir.c:135 redirection_error is internal_error
                 // (error.c:149-176) via error_prolog: the prefix honors
-                // gnu_errfmt (rubash#1038).
-                writeln!(
-                    &mut stderr,
-                    "{}{}",
-                    self.error_prefix(),
-                    crate::posix_errors::message(&error)
-                )?;
-                self.write_redirect_diagnostic_routed(&cmd, &stderr)?;
+                // gnu_errfmt (rubash#1038). The LINE in the prolog is the
+                // one do_redirections sees (execute_cmd.c:854): the
+                // ambient line for a compound in the ambient class, the
+                // completion line for cm_arith / cm_cond — see
+                // Executor::compound_redirect_error_prefix (rubash#3183).
+                // When the special prefix's identification fails the
+                // funnel-stamped composition below runs unchanged.
+                let special_prefix = self.compound_redirect_error_prefix(&cmd);
+                let mut special_handled = false;
+                if special_prefix != self.error_prefix() {
+                    writeln!(
+                        &mut stderr,
+                        "{}{}",
+                        special_prefix,
+                        crate::posix_errors::message(&error)
+                    )?;
+                    if self
+                        .failing_open_redirect_index_with_prefix(&cmd, &stderr, &special_prefix)
+                        .is_some()
+                    {
+                        let _ = self.write_redirect_diagnostic_routed_with_prefix(
+                            &cmd,
+                            &stderr,
+                            &special_prefix,
+                        );
+                        special_handled = true;
+                    } else {
+                        stderr.clear();
+                    }
+                }
+                if !special_handled {
+                    writeln!(
+                        &mut stderr,
+                        "{}{}",
+                        self.error_prefix(),
+                        crate::posix_errors::message(&error)
+                    )?;
+                    self.write_redirect_diagnostic_routed(&cmd, &stderr)?;
+                }
                 self.exit_code = 1;
                 // rubash#2082: GNU execute_cmd.c:4865-4875 — the failure
                 // above is execute_builtin_or_function's do_redirections
@@ -756,6 +861,16 @@ impl Executor {
                             .retain(|(name, _)| !name.starts_with("__RUBASH_PARSE"));
                         let mut fixed = function.as_ref().clone();
                         fixed.body = body;
+                        // rubash#3209: same definition-line restamp
+                        // as the parser path (bare `name()` only).
+                        if !fixed.keyword && fixed.has_parentheses {
+                            if let Some(definition_line) = cmd.line {
+                                crate::parser::restamp_function_body_first_command(
+                                    &mut fixed.body,
+                                    definition_line,
+                                );
+                            }
+                        }
                         fixed.unparsed_body_source = None;
                         fixed_cmd.function_command = Some(Box::new(fixed));
                         let fixed_function =
@@ -1231,14 +1346,28 @@ impl Executor {
             return Err(ExecuteError::ExitCode(2));
         }
 
-        // Bash must parse extglob syntax while the extglob option is
-        // enabled.  A pathname such as `@(name)` in a simple command is
-        // therefore a syntax error when the option is off; treating it as a
-        // literal silently accepts malformed scripts.  Conditional RHS
-        // patterns are handled separately and intentionally remain eligible
-        // for Bash's conditional-pattern semantics.
+        // GNU adjudicates extglob legality at READ time: parse.y:5466
+        // read_token_word consumes a `(` group as pattern text only
+        // while the read-time `extended_glob` is on, and a group met
+        // with the gate off fails the parse itself. At execution the
+        // pattern text is inert data — pathname expansion and strmatch
+        // consult the LIVE flag (pathexp.c unquoted_glob_pattern_p;
+        // pathexp.h FNMATCH_EXTFLAG), so a group that WAS consumed as
+        // a pattern at read time degrades to literal text/matching
+        // when a same-unit `shopt -u extglob` has already executed
+        // (rubash#3224) and must not be vetoed here. The diagnostic
+        // below therefore belongs only to patterns whose producing
+        // pass did not consume them as patterns
+        // (ExtglobPattern::read_gate_on == false): for those, treating
+        // the word as a literal would silently accept a script GNU
+        // rejects at read time. Conditional RHS patterns are handled
+        // separately and intentionally remain eligible for Bash's
+        // conditional-pattern semantics.
         if !crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "extglob")
-            && !cmd.extglob_patterns.is_empty()
+            && cmd
+                .extglob_patterns
+                .iter()
+                .any(|pattern| !pattern.read_gate_on)
             && cmd.conditional_command.is_none()
             && cmd.case_command.is_none()
         {
@@ -1593,6 +1722,7 @@ impl Executor {
         // (DISCARD) — the command is abandoned with status 1 and the
         // session keeps reading, whatever the target dispatches to.
         if self.expansion_error_is_interactive_discard() {
+            self.note_unit_expansion_error_discard();
             self.exit_code = 1;
             // rubash#439: expansion error, not a failed command — no ERR trap.
             self.command_expansion_failed.set(true);
@@ -1702,10 +1832,56 @@ impl Executor {
             })
     }
 
+    /// rubash#2615: whether THIS command's own do_redirections walk
+    /// runs with RX_UNDOABLE, so its fixed entries' undo saves occupy
+    /// descriptor slots while the walk evolves (redir.c:243). GNU's
+    /// in-process dispatch (builtins, functions, exec —
+    /// execute_builtin_or_function, execute_cmd.c:5606) and the
+    /// compound prologue (execute_cmd.c:854) are undoable; the fork
+    /// child's walks are RX_ACTIVE only (execute_disk_command,
+    /// execute_cmd.c:5522; the subshell's own list,
+    /// execute_cmd.c:1761). A subshell-headed node therefore walks
+    /// active even though its body later runs in a child executor,
+    /// and a compound node without a simple word walks undoable.
+    pub(in crate::executor) fn redirect_walk_is_undoable(&mut self, cmd: &CommandNode) -> bool {
+        if cmd.subshell_command.is_some() {
+            return false;
+        }
+        if cmd.words.is_empty() {
+            return true;
+        }
+        self.heredoc_error_command_runs_in_main_shell(cmd)
+    }
+
     /// True when the command carrying a failing heredoc would dispatch to
     /// a builtin or function (main-shell redirects, execute_cmd.c:5606)
     /// rather than a forked external child (execute_cmd.c:5884+).
     fn heredoc_error_command_runs_in_main_shell(&mut self, cmd: &CommandNode) -> bool {
+        // rubash#3429: a compound command's redirections run in the main
+        // shell (GNU execute_cmd.c:854 compound prologue,
+        // RX_ACTIVE|RX_UNDOABLE — cm_arith/cm_cond/cm_case/cm_while/
+        // cm_until/cm_if/cm_for/cm_group share it, :479-495) — but the
+        // node's synthetic words name no builtin (`((` for an arithmetic
+        // command; no words at all for a brace group), so the word-based
+        // classification below reads them as a forked-child (external)
+        // target and contains the fatal jump: the walker has already
+        // reported the diagnostic and set status 1, yet the script keeps
+        // running (`set -u; (( x = 1 )) > $nope` prints the line and
+        // continues). A backgrounded (`&`) or pipelined stage still
+        // forks first (execute_cmd.c:2837 / the pipeline children), so
+        // those keep the child containment; `!` does not exempt it
+        // (GNU aborts). A command inside a subshell keeps the main-shell
+        // reading: the Err unwinds to the subshell boundary, which folds
+        // it into the subshell's status (compound_exec.rs, the
+        // body_result match) — the parent continues, as GNU does.
+        if (cmd.arithmetic_command.is_some() || cmd.brace_group.is_some())
+            && !cmd.background
+            && cmd.background_command.is_none()
+            && cmd.pipe.is_none()
+            && cmd.pipeline_command.is_none()
+        {
+            return true;
+        }
         // A NULL command (`> $nope`, no words) applies its redirections in
         // the main shell (execute_cmd.c execute_null_command runs
         // do_redirections directly) — the fatal jump is not contained
@@ -1758,6 +1934,7 @@ impl Executor {
                 // abandoned with status 1 and the session keeps reading;
                 // the FORCE_EOF branch below is noninteractive only.
                 if self.expansion_error_is_interactive_discard() {
+                    self.note_unit_expansion_error_discard();
                     self.exit_code = 1;
                     // rubash#439: expansion error, not a failed command.
                     self.command_expansion_failed.set(true);

@@ -165,7 +165,7 @@ impl ConditionalArithParser<'_> {
                 // (rubash#1555; the dense mirror resolve used to hand
                 // back the scalar value / stay silent).
                 if *index < 0 && self.arith_negative_subscript_is_bad(name, *index) {
-                    self.diags.push(ArithEvalDiag::BadSubscript(name.clone()));
+                    self.record_diag(ArithEvalDiag::BadSubscript(name.clone()));
                 }
                 let value = value.unwrap_or_default();
                 self.evaluate_variable_text(&format!("{name}[{index}]"), &value)
@@ -178,7 +178,7 @@ impl ConditionalArithParser<'_> {
                 let index = self.eval_subscript_index(subscript)?;
                 let value = self.indexed_element_text(name, index);
                 if index < 0 && self.arith_negative_subscript_is_bad(name, index) {
-                    self.diags.push(ArithEvalDiag::BadSubscript(name.clone()));
+                    self.record_diag(ArithEvalDiag::BadSubscript(name.clone()));
                 }
                 let value = value.unwrap_or_default();
                 self.evaluate_variable_text(&format!("{name}[{index}]"), &value)
@@ -187,18 +187,15 @@ impl ConditionalArithParser<'_> {
                 // `a[]` read: GNU reports `a[]: bad array subscript` twice —
                 // array_variable_part and get_array_value each diagnose the
                 // empty subscript (expr.c:1183/1224) — then yields 0.
-                self.diags
-                    .push(ArithEvalDiag::BadSubscript(display.clone()));
-                self.diags
-                    .push(ArithEvalDiag::BadSubscript(display.clone()));
+                self.record_diag(ArithEvalDiag::BadSubscript(display.clone()));
+                self.record_diag(ArithEvalDiag::BadSubscript(display.clone()));
                 Some(0)
             }
             ArithLValue::BadSubscriptElement { display } => {
                 // `a[@]`/`a[*]` read: GNU array_expand_index diagnoses
                 // `a[@]: bad array subscript` ONCE and the element reads
                 // as 0 (arrayfunc.c; verified GNU 5.3.20, rubash#1136).
-                self.diags
-                    .push(ArithEvalDiag::BadSubscript(display.clone()));
+                self.record_diag(ArithEvalDiag::BadSubscript(display.clone()));
                 Some(0)
             }
             ArithLValue::AssocEmptyKey { name, .. } => {
@@ -206,7 +203,7 @@ impl ConditionalArithParser<'_> {
                 // array_value_internal — GNU INDEX_ERROR diagnoses the bare
                 // NAME once (arrayfunc.c:1462-1470 err_badarraysub(var->name))
                 // and the element reads as 0.
-                self.diags.push(ArithEvalDiag::BadSubscript(name.clone()));
+                self.record_diag(ArithEvalDiag::BadSubscript(name.clone()));
                 Some(0)
             }
             ArithLValue::Assoc { name, key } => {
@@ -294,7 +291,9 @@ impl ConditionalArithParser<'_> {
             self.cells,
         );
         self.adopt_error(super::super::take_arith_eval_error());
-        self.adopt_diags(super::super::take_arith_eval_diags());
+        // Nested-frame diagnostics already sit in the shared
+        // evaluation-order event log at their production points
+        // (rubash#3078); only the evalerror record needs adoption.
         if value.is_none() {
             self.env_vars.insert(
                 "__RUBASH_ARITH_SUBSCRIPT_EXPR".to_string(),
@@ -534,6 +533,24 @@ impl ConditionalArithParser<'_> {
             };
         }
 
+        // GNU expr.c:1190-1199 expr_streval: a read of a name with
+        // no binding at all traps under nounset. The entry-level
+        // text scan cannot see this read — the name arrives as a
+        // stored VALUE (an element's text, or a scalar's value
+        // re-entering through expr.c:1241's `subexpr (value)`), not
+        // as expression text — so the check lives at this one read
+        // point every value frame funnels through (rubash#3200).
+        // The dynamic legs above already resolved the names they
+        // own; a name merely SET to an empty value is bound and
+        // reads as 0 through the fallback below.
+        if super::super::arithmetic_name_is_unbound(name, self.env_vars)
+            && std::env::var(name).is_err()
+            && crate::builtins::set::shell_option_enabled(self.env_vars, "nounset")
+        {
+            self.error_category = Some(super::super::ArithmeticErrorCategory::UnboundVariable);
+            super::super::record_arith_unbound_name(name.to_string());
+            return None;
+        }
         let value = self
             .env_vars
             .get(name)
@@ -555,8 +572,17 @@ impl ConditionalArithParser<'_> {
             return None;
         }
 
-        let value = value.trim();
-        if value.is_empty() {
+        // GNU expr.c:1241 expr_streval hands the RAW value to subexpr,
+        // whose `expression' global is the value verbatim (expr.c:469):
+        // evalerror echoes it with only leading blanks skipped
+        // (expr.c:1528-1530) and lasttp runs to its end, so a trailing
+        // blank is part of both the echoed text and the error token
+        // (`A="4 + "; $(( A ))` reports `4 + ' / token `+ '`). The trim
+        // below therefore feeds only the empty check and the strlong /
+        // plain-decimal shortcuts; the nested parser's input is the
+        // value as stored (rubash#3184).
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
             return Some(0);
         }
         // GNU expr.c:1557 strlong (contract at expr.c:1539: "0nnn ->
@@ -564,7 +590,7 @@ impl ConditionalArithParser<'_> {
         // digits re-parses octal — `x=010; $((x))` is 8 (rubash#341).
         // `0x` hex and `base#n` forms keep flowing to the nested
         // expression parser below.
-        if let Some(number) = strlong_leading_zero_octal(value) {
+        if let Some(number) = strlong_leading_zero_octal(trimmed) {
             return Some(bash_arith(number));
         }
         // rubash#1101: a leading-zero digit string containing 8/9 (`08`,
@@ -574,8 +600,8 @@ impl ConditionalArithParser<'_> {
         // swallow it; let it fall through to the nested expression parser,
         // whose literal reader raises exactly that error (the same path
         // that already handles `08x` / `0x1g` values correctly).
-        if !leading_zero_digit_string(value) {
-            if let Ok(number) = value.parse::<i128>() {
+        if !leading_zero_digit_string(trimmed) {
+            if let Ok(number) = trimmed.parse::<i128>() {
                 return Some(bash_arith(number));
             }
         }
@@ -593,7 +619,6 @@ impl ConditionalArithParser<'_> {
             error_category: None,
             no_expand: false,
             error: None,
-            diags: Vec::new(),
             last_tok_start: 0,
             last_tok_operand: false,
             noeval: 0,
@@ -613,9 +638,10 @@ impl ConditionalArithParser<'_> {
         // shared globals — its expression text and lasttp are what the
         // diagnostic prints (expr.c:1241 expr_streval -> subexpr).
         let inner_error = parser.error.take();
-        let inner_diags = std::mem::take(&mut parser.diags);
         self.adopt_error(inner_error);
-        self.adopt_diags(inner_diags);
+        // The nested frame's diagnostics were recorded directly
+        // into the shared event log at their production points
+        // (rubash#3078).
         if !complete {
             return None;
         }
@@ -755,6 +781,7 @@ impl ConditionalArithParser<'_> {
         if is_marked_var(self.env_vars, READONLY_VARS, name) {
             self.env_vars
                 .insert("__RUBASH_ARITH_READONLY_ERROR".to_string(), name.clone());
+            super::super::record_arith_readonly_event(name);
             return false;
         }
         // GNU expr.c:350 (expr_bind_variable -> bind_variable): an
@@ -808,22 +835,19 @@ impl ConditionalArithParser<'_> {
                 // bind_variable fails the `a[]` name via sh_invalidid —
                 // `` `a[]': not a valid identifier `` (non-fatal; the
                 // expression value is unaffected).
-                self.diags
-                    .push(ArithEvalDiag::InvalidIdentifier(display.clone()));
+                self.record_diag(ArithEvalDiag::InvalidIdentifier(display.clone()));
             }
             ArithLValue::BadSubscriptElement { display } => {
                 // `a[@] = v` bind: GNU diagnoses `a[@]: bad array
                 // subscript` once and stores nothing (rubash#1136).
-                self.diags
-                    .push(ArithEvalDiag::BadSubscript(display.clone()));
+                self.record_diag(ArithEvalDiag::BadSubscript(display.clone()));
             }
             ArithLValue::AssocEmptyKey { bind_display, .. } => {
                 // `C['']` on the bind side: GNU assign_array_element_internal
                 // fails the empty akey with err_badarraysub —
                 // `C['']: bad array subscript` (arrayfunc.c:402-407) — and
                 // binds nothing.
-                self.diags
-                    .push(ArithEvalDiag::BadSubscript(bind_display.clone()));
+                self.record_diag(ArithEvalDiag::BadSubscript(bind_display.clone()));
             }
             ArithLValue::Assoc { name, key } => self.set_assoc_element(name, key, value),
         }
@@ -889,8 +913,9 @@ impl ConditionalArithParser<'_> {
         }
         // GNU expr.c assigns through bind_variable: a nameref lvalue resolves
         // to its cell — an empty cell adopts the assigned text after
-        // valid_nameref_value (invalid -> sh_invalidid via the marker below),
-        // an already-invalid cell stays unchanged, and a valid cell forwards
+        // valid_nameref_value (invalid -> sh_invalidid, recorded in the
+        // evaluation-order event log at this production point), an
+        // already-invalid cell stays unchanged, and a valid cell forwards
         // the write to the referenced variable or element.
         if is_marked_var(self.env_vars, NAMEREF_VARS, name) {
             let cell = self.env_vars.get(name).cloned().unwrap_or_default();
@@ -908,8 +933,26 @@ impl ConditionalArithParser<'_> {
                             crate::builtins::hash::flush_command_hash_table(self.env_vars);
                         }
                     } else {
-                        self.env_vars
-                            .insert("__RUBASH_ARITH_NAMEREF_ERROR".to_string(), value);
+                        // rubash#3246: GNU variables.c:3076-3079
+                        // bind_variable_internal fails an empty-cell
+                        // nameref adoption of an invalid value via
+                        // sh_invalidid(value)
+                        // (builtins/common.c:208), and expr.c:331-354
+                        // expr_bind_variable does NOT longjmp on the
+                        // NULL bind — evaluation continues and the
+                        // assignment yields its RHS value. Record the
+                        // diagnostic in the evaluation-order event log
+                        // here, at the bind point, like the `a[]` bind
+                        // above: the old single-slot nameref marker
+                        // could only hold the last failure, was
+                        // reported after the boundary (out of order
+                        // with the locale warnings), forced status 1
+                        // on the (( ))/let reporters, and leaked into
+                        // the next command on the fast-assignment
+                        // route. One failed bind is one event: two
+                        // namerefs in one expression print two lines,
+                        // in order.
+                        self.record_diag(ArithEvalDiag::InvalidIdentifier(value));
                     }
                 }
                 return;
@@ -954,6 +997,7 @@ impl ConditionalArithParser<'_> {
                     "__RUBASH_ARITH_READONLY_ERROR".to_string(),
                     base_target.to_string(),
                 );
+                super::super::record_arith_readonly_event(base_target);
                 return;
             }
             // GNU expr.c:350: a nameref chain ending at an att_noassign
@@ -1026,8 +1070,7 @@ impl ConditionalArithParser<'_> {
                 // (`a[0-4]`, `a[ -4 ]` — the name assign_array_element
                 // received) and stores nothing (rubash#2341; the read
                 // side's bare-name INDEX_ERROR line is a separate diag).
-                self.diags
-                    .push(ArithEvalDiag::BadSubscript(bind_display.to_string()));
+                self.record_diag(ArithEvalDiag::BadSubscript(bind_display.to_string()));
                 return;
             };
             index

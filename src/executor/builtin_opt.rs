@@ -91,8 +91,16 @@ pub struct BuiltinOpt<'a, 'd> {
     words: &'a [String],
     diag: &'d mut Diag<'a>,
     /// The parsed spec: (option byte, argument kind) pairs, plus
-    /// whether the spec opens with `'+'` (plus mode).
-    spec: Vec<(u8, ArgKind)>,
+    /// whether the spec opens with `'+'` (plus mode). Parsed into
+    /// a fixed stack buffer at construction (`parse_spec_into`):
+    /// the declare family's predicate probes construct this
+    /// machine several times per call, and the earlier shared
+    /// memoization put a global mutex lock + hash lookup on every
+    /// construction — itself a measurable per-call tax on the
+    /// fast builtins (E4, PR #2968). Only a spec too large for the
+    /// buffer (none in the table; the longest carries 25 pairs)
+    /// falls back to the memoized leaked parse (`parsed_spec`).
+    spec: SpecPairs,
     plus: bool,
     /// Index of the word being scanned.
     index: usize,
@@ -127,8 +135,20 @@ impl<'a, 'd> BuiltinOpt<'a, 'd> {
         posix: bool,
     ) -> Self {
         let (spec, plus, scannable) = match row.opt_spec {
-            OptSpec::Getopt(spec) => (parse_spec(spec), spec.starts_with('+'), true),
-            OptSpec::Grammar | OptSpec::NoScan => (Vec::new(), false, false),
+            OptSpec::Getopt(spec) => {
+                let plus = spec.starts_with('+');
+                let mut buffer = [(0, ArgKind::None); MAX_SPEC_PAIRS];
+                let spec = match parse_spec_into(spec, &mut buffer) {
+                    Some(len) => SpecPairs::Stack(buffer, len),
+                    None => SpecPairs::Shared(parsed_spec(spec)),
+                };
+                (spec, plus, true)
+            }
+            OptSpec::Grammar | OptSpec::NoScan => (
+                SpecPairs::Stack([(0, ArgKind::None); MAX_SPEC_PAIRS], 0),
+                false,
+                false,
+            ),
         };
         BuiltinOpt {
             row,
@@ -212,7 +232,11 @@ impl<'a, 'd> BuiltinOpt<'a, 'd> {
         let kind = if c == b':' {
             None
         } else {
-            self.spec.iter().find(|(b, _)| *b == c).map(|(_, k)| *k)
+            self.spec
+                .as_slice()
+                .iter()
+                .find(|(b, _)| *b == c)
+                .map(|(_, k)| *k)
         };
         let Some(kind) = kind else {
             // Invalid: errstr is the sign + the one character.
@@ -323,6 +347,64 @@ impl<'a, 'd> BuiltinOpt<'a, 'd> {
     }
 }
 
+/// Whether this builtin call carries `--help` in option position —
+/// the one shared CHECK_HELPOPT / CASE_HELPOPT decision for every
+/// builtin (rubash#2753).
+///
+/// GNU has no per-builtin help logic: `internal_getopt`
+/// (`builtins/bashgetopt.c:61-192`) returns `GETOPT_HELP` when it
+/// meets the `--help` word during the option scan, and the
+/// `Grammar` / `NoScan` builtins test the first word with
+/// `CHECK_HELPOPT` (`builtins/common.h:29-36`). This helper replays
+/// exactly that decision from the declaration-table row, so a caller
+/// (the dispatch gate) does not re-implement any builtin's parser:
+///
+/// * `help_entry == false` rows (`:`, `true`, `false`, `echo`,
+///   `test`, `[`, `env`) never take the help path — `--help` is an
+///   operand or ignored there (oracle-probed; see builtin_table.rs).
+/// * `Grammar` / `NoScan` rows follow `CHECK_HELPOPT`: only a first
+///   word of exactly `--help` counts (`kill -l --help` lists signals;
+///   `let x=1 --help` evaluates both words).
+/// * `Getopt` rows drive a throwaway `BuiltinOpt` over the words
+///   with the diagnostics sunk into a scratch buffer: the scan is
+///   the same machine the migrated handlers run, so option
+///   arguments are consumed exactly as GNU consumes them (`read -p
+///   --help` takes `--help` as the prompt, `wait -p --help` as the
+///   variable name — neither is a help request), an invalid option
+///   or a missing argument before `--help` ends the scan in error
+///   (GNU's loop returns `EX_USAGE` there and never reaches the
+///   help word), and `--` or the first operand ends it cleanly.
+/// * `local` is the one `Getopt` row whose `.def` does NOT run the
+///   getopt loop unconditionally: `local_builtin`
+///   (builtins/declare.def:126-141) catches a straight first-word
+///   `--help` itself and otherwise refuses outside a function
+///   before any scanning, so `local -p --help` at top level is the
+///   context error, not help. It therefore takes the first-word
+///   rule like a `CHECK_HELPOPT` row.
+pub(crate) fn help_opt_requested(row: &BuiltinRow, words: &[String]) -> bool {
+    if !row.help_entry {
+        return false;
+    }
+    match row.opt_spec {
+        OptSpec::Grammar | OptSpec::NoScan => words.first().map(String::as_str) == Some("--help"),
+        OptSpec::Getopt(_) => {
+            if row.name == "local" {
+                return words.first().map(String::as_str) == Some("--help");
+            }
+            let mut sink = Vec::new();
+            let mut diag = Diag::new(row, &mut sink);
+            let mut opt = BuiltinOpt::new(row, words, &mut diag, false);
+            loop {
+                match opt.next() {
+                    OptEvent::Help => return true,
+                    OptEvent::End => return false,
+                    OptEvent::Opt(_) | OptEvent::OptArg(_, _) => {}
+                }
+            }
+        }
+    }
+}
+
 /// Render one option byte for a diagnostic string. The byte comes
 /// from user argv, so it can be a UTF-8 continuation byte (>= 0x80)
 /// and must never be widened with `as char` — that Latin-1 widening
@@ -342,17 +424,140 @@ fn diagnostic_byte(byte: u8) -> String {
 /// `ISOPT` / `NOTOPT` (`bashgetopt.c:36-37`): a word is an option
 /// word when it starts with `-` (or `+` in plus mode) and has a
 /// second character. A bare `-` / `+` is an operand.
-fn is_option_word(word: &[u8], plus: bool) -> bool {
+pub(super) fn is_option_word(word: &[u8], plus: bool) -> bool {
     if word.len() < 2 {
         return false;
     }
     word[0] == b'-' || (plus && word[0] == b'+')
 }
 
-/// Parse a spec string into (option byte, argument kind) pairs.
-/// A leading `'+'` enables plus mode and is not an option. The
-/// `':'` / `';'` / `'#'` after a letter sets its argument kind;
-/// a leading `':'` in the spec (fc's `":e:lnrs"`) is inert.
+/// The length of the option region at the head of `words`: the
+/// maximal prefix of option words. `internal_getopt` stops the
+/// scan before the first non-option word (`bashgetopt.c:77-84`),
+/// before `--` (consumed as the delimiter), and before `--help`
+/// (GETOPT_HELP ends the scan with the word itself left in
+/// `loptend`); the region ends at the same three boundaries, so
+/// `words[..option_region_end(words, plus)]` is exactly the set of
+/// words a GNU scan reads option letters from, and every word from
+/// the returned index on is an operand (plus the `--` delimiter
+/// itself when the region ended there).
+///
+/// Every declare-family scan that reads option letters off the raw
+/// word list — instead of driving the machine above — must bound
+/// itself to this prefix: a word like `-i` behind an operand is a
+/// NAME in GNU, and a scan that roams past the first operand
+/// misreads it as an option (rubash#3338). The family specs
+/// (declare's `+acfgilnprtuxAFGI`, unset's `fnv`) are flag-only —
+/// no option takes an argument — so no word inside the region
+/// consumes a following word, and a pure prefix computation is
+/// the whole rule.
+pub(super) fn option_region_end(words: &[String], plus: bool) -> usize {
+    let mut end = 0;
+    for word in words {
+        if word == "--" || word == "--help" {
+            break;
+        }
+        if !is_option_word(word.as_bytes(), plus) {
+            break;
+        }
+        end += 1;
+    }
+    end
+}
+
+/// Capacity of the stack parse buffer (`parse_spec_into`): the
+/// longest spec in the builtin table (`complete`'s) carries 25
+/// pairs, so 64 leaves wide headroom; the table-walk test in this
+/// module pins that every row spec fits.
+const MAX_SPEC_PAIRS: usize = 64;
+
+/// A parsed spec: the (option byte, argument kind) pairs of one
+/// row's spec string, held either in the machine's own stack
+/// buffer (the universal case) or, for a spec too large for the
+/// buffer, in the memoized leaked slice (`parsed_spec`).
+enum SpecPairs {
+    Stack([(u8, ArgKind); MAX_SPEC_PAIRS], usize),
+    Shared(&'static [(u8, ArgKind)]),
+}
+
+impl SpecPairs {
+    fn as_slice(&self) -> &[(u8, ArgKind)] {
+        match self {
+            SpecPairs::Stack(buffer, len) => &buffer[..*len],
+            SpecPairs::Shared(slice) => slice,
+        }
+    }
+}
+
+/// Parse a spec string into (option byte, argument kind) pairs,
+/// writing them into `out`; returns the pair count, or `None`
+/// when the spec carries more pairs than the buffer holds. The
+/// parse mirrors `parse_spec` step for step: a leading `'+'`
+/// enables plus mode and is not an option; the `':'` / `';'` /
+/// `'#'` after a letter sets its argument kind; a `':'` where a
+/// letter is expected (fc's leading one) is skipped as inert.
+fn parse_spec_into(spec: &str, out: &mut [(u8, ArgKind); MAX_SPEC_PAIRS]) -> Option<usize> {
+    let bytes = spec.as_bytes();
+    let mut n = 0;
+    let mut i = 0;
+    if bytes.first() == Some(&b'+') {
+        i = 1;
+    }
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == b':' {
+            // A ':' where an option letter is expected (only the
+            // leading one, in practice) is not an option.
+            i += 1;
+            continue;
+        }
+        let kind = match bytes.get(i + 1) {
+            Some(b':') => {
+                i += 1;
+                ArgKind::Required
+            }
+            Some(b';') => {
+                i += 1;
+                ArgKind::Optional
+            }
+            Some(b'#') => {
+                i += 1;
+                ArgKind::Numeric
+            }
+            _ => ArgKind::None,
+        };
+        if n >= MAX_SPEC_PAIRS {
+            return None;
+        }
+        out[n] = (c, kind);
+        n += 1;
+        i += 1;
+    }
+    Some(n)
+}
+
+/// The oversized-spec fallback: `parse_spec` memoized per distinct
+/// spec string — the parse is a pure function of the row's static
+/// spec, so it is computed once and the result leaked into a
+/// shared slice. Bounded by the number of distinct row specs (one
+/// per builtin). Steady-state constructions never reach this (see
+/// `parse_spec_into`); it exists so a hypothetical spec larger
+/// than the stack buffer still parses exactly as before.
+fn parsed_spec(spec: &'static str) -> &'static [(u8, ArgKind)] {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<&'static str, &'static [(u8, ArgKind)]>>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache.lock().unwrap();
+    if let Some(hit) = cache.get(spec) {
+        return hit;
+    }
+    let parsed: &'static [(u8, ArgKind)] = Box::leak(parse_spec(spec).into_boxed_slice());
+    cache.insert(spec, parsed);
+    parsed
+}
+
 fn parse_spec(spec: &str) -> Vec<(u8, ArgKind)> {
     let bytes = spec.as_bytes();
     let mut out = Vec::new();
@@ -727,6 +932,63 @@ mod tests {
     }
 
     #[test]
+    fn issue3338_option_region_end_stops_like_internal_getopt() {
+        // The region is the maximal option-word prefix: it ends
+        // before the first operand, before `--`, and before
+        // `--help` (bashgetopt.c:77-84) — the same boundaries the
+        // machine above stops at, for scans that read letters off
+        // the raw word list instead of driving the machine.
+        assert_eq!(option_region_end(&words(&[]), true), 0);
+        assert_eq!(option_region_end(&words(&["x", "-i"]), true), 0);
+        assert_eq!(option_region_end(&words(&["-i", "x", "-p"]), true), 1);
+        assert_eq!(option_region_end(&words(&["-i", "--", "-p"]), true), 1);
+        assert_eq!(option_region_end(&words(&["-i", "--help"]), true), 1);
+        assert_eq!(option_region_end(&words(&["--help", "-i"]), true), 0);
+        assert_eq!(option_region_end(&words(&["-", "-i"]), true), 0);
+        assert_eq!(option_region_end(&words(&["-p", "-i"]), true), 2);
+        // Plus mode admits `+` words into the region; without it a
+        // `+` word is the first operand.
+        assert_eq!(option_region_end(&words(&["+x", "-i"]), true), 2);
+        assert_eq!(option_region_end(&words(&["+x", "-i"]), false), 0);
+        assert_eq!(option_region_end(&words(&["-f", "-v"]), false), 2);
+    }
+
+    #[test]
+    fn help_opt_requested_positions() {
+        let row = |name: &str| builtin_table_row(name).unwrap();
+        // First word and after a no-arg option: help.
+        assert!(help_opt_requested(row("cd"), &words(&["--help"])));
+        assert!(help_opt_requested(row("cd"), &words(&["-L", "--help"])));
+        assert!(help_opt_requested(row("wait"), &words(&["-n", "--help"])));
+        // After an operand or after `--`: an operand, not help.
+        assert!(!help_opt_requested(row("cd"), &words(&["dir", "--help"])));
+        assert!(!help_opt_requested(row("cd"), &words(&["--", "--help"])));
+        // A required-argument option consumes the word, even `--help`
+        // (`wait -p var`, `read -p prompt`, `printf -v var`).
+        assert!(!help_opt_requested(row("wait"), &words(&["-p", "--help"])));
+        assert!(!help_opt_requested(row("read"), &words(&["-p", "--help"])));
+        assert!(help_opt_requested(
+            row("read"),
+            &words(&["-p", "prompt", "--help"])
+        ));
+        // An invalid option before the word ends the scan in error.
+        assert!(!help_opt_requested(row("cd"), &words(&["-Z", "--help"])));
+        // Grammar rows (kill/let): CHECK_HELPOPT first word only.
+        assert!(help_opt_requested(row("kill"), &words(&["--help"])));
+        assert!(!help_opt_requested(row("kill"), &words(&["-l", "--help"])));
+        assert!(!help_opt_requested(row("let"), &words(&["x=1", "--help"])));
+        // `local`: first word only (declare.def:126-141) — a later
+        // `--help` belongs to the context check, not the help path.
+        assert!(help_opt_requested(row("local"), &words(&["--help"])));
+        assert!(!help_opt_requested(row("local"), &words(&["-p", "--help"])));
+        // help_entry == false rows never take the help path.
+        assert!(!help_opt_requested(row("echo"), &words(&["--help"])));
+        assert!(!help_opt_requested(row("test"), &words(&["--help"])));
+        assert!(!help_opt_requested(row(":"), &words(&["--help"])));
+        assert!(!help_opt_requested(row("true"), &words(&["--help"])));
+    }
+
+    #[test]
     fn no_options_rows_reject_any_option_word() {
         // times -z: no_options -> invalid + usage, EX_USAGE.
         let mut sink = Vec::new();
@@ -841,6 +1103,35 @@ mod tests {
         let mut opt = BuiltinOpt::new(builtin_table_row("set").unwrap(), &w, &mut diag, false);
         assert_eq!(opt.next(), OptEvent::Opt(b'i'));
         assert_eq!(opt.opttype(), b'+');
+    }
+
+    #[test]
+    fn stack_parse_matches_vec_parse_for_every_table_spec() {
+        // The stack parse (parse_spec_into) replaced the global
+        // memoized parse on the construction path (E4, PR #2968):
+        // pin that it agrees with the Vec parse (parse_spec) on
+        // every row spec in the table, and that every row spec
+        // fits the stack buffer — a spec that outgrew the buffer
+        // would silently take the Shared fallback (correct, but
+        // the hot path would pay the lock again unnoticed).
+        use super::super::builtin_table::BUILTIN_TABLE;
+        let mut checked = 0;
+        for row in BUILTIN_TABLE {
+            let OptSpec::Getopt(spec) = row.opt_spec else {
+                continue;
+            };
+            let mut buffer = [(0, ArgKind::None); MAX_SPEC_PAIRS];
+            let len = parse_spec_into(spec, &mut buffer)
+                .unwrap_or_else(|| panic!("spec for {} exceeds the stack buffer", row.name));
+            assert_eq!(
+                &buffer[..len],
+                parse_spec(spec).as_slice(),
+                "stack parse disagrees with vec parse for {}",
+                row.name
+            );
+            checked += 1;
+        }
+        assert!(checked > 0);
     }
 
     #[test]
