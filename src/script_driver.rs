@@ -2187,30 +2187,20 @@ fn run_history_group(
                 // location to this entry's physical line, not the last
                 // executed command's line.
                 executor.set_current_line_value(line_no);
-                // GNU error.c error_prolog gate: history-expansion failures
-                // are internal_error-class, so the ` line N` segment honors
-                // gnu_errfmt like every other error_prefix site.
-                let gnu_errfmt = executor.gnu_error_format_enabled();
-                let prefix = match (
-                    executor.get_env("__RUBASH_SCRIPT_NAME"),
-                    executor.get_env("__RUBASH_CURRENT_LINE"),
-                ) {
-                    (Some(script), Some(line)) => {
-                        let line: usize = line.parse().unwrap_or(1);
-                        let head = if executor.get_env("__RUBASH_EVAL_CONTEXT").is_some() {
-                            format!("{script}: eval")
-                        } else {
-                            script.to_string()
-                        };
-                        if gnu_errfmt {
-                            format!("{head}:{line}: ")
-                        } else {
-                            format!("{head}: line {line}: ")
-                        }
-                    }
-                    _ => "bash: ".to_string(),
-                };
-                eprintln!("{}{}", prefix, result.text);
+                // GNU bashhist.c:594 pre_process_line reports a failed
+                // history expansion through internal_error ("%s",
+                // history_value) -> error_prolog (error.c:75-86) ->
+                // get_name_for_error (error.c:90-120): no `eval`/`-c`
+                // segment (those belong to parser_error only) and no
+                // literal fallback. The executor's error_prefix()
+                // family is that chain (rubash#3255): it honors
+                // gnu_errfmt for the ` line N` segment like every
+                // other error_prefix site. The hand-rolled (script,
+                // line) match this replaces fell back to the literal
+                // "bash: " whenever the script name was absent — which
+                // is exactly the interactive read-line shape, since no
+                // script name is seeded on that route.
+                eprintln!("{}{}", executor.error_prefix(), result.text);
                 exec_parts.push(String::new());
                 record_texts.push(None);
                 // A dropped line changes the executed text even when no other
