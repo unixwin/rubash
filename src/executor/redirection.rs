@@ -1965,6 +1965,14 @@ impl Executor {
                 | RedirectKind::CombinedOutput
                 | RedirectKind::CombinedAppend
                 | RedirectKind::ReadWrite
+                // rubash#3195: a heredoc / here-string limit failure
+                // names its redirector exactly like a file arm
+                // (redir.c:1120's dup2 onto the redirector) — without
+                // this arm the routing walk above ran the FULL list
+                // for such a message and the ordered walk's own limit
+                // gate fired a second time inside the routing pass.
+                | RedirectKind::HereDoc
+                | RedirectKind::HereString
                 | RedirectKind::Input => effective == named,
                 RedirectKind::DuplicateOutput | RedirectKind::DuplicateInput => {
                     let target = self.expand_redirect_target(redirect);
@@ -2605,6 +2613,27 @@ impl Executor {
                 | crate::parser::RedirectKind::HereDoc
                 | crate::parser::RedirectKind::HereString => {
                     let fd = redirect_fd_or_default(redirect, 0);
+                    // rubash#3195: GNU materializes the heredoc body
+                    // first (here_document_to_fd, redir.c:1072) and
+                    // the dup2 onto a redirector at/above the
+                    // RLIMIT_NOFILE soft limit then fails EBADF
+                    // (redir.c:1120) — the same limit gate the
+                    // DuplicateInput arm below runs, through this
+                    // walk's failure protocol, naming the redirector
+                    // itself. (The diagnostic-routing passes over
+                    // this walk cannot re-fire it: the fd-number
+                    // matcher in failing_open_redirect_index locates
+                    // a heredoc limit failure's entry, so the routing
+                    // walk resolves only the entries before it.)
+                    if matches!(
+                        redirect.kind,
+                        crate::parser::RedirectKind::HereDoc
+                            | crate::parser::RedirectKind::HereString
+                    ) && self.redirect_fd_over_limit(fd)
+                    {
+                        self.limit_gate_fail(state, fd)?;
+                        return Ok(true);
+                    }
                     state.list_binds.insert(fd, ListBound::ReadOnly);
                     if fd >= 3 {
                         state.fds.remove(&fd);
