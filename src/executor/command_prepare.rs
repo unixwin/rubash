@@ -592,7 +592,19 @@ impl Executor {
         // last_command_substitution_status; the assignment loop below
         // overwrites it per assignment and the redirect arms overwrite
         // it on failure, preserving GNU's ordering.
-        if let Some(substitution_status) = vanished_substitution_status {
+        // rubash#3021: only the in-shell branch of execute_null_command
+        // returns last_command_subst_status (execute_cmd.c:4268-4276).
+        // When a redirect forces the fork (execute_cmd.c:4209-4216: an
+        // fd-0 redirector or a `{var}` varassign), the parent waits for
+        // the child that only runs do_redirections and exits
+        // EXECUTION_SUCCESS / EXECUTION_FAILURE (execute_cmd.c:4244-4247,
+        // waited at execute_cmd.c:982 wait_for) — the substitution status
+        // from the words and the assignment RHSs is discarded:
+        // `$(false) <<EOF` and `x=$(false) </dev/null` are status 0.
+        let substitution_status_survives = !Self::null_command_redirects_force_fork(cmd);
+        if let Some(substitution_status) =
+            vanished_substitution_status.filter(|_| substitution_status_survives)
+        {
             status = substitution_status;
         }
         // assignment_raws stays index-aligned with assignments when every
@@ -767,7 +779,9 @@ impl Executor {
                 self.evalerror_arith_pending.set(true);
                 return Err(ExecuteError::ExpansionFailure(1));
             }
-            if let Some(substitution_status) = substitution_status {
+            if let Some(substitution_status) =
+                substitution_status.filter(|_| substitution_status_survives)
+            {
                 status = substitution_status;
             }
             // GNU subst.c do_assignment_internal: expand once (3565), trace
