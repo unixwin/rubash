@@ -75,6 +75,11 @@ pub(in crate::executor) struct StageStdioContext {
 /// longer source it. The parent-side duplicate handles stay in the
 /// caller's list and are closed after the spawn, as before: with
 /// the env keys gone the child never learns them.
+///
+/// rubash#2688: the slot's carrier duplicates move to the dead
+/// list (see the body) — with the stamps gone no restore can name
+/// them, so the pre_exec close pass retires them outright.
+#[allow(clippy::too_many_arguments)]
 fn apply_pending_close_at(
     executor: &mut Executor,
     process: &mut Command,
@@ -84,6 +89,8 @@ fn apply_pending_close_at(
         std::rc::Rc<crate::executor::fd_table::FileFd>,
     >,
     numbered_dup_bindings: &mut std::collections::HashMap<u32, NumberedDupBinding>,
+    fd_carriers: &mut Vec<(crate::fd::HANDLE, u32)>,
+    dead_carriers: &mut Vec<crate::fd::HANDLE>,
     fd: u32,
 ) {
     executor.apply_fd_var_pending_close(fd);
@@ -96,6 +103,15 @@ fn apply_pending_close_at(
         process.env_remove(key);
     }
     command_fd_pins.retain(|&(_, target)| target != fd);
+    // rubash#2688: the revoked slot's carrier duplicates are spent —
+    // their env stamps are gone above, so no child restore can name
+    // them; leaving them open would leak the closed slot's file into
+    // the child at the carrier's own number. Move them to the dead
+    // list the pre_exec close pass retires unconditionally.
+    let (revoked, kept): (Vec<_>, Vec<_>) =
+        fd_carriers.drain(..).partition(|&(_, slot)| slot == fd);
+    *fd_carriers = kept;
+    dead_carriers.extend(revoked.into_iter().map(|(dup, _)| dup));
     walk_opened.remove(&fd);
     numbered_dup_bindings.remove(&fd);
 }
@@ -138,10 +154,16 @@ fn apply_pending_close_at(
 /// matches a stdio descriptor or a pin source is part of the
 /// spawn's own fd arrangement, while the error channel is a pipe
 /// of its own and never matches either.
+/// rubash#2688: the carrier dups this stamps are inheritable, so a
+/// foreign child inherits each carrier at its own (lowest-free)
+/// number as well as at the pin's slot. pin_ambient_fds_in_child
+/// returns the slots the pin pass installed, so the caller can
+/// retire each carrier whose slot landed (see
+/// pin_ambient_fds_and_close_carriers).
 #[cfg(unix)]
 pub(in crate::executor) fn pin_ambient_fds_in_child(
     pins: &[(std::os::unix::io::RawFd, u32)],
-) -> std::io::Result<()> {
+) -> std::io::Result<Vec<u32>> {
     use std::os::unix::io::RawFd;
     let sources: Vec<RawFd> = pins.iter().map(|&(source, _)| source).collect();
     let ceiling = pins
@@ -150,6 +172,7 @@ pub(in crate::executor) fn pin_ambient_fds_in_child(
         .max()
         .unwrap_or(2);
     let mut staged: Vec<(RawFd, RawFd)> = Vec::with_capacity(pins.len());
+    let mut delivered: Vec<u32> = Vec::new();
     for &(source, slot) in pins {
         let target = slot as RawFd;
         // rubash#2599: a source already sitting at its slot stages like
@@ -177,6 +200,56 @@ pub(in crate::executor) fn pin_ambient_fds_in_child(
         }
         if unsafe { libc::dup2(temp, target) } >= 0 {
             unsafe { libc::close(temp) };
+            delivered.push(target as u32);
+        }
+    }
+    Ok(delivered)
+}
+
+/// rubash#2688: pin the ambient descriptors and retire the spawn
+/// transport's carrier duplicates in the same pre_exec closure.
+///
+/// The delivery stamps every fd-table entry through the
+/// `__RUBASH_FD_*` env channel as an inheritable duplicate of the
+/// table handle (apply_external_fd_delivery, rubash#180) — the
+/// transport a rubash child replays its fd table from (init.rs).
+/// The duplicate is a plain `dup` at the lowest free number with
+/// CLOEXEC cleared, so std's spawn also inherits it into EVERY
+/// child: a foreign child saw the same open file description twice
+/// (the slot number from the pin pass, plus the carrier's own
+/// number). A carrier whose slot this pin pass installed is spent
+/// — the descriptor now sits at its slot number — so close it here,
+/// between fork and exec, before any exec can observe it. A carrier
+/// whose slot was NOT installed (error-channel guard skip, dup2
+/// failure) stays open: it is the rubash-child restore's fallback.
+/// A carrier allocated exactly onto another slot's number was
+/// already replaced by that slot's dup2, so it is never closed
+/// twice. Descriptors 0-2 are never touched: std installs the
+/// child's stdio after pre_exec.
+#[cfg(unix)]
+pub(in crate::executor) fn pin_ambient_fds_and_close_carriers(
+    pins: &[(std::os::unix::io::RawFd, u32)],
+    carriers: &[(std::os::unix::io::RawFd, u32)],
+    dead: &[std::os::unix::io::RawFd],
+) -> std::io::Result<()> {
+    let delivered = pin_ambient_fds_in_child(pins)?;
+    for &(dup, slot) in carriers {
+        if dup < 3 {
+            continue;
+        }
+        if delivered.contains(&slot) && !delivered.contains(&(dup as u32)) {
+            unsafe { libc::close(dup) };
+        }
+    }
+    // Revoked carriers (a {var} close removed their slot's stamps
+    // and pins) name nothing any restore can adopt; close them
+    // unless the pin pass installed a descriptor at their number.
+    for &dup in dead {
+        if dup < 3 {
+            continue;
+        }
+        if !delivered.contains(&(dup as u32)) {
+            unsafe { libc::close(dup) };
         }
     }
     Ok(())
@@ -1202,7 +1275,16 @@ impl Executor {
             if let Some((message, status)) =
                 slash_command_execve_error_message(&cmd.words[0], &self.shell_state.env_vars)
             {
-                writeln!(&mut stderr, "{error_prefix}{name}: {message}",)?;
+                // GNU's file_error (execute_cmd.c:6126-6159) prints the
+                // filename with a raw %s — the printable_filename
+                // quoting the not-found face uses ($'\ooo' for a
+                // non-printable name in a single-byte locale) is
+                // findcmd's renderer, not shell_execve's. The raw name
+                // still passes the one statutory decoder so marker
+                // transports render as their source characters
+                // (rubash#3182).
+                let raw_name = crate::locale::decode_to_visible_text(&cmd.words[0]);
+                writeln!(&mut stderr, "{error_prefix}{raw_name}: {message}",)?;
                 self.finish_external_error(cmd, &stderr, status)?;
                 return Ok(());
             }
@@ -1837,11 +1919,16 @@ impl Executor {
     /// the next command boundary (execute_cmd.c:643 run_pending_traps —
     /// bash manual, SIGNALS: the trap "will not be executed until the
     /// command completes"); an untrapped terminating signal kills the shell
-    /// mid-wait through SIG_DFL. The mailbox port slices the kernel wait
-    /// (fd wait_child_slice) and records deliveries between slices with the
-    /// same deferral (trap_exec observe_signals_while_blocked); on unix the
-    /// kernel backend already records arrivals during the plain blocking
-    /// wait.
+    /// mid-wait through SIG_DFL — and where GNU catches the delivery
+    /// (an EXIT trap is armed, or an interactive SIGHUP), CHECK_TERMSIG
+    /// (quit.h:53) inside the wait loop calls sig.c:590 termsig_handler
+    /// at once instead of waiting for the job to end. The mailbox port
+    /// records such a delivery instead of dying, so the engine must
+    /// drain the mailbox between slices (trap_exec
+    /// observe_signals_while_blocked); on unix the kernel backend
+    /// records arrivals, but a plain blocking wait never observes them
+    /// (rubash#3284) — hence the sliced draining wait below, and the
+    /// same discipline in the pipeline waits.
     fn wait_external_child(
         &mut self,
         child: &mut std::process::Child,
@@ -1884,11 +1971,13 @@ impl Executor {
             // rubash#1990: with the guard armed (interactive, untrapped),
             // wait in slices so a recorded terminal SIGINT can be
             // forwarded to a child the group delivery never reached;
-            // unarmed waits keep the plain blocking waitpid.
+            // unarmed waits drain the mailbox between slices instead
+            // (rubash#3284: a plain blocking waitpid never observes a
+            // recorded terminating delivery until the child ends).
             let status = if sigint_guard.is_armed() {
                 wait_fg_child_sliced(child, &sigint_guard)?
             } else {
-                child.wait().map_err(ExecuteError::IoError)?
+                wait_fg_child_draining(self, child)?
             };
             // rubash#1639: the foreground job died by SIGINT in an
             // interactive reader session with SIGINT untrapped — GNU
@@ -2891,6 +2980,7 @@ impl Executor {
         process: &mut Command,
         command_fd_pins: &mut FdPinVec,
         parent_side_dups: &mut Vec<crate::fd::HANDLE>,
+        fd_carriers: &mut Vec<(crate::fd::HANDLE, u32)>,
     ) {
         let mut slots: Vec<u32> = Vec::new();
         for (fd, entry) in &self.fd_table.entries {
@@ -2935,7 +3025,14 @@ impl Executor {
             slots.push(*fd);
         }
         for fd in slots {
-            self.deliver_fd_var_text_binding(fd, fd, process, command_fd_pins, parent_side_dups);
+            self.deliver_fd_var_text_binding(
+                fd,
+                fd,
+                process,
+                command_fd_pins,
+                parent_side_dups,
+                fd_carriers,
+            );
         }
     }
 
@@ -2956,7 +3053,7 @@ impl Executor {
             // registration — the closure runs only in the forked child
             // before exec and only dup2/closes raw descriptors.
             unsafe {
-                process.pre_exec(move || pin_ambient_fds_in_child(&pins));
+                process.pre_exec(move || pin_ambient_fds_in_child(&pins).map(|_| ()));
             }
         }
     }
@@ -3001,11 +3098,18 @@ impl Executor {
     ) -> Vec<crate::fd::HANDLE> {
         let mut command_fd_pins: FdPinVec = Vec::new();
         let mut parent_side_dups: Vec<crate::fd::HANDLE> = Vec::new();
+        // rubash#2688: the carriers this pass's text bindings stamp,
+        // as (dup, slot) pairs — the pre_exec wrapper below retires
+        // each carrier whose slot the pin pass installed, so a
+        // heredoc body does not also surface at the carrier's own
+        // number in a foreign child.
+        let mut fd_carriers: Vec<(crate::fd::HANDLE, u32)> = Vec::new();
         self.deliver_ambient_text_endpoints(
             cmd,
             process,
             &mut command_fd_pins,
             &mut parent_side_dups,
+            &mut fd_carriers,
         );
         #[cfg(unix)]
         if !command_fd_pins.is_empty() {
@@ -3014,7 +3118,9 @@ impl Executor {
             // registration — the closure runs only in the forked child
             // before exec and only dup2/closes raw descriptors.
             unsafe {
-                process.pre_exec(move || pin_ambient_fds_in_child(&command_fd_pins));
+                process.pre_exec(move || {
+                    pin_ambient_fds_and_close_carriers(&command_fd_pins, &fd_carriers, &[])
+                });
             }
         }
         parent_side_dups
@@ -3062,6 +3168,13 @@ impl Executor {
         // simply see one extra env var (same limitation the background path
         // documents).
         let mut parent_side_dups: Vec<crate::fd::HANDLE> = Vec::new();
+        // rubash#2688: (dup, slot) pairs for every inheritable
+        // carrier duplicate this delivery stamps, plus carriers a
+        // {var} close revoked (their stamps and pins are gone, so
+        // nothing can adopt them). The pre_exec wrapper at the end
+        // retires each carrier whose slot the pin pass installed.
+        let mut fd_carriers: Vec<(crate::fd::HANDLE, u32)> = Vec::new();
+        let mut dead_carriers: Vec<crate::fd::HANDLE> = Vec::new();
         // rubash#2272/#2281: this command's deferred {var} closes
         // (close-form targets and move-form dup sources, recorded by
         // the dynamic-fd applier in fd_var_pending_closes with their
@@ -3082,26 +3195,29 @@ impl Executor {
             if *fd < 3 || entry.closed {
                 continue;
             }
-            let mut pass = |endpoint: Option<&Rc<crate::executor::fd_table::FileFd>>,
-                            write: bool,
-                            process: &mut Command,
-                            dups: &mut Vec<crate::fd::HANDLE>| {
-                let Some(file) = endpoint else {
-                    return;
+            let mut pass =
+                |endpoint: Option<&Rc<crate::executor::fd_table::FileFd>>,
+                 write: bool,
+                 process: &mut Command,
+                 dups: &mut Vec<crate::fd::HANDLE>,
+                 carriers: &mut Vec<(crate::fd::HANDLE, u32)>| {
+                    let Some(file) = endpoint else {
+                        return;
+                    };
+                    let Ok(dup) = crate::fd::duplicate_handle_inheritable(file.handle) else {
+                        return;
+                    };
+                    process.env(
+                        format!("__RUBASH_FD_{}HANDLE_{fd}", if write { "W" } else { "" }),
+                        format!("{dup:#x}"),
+                    );
+                    process.env(
+                        format!("__RUBASH_FD_{}PATH_{fd}", if write { "W" } else { "" }),
+                        file.path.to_string_lossy().into_owned(),
+                    );
+                    dups.push(dup);
+                    carriers.push((dup, *fd));
                 };
-                let Ok(dup) = crate::fd::duplicate_handle_inheritable(file.handle) else {
-                    return;
-                };
-                process.env(
-                    format!("__RUBASH_FD_{}HANDLE_{fd}", if write { "W" } else { "" }),
-                    format!("{dup:#x}"),
-                );
-                process.env(
-                    format!("__RUBASH_FD_{}PATH_{fd}", if write { "W" } else { "" }),
-                    file.path.to_string_lossy().into_owned(),
-                );
-                dups.push(dup);
-            };
             pass(
                 entry.read.as_ref().and_then(|read| match read {
                     crate::executor::fd_table::FdReadEndpoint::File(file) => Some(file),
@@ -3110,6 +3226,7 @@ impl Executor {
                 false,
                 &mut process,
                 &mut parent_side_dups,
+                &mut fd_carriers,
             );
             pass(
                 entry.write.as_ref().and_then(|write| match write {
@@ -3119,6 +3236,7 @@ impl Executor {
                 true,
                 &mut process,
                 &mut parent_side_dups,
+                &mut fd_carriers,
             );
         }
         // The command's own fd>=3 file redirects are not fd-table entries on
@@ -3158,6 +3276,7 @@ impl Executor {
             &mut process,
             &mut command_fd_pins,
             &mut parent_side_dups,
+            &mut fd_carriers,
         );
         for (position, redirect) in cmd.redirects.iter().enumerate() {
             // rubash#2281: closes recorded at earlier positions take
@@ -3176,6 +3295,8 @@ impl Executor {
                     &mut command_fd_pins,
                     &mut walk_opened,
                     &mut numbered_dup_bindings,
+                    &mut fd_carriers,
+                    &mut dead_carriers,
                     fd,
                 );
             }
@@ -3187,6 +3308,7 @@ impl Executor {
                     &mut process,
                     &mut command_fd_pins,
                     &mut parent_side_dups,
+                    &mut fd_carriers,
                     &walk_opened,
                     &mut fd_var_claimed,
                 );
@@ -3253,6 +3375,7 @@ impl Executor {
                                 file.path.to_string_lossy().into_owned(),
                             );
                             parent_side_dups.push(dup);
+                            fd_carriers.push((dup, fd));
                         }
                     }
                 }
@@ -3284,6 +3407,7 @@ impl Executor {
                         &mut process,
                         &mut command_fd_pins,
                         &mut parent_side_dups,
+                        &mut fd_carriers,
                         &mut walk_opened,
                         &mut numbered_dup_bindings,
                         stage_stdio,
@@ -3348,6 +3472,7 @@ impl Executor {
                             &mut process,
                             &mut command_fd_pins,
                             &mut parent_side_dups,
+                            &mut fd_carriers,
                             fd,
                             true,
                             raw,
@@ -3482,11 +3607,11 @@ impl Executor {
             } else {
                 let opened = if write {
                     if redirect.append {
-                        open_redirect_append(
-                            &self.session_path(self.redirect_target_filesystem_path(&target)),
-                        )
+                        open_redirect_append(&self.session_path(
+                            self.redirect_target_filesystem_path_for(redirect, &target),
+                        ))
                     } else {
-                        self.create_redirect_output(&target, redirect.clobber)
+                        self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)
                             .map_err(|error| crate::posix_errors::path_error(&target, error))
                     }
                 } else if readwrite {
@@ -3539,6 +3664,7 @@ impl Executor {
                 process.env(format!("__RUBASH_FD_WPATH_{fd}"), path_label);
             }
             parent_side_dups.push(dup);
+            fd_carriers.push((dup, fd));
             // rubash#2272: remember the description delivered at this
             // slot for a later {var} dup in the same list (see
             // walk_opened above).
@@ -3569,6 +3695,8 @@ impl Executor {
                 &mut command_fd_pins,
                 &mut walk_opened,
                 &mut numbered_dup_bindings,
+                &mut fd_carriers,
+                &mut dead_carriers,
                 fd,
             );
         }
@@ -3591,6 +3719,7 @@ impl Executor {
                 &mut process,
                 &mut command_fd_pins,
                 &mut parent_side_dups,
+                &mut fd_carriers,
             );
         }
         // rubash#1626: the env channel above only reaches rubash children
@@ -3622,8 +3751,15 @@ impl Executor {
         if !ambient_fd_pins.is_empty() {
             use std::os::unix::process::CommandExt;
             let pins = ambient_fd_pins;
+            // rubash#2688: the same closure retires the carriers the
+            // delivery stamped (see fd_carriers above) once their
+            // slots are pinned — a foreign child then sees each file
+            // at its slot number only. Carriers of unpinned slots
+            // stay open as the rubash-child restore's fallback.
             unsafe {
-                process.pre_exec(move || pin_ambient_fds_in_child(&pins));
+                process.pre_exec(move || {
+                    pin_ambient_fds_and_close_carriers(&pins, &fd_carriers, &dead_carriers)
+                });
             }
         }
         parent_side_dups
@@ -3635,11 +3771,13 @@ impl Executor {
     /// environment at `fd`, and (on Unix) record the pre_exec pin so
     /// a foreign child receives the raw descriptor at that number —
     /// the same two channels as every other spawn delivery.
+    #[allow(clippy::too_many_arguments)]
     fn stamp_child_fd_handle(
         &mut self,
         process: &mut Command,
         command_fd_pins: &mut FdPinVec,
         parent_side_dups: &mut Vec<crate::fd::HANDLE>,
+        fd_carriers: &mut Vec<(crate::fd::HANDLE, u32)>,
         fd: u32,
         write: bool,
         raw: crate::fd::HANDLE,
@@ -3661,6 +3799,7 @@ impl Executor {
             path_label,
         );
         parent_side_dups.push(dup);
+        fd_carriers.push((dup, fd));
     }
 
     /// rubash#2531: stamp ONE resolved description on BOTH env
@@ -3681,6 +3820,7 @@ impl Executor {
         process: &mut Command,
         command_fd_pins: &mut FdPinVec,
         parent_side_dups: &mut Vec<crate::fd::HANDLE>,
+        fd_carriers: &mut Vec<(crate::fd::HANDLE, u32)>,
         fd: u32,
         raw: crate::fd::HANDLE,
         path_label: String,
@@ -3697,6 +3837,7 @@ impl Executor {
         process.env(format!("__RUBASH_FD_WHANDLE_{fd}"), format!("{dup:#x}"));
         process.env(format!("__RUBASH_FD_WPATH_{fd}"), path_label);
         parent_side_dups.push(dup);
+        fd_carriers.push((dup, fd));
     }
 
     /// rubash#2272: deliver one `{var}` redirect's binding to the
@@ -3736,6 +3877,7 @@ impl Executor {
         process: &mut Command,
         command_fd_pins: &mut FdPinVec,
         parent_side_dups: &mut Vec<crate::fd::HANDLE>,
+        fd_carriers: &mut Vec<(crate::fd::HANDLE, u32)>,
         walk_opened: &std::collections::HashMap<
             u32,
             std::rc::Rc<crate::executor::fd_table::FileFd>,
@@ -3755,6 +3897,7 @@ impl Executor {
                         process,
                         command_fd_pins,
                         parent_side_dups,
+                        fd_carriers,
                     );
                 }
             }
@@ -3768,6 +3911,7 @@ impl Executor {
                     process,
                     command_fd_pins,
                     parent_side_dups,
+                    fd_carriers,
                     walk_opened,
                     fd_var_claimed,
                 );
@@ -3797,6 +3941,7 @@ impl Executor {
         process: &mut Command,
         command_fd_pins: &mut FdPinVec,
         parent_side_dups: &mut Vec<crate::fd::HANDLE>,
+        fd_carriers: &mut Vec<(crate::fd::HANDLE, u32)>,
     ) {
         let Some((text, offset)) = self.fd_table.input_snapshot(snapshot_fd) else {
             return;
@@ -3827,6 +3972,7 @@ impl Executor {
             process,
             command_fd_pins,
             parent_side_dups,
+            fd_carriers,
             deliver_fd,
             false,
             raw,
@@ -3901,6 +4047,7 @@ impl Executor {
         process: &mut Command,
         command_fd_pins: &mut FdPinVec,
         parent_side_dups: &mut Vec<crate::fd::HANDLE>,
+        fd_carriers: &mut Vec<(crate::fd::HANDLE, u32)>,
         walk_opened: &std::collections::HashMap<
             u32,
             std::rc::Rc<crate::executor::fd_table::FileFd>,
@@ -3925,6 +4072,7 @@ impl Executor {
                 process,
                 command_fd_pins,
                 parent_side_dups,
+                fd_carriers,
                 var_fd,
                 file.handle,
                 path,
@@ -3945,6 +4093,7 @@ impl Executor {
                     process,
                     command_fd_pins,
                     parent_side_dups,
+                    fd_carriers,
                     var_fd,
                     file.handle,
                     path,
@@ -3986,6 +4135,7 @@ impl Executor {
                 process,
                 command_fd_pins,
                 parent_side_dups,
+                fd_carriers,
             );
             return;
         }
@@ -4038,6 +4188,7 @@ impl Executor {
         process: &mut Command,
         command_fd_pins: &mut FdPinVec,
         parent_side_dups: &mut Vec<crate::fd::HANDLE>,
+        fd_carriers: &mut Vec<(crate::fd::HANDLE, u32)>,
         walk_opened: &mut std::collections::HashMap<
             u32,
             std::rc::Rc<crate::executor::fd_table::FileFd>,
@@ -4062,6 +4213,7 @@ impl Executor {
                 process,
                 command_fd_pins,
                 parent_side_dups,
+                fd_carriers,
                 fd,
                 file.handle,
                 path,
@@ -4094,6 +4246,7 @@ impl Executor {
                     process,
                     command_fd_pins,
                     parent_side_dups,
+                    fd_carriers,
                     fd,
                     false,
                     file.handle,
@@ -4127,6 +4280,7 @@ impl Executor {
                 process,
                 command_fd_pins,
                 parent_side_dups,
+                fd_carriers,
                 fd,
                 write,
                 file.handle,
@@ -4145,6 +4299,7 @@ impl Executor {
                 process,
                 command_fd_pins,
                 parent_side_dups,
+                fd_carriers,
             );
             return;
         }
@@ -4226,6 +4381,7 @@ impl Executor {
                 {
                     command_fd_pins.push((dup, fd));
                     parent_side_dups.push(dup);
+                    fd_carriers.push((dup, fd));
                     numbered_dup_bindings.insert(fd, NumberedDupBinding::Handle(dup));
                     return;
                 }
@@ -5227,6 +5383,52 @@ pub(in crate::executor) fn fg_forward_drain(sigint_guard: &ForegroundWaitSigintG
     epoch_moved
 }
 
+/// rubash#3284: unix sliced form of the UNARMED foreground wait —
+/// the shared draining wait for every foreground child wait that has
+/// no SIGINT guard to arm (non-interactive shells, trapped SIGINT).
+/// GNU jobs.c:3064 wait_for runs CHECK_TERMSIG (quit.h:53) inside its
+/// wait loop: a terminating delivery the shell catches (an EXIT trap
+/// is armed, or an interactive SIGHUP) calls sig.c:590
+/// termsig_handler at once — EXIT trap, then sig.c:650 kill_shell
+/// re-raises the signal so the shell dies BY it mid-wait, never at
+/// the job's natural end. The mailbox port records such a delivery
+/// instead of dying (the handler cannot run the EXIT trap from signal
+/// context), so the engine must drain the mailbox between slices
+/// (observe_signals_while_blocked); a plain blocking waitpid never
+/// observes it, which is the 2.4s-vs-0.05s gap in the issue. Unix has
+/// no slice primitive (fd::wait_child_slice blocks), so this loop
+/// polls try_wait — the same shape wait_fg_child_sliced below uses.
+/// On an untrapped terminating delivery observe records the
+/// termsig-death mark and unwinds ExitCode(128+sig); the child is
+/// killed and reaped first so the shell's prompt death is observable
+/// (a lingering child would hold the shell's stdout pipe open past
+/// its death) — the same abort model the non-unix branch of
+/// wait_external_child and the pipeline waits use. Trapped
+/// deliveries are re-queued by observe and deferred to the command
+/// boundary, GNU's trap-completes-first rule (execute_cmd.c:643
+/// run_pending_traps). The SIGINT-guarded wait keeps its own sliced
+/// form below: it forwards the recorded terminal SIGINT to the child
+/// instead of aborting the wait outright.
+#[cfg(unix)]
+pub(in crate::executor) fn wait_fg_child_draining(
+    executor: &mut Executor,
+    child: &mut std::process::Child,
+) -> Result<std::process::ExitStatus, ExecuteError> {
+    const SLICE: std::time::Duration = std::time::Duration::from_millis(10);
+    loop {
+        if let Some(status) = child.try_wait().map_err(ExecuteError::IoError)? {
+            return Ok(status);
+        }
+        if let Err(error) = executor.observe_signals_while_blocked() {
+            let _ = child.kill();
+            let _ = child.wait();
+            super::read_helpers::note_reaped_child_cpu(child);
+            return Err(error);
+        }
+        std::thread::sleep(SLICE);
+    }
+}
+
 /// rubash#1990: sliced form of the armed foreground wait. GNU never
 /// needs to forward: its children lead their own process groups and
 /// the terminal's group delivery reaches them directly, so wait_for
@@ -5940,8 +6142,10 @@ pub(in crate::executor) fn is_enoexec_candidate(program: &std::path::Path) -> bo
 /// MSYS-like host). Such a name is never PATH-searched (findcmd.c:385-386
 /// search_for_command), so its failure text is classified by the execve
 /// result, not by the PATH miss: execute_cmd.c:6126-6159 shell_execve —
-/// ENOENT ("No such file or directory", 127), a directory (EISDIR text,
-/// 126), an unexecutable file ("Permission denied", 126). Returns None for
+/// ENOENT ("No such file or directory", 127), ENOTDIR ("Not a
+/// directory", 126, when a path component is a regular file), a
+/// directory (EISDIR text, 126), an unexecutable file ("Permission
+/// denied", 126). Returns None for
 /// slash-free names, which keep the "command not found" PATH wording
 /// (execute_cmd.c:5910 notfound_str).
 pub(crate) fn slash_command_execve_error_message(
@@ -5968,11 +6172,30 @@ pub(crate) fn slash_command_execve_error_message(
         return None;
     }
     let candidate = crate::executor::path::shell_path_to_windows(name, env_vars);
-    let metadata = std::fs::metadata(&candidate)
-        .or_else(|_| std::fs::metadata(name))
-        .ok();
+    let (metadata, probe_error) = match std::fs::metadata(&candidate) {
+        Ok(metadata) => (Some(metadata), None),
+        Err(_) => match std::fs::metadata(name) {
+            Ok(metadata) => (Some(metadata), None),
+            Err(error) => (None, Some(error)),
+        },
+    };
     match metadata {
-        None => Some(("No such file or directory", 127)),
+        None => {
+            // The metadata probe must not flatten every failure into
+            // ENOENT: when a path COMPONENT is a regular file, stat
+            // fails ENOTDIR and GNU's classification (the execve errno
+            // via file_error, execute_cmd.c:6126-6159) is
+            // "Not a directory" with 126, not 127 (`zz/x` with `zz` a
+            // plain file, rubash#3182). The kind comparison is the
+            // portable form of the errno test: std maps ENOTDIR to
+            // NotADirectory on unix, and the shared code must not
+            // name the unix-only libc crate (Windows E0433).
+            if probe_error.is_some_and(|error| error.kind() == std::io::ErrorKind::NotADirectory) {
+                Some(("Not a directory", 126))
+            } else {
+                Some(("No such file or directory", 127))
+            }
+        }
         Some(metadata) if metadata.is_dir() => Some(("Is a directory", 126)),
         Some(_) => Some(("Permission denied", 126)),
     }

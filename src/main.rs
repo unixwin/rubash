@@ -233,6 +233,14 @@ fn run_main() -> i32 {
     // AND shell_name, so "BASH_ARGV0=this-bash bash -c 'echo $0 $BASH_ARGV0'"
     // prints this-bash twice. The executable path is only the fallback when
     // the environment did not supply a value.
+    // rubash#3413: the test is EXISTENCE, never non-emptiness — GNU
+    // marks every imported env string att_imported
+    // (initialize_shell_variables: bind_variable + VSETATTR
+    // att_imported) and set_argv0 (variables.c:1547-1555) asks only
+    // `v && imported_p (v)`; assign_bash_argv0 (variables.c:1528-1545)
+    // copies the value verbatim, empty string included. "Set to
+    // empty" therefore seeds an empty $0 (and empty diagnostic name);
+    // only a genuinely absent BASH_ARGV0 falls back to argv[0].
     // rubash#590: the invocation face read above (NIU_INVOKED_AS, else
     // argv[0]) reconstructs the argv[0] the shim erased, per GNU
     // set_shell_name (shell.c:1778-1806): it feeds dollar_vars[0]/shell_name
@@ -240,10 +248,7 @@ fn run_main() -> i32 {
     // BASH_ARGV0 import — variables.c:1547-1555 ranks the environment value
     // above argv[0] ("BASH_ARGV0=this-bash bash -c 'echo $0 $BASH_ARGV0'"
     // prints this-bash twice).
-    match env::var("BASH_ARGV0")
-        .ok()
-        .filter(|value| !value.is_empty())
-    {
+    match env::var("BASH_ARGV0").ok() {
         Some(imported) => {
             // rubash#3105: this re-seed reads the RAW process
             // environment, so it entry-encodes like every raw-data
@@ -255,18 +260,35 @@ fn run_main() -> i32 {
         }
         None => {
             if let Some(shell_name) = &invocation_name {
-                // rubash#331 (#224 legacy): a full-path argv[0] the parent
-                // handed over in Windows form is OUR produced `$0` value —
-                // render it POSIX (/d/...) so `-c 'echo $0'` matches the
-                // PWD family. Relative and bare names stay verbatim; a
-                // shim-forwarded face is a bare name by construction.
-                let display = rubash::executor::shell_pwd_display_path(shell_name);
-                executor.set_env("__RUBASH_SHELL_NAME", &display);
-                // rubash#3105: BASH_ARGV0 is a shell-visible
-                // variable seeded from raw argv[0] — entry-encode
-                // the display spelling (the __RUBASH_SHELL_NAME
-                // carrier above keeps the raw spelling).
-                executor.set_env("BASH_ARGV0", &entry_encode_argv_value(&display));
+                // rubash#3355: GNU shell.c:1779-1806 set_shell_name binds
+                // dollar_vars[0] to argv[0] VERBATIM and only afterwards
+                // rescues an empty shell_name to PROGRAM ("bash") — the
+                // rescue never reaches $0. The old code ran the name
+                // through shell_pwd_display_path, whose empty-input arm
+                // returns "/", so an empty argv[0] seeded $0 as "/" and
+                // every diagnostic printed "/: ...". Keep the two
+                // carriers apart: BASH_ARGV0 ($0) keeps argv[0] verbatim
+                // (empty stays empty); __RUBASH_SHELL_NAME (shell_name)
+                // takes the display form, or PROGRAM when argv[0] is
+                // empty. (shell_pwd_display_path's "" -> "/" arm itself
+                // is correct for PWD and stays untouched.)
+                if shell_name.is_empty() {
+                    executor.set_env("__RUBASH_SHELL_NAME", "bash");
+                    executor.set_env("BASH_ARGV0", "");
+                } else {
+                    // rubash#331 (#224 legacy): a full-path argv[0] the parent
+                    // handed over in Windows form is OUR produced `$0` value —
+                    // render it POSIX (/d/...) so `-c 'echo $0'` matches the
+                    // PWD family. Relative and bare names stay verbatim; a
+                    // shim-forwarded face is a bare name by construction.
+                    let display = rubash::executor::shell_pwd_display_path(shell_name);
+                    executor.set_env("__RUBASH_SHELL_NAME", &display);
+                    // rubash#3105: BASH_ARGV0 is a shell-visible
+                    // variable seeded from raw argv[0] — entry-encode
+                    // the display spelling (the __RUBASH_SHELL_NAME
+                    // carrier above keeps the raw spelling).
+                    executor.set_env("BASH_ARGV0", &entry_encode_argv_value(&display));
+                }
             }
         }
     }
@@ -955,12 +977,31 @@ fn run_args(executor: &mut Executor, args: &[String], argv0: Option<&str>) -> i3
                         // `&` children) inherit the parent's script name
                         // through init.rs — GNU's forked subshell keeps
                         // $0, so do not clobber it here.
-                        let invocation_name = executor
-                            .get_env("BASH_ARGV0")
-                            .filter(|value| !value.is_empty())
-                            .unwrap_or("bash")
-                            .to_string();
-                        executor.set_env("__RUBASH_SCRIPT_NAME", &invocation_name);
+                        // rubash#3355: a present-but-empty $0 (empty
+                        // argv[0]) must stay empty — GNU error.c:90-120
+                        // get_name_for_error stops at dollar_vars[0] ==
+                        // "" and prints an empty name, so planting
+                        // "bash" in the reader-name carrier here would
+                        // make the script-name arm report "bash"
+                        // instead of the empty $0. Only the
+                        // no-carrier-at-all case (library host /
+                        // argc==0) takes PROGRAM; an empty $0 leaves
+                        // the carrier absent so the $0 arm owns the
+                        // prolog (BASH_SOURCE[0] is empty for -c in
+                        // GNU too).
+                        // Owned copy: get_env borrows the executor,
+                        // set_env needs it mutably.
+                        let invocation_name: Option<String> =
+                            executor.get_env("BASH_ARGV0").map(str::to_string);
+                        match invocation_name.as_deref() {
+                            Some(value) if !value.is_empty() => {
+                                executor.set_env("__RUBASH_SCRIPT_NAME", value);
+                            }
+                            Some(_) => {}
+                            None => {
+                                executor.set_env("__RUBASH_SCRIPT_NAME", "bash");
+                            }
+                        }
                     }
                     executor.set_env("__RUBASH_IS_C", "1");
                     apply_interactive_alias_default(executor, alias_expansion_override);

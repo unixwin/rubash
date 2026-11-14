@@ -609,11 +609,23 @@ impl Executor {
                 let array_exists = is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, lhs)
                     || is_marked_var(&self.shell_state.env_vars, ARRAY_VARS, lhs);
                 let declare_family = !matches!(command_name, "export" | "readonly");
-                let is_compound = paren_value
-                    && (w_compassign
-                        || assoc_hint
-                        || array_hint
-                        || (declare_family && array_exists));
+                // GNU parse.y:5648-5657 token_is_assignment + subst.c:12949
+                // expand_declaration_argument: a `(...)` operand binds as a
+                // compound assignment only when the LHS is a valid identifier
+                // — an invalid name (rubash#3186) takes the plain word path,
+                // so the builtin's InvalidId diagnostic quotes the plain
+                // expanded word instead of the marker/quoted compound
+                // expansion. The `w_compassign` arm needs no extra gate:
+                // the parser only sets the marker for a
+                // valid_compound_assignment_lhs LHS (token_actions.rs), which
+                // after its own tightening is a strict identifier (modulo a
+                // `[sub]` head).
+                let lhs_base = lhs.split('[').next().unwrap_or(lhs);
+                let lhs_base_valid = is_shell_name(lhs_base);
+                let hint_compound =
+                    assoc_hint || array_hint || (declare_family && array_exists);
+                let is_compound =
+                    paren_value && (w_compassign || (lhs_base_valid && hint_compound));
                 // GNU subst.c:12949-13036 expand_declaration_argument: a
                 // W_COMPASSIGN operand of an assignment builtin is bound by
                 // a nested declare_builtin during word expansion, with the
@@ -1572,7 +1584,18 @@ impl Executor {
                 // named print lookup, then restore — bare list mode stays
                 // untouched (GNU excludes the invisible array there) and
                 // assignments stay blocked (is_noassign_bash_array).
+                // rubash#2770: the named form now renders from the
+                // dynamic view; the seed stays for the subscript
+                // operands (`FUNCNAME[0]` has no view) — but never for
+                // a lifetime-unset cell (variables.c:3839 unbind):
+                // seeding one would fabricate a `declare -a FUNCNAME`
+                // GNU reports as not found.
                 let funcname_print_operand = declare_args_request_print(&args)
+                    && !is_marked_var(
+                        &self.shell_state.env_vars,
+                        crate::executor::UNSET_DYNAMIC_VARS,
+                        "FUNCNAME",
+                    )
                     && args
                         .iter()
                         .any(|arg| arg == "FUNCNAME" || arg.starts_with("FUNCNAME["));
@@ -1693,7 +1716,12 @@ impl Executor {
                         // contents; the env cells for these two only
                         // refresh at source-frame push/pop and would
                         // list a returned function's frozen frame.
-                        for name in ["GROUPS", "BASH_SOURCE", "BASH_LINENO"] {
+                        // rubash#2770: FUNCNAME joins the same VISIBLE
+                        // class — its env mirror is a birth snapshot
+                        // ("", init.rs) that function entry never
+                        // refreshes, so listings rendered the stale
+                        // valueless cell instead of the live stack.
+                        for name in ["GROUPS", "BASH_SOURCE", "BASH_LINENO", "FUNCNAME"] {
                             push_registry(name);
                         }
                         // rubash#1363 + rubash#2973: GNU enumerates a

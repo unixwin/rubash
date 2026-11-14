@@ -431,6 +431,73 @@ impl Executor {
         Ok(true)
     }
 
+    /// rubash#3333 — GNU coreutils mkdir.c `make_ancestors`:
+    /// `mkdir -p` creates the operand component by component, and
+    /// on failure the diagnostic names the operand text truncated
+    /// after the first failing component (`a/b` with `a` a file
+    /// reports 'a'; `a/./b` and `a//b` keep their literal
+    /// separators). Each prefix resolves through the same
+    /// operand-root convergence as the whole operand (the #3276
+    /// cwd-anchor route for a deleted session cwd), and a
+    /// single-level `create_dir` per prefix keeps the At arm's
+    /// mkdirat semantics. Any create failure gets a follow-up
+    /// stat, not just EEXIST: on the simulated (Windows) face a
+    /// bare create of an already-existing component — a drive
+    /// root such as `/c` above all — can answer EACCES instead,
+    /// while GNU's `-p` contract treats every pre-existing
+    /// component as success (the `golden_nvm_load` shape). The
+    /// stat decides: a directory continues the walk, a
+    /// non-directory is ENOTDIR, and a stat failure returns the
+    /// original create error (a dangling symlink keeps GNU's
+    /// EEXIST; a genuine failure keeps its own errno). An empty
+    /// operand has no component to fail on: GNU reports ''
+    /// ENOENT.
+    fn mkdir_create_parents(&self, operand: &str) -> Result<(), (io::Error, String)> {
+        if operand.is_empty() {
+            // Portable construction: shared code names no `libc::`
+            // constant (E0433 on Windows, where this file has no
+            // unconditional libc import). Kind + GNU strerror text
+            // via io::Error::new — the shape used across the crate
+            // (command_input_scope.rs, shell_options.rs) — and the
+            // diagnostic rendered by posix_errors::message stays
+            // byte-identical to the raw-errno form.
+            return Err((
+                io::Error::new(io::ErrorKind::NotFound, "No such file or directory"),
+                String::new(),
+            ));
+        }
+        // An operand of only slashes ("/", "//") names the root
+        // itself: one prefix, the whole operand.
+        let mut prefixes = mkdir_parent_prefixes(operand);
+        if prefixes.is_empty() {
+            prefixes.push(operand);
+        }
+        for prefix in prefixes {
+            let native = shell_path_to_windows(prefix, &self.shell_state.env_vars);
+            let joined = self.session_path(native.clone());
+            let node = CpNode::at_root(self.cp_operand_root(&native, &joined));
+            match node.create_dir() {
+                Ok(()) => {}
+                // rubash#3333 rework (captain review §7.1): the
+                // follow-up stat runs on every create failure, not
+                // only EEXIST — see the fn doc comment. On unix an
+                // existing component always answers EEXIST, so the
+                // widened trigger is observably identical there.
+                Err(error) => match node.stat() {
+                    Ok(stat) if stat.is_dir => {}
+                    Ok(_) => {
+                        return Err((
+                            io::Error::new(io::ErrorKind::NotADirectory, "Not a directory"),
+                            prefix.to_string(),
+                        ));
+                    }
+                    Err(_) => return Err((error, prefix.to_string())),
+                },
+            }
+        }
+        Ok(())
+    }
+
     fn external_mkdir(&mut self, cmd: &CommandNode) -> Result<bool, ExecuteError> {
         // rubash#1636 narrowing (2026-10-27 ruling): the parse below
         // implements -p/--parents exactly; every other option shape
@@ -524,16 +591,31 @@ impl Executor {
             let native = shell_path_to_windows(&expanded, &self.shell_state.env_vars);
             let joined = self.session_path(native.clone());
             let node = CpNode::at_root(self.cp_operand_root(&native, &joined));
-            let result = if parents {
-                node.create_dir_all()
+            // rubash#3333: -p walks the operand component by
+            // component (GNU coreutils mkdir.c make_ancestors) and
+            // the diagnostic names the operand text truncated
+            // after the first failing component — `a/b` with `a`
+            // a file reports 'a', not the whole operand. The
+            // single-level arm keeps reporting the operand itself.
+            let result: Result<(), (io::Error, String)> = if parents {
+                self.mkdir_create_parents(expanded)
+            } else if expanded.is_empty() {
+                // GNU mkdir("") fails ENOENT; the raw create_dir
+                // below would answer EEXIST against the session
+                // cwd itself.
+                Err((
+                    io::Error::new(io::ErrorKind::NotFound, "No such file or directory"),
+                    expanded.to_string(),
+                ))
             } else {
                 node.create_dir()
+                    .map_err(|error| (error, expanded.to_string()))
             };
-            if let Err(error) = result {
+            if let Err((error, name)) = result {
                 writeln!(
                     stderr,
                     "mkdir: cannot create directory '{}': {}",
-                    expanded,
+                    name,
                     crate::posix_errors::message(&error)
                 )?;
                 failed = true;
@@ -1533,15 +1615,22 @@ impl Executor {
             return Ok(true);
         }
 
-        if effective.len() > 2 && !destination.exists() {
-            let _ = writeln!(
-                stderr,
-                "cp: target '{}': No such file or directory",
-                destination_word
-            );
-            self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
-            self.exit_code = 1;
-            return Ok(true);
+        if effective.len() > 2 {
+            // GNU cp stats the target operand: a missing target is
+            // ENOENT, but a target spelled through a regular file is
+            // the walk's ENOTDIR — the classified stat keeps the two
+            // apart (rubash#3416).
+            if let Err(error) = destination.stat_classified() {
+                let _ = writeln!(
+                    stderr,
+                    "cp: target '{}': {}",
+                    destination_word,
+                    crate::posix_errors::message(&error)
+                );
+                self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+                self.exit_code = 1;
+                return Ok(true);
+            }
         }
 
         // rubash#1941: --preserve=links bookkeeping for this whole
@@ -1731,11 +1820,12 @@ impl Executor {
                     (destination.clone(), destination_word.clone())
                 };
 
-                if !source.exists() {
+                if let Err(error) = source.stat_classified() {
                     let _ = writeln!(
                         stderr,
-                        "cp: cannot stat '{}': No such file or directory",
-                        source_word
+                        "cp: cannot stat '{}': {}",
+                        source_word,
+                        crate::posix_errors::message(&error)
                     );
                     status = 1;
                     continue;
@@ -2244,7 +2334,7 @@ impl Executor {
                             && !t.starts_with("<(")
                             && !t.starts_with(">(")
                         {
-                            let _ = self.create_redirect_output(&t, r.clobber);
+                            let _ = self.create_redirect_output_for(Some(r), &t, r.clobber);
                         }
                     } else {
                         seen_last = true;
@@ -2261,7 +2351,8 @@ impl Executor {
                     self.exit_code = 0;
                     return Ok(true);
                 }
-                let file = self.create_redirect_output(&target, redirect.clobber)?;
+                let file =
+                    self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?;
                 crate::fd::write_file_all(&file, &output)?;
                 self.exit_code = 0;
                 return Ok(true);
@@ -3334,6 +3425,35 @@ fn rm_declines(words: &[String]) -> bool {
 /// flag position" (before the `--` terminator): -m/--mode in every
 /// form, -v/--verbose, -Z/--context, bundles carrying them, unknown
 /// options, and the --help/--version info requests.
+/// The operand text truncated after each of its components, in
+/// order: `a/b` -> ["a", "a/b"], `./a/b` -> [".", "./a",
+/// "./a/b"], `a/./b` -> ["a", "a/.", "a/./b"], `a//b` ->
+/// ["a", "a//b"]. The literal separators survive — GNU names the
+/// failing component in the operand's own spelling (rubash#3333).
+/// An operand of only slashes, or the empty string, yields no
+/// prefix. Slicing is safe: cuts land on '/' bytes, which are
+/// ASCII and never inside a multi-byte UTF-8 sequence.
+fn mkdir_parent_prefixes(operand: &str) -> Vec<&str> {
+    let bytes = operand.as_bytes();
+    let mut prefixes = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        while i < bytes.len() && bytes[i] == b'/' {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        let mut j = i;
+        while j < bytes.len() && bytes[j] != b'/' {
+            j += 1;
+        }
+        prefixes.push(&operand[..j]);
+        i = j;
+    }
+    prefixes
+}
+
 fn mkdir_declines(words: &[String]) -> bool {
     let mut no_more_flags = false;
     for word in words {
@@ -4165,6 +4285,75 @@ impl CpNode {
                 use std::os::unix::io::AsRawFd;
                 let st = cp_fstatat(dir.as_raw_fd(), &self.at_rel(), follow)?;
                 Ok(cp_stat_from_libc(&st))
+            }
+        }
+    }
+
+    /// `stat()` with the failure reclassified to the verdict the
+    /// path walk actually reached (rubash#3416). A walk dies
+    /// ENOTDIR at the first intermediate component that is not a
+    /// directory and ENOENT only when every intermediate component
+    /// is a directory; the kernel reports that distinction
+    /// natively (std carries it as ErrorKind::NotADirectory on
+    /// unix), but the Windows face answers ERROR_PATH_NOT_FOUND
+    /// for both shapes, and a diagnostic that collapses the raw
+    /// error into a hardcoded ENOENT — as external_cp's operand
+    /// gates did — prints the wrong class for `file/child`. When
+    /// the raw error is a bare NotFound, re-derive the verdict:
+    /// walk the node's proper ancestors deepest-first; the first
+    /// one that stats as a NON-directory is where the walk died,
+    /// while an existing directory ancestor means the missing
+    /// component hangs directly under a directory and the raw
+    /// NotFound stands.
+    pub(in crate::executor) fn stat_classified(&self) -> io::Result<CpStat> {
+        match self.stat() {
+            Ok(stat) => Ok(stat),
+            Err(error) => Err(self.classify_stat_error(error)),
+        }
+    }
+
+    fn classify_stat_error(&self, error: io::Error) -> io::Error {
+        if error.kind() != io::ErrorKind::NotFound {
+            return error;
+        }
+        let not_a_directory = || io::Error::new(io::ErrorKind::NotADirectory, "Not a directory");
+        match &self.root {
+            CpRoot::Plain(_) => {
+                let path = self.eff_path();
+                for ancestor in path.ancestors().skip(1) {
+                    match fs::metadata(ancestor) {
+                        Ok(metadata) => {
+                            return if metadata.is_dir() {
+                                error
+                            } else {
+                                not_a_directory()
+                            };
+                        }
+                        Err(_) => continue,
+                    }
+                }
+                error
+            }
+            #[cfg(unix)]
+            CpRoot::At { dir, .. } => {
+                use std::os::unix::io::AsRawFd;
+                // Proper prefixes of the anchor-relative path,
+                // deepest first; running out of prefixes means no
+                // existing ancestor contradicts the raw verdict
+                // (the anchor itself is a directory by
+                // construction), so the raw error stands.
+                let mut prefix = self.at_rel();
+                while prefix.pop() {
+                    match cp_fstatat(dir.as_raw_fd(), &prefix, true) {
+                        Ok(st) => {
+                            let is_dir = u32::from(st.st_mode) & u32::from(libc::S_IFMT)
+                                == u32::from(libc::S_IFDIR);
+                            return if is_dir { error } else { not_a_directory() };
+                        }
+                        Err(_) => continue,
+                    }
+                }
+                error
             }
         }
     }
@@ -5625,24 +5814,31 @@ impl Executor {
                 // G-02: relative operands anchor at the session cwd.
                 self.shell_state.cwd.join(&windows)
             };
+            // rubash#3425: route the operand stat through the CpNode
+            // machinery — the same root external_cp builds
+            // (cp_operand_root: an anchor-relative root under a
+            // dead cwd, else the plain joined path) — so the
+            // failure class comes from the path walk instead of a
+            // hardcoded ENOENT text. GNU chmod reports fts's errno
+            // verbatim (coreutils 9.4 src/chmod.c:231 `cannot
+            // access` with ent->fts_errno): the walk dies ENOTDIR
+            // at the first non-directory component.
+            let node = CpNode::at_root(self.cp_operand_root(std::path::Path::new(&windows), &host));
             // Base mode for symbolic clauses: unix reads the file's real
             // inode mode (coreutils chmod(1) applies `+x`/`-w` clauses to
             // the file's current mode via chmod(2)); windows keeps the
             // emulated store, which is the only mode source there.
             #[cfg(unix)]
             let (base, is_dir) = {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::metadata(&host)
-                    .map(|metadata| (metadata.permissions().mode(), metadata.is_dir()))
+                node.stat()
+                    .map(|stat| (stat.mode, stat.is_dir))
                     .unwrap_or((0o644, false))
             };
             #[cfg(not(unix))]
             let base = crate::builtins::test::emulated_file_mode(file, &self.shell_state.env_vars)
                 .unwrap_or_else(|| self.default_emulated_mode(&windows));
             #[cfg(not(unix))]
-            let is_dir = std::fs::metadata(&host)
-                .map(|metadata| metadata.is_dir())
-                .unwrap_or(false);
+            let is_dir = node.stat().map(|stat| stat.is_dir).unwrap_or(false);
             match apply_chmod_mode(
                 base,
                 mode,
@@ -5650,27 +5846,49 @@ impl Executor {
                 is_dir,
             ) {
                 Some(new_mode) => {
+                    // rubash#3425: the operand stat is the node's
+                    // classified stat: a walk that dies at a
+                    // non-directory component reports ENOTDIR, a
+                    // genuinely missing component ENOENT — the same
+                    // verdict #3416 built for cp, generalized here
+                    // to the plain host path via the node machinery.
+                    let classified = node.stat_classified();
                     #[cfg(unix)]
                     {
                         // coreutils chmod(1) -> chmod(2): the real inode mode
                         // is the single source of truth on unix; the readonly
                         // attribute + emulated store below is the Windows
                         // port (no POSIX mode bits there).
-                        match std::fs::metadata(&host) {
-                            Ok(metadata) => {
-                                use std::os::unix::fs::PermissionsExt;
-                                let mut permissions = metadata.permissions();
-                                permissions.set_mode(new_mode);
-                                if std::fs::set_permissions(&host, permissions).is_err() {
-                                    failures += 1;
+                        match classified {
+                            Ok(_) => match std::fs::metadata(&host) {
+                                Ok(metadata) => {
+                                    use std::os::unix::fs::PermissionsExt;
+                                    let mut permissions = metadata.permissions();
+                                    permissions.set_mode(new_mode);
+                                    if std::fs::set_permissions(&host, permissions).is_err() {
+                                        failures += 1;
+                                    }
                                 }
-                            }
-                            Err(_) => {
+                                Err(raw) => {
+                                    // The node stat just succeeded
+                                    // (anchor face or a race): keep
+                                    // the raw verdict, unclassified.
+                                    failures += 1;
+                                    writeln!(
+                                        stderr,
+                                        "chmod: cannot access '{}': {}",
+                                        file,
+                                        crate::posix_errors::message(&raw)
+                                    )?;
+                                }
+                            },
+                            Err(error) => {
                                 failures += 1;
                                 writeln!(
                                     stderr,
-                                    "chmod: cannot access '{}': No such file or directory",
-                                    file
+                                    "chmod: cannot access '{}': {}",
+                                    file,
+                                    crate::posix_errors::message(&error)
                                 )?;
                             }
                         }
@@ -5682,23 +5900,38 @@ impl Executor {
                         // attribute, so `>file`/`>>file` fail EACCES like under
                         // GNU-on-WSL (redir12.sub). Sync it for every real path —
                         // relative names resolve against the drive-relative cwd.
-                        match std::fs::metadata(&host) {
-                            Ok(metadata) => {
-                                let readonly = new_mode & 0o222 == 0;
-                                let mut permissions = metadata.permissions();
-                                if permissions.readonly() != readonly {
-                                    permissions.set_readonly(readonly);
-                                    if std::fs::set_permissions(&host, permissions).is_err() {
-                                        failures += 1;
+                        match classified {
+                            Ok(_) => match std::fs::metadata(&host) {
+                                Ok(metadata) => {
+                                    let readonly = new_mode & 0o222 == 0;
+                                    let mut permissions = metadata.permissions();
+                                    if permissions.readonly() != readonly {
+                                        permissions.set_readonly(readonly);
+                                        if std::fs::set_permissions(&host, permissions).is_err() {
+                                            failures += 1;
+                                        }
                                     }
                                 }
-                            }
-                            Err(_) => {
+                                Err(raw) => {
+                                    // The node stat just succeeded
+                                    // (a race): keep the raw verdict,
+                                    // unclassified.
+                                    failures += 1;
+                                    writeln!(
+                                        stderr,
+                                        "chmod: cannot access '{}': {}",
+                                        file,
+                                        crate::posix_errors::message(&raw)
+                                    )?;
+                                }
+                            },
+                            Err(error) => {
                                 failures += 1;
                                 writeln!(
                                     stderr,
-                                    "chmod: cannot access '{}': No such file or directory",
-                                    file
+                                    "chmod: cannot access '{}': {}",
+                                    file,
+                                    crate::posix_errors::message(&error)
                                 )?;
                             }
                         }

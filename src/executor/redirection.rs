@@ -871,10 +871,13 @@ impl Executor {
                 let masked_target = mask_redirect_target_quoted_spans(&masked_target);
                 if let Some(name) = self.nounset_unbound_parameter(&masked_target) {
                     let mut stderr = Vec::new();
+                    // rubash#3406: a redirection_expand failure inside
+                    // the walk is the same do_redirections moment as
+                    // reject_redirect_at — same class prefix.
                     writeln!(
                         &mut stderr,
                         "{}{name}: unbound variable",
-                        self.error_prefix()
+                        self.compound_redirect_error_prefix(cmd)
                     )?;
                     self.write_redirect_diagnostic_at(cmd, index, &stderr)?;
                     self.exit_code = 1;
@@ -1583,10 +1586,13 @@ impl Executor {
             )?;
         }
         let name = dup_bad_fd_name(raw_word, redirector, fd);
+        // rubash#3406: this second line is GNU's redirection_error for
+        // the same entry (redir.c), so it carries the same class prefix
+        // as every other walk rejection — see reject_redirect_at.
         writeln!(
             &mut stderr,
             "{}{name}: Bad file descriptor",
-            self.error_prefix()
+            self.compound_redirect_error_prefix(cmd)
         )?;
         self.write_redirect_diagnostic_at(cmd, index, &stderr)?;
         self.exit_code = 1;
@@ -1600,7 +1606,21 @@ impl Executor {
         text: &str,
     ) -> Result<(), ExecuteError> {
         let mut stderr = Vec::new();
-        writeln!(&mut stderr, "{}{text}", self.error_prefix())?;
+        // rubash#3406: the validation walk IS GNU's do_redirections
+        // moment for these entries (execute_cmd.c:854 runs before the
+        // dispatch stamps any line), so its rejections carry the same
+        // class prefix the post-dispatch paths already use: ambient
+        // line for plain compounds, the node's completion line for
+        // cm_arith / cm_cond, the command's own line otherwise
+        // (compound_redirect_error_prefix, rubash#3183). Rendering with
+        // the plain funnel prefix reported a multi-line (( )) command's
+        // failing input open at its FIRST line where GNU reports the
+        // completion line.
+        writeln!(
+            &mut stderr,
+            "{}{text}",
+            self.compound_redirect_error_prefix(cmd)
+        )?;
         self.write_redirect_diagnostic_at(cmd, index, &stderr)?;
         self.exit_code = 1;
         Ok(())
@@ -1646,9 +1666,16 @@ impl Executor {
         // and its state is discarded. The executing path reports a
         // failed open itself; a report here double-prints (rubash#1844).
         state.diagnostics_muted = true;
-        if !self.apply_ordered_output_redirects(cmd, &mut state)? {
-            return Ok(None);
-        }
+        // rubash#3308: apply_ordered_output_redirects reports whether
+        // the LIST held an output redirect — a stage with none returns
+        // false, which this probe read as "unresolvable" and answered
+        // None, so the spawner defaulted fd 2 to the ambient Stderr and
+        // an enclosing `2>file` / `2>/dev/null` / `exec 2>...` / `2>&1`
+        // binding was silently dropped (the child inherited the process
+        // stderr). The seeded state already carries the fd-table
+        // ambient bindings, so no list redirect means the seeded
+        // targets stand; only a failed open declines.
+        self.apply_ordered_output_redirects(cmd, &mut state)?;
         // A stage whose own output open failed is not routable from the
         // resolved targets (the failed fd never bound): decline so the
         // sequential stage executor reports the failure per element
@@ -1766,6 +1793,23 @@ impl Executor {
         cmd: &CommandNode,
         message: &[u8],
     ) -> Option<usize> {
+        let prefix = self.error_prefix();
+        self.failing_open_redirect_index_with_prefix(cmd, message, &prefix)
+    }
+
+    /// `failing_open_redirect_index` with the diagnostic prefix given
+    /// explicitly: the identification strips the prefix from `message`
+    /// before matching the `{target}: ` head, so a caller that composed
+    /// the message under a different line's prefix (a compound's own
+    /// redirect errors report the ambient line, rubash#3183) must hand
+    /// that same prefix over, or the strip misses and the entry is
+    /// never located.
+    pub(in crate::executor) fn failing_open_redirect_index_with_prefix(
+        &mut self,
+        cmd: &CommandNode,
+        message: &[u8],
+        prefix: &str,
+    ) -> Option<usize> {
         use crate::parser::RedirectKind;
         let by_target = cmd.redirects.iter().position(|redirect| {
             let opens_path = match redirect.kind {
@@ -1791,9 +1835,8 @@ impl Executor {
                 return false;
             }
             let head = format!("{}: ", target.strip_prefix('&').unwrap_or(&target));
-            let prefix = self.error_prefix();
             std::str::from_utf8(message).is_ok_and(|text| {
-                text.strip_prefix(prefix.as_str())
+                text.strip_prefix(prefix)
                     .is_some_and(|rest| rest.starts_with(&head))
             })
         });
@@ -1808,7 +1851,7 @@ impl Executor {
         // whose effective redirector equals the named number (file
         // arms), or whose dup source does (dup arms).
         let text = std::str::from_utf8(message).ok()?;
-        let rest = text.strip_prefix(self.error_prefix().as_str())?;
+        let rest = text.strip_prefix(prefix)?;
         let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
         if digits.is_empty() || !rest[digits.len()..].starts_with(": Bad file descriptor") {
             return None;
@@ -1855,7 +1898,22 @@ impl Executor {
         cmd: &CommandNode,
         message: &[u8],
     ) -> Result<(), ExecuteError> {
-        let failed_index = self.failing_open_redirect_index(cmd, message);
+        let prefix = self.error_prefix();
+        self.write_redirect_diagnostic_routed_with_prefix(cmd, message, &prefix)
+    }
+
+    /// `write_redirect_diagnostic_routed` with the diagnostic prefix
+    /// given explicitly, for messages composed under a different
+    /// line's prefix than the funnel-stamped one (rubash#3183 ambient
+    /// redirect reports): the failing-entry identification inside must
+    /// strip the same prefix the message was composed with.
+    pub(in crate::executor) fn write_redirect_diagnostic_routed_with_prefix(
+        &mut self,
+        cmd: &CommandNode,
+        message: &[u8],
+        prefix: &str,
+    ) -> Result<(), ExecuteError> {
+        let failed_index = self.failing_open_redirect_index_with_prefix(cmd, message, prefix);
         let mut state = self.command_output_fd_state();
         match failed_index {
             Some(index) => {
@@ -1891,7 +1949,7 @@ impl Executor {
         stdout: &[u8],
         stderr: &[u8],
     ) -> Result<bool, ExecuteError> {
-        self.route_builtin_buffered_output_ordered(cmd, stdout, stderr, false, false)
+        self.route_builtin_buffered_output_ordered(cmd, stdout, stderr, false)
     }
 
     /// Post-external variant of the buffered route: the child already
@@ -1911,19 +1969,21 @@ impl Executor {
         stdout: &[u8],
         stderr: &[u8],
     ) -> Result<bool, ExecuteError> {
-        self.route_builtin_buffered_output_ordered(cmd, stdout, stderr, false, true)
+        self.route_builtin_buffered_output_ordered(cmd, stdout, stderr, true)
     }
 
-    /// `stderr_first` swaps the final ordered walk: printf's GNU model
-    /// emits builtin_error diagnostics unbuffered while its converted
-    /// output flushes only when the builtin returns, so in a merged
-    /// stream the diagnostics precede the output (rubash#1134).
+    /// The final ordered walk writes stdout, then stderr (rubash#3324:
+    /// the old stderr-first swap encoded the #1134 model — diagnostics
+    /// unbuffered while output flushes at builtin exit — but GNU
+    /// line-buffers stdout, shell.c:1921-1922, so diagnostics
+    /// interleave with output in production order; builtins with a
+    /// cross-stream order route their ordered log through
+    /// route_builtin_buffered_output_chunks instead).
     pub(in crate::executor) fn route_builtin_buffered_output_ordered(
         &mut self,
         cmd: &CommandNode,
         stdout: &[u8],
         stderr: &[u8],
-        stderr_first: bool,
         resolve_only_numbered: bool,
     ) -> Result<bool, ExecuteError> {
         self.last_builtin_write_failed.set(false);
@@ -2041,13 +2101,8 @@ impl Executor {
         // untouched. GNU builtins/common.c:320 sh_chkwrite folds only
         // stdout's ferror into the builtin status; builtin_error's failed
         // fd-2 write is lost.
-        if stderr_first {
-            self.write_state_output_or_diagnostic(cmd, &state, 2, stderr)?;
-            self.write_state_output_or_diagnostic(cmd, &state, 1, stdout)?;
-        } else {
-            self.write_state_output_or_diagnostic(cmd, &state, 1, stdout)?;
-            self.write_state_output_or_diagnostic(cmd, &state, 2, stderr)?;
-        }
+        self.write_state_output_or_diagnostic(cmd, &state, 1, stdout)?;
+        self.write_state_output_or_diagnostic(cmd, &state, 2, stderr)?;
         Ok(true)
     }
 
@@ -2130,7 +2185,26 @@ impl Executor {
                 self.write_state_output_or_diagnostic(cmd, &state, 2, &stderr)?;
                 return Ok(true);
             }
-            return Ok(false);
+            // rubash#3324: a decline here used to mean "no output
+            // redirects on this command", and the caller degraded to
+            // the pair-block write (whole stdout, then whole stderr).
+            // That is still right when the walk failed (redirect_failed
+            // / first_open_error keep the old fallback), but a pipeline
+            // stage's clone has its output redirects STRIPPED — the
+            // driver applies them once to the captured streams
+            // (execute_builtin_pipeline_stage, #2106) — so the walk
+            // legitimately sees nothing to apply while the fd table
+            // already carries the merged bindings (the #2689 pre-wire
+            // bound fd 2 onto fd 1's capture for `2>&1`). Falling back
+            // to the pair block there reordered the stage's merged
+            // stream (stdout block before the stderr block). Fall
+            // through to the chunk walk instead: the seeded state IS
+            // the resolved state, and the chunks route in log order
+            // through it — exactly like the direct path, where the
+            // command's own redirects make the walk succeed.
+            if state.redirect_failed || state.first_open_error.borrow().is_some() {
+                return Ok(false);
+            }
         }
         if let Some((kind, message)) = state.first_open_error.borrow_mut().take() {
             return Err(ExecuteError::IoError(std::io::Error::new(kind, message)));
@@ -3240,7 +3314,8 @@ impl Executor {
             // marker probe standing in for access(2).
             #[cfg(any(unix, windows))]
             let fifo_validation: Option<Result<(), std::io::Error>> = {
-                let path = self.session_path(self.redirect_target_filesystem_path(&target));
+                let path =
+                    self.session_path(self.redirect_target_filesystem_path_for(redirect, &target));
                 crate::executor::shell_options::redirect_path_is_fifo(&path).then(|| {
                     match crate::executor::shell_options::redirect_fifo_access_error(&path, true) {
                         Some(error) => Err(crate::posix_errors::path_error(&target, error)),
@@ -3286,7 +3361,7 @@ impl Executor {
                         .map_err(|e| crate::posix_errors::path_error(&target, e))
                 }
                 None => self
-                    .create_redirect_output(&target, redirect.clobber)
+                    .create_redirect_output_for(Some(redirect), &target, redirect.clobber)
                     .map(|_| ()),
             };
             if let Err(error) = open_result {
@@ -3483,6 +3558,10 @@ impl Executor {
         // payloads, and a pass that declines or fails must not leak
         // them into a later stage's routing.
         let dup_payloads = std::mem::take(&mut *self.stage_dup_channel_payloads.borrow_mut());
+        // rubash#3324: same take-up-front rule for the stage's
+        // ordered output chunks — a pass that declines or fails must
+        // not leak them into a later stage's routing.
+        let ordered_chunks = std::mem::take(&mut *self.pipeline_stage_ordered_chunks.borrow_mut());
         if cmd.redirect_out.is_none()
             && cmd.append.is_none()
             && cmd.redirect_err.is_none()
@@ -3519,6 +3598,46 @@ impl Executor {
         // fd2-to-Stdout merge lands in the post-redirect pipe content.
         let stdout_target = state.fds.get(&1).cloned().unwrap_or(OutputTarget::Stdout);
         let stderr_target = state.fds.get(&2).cloned().unwrap_or(OutputTarget::Stderr);
+        // rubash#3324: when both streams resolve to the SAME sink
+        // (`2>&1`, `1>&2`, `>f 2>&1`), the split pair cannot express
+        // the production order — GNU forks the element
+        // (execute_cmd.c:2620) and the element's own do_redirections
+        // binds the descriptors, so the merged stream IS the
+        // element's write order. Rebuild it from the stage's ordered
+        // log and route it once through the shared sink; the other
+        // leg is empty, so its arm below is a no-op. When the
+        // targets differ, or the stage recorded no log, the pair
+        // routes exactly as before.
+        //
+        // The same sink wears two variants: `1>&2` dups fd 1 onto
+        // the ambient fd 2, which the walk records as the
+        // ProcessStderr snapshot (#279), while fd 2 itself stays
+        // the Stderr default — both are the shell's stderr, so
+        // they merge (the symmetric case is the same sink reached
+        // from the other side). The merged text rides the Stderr
+        // leg when fd 2 IS Stderr, so it stays in the driver's
+        // string channel instead of the raw channel; otherwise it
+        // rides the stdout leg.
+        let same_sink = stdout_target == stderr_target
+            || (stdout_target == OutputTarget::ProcessStderr
+                && stderr_target == OutputTarget::Stderr)
+            || (stdout_target == OutputTarget::Stderr
+                && stderr_target == OutputTarget::ProcessStderr);
+        if same_sink {
+            if let Some(chunks) = ordered_chunks {
+                let mut merged = String::new();
+                for (_, text) in &chunks {
+                    merged.push_str(text);
+                }
+                if stderr_target == OutputTarget::Stderr {
+                    *stderr = merged;
+                    stdout.clear();
+                } else {
+                    *stdout = merged;
+                    stderr.clear();
+                }
+            }
+        }
         match &stdout_target {
             OutputTarget::Stdout => {}
             OutputTarget::Stderr => {
