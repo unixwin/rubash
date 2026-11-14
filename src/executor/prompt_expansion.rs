@@ -251,7 +251,7 @@ impl Executor {
         // reads the joined word, so one "" element is silent while two ""
         // elements join to " " and diagnose; the empty-list arm below is
         // subsumed but kept as the direct statement of that case.
-        if self.pattern_word_is_silent(&format!("!{ref_expr}"), true) {
+        if self.pattern_word_is_silent(&format!("!{ref_expr}"), true, false) {
             return Some(String::new());
         }
         let values = self.indirect_target_values(target_expr);

@@ -1147,6 +1147,10 @@ impl Executor {
                 continue;
             }
 
+            // Mirror of the &self walker: QUOTED_EXPANSION_SITE before a
+            // `${}` fragment means the lexer saw it inside quotes — GNU's
+            // `quoted` bit for the fragment dispatch (rubash#3581).
+            let fragment_site_quoted = quoted_site;
             if quoted_site {
                 quoted_span_start = Some(output.len());
                 quoted_site = false;
@@ -1278,11 +1282,18 @@ impl Executor {
                             if let Some(start) = frag_start {
                                 self.apply_fragment_assignment_in_order(&name, word, start);
                             }
+                            let fragment_context = if (fragment_site_quoted || in_double)
+                                && matches!(context, SubstitutionQuoteContext::Unquoted)
+                            {
+                                SubstitutionQuoteContext::DoubleQuoted
+                            } else {
+                                context
+                            };
                             let value =
                                 self.expand_with_parameter_env(saved_parameter_state, |executor| {
                                     executor.expand_word_mut_with_context(
                                         &format!("${{{name}}}"),
-                                        context,
+                                        fragment_context,
                                     )
                                 });
                             let value = protect_rhs_value(
@@ -1312,11 +1323,18 @@ impl Executor {
                             if let Some(start) = frag_start {
                                 self.apply_fragment_assignment_in_order(&name, word, start);
                             }
+                            let fragment_context = if (fragment_site_quoted || in_double)
+                                && matches!(context, SubstitutionQuoteContext::Unquoted)
+                            {
+                                SubstitutionQuoteContext::DoubleQuoted
+                            } else {
+                                context
+                            };
                             let value =
                                 self.expand_with_parameter_env(saved_parameter_state, |executor| {
                                     executor.expand_word_mut_with_context(
                                         &format!("${{{name}}}"),
-                                        context,
+                                        fragment_context,
                                     )
                                 });
                             let value = protect_rhs_value(
@@ -1347,6 +1365,19 @@ impl Executor {
                         if let Some(start) = frag_start {
                             self.apply_fragment_assignment_in_order(&name, word, start);
                         }
+                        // rubash#3581: a `${}` fragment inside a `"..."`
+                        // span (walker's own in_double, or the lexer's
+                        // QUOTED_EXPANSION_SITE marker) is double-quoted
+                        // context for the fragment dispatch — without it a
+                        // quoted `"${a[*]#...}"` would read the removal
+                        // gate's silent branch as if unquoted.
+                        let fragment_context = if (fragment_site_quoted || in_double)
+                            && matches!(context, SubstitutionQuoteContext::Unquoted)
+                        {
+                            SubstitutionQuoteContext::DoubleQuoted
+                        } else {
+                            context
+                        };
                         let value =
                             self.expand_with_parameter_env(saved_parameter_state, |executor| {
                                 // Propagate the outer quote context so a
@@ -1357,7 +1388,10 @@ impl Executor {
                                 // subst.c:11229 expand_word_internal is a
                                 // single pass; its `${` arm runs
                                 // parameter_brace_expand inline).
-                                executor.expand_braced_parameter_fragment_in_word(&name, context)
+                                executor.expand_braced_parameter_fragment_in_word(
+                                    &name,
+                                    fragment_context,
+                                )
                             });
                         let value = protect_rhs_value(
                             &value,

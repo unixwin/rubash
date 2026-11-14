@@ -649,7 +649,7 @@ impl Executor {
             }
         }
 
-        if let Some(value) = self.expand_braced_pattern_or_transform_parameter(name) {
+        if let Some(value) = self.expand_braced_pattern_or_transform_parameter(name, true) {
             return value;
         }
 
@@ -1300,7 +1300,14 @@ impl Executor {
             }
         }
 
-        if let Some(value) = self.expand_braced_pattern_or_transform_parameter(name) {
+        // rubash#3581: the routed entry already records the quote context
+        // (DoubleQuoted | HereDocument) in EXTQUOTE_NAME_QUOTED_CONTEXT —
+        // the flag GNU `quoted` corresponds to for the `#`/`%` gate
+        // (heredoc bodies count: GNU diagnoses `"${a[*]#bad}"` there too).
+        if let Some(value) = self.expand_braced_pattern_or_transform_parameter(
+            name,
+            crate::executor::expand_word::extquote_name_quoted_context(),
+        ) {
             if apfae_trace_enabled() {
                 eprintln!("[EQPWM-tail-pattern] name={name:?}");
             }

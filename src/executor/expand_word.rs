@@ -1125,7 +1125,15 @@ impl Executor {
             return value;
         }
 
-        if let Some(value) = self.expand_braced_pattern_or_transform_parameter(name) {
+        // rubash#3581: the `${}` fragment's recorded quote context
+        // (EXTQUOTE_NAME_QUOTED_CONTEXT: `in_double || double_quoted ||
+        // heredoc` at the embedded-walker dispatch sites) is what GNU's
+        // `quoted` flag means for the `#`/`%` silent gate — a quoted or
+        // heredoc-context list subject keeps QUOTED_NULL and diagnoses
+        // where the unquoted joined "" stays silent.
+        if let Some(value) =
+            self.expand_braced_pattern_or_transform_parameter(name, extquote_name_quoted_context())
+        {
             return value;
         }
 

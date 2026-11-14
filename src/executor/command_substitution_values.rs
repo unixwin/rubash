@@ -514,7 +514,7 @@ impl Executor {
             // absent or empty (rubash#3501). The gate reads the JOINED
             // word: one "" positional joins to "" and is silent only
             // unquoted — quoted, GNU diagnoses (follow-up #3581).
-            if self.pattern_word_is_silent(var_name, !quoted) {
+            if self.pattern_word_is_silent(var_name, true, quoted) {
                 return Some(vec![]);
             }
             let pattern = self.expand_parameter_pattern_word(pattern);
@@ -529,7 +529,7 @@ impl Executor {
             }
             // GNU subst.c:9362-9367 parameter_brace_patsub: absent value
             // returns NULL before getpattern (rubash#3501).
-            if self.pattern_word_is_silent(var_name, false) {
+            if self.pattern_word_is_silent(var_name, false, false) {
                 return Some(vec![]);
             }
             let pattern = self.expand_parameter_pattern_word(pattern);
@@ -545,7 +545,7 @@ impl Executor {
             }
             // GNU subst.c:9604-9608 parameter_brace_casemod: same
             // absent-value gate as patsub (rubash#3501).
-            if self.pattern_word_is_silent(var_name, false) {
+            if self.pattern_word_is_silent(var_name, false, false) {
                 return Some(vec![]);
             }
             let pattern = self.expand_embedded_parameters(pattern);

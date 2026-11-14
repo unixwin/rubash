@@ -2129,6 +2129,12 @@ impl Executor {
         let arithmetic_error = self.shell_state.arithmetic_expansion_error.get();
         let arithmetic_fatal = self.shell_state.arithmetic_fatal_error.get();
         let arithmetic_nounset = self.shell_state.arithmetic_nounset_error.get();
+        // rubash#3581: same crossing for the `bad substitution` latch —
+        // GNU's do_redirections runs in the child too, and a parameter
+        // error inside a heredoc body (`"${a[*]#${-y}}"`) is an
+        // expand_word_error the parent must observe to abandon the
+        // command (execute_cmd.c:5522 -> redir.c do_redirections).
+        let parameter_bad_substitution = self.shell_state.parameter_bad_substitution.get();
         self.restore_flat_subshell(saved_state);
         self.shell_state
             .arithmetic_expansion_error
@@ -2139,6 +2145,9 @@ impl Executor {
         self.shell_state
             .arithmetic_nounset_error
             .set(arithmetic_nounset);
+        self.shell_state
+            .parameter_bad_substitution
+            .set(parameter_bad_substitution);
         self.exit_code = saved_exit_code;
         self.last_command_substitution_status
             .set(saved_substitution_status);

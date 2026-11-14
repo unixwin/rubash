@@ -659,6 +659,13 @@ impl Executor {
                 continue;
             }
 
+            // QUOTED_EXPANSION_SITE marks a `$` expansion the lexer saw
+            // inside `"..."` (or `'...'` groupings) — for a `${}`
+            // fragment that is GNU's `quoted` bit (subst.c `quoted` from
+            // Q_DOUBLE_QUOTES on the word), which the #3581 `#`/`%` gate
+            // consults via EXTQUOTE_NAME_QUOTED_CONTEXT. Capture it here
+            // so the `${}` dispatch below can record it.
+            let fragment_site_quoted = quoted_site;
             if quoted_site {
                 quoted_span_start = Some(output.len());
                 quoted_site = false;
@@ -955,7 +962,7 @@ impl Executor {
                     let value =
                         crate::executor::expand_word::with_pending_diagnostic_word(word, || {
                             crate::executor::expand_word::with_extquote_name_quoted_context(
-                                in_double || double_quoted || heredoc,
+                                in_double || double_quoted || heredoc || fragment_site_quoted,
                                 || self.expand_word(&format!("${{{name}}}")),
                             )
                         });
