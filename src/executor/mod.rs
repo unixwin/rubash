@@ -1665,7 +1665,10 @@ pub struct Executor {
     /// `1>&2`, `>f 2>&1`). The dispatcher clears it at the start of
     /// every stage so a stale log can never leak into the next
     /// stage's routing; the route takes it exactly once.
-    pipeline_stage_ordered_chunks: std::cell::RefCell<Option<Vec<(u8, String)>>>,
+    /// rubash#3453: the u32 is the rendering pass the chunk belongs to
+    /// (printf.def:819's ferror abort is pass-granular; non-printf
+    /// producers tag pass 0).
+    pipeline_stage_ordered_chunks: std::cell::RefCell<Option<Vec<(u8, String, u32)>>>,
     /// rubash#1454: set by the sequential pipeline driver around the LAST
     /// stage's dispatch only. The stage spawner may then hand an external
     /// final member the shell's own stdout (Stdio::inherit) instead of a
