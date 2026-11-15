@@ -257,6 +257,10 @@ impl Executor {
         } else {
             pre_attrs
         };
+        // rubash#3573: an unbound dynamic variable stays unbound
+        // (variables.c:3839) — the element bind lands on the plain
+        // variable GNU's generic path builds (indexed, arithmetic
+        // subscript), never in the alias table.
         if name == "BASH_ALIASES"
             && !is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, name)
         {
@@ -463,6 +467,9 @@ impl Executor {
             self.exit_code = 0;
             return true;
         }
+        // rubash#3573: same unbind stand-down as the BASH_ALIASES arm
+        // above — the element bind lands on the plain variable
+        // (variables.c:3839), never in the hashed-command table.
         if name == "BASH_CMDS"
             && !is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, name)
         {

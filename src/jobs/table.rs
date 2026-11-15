@@ -76,6 +76,13 @@ pub struct JobEntry {
     /// SIGSTOP, `Stopped (tty input)` for SIGTTIN, ...; rubash#1246).
     /// Recorded by the kill path, the shell's only stop detector.
     pub stop_signal: Option<i32>,
+    /// rubash#2777: an explicit operand `wait` already answered this
+    /// job's status (GNU wait_for_job marks J_NOTIFIED at
+    /// jobs.c:3434-3437 after answering). When the row later leaves
+    /// through cleanup_dead_jobs it must NOT leave a jobspec link —
+    /// GNU keeps no %N record for a wait-consumed row, so the next
+    /// `wait %N` answers 127.
+    pub wait_consumed: bool,
     /// Killing signal of the job's last process, mirroring
     /// ProcessEntry::term_signal at job granularity (rubash#1256).
     pub term_signal: Option<i32>,
@@ -110,6 +117,22 @@ pub struct JobTable {
     pub jobs: BTreeMap<JobId, JobEntry>,
     pub pid_to_job: HashMap<u32, JobId>,
     pub completed_statuses: HashMap<u32, i32>,
+    /// rubash#2777: job ids retired by [`cleanup_dead_jobs`], mapped
+    /// to the last pid of the removed job. GNU keeps a waited job's
+    /// slot until `wait` consumes it (jobs.c:3401 `wait_for_job`
+    /// reads the slot, then marks it J_NOTIFIED, jobs.c:3434-3437);
+    /// rubash deletes the slot at notification cleanup but keeps the
+    /// exit status in `completed_statuses` (the bgpids equivalent).
+    /// The retained link lets an explicit operand `wait %N` reach
+    /// that saved status instead of reporting 127 "no such job" for
+    /// a job the shell already reaped and notified. Only the
+    /// notification cleanup populates it — disown paths
+    /// (`remove_job_by_pid_preserve_status`, `clear_jobs`) never do,
+    /// so `wait %N` after a disown still answers 127 like GNU's
+    /// `get_job_spec` on a deleted slot (wait.def:294-311) — and
+    /// only the operand-`wait` path consults it, so `kill`/`fg`/`bg`
+    /// keep live-table-only resolution.
+    pub completed_job_pids: HashMap<JobId, u32>,
     /// rubash#1022: pids of forked process-substitution placeholders (real
     /// OS children, born zombies) whose recorded status lives in
     /// completed_statuses. Membership means "signallable but unreaped":
@@ -247,6 +270,7 @@ impl JobTable {
             state: ProcessState::Running,
             exit_status: None,
             stop_signal: None,
+            wait_consumed: false,
             term_signal: None,
             background,
             foreground: !background,
@@ -258,6 +282,10 @@ impl JobTable {
         for pid in pids {
             self.pid_to_job.insert(pid, id);
         }
+        // rubash#2777: a new job reusing this id must not inherit the
+        // retired job's link — the live entry answers `%N` from here
+        // on, and a stale link must not survive to outlive it.
+        self.completed_job_pids.remove(&id);
         self.jobs.insert(id, entry);
         self.set_current_job(id);
         id
@@ -704,6 +732,14 @@ impl JobTable {
     /// (the bgpids equivalent) so a later operand-addressed `wait $pid`
     /// still reports the exit status.
     pub fn cleanup_dead_jobs(&mut self) {
+        // rubash#2777: links retired by an EARLIER cleanup round die
+        // here. GNU's record only lives through the reap that noticed
+        // the death — one intervening command line (another REAP() ->
+        // cleanup_dead_jobs round) and `wait %N` must answer 127,
+        // exactly like a notified job row GNU already deleted
+        // (jobs.c:1303 cleanup_dead_jobs; REAP sites
+        // execute_cmd.c:2979).
+        self.completed_job_pids.clear();
         let dead_notified: Vec<JobId> = self
             .jobs
             .iter()
@@ -715,6 +751,17 @@ impl JobTable {
             removed_current_or_previous |=
                 Some(job_id) == self.current_job || Some(job_id) == self.previous_job;
             if let Some(job) = self.jobs.remove(&job_id) {
+                // rubash#2777: keep the jobspec -> pid link for the
+                // retired job (see `completed_job_pids`): the exit
+                // status already lives in `completed_statuses`, so an
+                // explicit `wait %N` issued after this cleanup can
+                // still reach it. Only a pid with a recorded status
+                // is retained — anything else still answers 127.
+                if let Some(last_pid) = job.pids.last().copied() {
+                    if !job.wait_consumed && self.completed_statuses.contains_key(&last_pid) {
+                        self.completed_job_pids.insert(job_id, last_pid);
+                    }
+                }
                 for pid in &job.pids {
                     self.pid_to_job.remove(pid);
                 }
@@ -738,6 +785,19 @@ impl JobTable {
         if let Some(job_id) = self.pid_to_job.get(&pid).copied() {
             if let Some(job) = self.jobs.get_mut(&job_id) {
                 job.notified = true;
+            }
+        }
+    }
+
+    /// rubash#2777: the operand-`wait` mark — notified AND consumed
+    /// (GNU wait_for_job, jobs.c:3434-3437). The consumed flag keeps
+    /// cleanup_dead_jobs from leaving a jobspec link for a row GNU
+    /// would no longer let `%N` reach.
+    pub fn mark_job_waited_by_pid(&mut self, pid: u32) {
+        if let Some(job_id) = self.pid_to_job.get(&pid).copied() {
+            if let Some(job) = self.jobs.get_mut(&job_id) {
+                job.notified = true;
+                job.wait_consumed = true;
             }
         }
     }
@@ -788,6 +848,11 @@ impl JobTable {
     /// no-jobs bare-wait exit in execute_wait_inner calls it too.
     pub fn clear_completed_statuses(&mut self) {
         self.completed_statuses.clear();
+        // rubash#2777: bgp_clear (jobs.c:2866) wipes the saved-status
+        // list wholesale, so the retired-jobspec links go with it — a
+        // later `wait %N` must answer 127, not resurrect a wiped
+        // status through a stale link.
+        self.completed_job_pids.clear();
     }
 
     /// jobs.c:3652 reap_dead_jobs — non-interactive shells (and shells
@@ -899,6 +964,9 @@ impl JobTable {
         self.jobs.clear();
         self.pid_to_job.clear();
         self.completed_statuses.clear();
+        // rubash#2777: disown -a / delete_all_jobs leaves nothing
+        // waitable (see `clear_completed_statuses`).
+        self.completed_job_pids.clear();
         self.current_job = None;
         self.previous_job = None;
     }

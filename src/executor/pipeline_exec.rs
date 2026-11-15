@@ -801,6 +801,25 @@ fn compound_output_execution_order(outputs: &[CompoundOutputProcsub]) -> Vec<usi
     order
 }
 
+/// rubash#3434: true when a redirect entry (re)binds fd 2 — the only
+/// redirects that may decline the #2483 live-stderr channel (see
+/// pipeline_stage_stderr_may_stream). An entry claims fd 2 when its fd
+/// is literally 2 (any kind, including `2>&-` / `2<&1`), when it is a
+/// combined-output redirect (`&>f` / `&>>f`, which binds fd 1 and fd 2
+/// together), or when its target fd is dynamic (`{var}`, unknowable
+/// statically — decline conservatively). Every other entry (`3>&1`,
+/// `>f`, `3>file`, `<f`) leaves fd 2's disposition untouched, so the
+/// stage's diagnostics may still stream live.
+fn redirect_claims_fd2(redirect: &crate::parser::Redirect) -> bool {
+    redirect.fd_var.is_some()
+        || matches!(
+            redirect.kind,
+            crate::parser::RedirectKind::CombinedOutput
+                | crate::parser::RedirectKind::CombinedAppend
+        )
+        || redirect.fd == Some(2)
+}
+
 impl Executor {
     pub(in crate::executor) fn execute_and_or_list_command(
         &mut self,
@@ -933,7 +952,7 @@ impl Executor {
             // the script at top level — the same unwind the arithmetic
             // command's reject-gate fatal takes (command_execute.rs,
             // finish_heredoc_expansion_error).
-            if self.brace_group_redirect_nounset_fatal(command)? {
+            if self.compound_redirect_nounset_fatal(command)? {
                 return Err(ExecuteError::ExitCode(1));
             }
             // GNU execute_cmd.c:826-828: cm_group is a shell control
@@ -1942,7 +1961,21 @@ impl Executor {
                         None => true,
                     };
                 } else {
-                    let (stage_input, base, alias_fold) = self.initial_pipeline_input(stage);
+                    let mut stage0_heredoc_death = None;
+                    let (stage_input, base, alias_fold) =
+                        self.initial_pipeline_input(stage, &mut stage0_heredoc_death);
+                    if let Some(death_status) = stage0_heredoc_death {
+                        // rubash#2763: a `${ ...; exit N; }` funsub in the
+                        // element's stdin bodies killed the forked stage
+                        // during do_redirections (execute_cmd.c:5522)
+                        // before it ran — record the death status and an
+                        // instant empty stream for the next element, the
+                        // same shape the debug-trap skip below models.
+                        statuses.push(death_status);
+                        input = String::new();
+                        input_timing = None;
+                        continue;
+                    }
                     // GNU execute_pipeline forks the child with the shell's own
                     // fd 0 — with no fd-0 binding on the stage and fd 0 being the
                     // inherited process stdin, the child reads that handle
@@ -2054,52 +2087,88 @@ impl Executor {
                         .time_command
                         .as_ref()
                         .is_some_and(|time| time.command.coproc_command.is_some()));
-            let Some((mut next_input, mut next_stderr, mut next_status)) = (if stage_is_coproc_tail
-            {
-                if pipeline_inverted {
-                    self.with_errexit_suppressed(|executor| {
-                        executor.execute_coproc_pipeline_tail(stage).map(Some)
-                    })?
-                } else {
-                    Some(self.execute_coproc_pipeline_tail(stage)?)
-                }
-            } else if pipeline_inverted {
-                self.with_errexit_suppressed(|executor| {
-                    if last_stage && executor.lastpipe_enabled() {
-                        executor.execute_lastpipe_stage(stage, &input).map(Some)
-                    } else {
-                        executor.execute_pipeline_stage(
+            // rubash#3434: arm the #2483 live-stderr channel for this
+            // stage when its fd 2 is live (see
+            // pipeline_stage_stderr_may_stream): a compound/function
+            // stage's diagnostics otherwise sit in the whole-stage
+            // stderr capture until the stage completes, while its
+            // stdout streams live (final member, #1605) or escapes
+            // live through a dup'd fd (`>&3`), so the error that
+            // execution order puts first prints last (GNU forks the
+            // element with the shell's own fd 2, execute_cmd.c:2620,
+            // and builtin_error writes it as produced,
+            // builtins/common.c:98). The flag is restored unconditionally
+            // right after the dispatch: the dispatch runs inside a
+            // closure returning Result, so a `?` inside it can only
+            // return into the closure — an Err exit cannot skip the
+            // restore the way it could if the `?` sat in this
+            // function's own scrutinee (all three exits — Some, None,
+            // Err — pass through the restore below, cf. the
+            // shell-writer and sandwich paths). The coproc/lastpipe
+            // arms never consult the flag (they run on this executor,
+            // not a stage subshell), and a nested pipeline inside the
+            // stage body starts from a fresh executor with the flag
+            // clear.
+            let saved_stderr_live = self.pipeline_stage_stderr_live;
+            self.pipeline_stage_stderr_live = self.pipeline_stage_stderr_may_stream(stage);
+            // Sandwich form: capture the dispatch result with no `?`
+            // between the set above and the unconditional restore
+            // below; only then propagate or handle it.
+            let dispatch_result: Result<Option<(String, String, i32)>, ExecuteError> =
+                (|| -> Result<Option<(String, String, i32)>, ExecuteError> {
+                    Ok(if stage_is_coproc_tail {
+                        if pipeline_inverted {
+                            self.with_errexit_suppressed(|executor| {
+                                executor.execute_coproc_pipeline_tail(stage).map(Some)
+                            })?
+                        } else {
+                            Some(self.execute_coproc_pipeline_tail(stage)?)
+                        }
+                    } else if pipeline_inverted {
+                        self.with_errexit_suppressed(|executor| {
+                            if last_stage && executor.lastpipe_enabled() {
+                                executor.execute_lastpipe_stage(stage, &input).map(Some)
+                            } else {
+                                executor.execute_pipeline_stage(
+                                    stage,
+                                    &input,
+                                    stage0_stdin_inherit,
+                                    stage0_stdin_live,
+                                )
+                            }
+                        })?
+                    } else if last_stage && self.lastpipe_enabled() {
+                        Some(self.execute_lastpipe_stage(stage, &input)?)
+                    } else if last_stage || preserve_compound_errexit {
+                        // Compound and function stages inherit the pipeline
+                        // command's ignore_return (the current suppress_errexit
+                        // depth) instead of being wrapped in extra suppression:
+                        // execute_cmd.c:2702-2708 propagates the flag into every
+                        // element, so `! { false; echo A $?; } | cat` reaches the
+                        // echo while top-level `{ false; echo x; } | cat` still
+                        // dies on `false` under -e.
+                        self.execute_pipeline_stage(
                             stage,
                             &input,
                             stage0_stdin_inherit,
                             stage0_stdin_live,
-                        )
-                    }
-                })?
-            } else if last_stage && self.lastpipe_enabled() {
-                Some(self.execute_lastpipe_stage(stage, &input)?)
-            } else if last_stage || preserve_compound_errexit {
-                // Compound and function stages inherit the pipeline
-                // command's ignore_return (the current suppress_errexit
-                // depth) instead of being wrapped in extra suppression:
-                // execute_cmd.c:2702-2708 propagates the flag into every
-                // element, so `! { false; echo A $?; } | cat` reaches the
-                // echo while top-level `{ false; echo x; } | cat` still
-                // dies on `false` under -e.
-                self.execute_pipeline_stage(stage, &input, stage0_stdin_inherit, stage0_stdin_live)?
-            } else {
-                // Non-final simple pipeline stages never trigger errexit
-                // (bash manual: "any command in a pipeline but the
-                // last").
-                self.with_errexit_suppressed(|executor| {
-                    executor.execute_pipeline_stage(
-                        stage,
-                        &input,
-                        stage0_stdin_inherit,
-                        stage0_stdin_live,
-                    )
-                })?
-            }) else {
+                        )?
+                    } else {
+                        // Non-final simple pipeline stages never trigger errexit
+                        // (bash manual: "any command in a pipeline but the
+                        // last").
+                        self.with_errexit_suppressed(|executor| {
+                            executor.execute_pipeline_stage(
+                                stage,
+                                &input,
+                                stage0_stdin_inherit,
+                                stage0_stdin_live,
+                            )
+                        })?
+                    })
+                })();
+            self.pipeline_stage_stderr_live = saved_stderr_live;
+            let Some((mut next_input, mut next_stderr, mut next_status)) = dispatch_result? else {
                 super::shell_options::end_capture_timing();
                 self.timed_stdin = entry_timed_stdin.clone();
                 self.defer_stage_time_report = false;
@@ -2755,7 +2824,10 @@ impl Executor {
         // would break the profiler's stack discipline — the members' wall
         // time overlaps, which a sequential frame stack cannot represent.
         let _profiler_external_pipeline = super::profiler::enter_external("pipeline");
-        let results = self.spawn_wait_concurrent_external_stages(commands, specs, true)?;
+        let Some(results) = self.spawn_wait_concurrent_external_stages(commands, specs, true)?
+        else {
+            return Ok(None);
+        };
         let (_, stderr, _) = results.last().unwrap();
         self.write_pipeline_output(
             commands[commands.len() - 1],
@@ -2844,11 +2916,14 @@ impl Executor {
     /// pipeline's fd 2 must resolve to the process stderr (an ambient
     /// `2>&1` rebinds it to fd 1's object, a case the merged-stream
     /// machinery owns), and no enclosing stderr capture may be armed.
+    /// rubash#3434: only redirects that (re)bind fd 2 decline —
+    /// redirect_claims_fd2 — so a `3>&1` dup (which leaves fd 2 alone)
+    /// no longer forfeits the live channel for the whole stage.
     fn pipeline_stage_stderr_may_stream(&self, command: &CommandNode) -> bool {
         if self.stderr_capture.is_some()
             || command.redirect_err.is_some()
             || command.redirect_err_append.is_some()
-            || !command.redirects.is_empty()
+            || command.redirects.iter().any(redirect_claims_fd2)
         {
             return false;
         }
@@ -2974,8 +3049,7 @@ impl Executor {
         }) {
             return Ok(None);
         }
-        self.run_shell_writer_pipeline(commands, &consumers, specs)?;
-        Ok(Some(()))
+        self.run_shell_writer_pipeline(commands, &consumers, specs)
     }
 
     /// niubash#345: reduce a `{ cmd; }` wrapper with no group-level
@@ -3031,7 +3105,7 @@ impl Executor {
         commands: &[&CommandNode],
         consumers: &[&CommandNode],
         specs: Vec<(std::path::PathBuf, String, Vec<String>)>,
-    ) -> Result<(), ExecuteError> {
+    ) -> Result<Option<()>, ExecuteError> {
         #[cfg(unix)]
         use std::os::unix::io::AsRawFd;
         #[cfg(windows)]
@@ -3162,12 +3236,21 @@ impl Executor {
         // whose funnel binds its fd 0 to the materialized alias endpoint
         // (#2003), so its consumption moves the shared cursor directly and
         // needs no driver-side fold.
+        let mut stage0_heredoc_death = None;
         let (stage0_input, stage0_stdin_base, _alias_fold) = if stage0_stdin_live {
             self.apply_comsub_stdin_writeback();
             (String::new(), None, None)
         } else {
-            self.initial_pipeline_input(commands[0])
+            self.initial_pipeline_input(commands[0], &mut stage0_heredoc_death)
         };
+        if stage0_heredoc_death.is_some() {
+            // rubash#2763: the producer's stdin bodies latched a funsub
+            // `exit` — the forked element died during do_redirections
+            // (execute_cmd.c:5522) with consumers already spawned; they
+            // see EOF as the pipes drop, and the sequential stage loop
+            // re-runs the shape and records the death status.
+            return Ok(None);
+        }
         let stage0_stdin_inherit = if stage0_stdin_live {
             match self.fd_table.entries.get(&0) {
                 Some(entry) => {
@@ -3401,7 +3484,7 @@ impl Executor {
         if let Some(error) = producer_error {
             return Err(error);
         }
-        Ok(())
+        Ok(Some(()))
     }
 
     /// Admission and argv expansion for one concurrent external pipeline
@@ -3686,13 +3769,16 @@ impl Executor {
     /// bytes live and the returned payload stays empty; callers that feed
     /// the bytes elsewhere — the sequential prefix path passes them on as
     /// stage input — pass `false` and always get the collected stream.
+    /// `Ok(None)` declines: stage 0's stdin bodies latched a funsub `exit`
+    /// (rubash#2763) — the element died in its own do_redirections, and
+    /// the sequential stage loop owns the dead-element verdict.
     #[cfg(windows)]
     fn spawn_wait_concurrent_external_stages(
         &mut self,
         commands: &[&CommandNode],
         specs: Vec<(std::path::PathBuf, String, Vec<String>)>,
         allow_stream_stdout: bool,
-    ) -> Result<Vec<(String, String, i32)>, ExecuteError> {
+    ) -> Result<Option<Vec<(String, String, i32)>>, ExecuteError> {
         let mut pipes: Vec<(Option<os_pipe::PipeReader>, Option<os_pipe::PipeWriter>)> =
             Vec::with_capacity(commands.len() - 1);
         for _ in 0..commands.len() - 1 {
@@ -3706,8 +3792,17 @@ impl Executor {
         // rubash#2029: the concurrent members' fd-0 sources never carry an
         // fd-alias redirect (concurrent_external_stage_spec declines
         // redirect_in), so the alias fold target cannot exist here.
+        let mut stage0_heredoc_death = None;
         let (stage0_input, stage0_stdin_base, _alias_fold) =
-            self.initial_pipeline_input(commands[0]);
+            self.initial_pipeline_input(commands[0], &mut stage0_heredoc_death);
+        if stage0_heredoc_death.is_some() {
+            // rubash#2763: the funsub-`exit` death belongs to the
+            // element's own child — no spawn ran yet, so decline and
+            // let the sequential stage loop record status + empty
+            // stream (GNU: the downstream element reads the dead
+            // pipe's EOF, which the sequential input contract models).
+            return Ok(None);
+        }
         // GNU forks the child with the shell's own fd 0 — when the stage
         // carries no fd-0 binding (no `<`, `<<<`, `<<`, heredoc-0) and fd 0
         // is the inherited process stdin, the child must inherit the real
@@ -4037,7 +4132,7 @@ impl Executor {
                 self.write_default_stdout(&output)?;
             }
         }
-        Ok(results)
+        Ok(Some(results))
     }
 
     /// rubash#761: an unbounded external producer chain feeding a pipeline
@@ -4106,9 +4201,12 @@ impl Executor {
         // rubash#2029: prefix members never carry an fd-alias redirect
         // (concurrent_external_stage_spec declines redirect_in), so the
         // alias fold target cannot exist here.
+        let mut stage0_heredoc_death = None;
         let (stage0_input, _stage0_stdin_base, _alias_fold) =
-            self.initial_pipeline_input(commands[0]);
-        if !stage0_input.is_empty() {
+            self.initial_pipeline_input(commands[0], &mut stage0_heredoc_death);
+        // rubash#2763: a funsub-`exit` death in the element's stdin bodies
+        // belongs to the sequential stage loop's dead-element verdict.
+        if stage0_heredoc_death.is_some() || !stage0_input.is_empty() {
             return Ok(None);
         }
         let stage0_inherits = self.stdin_string_for_command(commands[0]).is_none()
@@ -4276,6 +4374,7 @@ impl Executor {
             FdEntry {
                 read: Some(FdReadEndpoint::File(std::rc::Rc::new(FileFd {
                     handle: tail_handle,
+                    closed: std::cell::Cell::new(false),
                     path: std::path::PathBuf::from("<rubash-pipeline-stdin>"),
                 }))),
                 write: None,
@@ -4552,9 +4651,12 @@ impl Executor {
         // inherited stdin (GNU forks the element with the shell's own
         // descriptors); a staged FUNCTION_STDIN payload keeps the
         // sequential path, as in the streaming tail.
+        let mut stage0_heredoc_death = None;
         let (stage0_input, _stage0_stdin_base, _alias_fold) =
-            self.initial_pipeline_input(commands[0]);
-        if !stage0_input.is_empty() {
+            self.initial_pipeline_input(commands[0], &mut stage0_heredoc_death);
+        // rubash#2763: a funsub-`exit` death in the element's stdin bodies
+        // belongs to the sequential stage loop's dead-element verdict.
+        if stage0_heredoc_death.is_some() || !stage0_input.is_empty() {
             self.restore_discard_latches(&saved_discard_latches);
             return Ok(None);
         }
@@ -4709,6 +4811,7 @@ impl Executor {
             FdEntry {
                 read: Some(FdReadEndpoint::File(std::rc::Rc::new(FileFd {
                     handle: stage_handle,
+                    closed: std::cell::Cell::new(false),
                     path: std::path::PathBuf::from("<rubash-pipeline-stdin>"),
                 }))),
                 write: None,
@@ -4921,7 +5024,10 @@ impl Executor {
         let commands = &commands[..prefix_len];
         // The last prefix member's payload becomes the sequential tail's
         // stage input — it must be collected, never streamed away.
-        let results = self.spawn_wait_concurrent_external_stages(commands, specs, false)?;
+        let Some(results) = self.spawn_wait_concurrent_external_stages(commands, specs, false)?
+        else {
+            return Ok(None);
+        };
         let Some((output, stderr, _)) = results.last().cloned() else {
             return Ok(None);
         };
@@ -5432,8 +5538,15 @@ impl Executor {
         // rubash#2029: the streaming prefix members never carry an fd-alias
         // redirect (concurrent_external_stage_spec declines redirect_in),
         // so the alias fold target cannot exist here.
+        let mut stage0_heredoc_death = None;
         let (stage0_input, stage0_stdin_base, _alias_fold) =
-            self.initial_pipeline_input(commands[0]);
+            self.initial_pipeline_input(commands[0], &mut stage0_heredoc_death);
+        if stage0_heredoc_death.is_some() {
+            // rubash#2763: a funsub-`exit` death in the element's stdin
+            // bodies belongs to the sequential stage loop's dead-element
+            // verdict — no spawn ran yet, so decline cleanly.
+            return Ok(None);
+        }
         // Same contract as the Windows path: with no fd-0 binding the
         // first child inherits the shell's real stdin handle.
         let stage0_inherits = stage0_input.is_empty()
@@ -6081,6 +6194,17 @@ impl Executor {
         stdin_inherit: bool,
         live_stdin: bool,
     ) -> Result<Option<(String, String, i32)>, ExecuteError> {
+        // rubash#3387: a pipeline element is a forked child (GNU
+        // execute_cmd.c:2620 execute_pipeline), so its `times` reads
+        // from this stage's entry baseline, not the host's
+        // accumulated rusage. The guard pops on every exit path. The
+        // lastpipe last element never comes through here
+        // (execute_lastpipe_stage), so its `times` keeps the
+        // accumulated reading (execute_cmd.c:2758).
+        let _times_baseline = crate::executor::read_helpers::TimesBaselineGuard::enter(
+            crate::executor::read_helpers::TimesBaselineKind::PipelineStage,
+            self.shell_state.subshell_depth.get(),
+        );
         // rubash#1333/niubash#345: SIGPIPE is SIG_DFL for the shell
         // process (GNU parity), but a pipeline member executed in
         // process shares that disposition — GNU forks members, so a
@@ -7227,16 +7351,28 @@ impl Executor {
                 // the `bad: invalid number` diagnostic, then 0, 7), and
                 // the two-Vec split loses that order.
                 let log = super::trap_stack_builtins::OrderedOutputLog::new();
-                let status = crate::builtins::printf::execute_with_io(
+                // rubash#3453: tag printf's rendering pass boundaries
+                // into the log — the driver's stream routing drops the
+                // passes GNU's printf.def:819 ferror abort never
+                // renders once an fd-1 write fails.
+                let mut pass_boundary = log.pass_boundary_writer();
+                let status = crate::builtins::printf::execute_with_io_and_store(
                     args.iter().map(String::as_str),
                     &mut env_vars,
+                    None,
                     &mut log.stdout_writer(),
                     &mut log.stderr_writer(),
+                    Some(&mut pass_boundary),
                 )?;
                 let mut output = Vec::new();
                 let mut stderr = Vec::new();
                 let mut chunks = Vec::new();
+                let mut pass = 0u32;
                 for (fd, bytes) in log.chunks().iter() {
+                    if *fd == u8::MAX {
+                        pass += 1;
+                        continue;
+                    }
                     match fd {
                         1 => output.extend_from_slice(bytes),
                         _ => stderr.extend_from_slice(bytes),
@@ -7244,6 +7380,7 @@ impl Executor {
                     chunks.push((
                         *fd,
                         crate::executor::substitution_metadata::bytes_to_shell_text(bytes),
+                        pass,
                     ));
                 }
                 *self.pipeline_stage_ordered_chunks.borrow_mut() = Some(chunks);
@@ -7326,6 +7463,7 @@ impl Executor {
                     chunks.push((
                         *fd,
                         crate::executor::substitution_metadata::bytes_to_shell_text(bytes),
+                        0,
                     ));
                 }
                 *self.pipeline_stage_ordered_chunks.borrow_mut() = Some(chunks);
@@ -8055,9 +8193,16 @@ impl Executor {
     /// regular-file (coproc pipe read end aside) dup keeps GNU head's
     /// seek-back-to-printed-boundary consumption, a Text/ProcessSubstitution
     /// source models an unseekable stream whose first block read drains it.
+    /// `stage0_heredoc_death` receives `Some(N)` when the stage's stdin
+    /// bodies latched a funsub `exit` inside the fork emulation — the
+    /// element died during do_redirections (execute_cmd.c:5522) before
+    /// it ran, so the stage contributes status N and no stream (the
+    /// sequential stage loop owns the verdict; the concurrent drivers
+    /// decline on it).
     fn initial_pipeline_input(
         &mut self,
         command: &CommandNode,
+        stage0_heredoc_death: &mut Option<i32>,
     ) -> (String, Option<usize>, Option<(u32, usize, bool)>) {
         self.apply_comsub_stdin_writeback();
         let base = self
@@ -8104,7 +8249,42 @@ impl Executor {
         let alias_buffered_offset = alias_source
             .and_then(|fd| self.fd_table.input_snapshot_bytes(fd))
             .map(|(_, offset)| offset);
-        let resolved = self.stdin_string_for_command_mut(command);
+        // rubash#2763: a pipeline element's stdin bodies expand inside
+        // the forked element — do_redirections runs after do_piping in
+        // the element's child (execute_cmd.c:2620, execute_cmd.c:5522;
+        // the builtin/function asymmetry of a bare command does not
+        // exist here because execute_pipeline forks EVERY element). Run
+        // the body expansion inside the fork emulation so its
+        // side-effect die with the element and, crucially, a funsub
+        // `exit` latch surfaces as the ELEMENT's death status rather
+        // than lingering on the main shell as a shell abort (the
+        // command_execute.rs consumer never sees a pipeline stage).
+        let fd0_winner = crate::executor::shell_options::fd0_stdin_redirect_winner(command);
+        let bodies_expand_in_element = match fd0_winner {
+            Some(crate::parser::RedirectKind::HereDoc)
+            | Some(crate::parser::RedirectKind::HereString) => true,
+            Some(_) => false,
+            None => {
+                command.heredoc.is_some()
+                    || command.heredoc_body.is_some()
+                    || command.here_string.is_some()
+                    || command
+                        .heredoc_redirects
+                        .iter()
+                        .any(|redirect| redirect.fd.unwrap_or(0) == 0)
+            }
+        };
+        let resolved = if bodies_expand_in_element {
+            let saved_latch = self.current_shell_substitution_exit.take();
+            let resolved = self.with_forked_heredoc_expansion(|executor| {
+                executor.stdin_string_for_command_mut(command)
+            });
+            *stage0_heredoc_death = self.current_shell_substitution_exit.take();
+            self.current_shell_substitution_exit.set(saved_latch);
+            resolved
+        } else {
+            self.stdin_string_for_command_mut(command)
+        };
         self.restore_spec_variables(saved_input_env);
         let mut alias_fold = None;
         if let (Some(fd), Some(payload)) = (alias_source, &resolved) {

@@ -207,6 +207,22 @@ pub(in crate::executor) fn execute_history_session(
         return Ok(1);
     }
 
+    // history.def:169-173: `-c` clears FIRST and, with no remaining
+    // words (list == 0), returns success before the -d arm or any
+    // operand validation runs — `history -c -d bad` clears and never
+    // validates "bad". With words remaining, the CFLAG term in the
+    // display-arm gate `(flags & (AFLAG|RFLAG|NFLAG|WFLAG|CFLAG)) == 0`
+    // (history.def:267) keeps surplus operands out of get_numeric_arg /
+    // no_args while the -s/-p/-d/file arms still run against the
+    // cleared list (`history -c -s two` pushes onto it; `history -c
+    // -d 1 extra` eranges against the now-empty list).
+    if clear {
+        session.borrow_mut().clear();
+        if mode == HistoryMode::List || operands.is_empty() {
+            return Ok(0);
+        }
+    }
+
     // GNU display_history -> get_numeric_arg(list, 0, &limit): the operand
     // is validated as a number first (sh_neednumarg, EX_USAGE), then
     // no_args() rejects any further operands with `too many arguments`.
@@ -247,10 +263,6 @@ pub(in crate::executor) fn execute_history_session(
     let ctx = hist_ctx(executor);
     let histsize = histsize_of(executor);
     let mut shell = session.borrow_mut();
-
-    if clear {
-        shell.clear();
-    }
 
     match mode {
         HistoryMode::Delete => {

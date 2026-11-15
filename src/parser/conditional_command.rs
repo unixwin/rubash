@@ -71,7 +71,19 @@ pub(super) fn parse_conditional_command(
         expression,
     }));
 
-    Some(finish_compound_command(command, tokens, end + 1))
+    let (mut command, next) = finish_compound_command(command, tokens, end + 1);
+    // rubash#3428: GNU's cond path stamps the node's completion line on
+    // the `]]` token in the READER's numbering — a backslash-newline
+    // continuation inside `[[ ... ]]` does not advance it (unlike the
+    // arith `(( ))` family, whose #3406 completion line counts the
+    // continuation's physical line). `[[ x == 1 \`<newline>` ]] < BAD`
+    // therefore reports line 1 while the same command across a real
+    // newline still reports line 2; `Token::logical_line` carries
+    // exactly that continuation-merged numbering.
+    if let Some(close_line) = tokens.get(end).map(|token| token.logical_line) {
+        command.end_line = Some(close_line);
+    }
+    Some((command, next))
 }
 
 /// parse.y cond_term/cond_and/cond_or (5038-5246) + cond_error (5013-5029)

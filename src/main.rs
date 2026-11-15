@@ -294,8 +294,27 @@ fn run_main() -> i32 {
     }
     apply_invocation_shell_mode(&mut executor, invocation_name.as_deref());
 
+    // rubash#3254: the single startup diagnostic name (GNU shell.c:467
+    // set_shell_name + error.c:90-120 get_name_for_error): the invocation
+    // name verbatim — the NIU_INVOKED_AS reconstruction when the shim
+    // erased argv[0] (rubash#590), else argv[0] itself. An empty name
+    // stays empty (#3355); only a genuinely absent name (argc == 0)
+    // falls back to PROGRAM ("bash"). An imported BASH_ARGV0 does NOT
+    // rename these diagnostics: set_argv0 (variables.c:1547-1555) runs
+    // after the option parse (shell.c:475/493), so at parse time $0 is
+    // still argv[0] (probed: BASH_ARGV0=custom still prints the argv[0]
+    // path, twice for -o). The driver-time sites (debugger, startup
+    // files) read the then-current $0 from the executor instead — see
+    // driver_error_name.
+    let startup_error_name = invocation_name.unwrap_or_else(|| "bash".to_string());
+
     if args.len() > 1 {
-        return run_args(&mut executor, &args[1..], args.first().map(String::as_str));
+        return run_args(
+            &mut executor,
+            &args[1..],
+            args.first().map(String::as_str),
+            &startup_error_name,
+        );
     }
 
     // GNU shell.c:541-547: with no operands (and no -c string), tty stdin +
@@ -435,7 +454,12 @@ fn entry_encode_argv(values: &[String]) -> Vec<String> {
         .collect()
 }
 
-fn run_args(executor: &mut Executor, args: &[String], argv0: Option<&str>) -> i32 {
+fn run_args(
+    executor: &mut Executor,
+    args: &[String],
+    argv0: Option<&str>,
+    startup_error_name: &str,
+) -> i32 {
     // rubash#815: `--profile` / `--profile-output <file>` are engine meta
     // flags handled BEFORE the GNU option parser (the same shape as
     // --identity and --internal-* at the run_main gate), so the GNU
@@ -487,7 +511,9 @@ fn run_args(executor: &mut Executor, args: &[String], argv0: Option<&str>) -> i3
                         index += 2;
                     }
                     None => {
-                        eprintln!("rubash: --profile-output: option requires an argument");
+                        eprintln!(
+                            "{startup_error_name}: --profile-output: option requires an argument"
+                        );
                         return 2;
                     }
                 },
@@ -744,7 +770,8 @@ fn run_args(executor: &mut Executor, args: &[String], argv0: Option<&str>) -> i3
     // ("%s: invalid option" + usage, exit 2, shell.c:874-881); a single-dash
     // unknown name falls through to the short-option parser (shell.c:882).
     let mut long_state = LongOptionState::default();
-    let (mut index, early_exit) = parse_long_options(executor, args, &mut long_state, argv0);
+    let (mut index, early_exit) =
+        parse_long_options(executor, args, &mut long_state, argv0, startup_error_name);
     if let Some(code) = early_exit {
         return code;
     }
@@ -782,7 +809,9 @@ fn run_args(executor: &mut Executor, args: &[String], argv0: Option<&str>) -> i3
                         // — the report_error prolog carries shell_name +
                         // "line 0" (startup line number) + this_command_name
                         // ("bash", the option parser's caller name).
-                        eprintln!("bash: line 0: bash: {option}: invalid option name");
+                        eprintln!(
+                            "{startup_error_name}: line 0: {startup_error_name}: {option}: invalid option name"
+                        );
                         return 2;
                     }
                     let enabled = args[index] == "-o";
@@ -816,7 +845,13 @@ fn run_args(executor: &mut Executor, args: &[String], argv0: Option<&str>) -> i3
                     init_file = Some(path.clone());
                     index += 2;
                 } else {
-                    eprintln!("rubash: --init-file: option requires an argument");
+                    // GNU shell.c:863-867: a Charp option without a
+                    // following argv reports its name WITHOUT dashes —
+                    // `init-file` for --init-file, `rcfile` for
+                    // --rcfile — never the `--init-file` spelling this
+                    // used to print for both arms.
+                    let option_name = args[index].trim_start_matches('-');
+                    eprintln!("{startup_error_name}: {option_name}: option requires an argument");
                     return 2;
                 }
             }
@@ -867,7 +902,9 @@ fn run_args(executor: &mut Executor, args: &[String], argv0: Option<&str>) -> i3
                         // the diagnostic carries no builtin segment. The
                         // shell then exits EX_BADUSAGE (2) without running
                         // any pending -c command.
-                        eprintln!("bash: line 0: {option}: invalid shell option name");
+                        eprintln!(
+                            "{startup_error_name}: line 0: {option}: invalid shell option name"
+                        );
                         return 2;
                     }
                     if option == "expand_aliases" {
@@ -933,8 +970,8 @@ fn run_args(executor: &mut Executor, args: &[String], argv0: Option<&str>) -> i3
                         .chars()
                         .find(|ch| !rubash::usage::is_short_option_letter(*ch));
                     if let Some(ch) = invalid {
-                        eprintln!("bash: {sign}{ch}: invalid option");
-                        show_shell_usage();
+                        eprintln!("{startup_error_name}: {sign}{ch}: invalid option");
+                        show_shell_usage(startup_error_name);
                         return 2;
                     }
                 }
@@ -1059,7 +1096,7 @@ fn run_args(executor: &mut Executor, args: &[String], argv0: Option<&str>) -> i3
         // GNU shell.c:519-528: a pending -c with no following argv reports
         // through report_error and exits EX_BADUSAGE. Empirical GNU 5.3.0:
         // `bash -c` -> "bash: -c: option requires an argument", exit 2.
-        eprintln!("bash: -c: option requires an argument");
+        eprintln!("{startup_error_name}: -c: option requires an argument");
         return 2;
     }
 
@@ -1259,6 +1296,7 @@ fn parse_long_options(
     args: &[String],
     state: &mut LongOptionState,
     argv0: Option<&str>,
+    startup_error_name: &str,
 ) -> (usize, Option<i32>) {
     let mut index = 0usize;
     while index < args.len() && args[index].starts_with('-') {
@@ -1276,8 +1314,8 @@ fn parse_long_options(
             if long_form {
                 // shell.c:874-881: an unknown long option is a usage error:
                 // "%s: invalid option", the usage block on stderr, exit 2.
-                eprintln!("bash: {arg}: invalid option");
-                show_shell_usage();
+                eprintln!("{startup_error_name}: {arg}: invalid option");
+                show_shell_usage(startup_error_name);
                 return (index, Some(2));
             }
             // shell.c:882: a single-dash non-table name may still be a
@@ -1288,7 +1326,7 @@ fn parse_long_options(
             // shell.c:863-867: a Charp option without a following argv is a
             // usage error; report_error names the option WITHOUT dashes.
             let Some(value) = args.get(index + 1) else {
-                eprintln!("bash: {name}: option requires an argument");
+                eprintln!("{startup_error_name}: {name}: option requires an argument");
                 return (index, Some(2));
             };
             state.init_file = Some(value.clone());
@@ -1383,16 +1421,21 @@ fn parse_long_options(
 
 /// show_shell_usage (shell.c:2056-2103) with extra=0: the usage block the
 /// option parser writes to stderr. GNU renders it with the invoked shell
-/// name, which the upstream suites normalize (sed) to the canonical name;
-/// rubash prints the canonical name directly so the normalized forms match
-/// byte for byte.
-fn show_shell_usage() {
-    // GNU shell.c usage() prints "Usage:\tbash ..."; the upstream suites
-    // normalize (sed) that prefix away, so rubash prints the normalized form
-    // directly to match the harness byte for byte.
+/// name (shell.c:2084-2088 `shell_name`), which the upstream suites
+/// normalize (sed) to the canonical name; under the canonical `bash`
+/// invocation these bytes are unchanged. rubash#3254: the name is the
+/// startup diagnostic name — except an empty argv[0] rescues to PROGRAM
+/// here, because set_shell_name rebinds an empty `shell_name` to
+/// `"bash"` while `dollar_vars[0]` stays empty (#3355), so the usage
+/// block prints `bash` where the diagnostic line itself prints an empty
+/// name.
+fn show_shell_usage(startup_error_name: &str) {
+    // The usage name is the shell_name face, not the $0 face: empty
+    // means "bash" here (see the doc comment above).
+    let usage_name = if startup_error_name.is_empty() { "bash" } else { startup_error_name };
     eprint!(
-        "bash [GNU long option] [option] ...
-bash [GNU long option] [option] script-file ...
+        "{usage_name} [GNU long option] [option] ...
+{usage_name} [GNU long option] [option] script-file ...
 "
     );
     eprintln!("GNU long options:");
@@ -2136,6 +2179,29 @@ fn init_file_needs_direct_run(executor: &Executor, init_file: &str) -> bool {
     true
 }
 
+/// rubash#3254: the driver-time diagnostic name — GNU error.c:90-120
+/// `get_name_for_error` at the point the debugger / startup-file
+/// diagnostic fires: `dollar_vars[0]` as currently bound. The `-c`
+/// and script arms rebind `BASH_ARGV0` before the drivers run (the
+/// `-c` `$0` operand, the script name as spelled — shell.c:1613), so
+/// it is read from the executor, not from the invocation name: an
+/// imported `BASH_ARGV0` has applied by now (variables.c set_argv0)
+/// and a script's `$0` wins over it (probed: `BASH_ARGV0=custom`
+/// still prints the script path for `--debugger script.sh`, and
+/// `custom:` for `--debugger -c 'echo hi'`). Presence-based, so an
+/// empty `$0` stays empty (#3355); only a genuinely absent name falls
+/// back to the invocation shell name, then PROGRAM.
+fn driver_error_name(executor: &Executor) -> String {
+    if let Some(name) = executor.get_env("BASH_ARGV0") {
+        return name.to_string();
+    }
+    executor
+        .get_env("__RUBASH_SHELL_NAME")
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| "bash".to_string())
+}
+
 /// GNU shell.c:1547 start_debugger: run the bashdb starter file once before
 /// any user command (-c string, script, or stdin script — never a bare
 /// interactive shell, shell.c:795's `reading_shell_script ||
@@ -2172,8 +2238,12 @@ fn start_debugger(executor: &mut Executor) {
             // baked path, then start_debugger warns internally
             // (shell.c:1556-1561) and drops the mode; errexit stays
             // suppressed for the attempt (shell.c:1551-1553).
-            eprintln!("rubash: {}: No such file or directory", candidates[0]);
-            eprintln!("rubash: warning: cannot start debugger; debugging mode disabled");
+            // rubash#3254: both lines carry the driver-time name
+            // (see driver_error_name), not the literal this used
+            // to print.
+            let name = driver_error_name(executor);
+            eprintln!("{name}: {}: No such file or directory", candidates[0]);
+            eprintln!("{name}: warning: cannot start debugger; debugging mode disabled");
         }
     }
 }
@@ -2183,8 +2253,15 @@ fn run_init_file(executor: &mut Executor, init_file: &str) -> i32 {
     let contents = match rubash::script_driver::read_script_bytes(&path) {
         Ok(contents) => contents,
         Err(e) => {
+            // rubash#3254: the driver-time name (see
+            // driver_error_name). NOTE: GNU stays silent when a
+            // startup file cannot be opened (shell.c run_startup_files
+            // / maybe_execute_file); whether this diagnostic should
+            // fire at all is a separate divergence, not this ticket —
+            // only the name is fixed here.
             eprintln!(
-                "rubash: {}: {}",
+                "{}: {}: {}",
+                driver_error_name(executor),
                 init_file,
                 rubash::posix_errors::message(&e)
             );
