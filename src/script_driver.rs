@@ -756,6 +756,7 @@ fn run_script_grouped_at_line_offset(
             false,
             feeder_tokens.take(),
             Some(gather_info.entry_extended_glob),
+            pending.ends_with('\n'),
         );
         if executor.evalerror_failglob_pending.get() {
             failglob_discard_until = Some(group_last_line);
@@ -2102,6 +2103,7 @@ fn run_history_group(
     interactive: bool,
     feeder_tokens: Option<Vec<Token>>,
     entry_extended_glob: Option<bool>,
+    last_line_terminated: bool,
 ) -> i32 {
     let history_on = executor.get_env("__RUBASH_SETOPT_history").as_deref() == Some("1");
     let histexpand_on = executor.get_env("__RUBASH_SETOPT_histexpand").as_deref() == Some("1");
@@ -2301,7 +2303,7 @@ fn run_history_group(
         session.borrow_mut().last_line_added = false;
     }
 
-    let exec_text = if modified_any {
+    let mut exec_text = if modified_any {
         exec_parts.join("\n")
     } else {
         group
@@ -2310,6 +2312,16 @@ fn run_history_group(
             .collect::<Vec<_>>()
             .join("\n")
     };
+    // GNU parse.y:2842 shell_getc: a `\<newline>` pair in the input is
+    // elided and the read continues — the group's line texts are stored
+    // trimmed, so the join alone renders a script-final `AAA\<newline>`
+    // as `AAA\` at bare EOF, whose backslash GNU keeps literal
+    // (parse.y:2739-2743). Restore the physical line's terminator so a
+    // tail continuation still elides like GNU's character stream
+    // (`echo AAA\`+`\n` prints `AAA`, never `AAA\`).
+    if last_line_terminated {
+        exec_text.push('\n');
+    }
     let pre_alias_text = exec_text.clone();
     let exec_text = expand_group_aliases(executor, &exec_text);
     if exec_text.trim().is_empty() {
@@ -5823,6 +5835,7 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                         true,
                         None,
                         None,
+                        pending.ends_with('\n'),
                     )
                 } else {
                     run_source_with_line_offset(
