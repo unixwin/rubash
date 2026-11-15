@@ -8017,7 +8017,7 @@ pub fn bash_invocation_name(argv0: &str, env_vars: &HashMap<String, String>) -> 
     if name.is_empty() {
         return None;
     }
-    if name.starts_with('/') {
+    if invocation_path_is_absolute(name) {
         return Some(name.to_string());
     }
     // GNU set_pwd() (shell.c) validates an inherited $PWD against getcwd
@@ -8059,7 +8059,7 @@ pub fn bash_invocation_name(argv0: &str, env_vars: &HashMap<String, String>) -> 
     }
     find_user_command(name, env_vars).map(|path| {
         let joined = path.to_string_lossy().into_owned();
-        if joined.starts_with('/') {
+        if invocation_path_is_absolute(&joined) {
             joined
         } else {
             // full_pathname (general.c) absolutizes a relative join
@@ -8067,4 +8067,23 @@ pub fn bash_invocation_name(argv0: &str, env_vars: &HashMap<String, String>) -> 
             pwd().map(|pwd| format!("{pwd}/{joined}")).unwrap_or(joined)
         }
     })
+}
+
+/// The absolute-path test for an invocation spelling — the ABSPATH macro
+/// behind variables.c:785 get_bash_name. POSIX (general.h:266) is
+/// `x[0] == '/'` only; the __CYGWIN__ port (general.h:269) — the Windows
+/// spellings get_bash_name must recognize — counts a drive-letter
+/// designator (`C:` anything, including the drive-relative `C:name`) or
+/// a leading directory separator of EITHER spelling (general.h:279
+/// ISDIRSEP), so `C:\…`, `C:/…`, `\dir\…`, `\\?\…` and `\\server\…` are
+/// all already absolute and keep verbatim instead of falling into the
+/// PATH walk or the textual $PWD join (rubash#3318 rework).
+fn invocation_path_is_absolute(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    if cfg!(windows) {
+        matches!(bytes.first(), Some(b'/') | Some(b'\\'))
+            || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+    } else {
+        bytes.first() == Some(&b'/')
+    }
 }
