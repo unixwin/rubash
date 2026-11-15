@@ -6922,8 +6922,30 @@ impl Executor {
         let mut word_chars: Option<Vec<char>> = None;
         let mut index = 0;
         while let Some(clause) = case_command.clauses.get(index) {
+            let mut pattern_error: Option<(String, String, i32)> = None;
             let matched = fall_through
                 || clause.pattern_nodes.iter().any(|pattern| {
+                    // rubash#2701 — GNU re-expands every arm's pattern
+                    // through the same word pipeline per match attempt
+                    // (execute_cmd.c:3712 expand_word_leave_quoted ->
+                    // subst.c:11229 expand_word_internal): a `:?` in an
+                    // evaluated arm is the same FORCE_EOF class as in a
+                    // command word (subst.c:10347 case '?', 10414/10418)
+                    // and `:=` binds at the evaluation point. GNU
+                    // consults arms in order and stops at the first
+                    // match, so the verdict latch preserves ordering —
+                    // an unreached arm can neither bind nor error.
+                    if pattern_error.is_some() {
+                        return true;
+                    }
+                    if pattern.text.contains('$') || pattern.text.contains('`') {
+                        self.apply_parameter_assignment_expansions_in_word(&pattern.text);
+                        pattern_error =
+                            self.parameter_expansion_error_in_word_isolated(&pattern.text);
+                        if pattern_error.is_some() {
+                            return true;
+                        }
+                    }
                     let stripped = self.expand_case_pattern(pattern);
                     if self.shell_state.arithmetic_fatal_error.get()
                         || self.shell_state.arithmetic_nounset_error.get()
@@ -6963,6 +6985,9 @@ impl Executor {
                         case_pattern_matches_with_word_chars(&stripped, &word, &mut word_chars)
                     }
                 });
+            if let Some(error) = pattern_error.take() {
+                return self.raise_word_expansion_error(error);
+            }
             self.abandon_on_arithmetic_expansion_error()?;
             if matched {
                 matched_any = true;

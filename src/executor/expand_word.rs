@@ -1364,6 +1364,25 @@ impl Executor {
                 crate::executor::expand_braced_indices::env_vars_with_pending_subscript_writes(
                     &self.shell_state.env_vars,
                 );
+            // rubash#2701 — a `${x:?word}` inside `$((...))` text is a
+            // parameter-expansion error in the same class as anywhere
+            // else (subst.c:10347 case '?' -> 10414/10418
+            // parameter_brace_expand_error -> expand_wdesc_fatal ->
+            // FORCE_EOF). The word pre-scan skips `$((` units as
+            // arith-owned (rubash#533), so scan the arith text at its
+            // own expansion boundary; the nounset latch carries the
+            // same fatal class as the unbound-variable arm below.
+            if let Some((name, message, _)) =
+                self.parameter_expansion_error_in_word_isolated(&expression)
+            {
+                if !self.shell_state.arithmetic_expansion_error.replace(true) {
+                    self.write_diagnostic_fd2(
+                        format!("{}{}: {}\n", self.error_prefix(), name, message).as_bytes(),
+                    );
+                }
+                self.shell_state.arithmetic_nounset_error.set(true);
+                return Some(String::new());
+            }
             if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset") {
                 if let Some(name) = arithmetic_unbound_variable(&expression, &overlaid) {
                     if !self.shell_state.arithmetic_expansion_error.replace(true) {

@@ -590,6 +590,41 @@ impl Executor {
             return Ok(());
         }
 
+        // rubash#2701 — GNU redir.c:298 redirection_expand runs each
+        // redirect word through the same word-expansion pipeline as
+        // command words: a `:?` verdict is the same FORCE_EOF class
+        // (subst.c:10347 case '?', 10414/10418
+        // parameter_brace_expand_error -> expand_wdesc_fatal) and `:=`
+        // binds at the evaluation point. The command-word pre-scan
+        // above covers only cmd.words/assignments, so a `:?` in a
+        // redirect target degraded to `:-` and `:=` was dropped. Run
+        // the same two pre-passes on every redirect target before
+        // do_redirections applies it — the verdict must land before
+        // the file is opened, matching GNU's jump out of
+        // redirection_expand.
+        for redirect in cmd.redirects.iter().chain(
+            [
+                cmd.redirect_in.as_deref(),
+                cmd.redirect_out.as_deref(),
+                cmd.append.as_deref(),
+                cmd.redirect_err.as_deref(),
+                cmd.redirect_err_append.as_deref(),
+            ]
+            .into_iter()
+            .flatten(),
+        ) {
+            if redirect.kind == crate::parser::RedirectKind::HereDoc {
+                continue;
+            }
+            let target = redirect.target.as_str();
+            if (target.starts_with(">(") || target.starts_with("<(")) && target.ends_with(')') {
+                continue;
+            }
+            self.apply_parameter_assignment_expansions_in_word(target);
+            if let Some(error) = self.parameter_expansion_error_in_word_isolated(target) {
+                return self.raise_word_expansion_error(error);
+            }
+        }
         if alias_expansion_changed_words
             && !original_words_had_command_substitution
             && self.execute_alias_expanded_syntax(&cmd)?
