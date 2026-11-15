@@ -4929,8 +4929,7 @@ impl Executor {
         line: Option<usize>,
     ) -> Option<Rc<FileFd>> {
         use std::process::{Command, Stdio};
-        let exe = std::env::var_os("CARGO_BIN_EXE_rubash")
-            .map(std::path::PathBuf::from)
+        let exe = test_rubash_binary_from_env()
             .or_else(test_rubash_binary_from_current_exe)
             .or_else(|| std::env::current_exe().ok())
             .unwrap_or_else(|| "rubash".into());

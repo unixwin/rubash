@@ -3494,9 +3494,7 @@ fn issue2875_require_rubash_binary() {
     } else {
         "rubash"
     };
-    let resolved = std::env::var_os("CARGO_BIN_EXE_rubash")
-        .map(std::path::PathBuf::from)
-        .filter(|path| path.is_file())
+    let resolved = crate::executor::test_rubash_binary_from_env()
         .or_else(crate::executor::test_rubash_binary_from_current_exe)
         .or_else(|| std::env::current_exe().ok());
     let is_rubash = resolved
