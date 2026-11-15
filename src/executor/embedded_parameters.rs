@@ -530,6 +530,28 @@ impl Executor {
                             output.push('\'');
                             continue;
                         }
+                        // rubash#3117 — the dq half of the same GNU branch
+                        // (syntax.h:58 CBSDQUOTE): inside a "..." span of
+                        // the rhs a backslash is an escape only before
+                        // $ ` " \ and newline (resolved by the arms
+                        // above); before any other char BOTH bytes are
+                        // literal data (subst.c:11661-11665 copies `\`+c).
+                        // The pair rides the backslash carrier so the
+                        // caller's trailing UNQUOTED unescape — which no
+                        // longer sees the span boundary — cannot refold
+                        // it; restore_deferred_operator_backslashes
+                        // restores the `\` after that pass. Escaped
+                        // whitespace stays glued exactly like the walk's
+                        // own in-double whitespace marking above.
+                        Some(other) if in_double => {
+                            chars.next();
+                            output.push(crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH);
+                            if matches!(other, ' ' | '\t') {
+                                output.push(crate::executor::markers::IFS_GLUE);
+                            }
+                            output.push(other);
+                            continue;
+                        }
                         _ => {}
                     }
                 }
