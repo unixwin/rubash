@@ -1124,10 +1124,23 @@ impl Executor {
             // the colon-less `${#=}`/`${#+}` which stay bad substitution.
             return !name[1..].is_empty();
         }
-        matches!(
-            first,
-            '-' | '+' | '=' | '?' | '@' | '^' | ',' | '/' | '%' | '#'
-        ) && name.len() > 1
+        if first == '@' {
+            // rubash#2711 — GNU subst.c:8898-8922
+            // valid_parameter_transform: the `@` xform operator admits
+            // EXACTLY one transform char from the fixed set, so `${#@Q}`
+            // is `$#` under the Q transform (probe: `set -- ab cd;
+            // echo ${#@Q}` -> `'2'`) while `${#@:}`, `${#@%b}` and
+            // `${#@:-2}` all hit bad_substitution — `${#@...}` is NOT
+            // the `${#@}` positional-count form followed by an operator,
+            // because the `#`-led name scan (subst.c:9931-9941) requires
+            // the name to consume the whole body up to `}`.
+            return name.len() == 2
+                && matches!(
+                    name.as_bytes()[1],
+                    b'a' | b'A' | b'K' | b'k' | b'E' | b'P' | b'Q' | b'U' | b'u' | b'L'
+                );
+        }
+        matches!(first, '-' | '+' | '=' | '?' | '^' | ',' | '/' | '%' | '#') && name.len() > 1
     }
 
     /// GNU subst.c:8949 parameter_brace_transform returns
