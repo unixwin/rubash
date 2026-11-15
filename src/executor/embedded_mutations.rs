@@ -90,6 +90,14 @@ impl Executor {
     /// them after its final unescape pass (rubash#218 — `v=${1-U}` with
     /// `\\` data collapsed the pair). Source-word escapes still resolve
     /// exactly as before; only expansion-result data is protected.
+    ///
+    /// rubash#3663: the literal DATA_BACKSLASH carrier the lexer emitted
+    /// for a source `\\` is deferred the same way (rubash#3088 pattern):
+    /// restoring it in the walker tail handed the assignment path's final
+    /// `unescape_remaining_shell_escapes` pass a raw `\` it folded as
+    /// source escape syntax, so `x=a\\*e` stored `a*e`. The caller
+    /// (`expand_assignment_value_inner`) restores the carrier after its
+    /// unescape pass.
     pub(in crate::executor) fn expand_embedded_parameters_assignment_rhs_mut(
         &mut self,
         word: &str,
@@ -104,7 +112,7 @@ impl Executor {
             false,
             false,
             false,
-            false,
+            true,
         )
     }
 
