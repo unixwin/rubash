@@ -3089,7 +3089,36 @@ impl Executor {
         // the generic `expanded` text already carries the transform result
         // and splits through field_split_values_with_ifs below, matching
         // GNU's quote_escapes+field-split pipeline (subst.c:8705).
+        // GNU subst.c:12026-12048 (expand_word_internal end-of-word): a
+        // word whose whole expansion is null survives as one empty field
+        // only under had_quoted_null or PARTIALLY_QUOTED state — an
+        // UNQUOTED word (or quoted_dollar_at) discards. Quoting bytes
+        // inside the word's own `${...}`/`$(...)` are inner syntax, so a
+        // QUOTED_NULL_MARKER produced by `${v=''}` does not anchor the
+        // OUTER field: strip bare markers before the empty/split verdicts
+        // when the word itself is unquoted (`[[` operands skip field
+        // semantics entirely — the `[[` guard in removes_unquoted_null_word
+        // keeps its own rule).
+        let word_is_unquoted = !cmd.words.first().is_some_and(|word| word == "[[")
+            && !raw_word_is_partially_quoted(raw);
+        let expanded = if word_is_unquoted
+            && expanded.contains(crate::executor::markers::QUOTED_NULL_MARKER)
+        {
+            std::borrow::Cow::Owned(crate::executor::markers::restore_bare_sentinels(
+                &expanded,
+                &[(crate::executor::markers::QUOTED_NULL_MARKER, "")],
+            ))
+        } else {
+            std::borrow::Cow::Borrowed(&expanded)
+        };
+        let expanded = expanded.as_ref();
         if expanded.is_empty() && self.removes_unquoted_null_word(cmd, index) {
+            Vec::new()
+        } else if expanded.is_empty() && word_is_unquoted {
+            // The Variable-kind admission of removes_unquoted_null_word
+            // only models part of the GNU discard: a non-Variable
+            // unquoted word (`${v=$*}` with one empty positional) whose
+            // expansion is empty vanishes the same way.
             Vec::new()
         } else if raw_word_contains_process_substitution(raw)
             && expanded_word_has_process_substitution(&expanded)
@@ -5081,6 +5110,48 @@ pub(in crate::executor) fn raw_word_is_quoted(raw: Option<&str>) -> bool {
 
 fn raw_has_quoted_empty_suffix(raw: &str) -> bool {
     raw.ends_with("''") || raw.ends_with("\"\"")
+}
+
+/// GNU expand_word_internal's `quoted_state != UNQUOTED` at the word's top
+/// level: any `'...'`/`"..."` span, a `$'...'`/`$"..."` construct, or a
+/// backslash escape makes the word PARTIALLY_QUOTED — which keeps one
+/// empty field when the whole expansion is null (subst.c:12026-12048).
+/// Quoting bytes inside `${...}`/`$(...)`/`` `...` `` belong to the inner
+/// construct and do not count (`${v=''}` is an UNQUOTED word).
+fn raw_word_is_partially_quoted(raw: Option<&str>) -> bool {
+    let Some(raw) = raw else {
+        return false;
+    };
+    if !raw
+        .bytes()
+        .any(|b| matches!(b, b'\'' | b'"' | b'\\' | b'$' | b'`'))
+    {
+        return false;
+    }
+    let chars: Vec<char> = raw.chars().collect();
+    let mut index = 0usize;
+    while index < chars.len() {
+        match chars[index] {
+            '\'' | '"' | '\\' => return true,
+            '$' if chars.get(index + 1) == Some(&'\'') => return true,
+            '$' if chars.get(index + 1) == Some(&'"') => return true,
+            '$' if chars.get(index + 1) == Some(&'{') => {
+                index = skip_raw_braced_parameter(&chars, index + 2);
+                continue;
+            }
+            '$' if chars.get(index + 1) == Some(&'(') => {
+                index = skip_raw_command_substitution(&chars, index + 2);
+                continue;
+            }
+            '`' => {
+                index = skip_raw_backtick(&chars, index + 1);
+                continue;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    false
 }
 
 /// Whitelist predicates for the IFS-marking skip in `expand_command_word`

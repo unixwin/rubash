@@ -60,6 +60,7 @@ pub use skip::{unclosed_comsub_eof_shape, UnclosedComsubShape};
 
 use crate::executor::markers::DATA_DOLLAR;
 pub(crate) use ansi::decode_ansi_c_quoted;
+pub(crate) use quotes::remove_double_quoted_into_cursor;
 pub(crate) use quotes::remove_shell_quotes;
 pub(crate) use quotes::with_lex_extquote_pin;
 pub(crate) use quotes::{

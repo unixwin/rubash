@@ -2080,7 +2080,7 @@ fn copy_braced_parameter_with_ansi_c_cursor<'a>(out: &mut String, rest: &'a str)
 /// an empty slice). Trigger bytes inside double quotes: `"`, `$`, `\`, `'`,
 /// the glob set `* ? [ @ + !`, and `` ` `` when backtick bodies must be
 /// preserved.
-fn remove_double_quoted_into_cursor<'a>(
+pub(crate) fn remove_double_quoted_into_cursor<'a>(
     out: &mut String,
     rest: &'a str,
     preserve_backticks: bool,
