@@ -44,6 +44,7 @@ mod command_substitution_pipelines;
 mod command_substitution_values;
 mod command_words;
 mod compound_exec;
+pub(crate) use compound_exec::test_rubash_binary_from_current_exe;
 mod copy_source;
 mod history_exec;
 mod inherited_stdin;

@@ -3483,6 +3483,32 @@ fn issue2859_jobs_face_procsub_child_does_not_count() {
     );
 }
 
+/// rubash#3292: the cell needs a real rubash binary for its `<(`
+/// child, and a lib-only run (`cargo test --lib`) on a fresh target
+/// builds none — so fail fast naming the precondition instead of
+/// letting the spawn fall back to the lib-test binary, which
+/// rejects `-c` with a misleading error.
+fn issue2875_require_rubash_binary() {
+    let binary_name = if cfg!(windows) {
+        "rubash.exe"
+    } else {
+        "rubash"
+    };
+    let resolved = std::env::var_os("CARGO_BIN_EXE_rubash")
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_file())
+        .or_else(crate::executor::test_rubash_binary_from_current_exe)
+        .or_else(|| std::env::current_exe().ok());
+    let is_rubash = resolved
+        .as_ref()
+        .is_some_and(|path| path.file_name().and_then(|name| name.to_str()) == Some(binary_name));
+    assert!(
+        is_rubash,
+        "issue2875 precondition (rubash#3292): no rubash binary found — on a fresh target run `cargo build --locked --bin rubash` first, or run the full `cargo test` so cargo builds the bin; otherwise the `<(` child falls back to the lib-test binary, which rejects `-c`"
+    );
+}
+
+#[test]
 /// rubash#2875: an input process-substitution child must be a real
 /// rubash shell, not the lib-test binary. The `<(` spawn resolved
 /// its exe as `CARGO_BIN_EXE_rubash` -> `current_exe()` with no
@@ -3492,8 +3518,8 @@ fn issue2859_jobs_face_procsub_child_does_not_count() {
 /// `-c`: it printed `error: Unrecognized option: 'c'` and wrote
 /// nothing to the pipe, so the body never ran. With the fallback
 /// the child is the real rubash binary and the body executes.
-#[test]
 fn issue2875_input_procsub_child_runs_as_rubash_shell() {
+    issue2875_require_rubash_binary();
     let mut session = issue863_gap6_session();
     issue863_gap6_run(
         &mut session,
