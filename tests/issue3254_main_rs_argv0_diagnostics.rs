@@ -48,8 +48,10 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
 const STARTER: &str = "/usr/local/share/bashdb/bashdb-main.inc";
 
+#[cfg(unix)]
 fn system_starter_exists() -> bool {
     PathBuf::from(STARTER).exists() || PathBuf::from("/usr/share/bashdb/bashdb-main.inc").exists()
 }
@@ -118,6 +120,7 @@ impl Drop for Scratch {
     }
 }
 
+#[cfg(unix)]
 fn assert_usage_block(stderr: &str, name: &str) {
     // rubash#3254 re-review round 3, captain ruling (b): the usage block
     // asserts the product's DELIBERATE normalized form, NOT GNU's raw
