@@ -1,6 +1,7 @@
 use super::command_registry::{comsub_front_slot, ComsubFrontSlot};
 use super::*;
 use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
+use std::io::Read;
 
 impl Executor {
     /// Expand one command-substitution argument word, applying pathname
@@ -509,6 +510,14 @@ impl Executor {
             if !positional_target(var_name) {
                 return None;
             }
+            // GNU subst.c:10320-10327 (`case '#': case '%':`): removal
+            // skips the pattern expansion when the parameter word is
+            // absent or empty (rubash#3501). The gate reads the JOINED
+            // word: one "" positional joins to "" and is silent only
+            // unquoted — quoted, GNU diagnoses (follow-up #3581).
+            if self.pattern_word_is_silent(var_name, !quoted) {
+                return Some(vec![]);
+            }
             let pattern = self.expand_parameter_pattern_word(pattern);
             return self.positional_modified_values(var_name, quoted, |value| {
                 remove_parameter_pattern(value, &pattern, operation, self.extglob_enabled())
@@ -518,6 +527,11 @@ impl Executor {
         if let Some((var_name, pattern, replacement, global)) = parse_parameter_replacement(name) {
             if !positional_target(var_name) {
                 return None;
+            }
+            // GNU subst.c:9362-9367 parameter_brace_patsub: absent value
+            // returns NULL before getpattern (rubash#3501).
+            if self.pattern_word_is_silent(var_name, false) {
+                return Some(vec![]);
             }
             let pattern = self.expand_parameter_pattern_word(pattern);
             let replacement = self.expand_patsub_replacement_text(replacement);
@@ -529,6 +543,11 @@ impl Executor {
         if let Some((var_name, operation, pattern)) = parse_parameter_case_mod(name) {
             if !positional_target(var_name) {
                 return None;
+            }
+            // GNU subst.c:9604-9608 parameter_brace_casemod: same
+            // absent-value gate as patsub (rubash#3501).
+            if self.pattern_word_is_silent(var_name, false) {
+                return Some(vec![]);
             }
             let pattern = self.expand_embedded_parameters(pattern);
             return self.positional_modified_values(var_name, quoted, |value| {
@@ -610,13 +629,23 @@ impl Executor {
     /// results are identical to the standalone `"${...}"` expansion; only
     /// the enclosing word's affix attachment differs (handled by the
     /// segment expander).
-    pub(in crate::executor) fn at_modified_segment_values(&self, inner: &str) -> Vec<String> {
+    pub(in crate::executor) fn at_modified_segment_values(
+        &self,
+        inner: &str,
+        quoted: bool,
+    ) -> Vec<String> {
+        // The segment carries its own quote state (AtModified's bool):
+        // an unquoted `pre${a[@]#...}` segment must reach the list
+        // helpers as unquoted, so the #3501 removal gate reads the
+        // joined word as silent for a one-"" list — the previous
+        // hardcoded `true` diagnosed it (rubash#3501). Quoted segments
+        // keep `true` (a quoted one-"" list diagnoses, #3581).
         if inner.starts_with('@') {
             return self
-                .positional_modified_word_values(inner, true)
+                .positional_modified_word_values(inner, quoted)
                 .unwrap_or_default();
         }
-        self.array_pattern_word_values(&format!("${{{inner}}}"), true)
+        self.array_pattern_word_values(&format!("${{{inner}}}"), quoted)
             .unwrap_or_default()
     }
 
@@ -652,8 +681,8 @@ impl Executor {
                         | QuotedPositionalAtSegment::PositionalAtSlice(inner, _) => {
                             self.at_slice_segment_values(inner)
                         }
-                        QuotedPositionalAtSegment::AtModified(inner, _) => {
-                            self.at_modified_segment_values(inner)
+                        QuotedPositionalAtSegment::AtModified(inner, quoted) => {
+                            self.at_modified_segment_values(inner, *quoted)
                         }
                         // GNU string_list_dollar_star: `[*]` joins the
                         // elements with IFS[0] into one word.
@@ -661,7 +690,8 @@ impl Executor {
                             .array_subscript_range_values(name, 0, None)
                             .unwrap_or_default()
                             .join(&self.ifs_first_char_separator())],
-                        QuotedPositionalAtSegment::Literal { .. } => Vec::new(),
+                        QuotedPositionalAtSegment::Literal { .. }
+                        | QuotedPositionalAtSegment::VerbatimQuoted(_) => Vec::new(),
                     },
                     |literal| self.expand_embedded_parameters(literal),
                 )
@@ -994,8 +1024,9 @@ impl Executor {
                 // the closure runs only in the forked child before
                 // exec and only dup2/closes raw descriptors.
                 unsafe {
-                    process
-                        .pre_exec(move || super::external_inner::pin_ambient_fds_in_child(&pins));
+                    process.pre_exec(move || {
+                        super::external_inner::pin_ambient_fds_in_child(&pins).map(|_| ())
+                    });
                 }
             }
         }
@@ -1019,6 +1050,61 @@ impl Executor {
                 let _ = child_stdin.write_all(input);
             }
         }
+        // rubash#3401 (face 1): the fast path's `wait_with_output()`
+        // had no observe point — a termsig rode out the whole child.
+        // The pin shape `x=$(/usr/bin/sleep 5)` IS served here, not by
+        // the clone path: the dispatcher claims every
+        // single-external-command body before the clone fallback
+        // (command_substitution.rs:1310), so the clone conduit alone
+        // cannot make the pin green. Drain the capture pipe on a reader
+        // thread (std's `wait_with_output` shape) and poll the child in
+        // 10ms slices, classifying each mailbox delivery with the
+        // shared `&self` verdict (the fast path runs in `&self`
+        // expansion contexts and cannot lend a `&mut` receiver). On a
+        // death verdict the child is killed and reaped first, the raw
+        // signal is re-queued for the parent's next boundary poll
+        // (which adjudicates it — EXIT trap first, then death by the
+        // signal — before the next command runs), and the substitution
+        // yields empty output. The reader handle is dropped, not
+        // joined, there: a grandchild holding the pipe open must not
+        // stall the death. fd 2 is inherited live on this route
+        // (subst.c:7143; rubash#2086), so there is no stderr pipe to
+        // drain; the non-unix shape keeps the plain `wait_with_output`.
+        #[cfg(unix)]
+        let mut output = {
+            let stdout_reader = spawned.stdout.take().map(|mut pipe| {
+                std::thread::spawn(move || {
+                    let mut buf = Vec::new();
+                    let _ = pipe.read_to_end(&mut buf);
+                    buf
+                })
+            });
+            let status = loop {
+                match spawned.try_wait() {
+                    Ok(Some(status)) => break status,
+                    Ok(None) => {
+                        if let Some(sig) = self.pending_termsig_verdict() {
+                            let _ = spawned.kill();
+                            let _ = spawned.wait();
+                            crate::builtins::kill::requeue_pending_signals(vec![sig]);
+                            self.last_command_substitution_status.set(Some(128 + sig));
+                            return Some(String::new());
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(_) => return None,
+                }
+            };
+            let stdout_bytes = stdout_reader
+                .map(|handle| handle.join().unwrap_or_default())
+                .unwrap_or_default();
+            std::process::Output {
+                status,
+                stdout: stdout_bytes,
+                stderr: Vec::new(),
+            }
+        };
+        #[cfg(not(unix))]
         let mut output = spawned.wait_with_output().ok()?;
         output.stdout.extend(self.collect_dev_fd_capture(&dev_ops));
         if piped_stdin.is_some() && !fd_table_text_stdin {
@@ -1290,6 +1376,16 @@ enum QuotedPositionalAtSegment {
     /// split. Text collected between quoted spans is `quoted == false` and
     /// keeps the historic unquoted-literal split behavior.
     Literal { text: String, quoted: bool },
+    /// A `'...'` or `$'...'` span (rubash#3192): the body is literal data
+    /// with NO expansion stage — GNU subst.c:11880 hands the whole
+    /// single-quoted body to add_quoted_string via
+    /// string_extract_single_quoted, and subst.c:8766 ansicstr decodes a
+    /// `$'...'` body into the same quoted-data status — so it carries
+    /// the same IFS protection as a quoted `Literal` but must never reach
+    /// the literal expansion pass (a `$` inside is data, not an
+    /// expansion introducer). For `$'...'` the stored text is the
+    /// ansicstr-decoded body; for `'...'` it is the verbatim body.
+    VerbatimQuoted(String),
     /// `quoted` distinguishes a `"$@"`/`"${@}"` span from a bare unquoted
     /// `$@`/`${@}`: quoted elements' IFS characters are quote-protected data
     /// (GNU CTLESC, subst.c:12273+ word splitting skips them); unquoted
@@ -1600,11 +1696,40 @@ fn quoted_positional_at_segments(
                 continue;
             }
             '\'' => {
-                index = skip_single_quote(&chars, index + 1)?;
+                // A single-quoted span carries the same quoted-site
+                // verdict as a double-quoted span (rubash#3192): emit it
+                // as a verbatim quoted segment so its IFS characters are
+                // protected at the junction. Declined spans stay in the
+                // literal run, byte-for-byte the historic path.
+                let after = skip_single_quote(&chars, index + 1)?;
+                if push_verbatim_quoted_span_segment(
+                    &mut segments,
+                    &chars[literal_start..index],
+                    &chars[index + 1..after - 1],
+                    false,
+                ) {
+                    index = after;
+                    literal_start = index;
+                    continue;
+                }
+                index = after;
                 continue;
             }
             '$' if chars.get(index + 1) == Some(&'\'') => {
-                index = skip_single_quote(&chars, index + 2)?;
+                // `$'...'` (ANSI-C quoting) is the same quoted-data
+                // class with an ansicstr-decoded body (rubash#3192).
+                let after = skip_single_quote(&chars, index + 2)?;
+                if push_verbatim_quoted_span_segment(
+                    &mut segments,
+                    &chars[literal_start..index],
+                    &chars[index + 2..after - 1],
+                    true,
+                ) {
+                    index = after;
+                    literal_start = index;
+                    continue;
+                }
+                index = after;
                 continue;
             }
             '$' if chars.get(index + 1) == Some(&'"')
@@ -2082,6 +2207,34 @@ fn push_quoted_span_segment(
     true
 }
 
+/// Emit a `'...'` / `$'...'` span as a verbatim quoted segment,
+/// flushing the pending unquoted literal run first — the
+/// single-quote twin of push_quoted_span_segment (rubash#3192). The
+/// body needs no admissibility decline of its own: unlike a
+/// double-quoted body it never reaches an expansion pass, so `$`,
+/// backtick and backslash inside it are inert data. The RUN keeps the
+/// historic decline (the literal pushers refuse backtick/backslash
+/// runs by design); on decline the span stays in the run,
+/// byte-for-byte the historic path.
+fn push_verbatim_quoted_span_segment(
+    segments: &mut Vec<QuotedPositionalAtSegment>,
+    run: &[char],
+    body: &[char],
+    ansi_c: bool,
+) -> bool {
+    if push_quoted_positional_literal_segment(segments, run, false).is_none() {
+        return false;
+    }
+    let raw: String = body.iter().collect();
+    let text = if ansi_c {
+        crate::lexer::decode_ansi_c_quoted(&raw)
+    } else {
+        raw
+    };
+    segments.push(QuotedPositionalAtSegment::VerbatimQuoted(text));
+    true
+}
+
 fn push_body_piece(segments: &mut Vec<QuotedPositionalAtSegment>, chars: &[char]) -> Option<()> {
     if chars.is_empty() {
         return Some(());
@@ -2186,6 +2339,19 @@ where
 
     for (segment_index, segment) in segments.iter().enumerate() {
         match segment {
+            QuotedPositionalAtSegment::VerbatimQuoted(text) => {
+                // Verbatim quoted data (rubash#3192): no expansion pass —
+                // the stored text IS the expansion result — but the same
+                // IFS protection and quoted-null presence as a quoted
+                // literal, so a trailing quoted space survives the
+                // junction exactly as GNU's add_quoted_string data does.
+                if !text.is_empty() {
+                    saw_non_empty_expansion = true;
+                }
+                current_has_quoted = true;
+                current.push_str(&protect_ifs_field_chars(text, ifs));
+                current_present = true;
+            }
             QuotedPositionalAtSegment::Literal { text, quoted } => {
                 // GNU word splitting (subst.c:10649+ word_split) applies to
                 // expansion-produced text only — literal characters in the

@@ -14,32 +14,56 @@
 //! a function defined in a sourced file carried the definition
 //! file's LINE under the top-level script's NAME (rubash#3035 — the
 //! same pairing the executor's own prefix got right in rubash#2212).
+//!
+//! The three builders here are thin faces over the single argv[0]
+//! derivation chain in `builtins::prefix` (rubash#2791): each reads
+//! the same carriers through a map getter and delegates the arm
+//! selection to the chain, so an incomplete carrier pair (file
+//! without line, line without file, neither) derives its name from
+//! the invocation name exactly as the executor's own prefix does —
+//! the hard-coded `"rubash: "` fallback these faces used to print
+//! for every incomplete pair named a renamed shell by the wrong
+//! name (rubash#3256). The one arm the chain's renderers do not
+//! carry is the interactive one: `get_name_for_error` skips the
+//! BASH_SOURCE/$0 levels in an interactive shell (error.c:98) and
+//! reports `base_pathname(shell_name)` with no line segment, so
+//! each builder checks the interactive carrier first, in the same
+//! shape as the executor's `diagnostic_prefix` / `sys_error_prefix`.
 
 use std::collections::HashMap;
 
-/// The executing frame's file for diagnostics: the executor-stamped
-/// `__RUBASH_CURRENT_FILE` when present and non-empty, else the
-/// top-level `__RUBASH_SCRIPT_NAME` (the pre-frame contexts: -c,
-/// startup, and any path that never crossed a command stamp).
-fn error_file_name<'a>(env_vars: &'a HashMap<String, String>) -> Option<&'a str> {
-    env_vars
-        .get("__RUBASH_CURRENT_FILE")
-        .map(String::as_str)
-        .filter(|name| !name.is_empty())
-        .or_else(|| env_vars.get("__RUBASH_SCRIPT_NAME").map(String::as_str))
+/// The carrier getter over an executor env map, in the shape the
+/// `builtins::prefix` chain consumes.
+fn map_get<'a>(env_vars: &'a HashMap<String, String>) -> impl Fn(&str) -> Option<String> + 'a {
+    move |key: &str| env_vars.get(key).cloned()
+}
+
+/// The interactive arm shared by all three builders: GNU
+/// error.c:98's `interactive_shell == 0` guard around the
+/// BASH_SOURCE/$0 levels of `get_name_for_error` — an interactive
+/// shell reports `base_pathname(shell_name)` alone, never a line
+/// segment.
+fn interactive_name(env_vars: &HashMap<String, String>) -> Option<String> {
+    if env_vars.contains_key("__RUBASH_INTERACTIVE") {
+        Some(super::prefix::shell_basename(&map_get(env_vars)))
+    } else {
+        None
+    }
 }
 
 /// GNU builtins/common.c:83-94 builtin_error_prolog: the frame file,
 /// the executing line for scripts, then the builtin name (the caller
 /// appends the builtin name and message).
 pub(crate) fn diagnostic_prefix(env_vars: &HashMap<String, String>) -> String {
-    if let (Some(file), Some(line)) = (
-        error_file_name(env_vars),
-        env_vars.get("__RUBASH_CURRENT_LINE"),
-    ) {
-        return format!("{file}: line {line}: ");
+    if let Some(name) = interactive_name(env_vars) {
+        return format!("{name}: ");
     }
-    "rubash: ".to_string()
+    // rubash#3355: the line-without-file arm (the -c face when $0
+    // is empty) renders through the chain's fallback_error_name,
+    // whose presence-based $0 step makes an empty $0 print an
+    // empty name (error.c:90-120) — the delegation below carries
+    // that arm; no "rubash" literal remains on this face.
+    super::prefix::diagnostic_prefix(&map_get(env_vars))
 }
 
 /// GNU error.c:275-281 sys_error: error_prolog (0) — get_name_for_error
@@ -49,24 +73,32 @@ pub(crate) fn diagnostic_prefix(env_vars: &HashMap<String, String>) -> String {
 /// the shared spawn classifier (rubash#3148), mirroring the executor's
 /// own `sys_error_prefix`.
 pub(crate) fn sys_error_prefix(env_vars: &HashMap<String, String>) -> String {
-    if let Some(file) = error_file_name(env_vars) {
-        return format!("{file}: ");
+    if let Some(name) = interactive_name(env_vars) {
+        return format!("{name}: ");
     }
-    "rubash: ".to_string()
+    // rubash#3355: the no-file arm is get_name_for_error alone
+    // (error.c:275-281 sys_error) — the $0 verdict, not the brand:
+    // an empty $0 prints an empty name. The delegation below
+    // routes that arm through the chain's fallback_error_name
+    // (presence-based $0 step); the interactive arm above keeps
+    // the shared basename shape.
+    super::prefix::sys_error_prefix(&map_get(env_vars))
 }
 
 /// GNU error.c:453 err_readonly (report_error family): the bare
 /// `VAR: readonly variable` bind diagnostic honors gnu_errfmt
 /// (rubash#1038), unlike the builtin_error lines.
 pub(crate) fn readonly_error_prefix(env_vars: &HashMap<String, String>) -> String {
-    if let (Some(file), Some(line)) = (
-        error_file_name(env_vars),
-        env_vars.get("__RUBASH_CURRENT_LINE"),
-    ) {
-        if crate::builtins::shopt::option_enabled(env_vars, "gnu_errfmt") {
-            return format!("{file}:{line}: ");
-        }
-        return format!("{file}: line {line}: ");
+    if let Some(name) = interactive_name(env_vars) {
+        return format!("{name}: ");
     }
-    "rubash: ".to_string()
+    // rubash#3355: same $0-verdict arm as diagnostic_prefix above —
+    // a line but no file is the -c face with an empty $0, whose
+    // name is empty (error.c:90-120); the delegation below renders
+    // it (honoring gnu_errfmt) through the chain's
+    // fallback_error_name.
+    super::prefix::readonly_error_prefix(
+        &map_get(env_vars),
+        crate::builtins::shopt::option_enabled(env_vars, "gnu_errfmt"),
+    )
 }

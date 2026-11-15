@@ -26,16 +26,21 @@
 //! the fix; the direct-path, ./ and not-in-PATH controls match on
 //! both.
 
+#[cfg(unix)]
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::process::{Command, Stdio};
 
+#[cfg(unix)]
 const RUBASH: &str = env!("CARGO_BIN_EXE_rubash");
 
+#[cfg(unix)]
 struct Fixture {
     root: PathBuf,
     bin: PathBuf,
 }
 
+#[cfg(unix)]
 fn fixture(tag: &str) -> Fixture {
     let root = std::env::temp_dir().join(format!("issue2302_{}_{}", tag, std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
@@ -56,6 +61,7 @@ fn fixture(tag: &str) -> Fixture {
     Fixture { root, bin }
 }
 
+#[cfg(unix)]
 fn write_script(bin: &PathBuf, name: &str, body: &str) {
     let path = bin.join(name);
     std::fs::write(&path, body).expect("write fixture script");
@@ -67,6 +73,7 @@ fn write_script(bin: &PathBuf, name: &str, body: &str) {
     }
 }
 
+#[cfg(unix)]
 impl Fixture {
     fn path_env(&self) -> String {
         format!(

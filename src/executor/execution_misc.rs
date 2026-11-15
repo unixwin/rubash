@@ -1382,6 +1382,18 @@ pub(in crate::executor) fn restore_command_substitution_output(value: &str) -> S
         // raw 0x18 byte. GNU: subst.c:11882-11886 (case '\'') copies the
         // span verbatim — the child argv gets a real `"`.
         .replace(crate::executor::markers::DATA_DQUOTE, "\"")
+        // A `'` that was quote-removal data inside a double-quoted word
+        // travels as DATA_SQUOTE (lexer quotes.rs:208). The pipeline spawn
+        // faces decode carriers here (rubash#177), so a member word mixing
+        // a live backtick substitution with an apostrophe reached the
+        // child argv with a raw 0x17 byte (`member^Ws`; niubash defect D11,
+        // stage-log §235). GNU: subst.c:11882-11886 case '\'' copies the
+        // span verbatim — the child argv gets a real `'`. Raw-byte safe:
+        // the plain-command argv boundary has decoded DATA_SQUOTE with
+        // `.replace` since the carrier landed (command_prepare.rs), and
+        // typed 0x17 user data cannot arrive bare (markers.rs raw-byte
+        // marker pair on entry).
+        .replace(crate::executor::markers::DATA_SQUOTE, "'")
 }
 
 /// The command-substitution dispatchers return transport text; a body that

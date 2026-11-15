@@ -1,5 +1,15 @@
 use super::*;
 
+/// Outcome of a builtin's pre-help prologue (rubash#3340):
+/// `Proceed` continues to the long help (any prologue diagnostics
+/// already sit in the gate's stderr sink); `Abort(status)` means
+/// the prologue refused the builtin outright — emit its diagnostic
+/// with this status and print no help.
+enum PreHelpOutcome {
+    Proceed,
+    Abort(i32),
+}
+
 impl Executor {
     pub(in crate::executor) fn execute_materialized_command(
         &mut self,
@@ -725,7 +735,26 @@ impl Executor {
             // with `f(){ return 7; }`, not ERR:1 / exit 1. The unwind passes
             // through to the function (or source) boundary untouched.
             result
-        } else if self.errexit_enabled() && self.errexit_is_active() && self.exit_code != 0 {
+        } else if self.errexit_enabled()
+            && self.errexit_is_active()
+            && self.exit_code != 0
+            && !self.evalerror_arith_pending.get()
+        {
+            // rubash#3287: the arithmetic evalerror class is exempt
+            // here exactly as at the list loop's promotion
+            // (ast_exec.rs, rubash#1518): expr.c's evalerror jumps
+            // DISCARD directly, bypassing the errexit epilogue in
+            // every context — a fatal nested expansion inside a
+            // `(( ))` discards the command and the script continues,
+            // it does not exit under `set -e`. This funnel is the
+            // loop promotion's twin for the materialized dispatch
+            // (a `(( ))` carrying `$` in its words takes the generic
+            // path through here, never the bare fast entry), and
+            // without the exemption its ExpansionFailure was
+            // converted to ExitCode(1) before any list arm could
+            // absorb it. Other expansion failures (bad substitution,
+            // failglob) set no such pending mark and keep exiting
+            // under `set -e`, per the 2026-09-02 probe.
             // rubash#1611: inside a timed dispatch the ERR trap is
             // adjudicated once, by the ast_exec time branch, when the
             // timed command completes (rubash#1277) — firing here too
@@ -825,7 +854,10 @@ impl Executor {
     /// the two layers cannot disagree; handlers with no scan at all
     /// (the #2753 divergent set: cd, kill, trap, read, fc, bind,
     /// history, getopts, mapfile, pwd, the complete family, ...)
-    /// are covered by this one site.
+    /// are covered by this one site. The `--help` dispatch itself
+    /// (including the pre-option-scan prologue replay, rubash#3340)
+    /// lives in `apply_builtin_help` below, shared with the
+    /// `builtin` re-dispatch.
     fn builtin_help_gate(&mut self, cmd: &CommandNode, word: &str) -> Result<bool, ExecuteError> {
         let Some(row) = super::builtin_table::builtin_table_row(word) else {
             return Ok(false);
@@ -833,9 +865,64 @@ impl Executor {
         if !super::builtin_opt::help_opt_requested(row, &cmd.words[1..]) {
             return Ok(false);
         }
+        self.apply_builtin_help(cmd, row)?;
+        Ok(true)
+    }
+
+    /// Apply a `--help` dispatch for `row` under `cmd`: replay the
+    /// builtin's pre-option-scan prologue first, then either emit
+    /// the prologue's fatal diagnostic with its status and no help,
+    /// or the long help (status 2) with the prologue's stderr ahead
+    /// of it. The caller returns without running the handler either
+    /// way. Shared by the funnel gate above and the `builtin`
+    /// re-dispatch (builtin_direct_command.rs), which never
+    /// re-enters the funnel — the trap pipeline-stage site
+    /// (pipeline_exec.rs) is trap-only and trap has no prologue,
+    /// so it keeps its own inline decision.
+    ///
+    /// rubash#3340: GNU runs each builtin's prologue BEFORE its
+    /// option scan (bind.def:122-131 warning + initialize_readline
+    /// before CASE_HELPOPT at :191; hash.def:86-90 hashing-disabled
+    /// refusal before the getopt loop), so a `--help` dispatch must
+    /// replay the prologue before the long help — the gate used to
+    /// return before the handler was ever entered and swallowed it.
+    /// The prologue is dispatched on the row's handler identity
+    /// (not the name) and runs exactly once on this path: the gate
+    /// returns before the handler is entered, so the handler's own
+    /// prologue never runs twice. A refusing prologue (hash with
+    /// hashing disabled) aborts the dispatch: its diagnostic is
+    /// emitted with status 1 and no help is printed. The survey
+    /// in tests/issue3340_help_gate_leading_diagnostics.rs read
+    /// every other builtin's `.def` prologue — only bind and hash
+    /// have observable code before the help check.
+    pub(in crate::executor) fn apply_builtin_help(
+        &mut self,
+        cmd: &CommandNode,
+        row: &super::builtin_table::BuiltinRow,
+    ) -> Result<(), ExecuteError> {
+        let mut prologue_stderr = Vec::new();
+        if let PreHelpOutcome::Abort(status) =
+            self.run_pre_help_prologue(row, &mut prologue_stderr)?
+        {
+            self.write_buffered_builtin_output(cmd, &[], &prologue_stderr)?;
+            self.exit_code = status;
+            return Ok(());
+        }
         let mut stdout = Vec::new();
         crate::builtins::help::print_builtin_help(row.name, &mut stdout)?;
-        self.write_buffered_builtin_output(cmd, &stdout, &[])?;
+        // GNU emits a builtin's diagnostics unbuffered while its
+        // output flushes at builtin exit (the #1134 printf rule),
+        // so the prologue's stderr precedes the help text on a
+        // merged stream (`bind --help 2>&1` shows the warning
+        // first). The ordered-chunk log below is the mechanism that
+        // preserves that stderr-first order (union #3399 + #3385).
+        let log = super::trap_stack_builtins::OrderedOutputLog::new();
+        {
+            use std::io::Write;
+            let _ = log.stderr_writer().write_all(&prologue_stderr);
+            let _ = log.stdout_writer().write_all(&stdout);
+        }
+        self.write_buffered_builtin_output_chunks(cmd, &log)?;
         self.exit_code = 2;
         if row
             .flags
@@ -843,7 +930,37 @@ impl Executor {
         {
             self.special_builtin_failed.set(true);
         }
-        Ok(true)
+        Ok(())
+    }
+
+    /// Run a builtin's pre-option-scan prologue for a `--help`
+    /// dispatch (rubash#3340); see `builtin_help_gate`.
+    fn run_pre_help_prologue(
+        &mut self,
+        row: &super::builtin_table::BuiltinRow,
+        stderr: &mut Vec<u8>,
+    ) -> Result<PreHelpOutcome, ExecuteError> {
+        use super::builtin_table::HandlerSlot;
+        match row.handler {
+            HandlerSlot::Bind => {
+                let prefix = self.diagnostic_prefix();
+                self.bind_pre_help_prologue(self.invocation_interactive(), &prefix, stderr);
+                Ok(PreHelpOutcome::Proceed)
+            }
+            HandlerSlot::Hash => {
+                let mut diag = super::builtin_diag::Diag::new(row, stderr);
+                if crate::builtins::hash::check_hashing_enabled(
+                    &self.shell_state.env_vars,
+                    &mut diag,
+                ) {
+                    Ok(PreHelpOutcome::Proceed)
+                } else {
+                    diag.flush_with(|| self.diagnostic_prolog());
+                    Ok(PreHelpOutcome::Abort(1))
+                }
+            }
+            _ => Ok(PreHelpOutcome::Proceed),
+        }
     }
 
     fn execute_prepared_command(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {

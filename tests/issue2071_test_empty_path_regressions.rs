@@ -101,7 +101,10 @@ fn issue2071_normal_path_controls_unchanged() {
     }
 
     // (target, op, expected rc) — GNU Bash 5.3.20 oracle values.
-    let mut cells: Vec<(&str, &str, i32)> = vec![
+    // Unix-only rows are gated per element: the `mut` on `cells` was
+    // unused on Windows (the only mutation was the cfg(unix) extend),
+    // which `-D warnings` rejects as unused-mut (rubash#3515).
+    let cells: Vec<(&str, &str, i32)> = vec![
         ("nonempty", "-e", 0),
         ("nonempty", "-f", 0),
         ("nonempty", "-s", 0),
@@ -120,16 +123,19 @@ fn issue2071_normal_path_controls_unchanged() {
         ("/dev/null", "-c", 0),
         ("/dev/null", "-e", 0),
         ("/dev/null", "-f", 1),
-    ];
-    #[cfg(unix)]
-    cells.extend_from_slice(&[
+        #[cfg(unix)]
         ("link", "-L", 0),
+        #[cfg(unix)]
         ("link", "-h", 0),
+        #[cfg(unix)]
         ("link", "-f", 0),
+        #[cfg(unix)]
         ("link", "-e", 0),
+        #[cfg(unix)]
         ("somefifo", "-p", 0),
+        #[cfg(unix)]
         ("somefifo", "-f", 1),
-    ]);
+    ];
 
     for (target, op, expected) in cells {
         for script in [format!("[ {op} {target} ]"), format!("[[ {op} {target} ]]")] {

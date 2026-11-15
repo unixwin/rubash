@@ -22,7 +22,6 @@ use std::process::Command;
 
 struct Run {
     stdout: String,
-    stderr: String,
     code: Option<i32>,
 }
 
@@ -36,7 +35,6 @@ fn run_c(script: &str) -> Run {
         .expect("run rubash");
     Run {
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         code: output.status.code(),
     }
 }

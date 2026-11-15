@@ -24,6 +24,23 @@ const HASH_TABLE: &str = "__RUBASH_HASH_TABLE";
 /// Stage-2 ④ Phase 2: the option scan is the (table row + `BuiltinOpt` +
 /// `Diag`) triple (`internal_getopt (list, "dlp:rt")`,
 /// builtins/hash.def:95); every diagnostic speaks through `diag`.
+/// GNU builtins/hash.def:86-90 — the hash prologue, shared by the
+/// handler and the `--help` gate (rubash#3340): when hashing is
+/// disabled (`set +h`), the entire `hash` builtin refuses with
+/// "hash: hashing disabled" and returns failure, before any option
+/// parsing. The gate replays this prologue before the long help, so
+/// `set +h; hash --help` refuses with status 1 and prints no help.
+/// Returns `true` when the builtin may proceed; when it returns
+/// `false` the diagnostic is recorded in `diag` and the caller
+/// flushes it and returns `EXECUTION_FAILURE`.
+pub(crate) fn check_hashing_enabled(env_vars: &VarTable, diag: &mut Diag<'_>) -> bool {
+    if !crate::builtins::set::shell_option_enabled(env_vars, "hashall") {
+        diag.free(format_args!("hashing disabled"));
+        return false;
+    }
+    true
+}
+
 pub(crate) fn execute_with_io_and_functions<'a, W>(
     row: &'a BuiltinRow,
     args: &'a [String],
@@ -35,11 +52,7 @@ pub(crate) fn execute_with_io_and_functions<'a, W>(
 where
     W: Write,
 {
-    // GNU builtins/hash.def:86-90: when hashing is disabled (set +h), the
-    // entire `hash` builtin refuses with "hash: hashing disabled" and
-    // returns failure, before any option parsing.
-    if !crate::builtins::set::shell_option_enabled(env_vars, "hashall") {
-        diag.free(format_args!("hashing disabled"));
+    if !check_hashing_enabled(env_vars, diag) {
         return Ok(EXECUTION_FAILURE);
     }
 
@@ -362,7 +375,22 @@ where
             crate::executor::path::remove_command_lookup_cache(name, env_vars);
             match crate::executor::path::find_user_command(name, env_vars) {
                 Some(path) => {
-                    let path_string = path.to_string_lossy().to_string();
+                    // rubash#3358: the table records the as-found
+                    // spelling — the as-written `<elem>/<name>` join
+                    // (recorded_resolution_spelling, rubash#2696) —
+                    // not the anchored resolution find_user_command
+                    // returns: with PATH=.:... GNU stores `./mycmd`
+                    // (builtins/hash.def:223-225 phash_insert of the
+                    // find_user_command result, findcmd.c sh_makepath
+                    // with the element verbatim), while the anchored
+                    // form leaks `<cwd>/./mycmd`. An absolute element
+                    // anchors to itself, so the two forms coincide
+                    // there. The internal lookup cache keeps the
+                    // anchored form find_user_command wrote (the
+                    // execution face is untouched by this fix; see
+                    // REPORT.md §4 for the mirror-sync residual).
+                    let path_string =
+                        crate::executor::path::recorded_resolution_spelling(name, &path, env_vars);
                     table.insert(
                         name.to_string(),
                         (path_string.clone(), 0, next_hash_seq(&table)),

@@ -231,6 +231,14 @@ pub struct SessionHistory {
     pub last_line_pushed: bool,
     /// The HISTFILE load triggered by the first "set -o history" ran.
     pub histfile_loaded: bool,
+    /// lib/readline/histfile.c:126 `history_multiline_entries`: armed by
+    /// the first file read that both starts with a timestamp line and
+    /// runs while history_write_timestamps is set (histfile.c:384 `+=
+    /// has_timestamps && history_write_timestamps`), and never reset
+    /// afterwards — not by `history -c`, not by unsetting HISTTIMEFORMAT.
+    /// While armed, a read appends an unstamped line to the previous
+    /// entry and keeps blank lines (histfile.c:387, 436-437).
+    pub multiline_entries: bool,
     /// Entries already flushed by "history -a".
     pub entries_written: usize,
     /// Expansion state (search string, last substitution) that survives
@@ -268,6 +276,13 @@ impl SessionHistory {
 
     /// bashhist.c check_history_control + history_should_ignore, then
     /// add_history with HISTSIZE stifling. Returns true when recorded.
+    /// There is deliberately NO emptiness check here: GNU's
+    /// check_add_history (bashhist.c:789-807) has none — emptiness
+    /// filtering lives at the line-recording call sites
+    /// (pre_process_line's `*return_value`, bashhist.c:643;
+    /// fc_replhist's `*command`, fc.def:770-780), while `history -s`
+    /// (push_history, history.def:421-451) records the empty string as
+    /// a real entry (rubash#3329).
     pub fn record(
         &mut self,
         line: &str,
@@ -275,9 +290,6 @@ impl SessionHistory {
         histignore: &str,
         histsize: Option<usize>,
     ) -> bool {
-        if line.trim().is_empty() {
-            return false;
-        }
         if history_should_ignore(line, histignore, self.entries.last().map(String::as_str)) {
             return false;
         }
@@ -291,7 +303,11 @@ impl SessionHistory {
                 _ => {}
             }
         }
-        if control & 1 != 0 && (line.starts_with(' ') || line.starts_with('\t')) {
+        // bashhist.c:694-708 check_history_control: ignorespace drops
+        // only a line whose FIRST character is exactly ' ' — a
+        // tab-leading line is kept (rubash#3329: `history -s '\t'`
+        // under ignorespace is a real entry in GNU).
+        if control & 1 != 0 && line.starts_with(' ') {
             return false;
         }
         if control & 2 != 0 && self.entries.last().map(String::as_str) == Some(line) {
@@ -396,8 +412,15 @@ impl SessionHistory {
             l.starts_with('#') && l[1..].chars().next().is_some_and(|c| c.is_ascii_digit())
         });
         let timestamps_active = timestamps_armed || has_timestamps;
+        // histfile.c:384: `history_multiline_entries += has_timestamps &&
+        // history_write_timestamps` — regrouping needs the file's leading
+        // stamp AND HISTTIMEFORMAT existing at read time (every caller
+        // passes that variable-exists state as `timestamps_armed`,
+        // variables.c:6177 sv_histtimefmt). The counter is sticky: once a
+        // read armed it, later reads regroup too (rubash#3393).
+        self.multiline_entries |= has_timestamps && timestamps_armed;
         // histfile.c:387: default_skipblanks = 0 when multiline entries.
-        let has_multiline = has_timestamps;
+        let has_multiline = self.multiline_entries;
         let default_skipblanks = !has_multiline;
         let mut skipblanks = default_skipblanks;
         let mut last_ts: Option<String> = None;

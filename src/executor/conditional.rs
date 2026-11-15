@@ -86,6 +86,40 @@ impl Executor {
         status
     }
 
+    /// rubash#3382: consume a fatal arithmetic evalerror latched while
+    /// expanding this `[[ ]]` command's operands, and arm the DISCARD
+    /// class for the list loop. Returns true when a fatal record was
+    /// consumed. GNU has no cross-command error state at all: expr.c's
+    /// evalerror jumps DISCARD for the CURRENT command only, so the
+    /// `[[ ]]` command itself must own the failure — the flags may
+    /// not survive into the next command (where `abort_on_expansion_errors`
+    /// would discard an innocent command instead). Nounset is excluded:
+    /// it has its own FORCE_EOF path (`[[ $((b)) = x ]]` under `set -u`
+    /// aborts the script, and the next command's abort check is what
+    /// fires it today). Nonfatal arith errors (e.g. a ternary
+    /// assignment error) do not fire this check — they print and the
+    /// command continues with status 1.
+    pub(super) fn take_conditional_arith_evalerror(&mut self) -> bool {
+        if self.shell_state.arithmetic_expansion_error.get()
+            && self.shell_state.arithmetic_fatal_error.get()
+            && !self.shell_state.arithmetic_nounset_error.get()
+        {
+            self.shell_state.arithmetic_expansion_error.set(false);
+            self.shell_state.arithmetic_fatal_error.set(false);
+            // A nonfatal flag latched by this command's operands
+            // belongs to this command too; leaving it standing would
+            // let the next command's funnel misread it as its own.
+            self.shell_state.arithmetic_nonfatal_error.set(false);
+            // rubash#1518: the arithmetic evalerror class — the
+            // reader's errexit promotion skips it, so the DISCARD
+            // does not exit the script under `set -e`.
+            self.evalerror_arith_pending.set(true);
+            true
+        } else {
+            false
+        }
+    }
+
     /// rubash#1915: mask the process-substitution spans the parser
     /// recorded for THIS conditional word out of the text a `[[ ]]`
     /// nounset scan is about to judge. The lookup is by the word's
@@ -1073,6 +1107,22 @@ impl Executor {
         let left_exp = self.expand_conditional_word(left);
         let right_exp = self.expand_conditional_word(right);
         self.xtrace_conditional_term(op, &left_exp, Some(&right_exp));
+        // rubash#3432: the binary file operators (-ef/-nt/-ot) resolve
+        // an fd-alias operand through the fd table (sh_stataccess
+        // stats the current binding, eaccess.c:116), so the marks
+        // must be fresh for THIS evaluation — the same contract as
+        // the unary arm above and the [ ] path's fused scan. The
+        // binary arm never synced at all: without this, [[ ]] binary
+        // ops read the marks stale from a previous evaluation (or
+        // none) and fall to the literal path, whose OS fd namespace
+        // is shifted one fd down from the user's.
+        if crate::special_paths::fd_alias_target(&left_exp).is_some()
+            || crate::special_paths::fd_alias_target(&right_exp).is_some()
+        {
+            self.sync_fd_pipe_marks();
+            let redirects = self.current_conditional_redirects.clone();
+            self.sync_fd_alias_facts_scoped(None, redirects.as_deref());
+        }
         let args = vec![left_exp, op.to_string(), right_exp];
         crate::builtins::test::execute(&args, false, &self.shell_state.env_vars).unwrap_or(1) == 0
     }

@@ -168,6 +168,26 @@ impl Executor {
             {
                 continue;
             }
+            // rubash#3195: a heredoc / here-string entry names no
+            // path (the filter below skips it), but GNU's walk still
+            // fails its dup2 onto a redirector at/above the
+            // RLIMIT_NOFILE soft limit (here_document_to_fd
+            // materializes the body first, redir.c:1072; the dup2
+            // fails EBADF at redir.c:1120). Gate it here, at its own
+            // list position, without expanding its target word.
+            if matches!(
+                redirect.kind,
+                RedirectKind::HereDoc | RedirectKind::HereString
+            ) {
+                let gate_fd = redirect.fd.unwrap_or(0);
+                if self.redirect_fd_over_limit(gate_fd) {
+                    return Ok(Some(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("{gate_fd}: Bad file descriptor"),
+                    )));
+                }
+                continue;
+            }
             // Only the open-performing kinds consult a filesystem target
             // here; heredoc / herestring / dup kinds name no path, so
             // expanding their target word would be a side effect of its
@@ -691,9 +711,9 @@ impl Executor {
                 // >file 2>&1) - open WORD for output instead of treating
                 // it as an unusable dup source.
                 let path = target.strip_prefix('&').unwrap_or(&target);
-                self.create_redirect_output(path, redirect.clobber)?;
+                self.create_redirect_output_for(Some(redirect), path, redirect.clobber)?;
             } else {
-                self.create_redirect_output(&target, redirect.clobber)?;
+                self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?;
             }
         }
 
@@ -732,7 +752,7 @@ impl Executor {
                 && !is_null_device(&target)
                 && redirect_target_fd(&target).is_none()
             {
-                self.create_redirect_output(&target, redirect.clobber)?;
+                self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?;
             }
         }
 
@@ -788,7 +808,7 @@ impl Executor {
                     } else if let Some(source_fd) = dup_spelling_source_fd(&target) {
                         self.validate_builtin_dup_source(cmd, index, source_fd)?;
                     } else if !target.starts_with("<(") && !target.starts_with(">(") {
-                        self.create_redirect_output(&target, redirect.clobber)?;
+                        self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?;
                     }
                 }
                 crate::parser::RedirectKind::Append => {

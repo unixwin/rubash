@@ -101,6 +101,31 @@ impl Executor {
         Ok(status)
     }
 
+    /// bind.def:122-131 — the bind prologue, shared by the handler
+    /// and the `--help` gate (rubash#3340): the line-editing warning
+    /// prints first, then initialize_readline runs ONCE per process
+    /// (bashline.c:278 bash_readline_initialized) — on the first
+    /// `bind` invocation in ANY shell mode, which is what makes
+    /// $INPUTRC/~/.inputrc apply to `bind -v` even under `-c` (GNU
+    /// probe: INPUTRC + `bash --norc -c 'bind -v'` shows the file's
+    /// variables). Both run BEFORE the option scan (CASE_HELPOPT at
+    /// bind.def:191), so the gate replays this prologue before the
+    /// long help — otherwise `bind --help` in a non-interactive
+    /// shell loses its warning.
+    pub(in crate::executor) fn bind_pre_help_prologue(
+        &mut self,
+        line_editing_enabled: bool,
+        prefix: &str,
+        stderr: &mut Vec<u8>,
+    ) {
+        if !line_editing_enabled {
+            let _ = writeln!(stderr, "{prefix}bind: warning: line editing not enabled");
+        }
+        if !self.bind_registry().borrow().readline_initialized {
+            self.initialize_readline();
+        }
+    }
+
     /// bind.def:114 bind_builtin. Dispatch order mirrors the C: listings
     /// (-l/-p/-P/-s/-S/-v/-V), then -f, then -q/-u/-r, then -x, then -X,
     /// then the remaining arguments as inputrc-form bindings
@@ -113,18 +138,7 @@ impl Executor {
         stdout: &mut Vec<u8>,
         stderr: &mut Vec<u8>,
     ) -> i32 {
-        // bind.def:127-131: the line-editing warning prints first, then
-        // initialize_readline runs ONCE per process (bashline.c:278
-        // bash_readline_initialized) — on the first `bind` invocation in
-        // ANY shell mode, which is what makes $INPUTRC/~/.inputrc apply
-        // to `bind -v` even under `-c` (GNU probe: INPUTRC +
-        // `bash --norc -c 'bind -v'` shows the file's variables).
-        if !line_editing_enabled {
-            let _ = writeln!(stderr, "{prefix}bind: warning: line editing not enabled");
-        }
-        if !self.bind_registry().borrow().readline_initialized {
-            self.initialize_readline();
-        }
+        self.bind_pre_help_prologue(line_editing_enabled, prefix, stderr);
 
         let mut flags = BindFlags::default();
         let mut return_code: Option<i32> = None;

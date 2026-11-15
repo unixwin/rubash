@@ -7,11 +7,17 @@ impl Executor {
     ) -> Result<i32, ExecuteError> {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
+        // The dispatcher owns the prolog (Stage-2 ④ D3): the
+        // builtin layer's lib prolog reads the process env, whose
+        // carriers cannot express the interactive arm (rubash#2259),
+        // so the executor hands its composed prolog in (rubash#3256).
+        let prolog = self.diagnostic_prolog();
         let status = crate::builtins::alias::unalias_with_io(
             &cmd.words[1..],
             &mut self.shell_state.aliases,
             &mut stdout,
             &mut stderr,
+            prolog,
         )?;
         self.clear_alias_definition_lines(&cmd.words[1..]);
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
@@ -62,12 +68,15 @@ impl Executor {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let posix = self.posix_mode_enabled();
+        // The dispatcher owns the prolog, as in execute_unalias above.
+        let prolog = self.diagnostic_prolog();
         let status = crate::builtins::alias::alias_with_io(
             &cmd.words[1..],
             &mut self.shell_state.aliases,
             &mut stdout,
             &mut stderr,
             posix,
+            prolog,
         )?;
         self.record_alias_definition_lines(&cmd.words[1..], cmd.line);
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;

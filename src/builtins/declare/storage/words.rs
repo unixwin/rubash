@@ -53,8 +53,22 @@ impl Iterator for StorageWordIter<'_> {
             // its whitespace into the word so assoc kv-pairs keep them;
             // indexed callers re-split on the marker. The \x1c
             // IFS-protection sentinel takes the same glued form here.
+            // So does CTLESC (\x11, markers.rs): GNU quote_string
+            // (subst.c:4773) prefixes EVERY character of a quoted string
+            // with CTLESC, so a protected character is data, never syntax
+            // — dequote_string (subst.c:4807) strips the pairs only at the
+            // end. Without this glue a protected `"` toggled the quote
+            // state: the declare operand path wraps each literal element
+            // as a `\x10"..."` transport word whose interior quotes ride
+            // CTLESC-protected (compound_element_glob_pattern), so the
+            // `"` inside `'a"b'` closed the wrapper's span and the space
+            // between elements read as inside-quotes — `declare -a
+            // a=('a"b' 'c')` stored ONE element with the \x10 boundary
+            // marker leaking into its value (rubash#3350). A protected
+            // space split an element mid-word the same way (`'a"b c'`).
             if ch == crate::executor::markers::IFS_GLUE
                 || ch == crate::executor::COMPOUND_EXPANSION_WS_TAG
+                || ch == crate::executor::markers::CTLESC
             {
                 word.push(ch);
                 escaped = true;

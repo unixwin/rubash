@@ -1303,10 +1303,14 @@ impl Executor {
             signal_discard_pending: false,
             errexit_unwind_pending: false,
             errexit_unwind_armed: false,
+            errexit_suppressed_terminal: Cell::new(false),
             unit_signal_discard: false,
             unit_expansion_error_discard: false,
             termsig_death_pending: None,
             termsig_death_trap_status: None,
+            comsub_drain_permit: Cell::new(false),
+            comsub_parent_exit_armed: Cell::new(false),
+            comsub_termsig_pending: Cell::new(None),
             bash_logout_sourced: false,
             shell_pid,
             bashpid_origin_depth: bg_bashpid_base.unwrap_or(0),
@@ -1433,6 +1437,7 @@ impl Executor {
             unit_lex_locale: std::cell::RefCell::new(None),
             line_lex_extquotes: std::cell::RefCell::new(HashMap::new()),
             ambient_line: Cell::new(None),
+            err_trap_line: Cell::new(None),
             inside_compound_condition: Cell::new(false),
             conditional_invert_pending: Cell::new(false),
             inside_assignment_rhs: Cell::new(false),
@@ -1442,6 +1447,7 @@ impl Executor {
             pipeline_stdin_consumed: Cell::new(None),
             pipeline_stage_fds_pre_wired: std::cell::Cell::new(false),
             stage_dup_channel_payloads: std::cell::RefCell::new(Vec::new()),
+            pipeline_stage_ordered_chunks: std::cell::RefCell::new(None),
             pipeline_final_stage: std::cell::Cell::new(false),
             pipeline_stage_pre_traced: std::cell::Cell::new(false),
             pipeline_stage_restricted_refused: std::cell::Cell::new(false),
@@ -1465,12 +1471,15 @@ impl Executor {
             posix_special_status_converted: Cell::new(false),
             exec_do_redirections_failed: Cell::new(false),
             timed_dispatch_depth: Cell::new(0),
+            timed_root_redirect_failure: Cell::new(false),
+            timed_err_owned_by_body: Cell::new(None),
             special_builtin_failed: Cell::new(false),
             last_builtin_write_failed: Cell::new(false),
             alias_introduced_words: Cell::new(0),
             redirect_target_memo: RefCell::new(HashMap::new()),
             redirect_target_single_glob_match: RefCell::new(std::collections::HashSet::new()),
-            redirect_target_had_transport: RefCell::new(std::collections::HashSet::new()),
+            redirect_target_transport_spellings: RefCell::new(HashMap::new()),
+            redirect_target_node_spellings: RefCell::new(HashMap::new()),
             assignment_expansion_memo: RefCell::new(HashMap::new()),
             alias_select_scan_memo: RefCell::new(None),
             fd_var_external_undo: Vec::new(),
@@ -1647,7 +1656,15 @@ impl Executor {
         // imported PWD keeps its stale value and an absent one stays
         // unbound; no logical value is adopted either — the readers
         // gate on the empty field itself.
+        // rubash#3570: the `\`→`/` rewrite is a Windows path-form
+        // normalization — on Unix a backslash is an ordinary filename byte
+        // (general.h:264-270 ABSPATH), and GNU set_pwd (variables.c:907)
+        // binds the get_working_directory spelling verbatim, so a physical
+        // cwd named `dir\name` must NOT become the nonexistent `dir/name`.
+        #[cfg(windows)]
         let physical_pwd = shell_pwd_display(&cwd.to_string_lossy().replace('\\', "/"));
+        #[cfg(not(windows))]
+        let physical_pwd = shell_pwd_display(cwd.to_string_lossy().as_ref());
         let startup_logical_cwd = if cwd.as_os_str().is_empty() {
             String::new()
         } else {

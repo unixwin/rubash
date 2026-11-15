@@ -118,6 +118,57 @@ pub fn is_disk_file(h: HANDLE) -> bool {
     }
 }
 
+/// rubash#3432: the (device, inode, mtime seconds, mtime
+/// nanoseconds) of the open file description behind `h`, from
+/// fstat(2) — the identity/mtime the `__RUBASH_FD_STAT_<fd>` mark
+/// carries. GNU's sh_stat (lib/sh/eaccess.c:80) stats the descriptor
+/// the process holds; in GNU the shell's OS fd N IS user fd N, so a
+/// plain stat() of /proc/self/fd/N lands on the bound file, while
+/// here the OS fd namespace is shifted (the cwd anchor holds OS fd
+/// 3) and only the fstat of the fd-table entry's handle names the
+/// same file. None when the descriptor is closed or fstat fails.
+/// The nanosecond arm follows the cp_stat_mtime_nsec idiom in
+/// src/executor/external_file_builtins.rs: the libc crate flattens
+/// the timespec's nanoseconds into their own field on every unix
+/// target the suite builds for, and the remaining targets answer 0.
+pub fn fd_stat_parts(h: HANDLE) -> Option<(u64, u64, i64, i64)> {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(h, &mut st) } != 0 {
+        return None;
+    }
+    Some((
+        st.st_dev as u64,
+        st.st_ino as u64,
+        i64::from(st.st_mtime),
+        stat_mtime_nsec(&st),
+    ))
+}
+
+#[cfg(any(
+    target_os = "android",
+    all(target_os = "linux", target_env = "gnu"),
+    all(target_os = "linux", not(target_env = "gnu")),
+    target_os = "macos",
+    target_os = "ios",
+))]
+fn stat_mtime_nsec(st: &libc::stat) -> i64 {
+    // glibc, musl and bionic flatten the nanoseconds into their own
+    // field; its width follows the target's c_long (i32 on armv7).
+    // Darwin's C header keeps the st_mtimespec pair, but the libc
+    // crate flattens it the same way.
+    i64::from(st.st_mtime_nsec)
+}
+
+#[cfg(not(any(
+    target_os = "android",
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "ios",
+)))]
+fn stat_mtime_nsec(_st: &libc::stat) -> i64 {
+    0
+}
+
 /// S_ISFIFO — the handle refers to a pipe/FIFO. GNU test.c's `-p`
 /// file test on an fd path resolves through the descriptor itself, so
 /// fd slots backed by a real OS pipe (e.g. `exec N< <(...)`, which

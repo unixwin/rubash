@@ -117,12 +117,23 @@ fn dot_is_command_position(bytes: &[u8], i: usize) -> bool {
 fn set_args_may_set_onecmd(args: &str) -> bool {
     for token in args.split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|')) {
         if token.len() >= 2 && token.starts_with('-') && !token.starts_with("--") {
-            // A flag bundle: `t` counts only before any `o`, which
-            // would swallow the rest of the bundle as its option
-            // name operand (`set -ot` names an option, sets none).
-            let bundle = &token[1..];
-            let head = bundle.split('o').next().unwrap_or("");
-            if head.contains('t') {
+            // A flag bundle carrying `t` in any position counts:
+            // GNU's apply loop walks the bundle letter by letter
+            // (builtins/set.def:726-766), and an `o` takes its
+            // option name from the NEXT WORD, never from the bundle
+            // remainder (set.def:737-762) — after listing options
+            // (no next word) or setting the named option it
+            // CONTINUES with the next letter, so `set -ot` sets
+            // onecmd AND lists the option table (verified against
+            // GNU bash 5.3.20: `FLAGS=htBc`, table printed), the
+            // same letter-by-letter rule the verbose scanner
+            // already uses for `set -ov`. The old `split('o')`
+            // truncation assumed the rest was swallowed as the
+            // option name; it is not. A false positive (an `o`
+            // whose next word is an invalid option name aborts
+            // before the `t`, or a bundle the validation pass
+            // rejects) only costs the incremental driver.
+            if token[1..].contains('t') {
                 return true;
             }
         }
@@ -780,7 +791,16 @@ fn run_script_grouped_at_line_offset(
         // errexit — the inverted command's status is exempt.
         let last_inverted = executor.last_command_inverted();
         let errexit_stop = errexit_break_verdict(executor, status);
-        if parse_error || exit_jump || errexit_stop {
+        // rubash#2652: an armed errexit unwind is itself a stop —
+        // the inner gates already made the context-aware decision
+        // (execute_command_internal, execute_cmd.c:624), and the
+        // decomposition above deliberately keeps it out of
+        // `exit_jump`, so the verdict is the only other stop
+        // signal. A verdict suppressed by the stale-terminal
+        // record must not swallow a real unwind (`false || false`:
+        // the last `false` raised, the verdict reads the first
+        // `false`'s exemption).
+        if parse_error || exit_jump || errexit_unwind || errexit_stop {
             // GAP-1 (unixwin/niubash#863): the run's classification is
             // adjudicated HERE, from these same verdicts — the
             // decomposition of the stop bool below, computed once.
@@ -796,7 +816,7 @@ fn run_script_grouped_at_line_offset(
                 last_inverted,
                 stop: if exit_jump && !parse_error {
                     Some(GroupedRunStop::ExitJump)
-                } else if errexit_stop {
+                } else if errexit_unwind || errexit_stop {
                     Some(GroupedRunStop::ErrexitBreak)
                 } else {
                     None
@@ -2259,6 +2279,14 @@ fn run_history_group(
             }
         } else {
             for text in record_texts.iter().flatten() {
+                // bashhist.c:643 pre_process_line records only
+                // `*return_value`: a line that expanded to exactly
+                // empty is never recorded (rubash#3329). Whitespace-
+                // only texts pass — GNU records them, subject only to
+                // check_history_control inside record().
+                if text.is_empty() {
+                    continue;
+                }
                 let was_recorded = session
                     .borrow_mut()
                     .record(text, &control, &ignore, histsize);
@@ -2513,7 +2541,15 @@ pub fn stdin_script_errexit_enabled(executor: &Executor) -> bool {
 /// jump or a signal discard preempts it), which the call sites
 /// combine with this verdict — in the same order everywhere.
 pub fn errexit_break_verdict(executor: &Executor, status: i32) -> bool {
-    status != 0 && stdin_script_errexit_enabled(executor) && !executor.last_command_inverted()
+    status != 0
+        && stdin_script_errexit_enabled(executor)
+        && !executor.last_command_inverted()
+        // rubash#2652: a terminal status produced while errexit was
+        // suppressed (a CMD_IGNORE_RETURN position) is exempt —
+        // GNU's -e decision was already made per command inside
+        // execute_command_internal (execute_cmd.c:624) and the
+        // reader must not re-fire on it.
+        && !executor.errexit_suppressed_terminal()
 }
 
 pub fn stdin_source_needs_more(source: &str) -> bool {
@@ -3618,6 +3654,25 @@ fn command_paren_verdict_disproved_by_parser(input: &str, parse_posix: bool) -> 
                 .any(command_tree_has_non_cond_parse_error);
     }
     if !ast.commands.iter().any(command_tree_has_parse_error) {
+        // rubash#3405: the real parser stays silent when the offending
+        // `(` hides inside a comsub word — the lexer swallows the whole
+        // body into the word token, so no marker is raised — but the
+        // body's own nested yyparse still dies on the token after it
+        // (parse.y:4549-4555 parse_comsub, 6858-6859). A
+        // ComsubBodyTokenError verdict is therefore NOT disproved by the
+        // main parse's silence: let the unclosed route run and print it.
+        // Every other shape keeps the disproof (notably the matched-pair
+        // EOF, whose `$( (` subshell root the #516/q1, `((` and
+        // `for ((` guards already keep out of this class).
+        if matches!(
+            crate::lexer::unclosed_comsub_eof_shape(input, crate::lexer::parse_extended_glob()),
+            Some((
+                crate::lexer::UnclosedComsubShape::ComsubBodyTokenError { .. },
+                _
+            ))
+        ) {
+            return false;
+        }
         return true;
     }
     // rubash#413: GNU's parser reports the FIRST offending event inside the
@@ -4158,6 +4213,14 @@ fn run_source_impl(
     // runs below) must never consume the root transport. The prior
     // value is restored on exit; this wrapper is the single exit.
     let source_run_prior = executor.source_run_active.get();
+    // rubash#2652: the suppressed-terminal record lives exactly one
+    // outermost unit — clear it here, where outermost is known.
+    // Nested units must not clear it: a suppressed failure recorded
+    // earlier in the enclosing unit (e.g. the `false` of
+    // `false && eval 'true'`) is still that unit's terminal fact.
+    if !source_run_prior {
+        executor.clear_errexit_suppressed_terminal();
+    }
     executor.source_run_active.set(true);
     let status = run_source_impl_inner(
         executor,
@@ -4605,7 +4668,29 @@ fn run_source_impl_inner_body(
                 // end of file from `(' command on line N" — while
                 // `$(`/`$((`/array/quote matched pairs keep the "matching
                 // `X'" wording.
-                if close == ')' && command {
+                // rubash#3405: when the shape scan positively identifies
+                // a token-level error inside the comsub body, the
+                // command-position branch must NOT claim the input for
+                // its subshell-EOF fallthrough — the `else if` arm below
+                // renders that verdict (with the matching suffix), and
+                // the MainLevel/dparen arms inside this branch have no
+                // verdict for it. The shape's own guards (#516/q1,
+                // `((` arithmetic root, `for ((` pair) already keep
+                // those families out of the ComsubBodyTokenError class,
+                // so only genuine body token errors defer.
+                if close == ')'
+                    && command
+                    && !matches!(
+                        crate::lexer::unclosed_comsub_eof_shape(
+                            input,
+                            crate::lexer::parse_extended_glob()
+                        ),
+                        Some((
+                            crate::lexer::UnclosedComsubShape::ComsubBodyTokenError { .. },
+                            _
+                        ))
+                    )
+                {
                     // Issue #516 (F181 class): a `(` that follows word
                     // text — any second word, a redirect or an assignment
                     // prefix before it — is a yacc token error at the
@@ -4718,6 +4803,43 @@ fn run_source_impl_inner_body(
                             Some(global_eof),
                         );
                     }
+                } else if let Some((
+                    crate::lexer::UnclosedComsubShape::ComsubBodyTokenError { line, token },
+                    _,
+                )) = crate::lexer::unclosed_comsub_eof_shape(
+                    input,
+                    crate::lexer::parse_extended_glob(),
+                ) {
+                    // rubash#3405: a token-level error inside the
+                    // unclosed comsub's body preempts the matched-pair
+                    // EOF report in file mode too — GNU's nested
+                    // yyparse (parse.y:4549-4555) fails on the offending
+                    // token before EOF is reached, and
+                    // report_syntax_error (parse.y:6833-6865) names it
+                    // with the matching suffix plus the offending line.
+                    let report = line + line_offset;
+                    let prefix = executor.parser_error_prefix_for_line(report);
+                    unclosed_report!(
+                        "{prefix}syntax error near unexpected token `{token}' while looking for matching `{close}'"
+                    );
+                    if !suppress_unclosed_diagnostic {
+                        executor.record_run_diagnostic(
+                            format!(
+                                "syntax error near unexpected token `{token}' while looking for matching `{close}'"
+                            ),
+                            Some(report),
+                        );
+                    }
+                    if !executor.invocation_interactive() {
+                        let offending = input
+                            .lines()
+                            .nth(line.saturating_sub(1))
+                            .unwrap_or_default();
+                        unclosed_report!("{prefix}`{offending}'");
+                    }
+                    executor.errexit_live_at_diagnostic();
+                    executor.set_last_exit_code(2);
+                    return 2;
                 } else {
                     let reported = if report_open { global_open } else { global_eof };
                     unclosed_report!(
@@ -5307,7 +5429,11 @@ pub fn initialize_interactive_history(executor: &mut Executor) {
         let histsize = SessionHistory::size_limit(executor.get_env("HISTSIZE"));
         let mut shell = session.borrow_mut();
         shell.histfile_loaded = true;
-        let _ = shell.load_file(&path.to_string_lossy(), histsize);
+        // bashhist.c load_history -> read_history: the startup read takes
+        // the same read-time HISTTIMEFORMAT state as `history -r` — it
+        // arms the comment char (variables.c:6168 sv_histtimefmt) and
+        // gates multi-line regrouping (histfile.c:384, rubash#3393).
+        let _ = shell.load_file_with_arming(&path.to_string_lossy(), histsize, write_ts);
     }
 }
 
@@ -5735,7 +5861,10 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                 if (exit_jump && !parse_error)
                     || (status != 0
                         && stdin_script_errexit_enabled(executor)
-                        && !executor.last_command_inverted())
+                        && !executor.last_command_inverted()
+                        // rubash#2652: terminal status produced in a
+                        // CMD_IGNORE_RETURN position is exempt.
+                        && !executor.errexit_suppressed_terminal())
                 {
                     eof = true;
                 }
@@ -7783,7 +7912,10 @@ pub fn run_stdin_script(executor: &mut Executor) -> i32 {
             || (status != 0
                 && stdin_script_errexit_enabled(executor)
                 // execute_cmd.c:652-656: `! CMD` status is errexit-exempt.
-                && !executor.last_command_inverted())
+                && !executor.last_command_inverted()
+                // rubash#2652: terminal status produced in a
+                // CMD_IGNORE_RETURN position is exempt.
+                && !executor.errexit_suppressed_terminal())
         {
             break;
         }
@@ -7825,7 +7957,10 @@ pub fn run_stdin_script(executor: &mut Executor) -> i32 {
             || executor.take_exit_jump_pending()
             || (status != 0
                 && stdin_script_errexit_enabled(executor)
-                && !executor.last_command_inverted())
+                && !executor.last_command_inverted()
+                // rubash#2652: terminal status produced in a
+                // CMD_IGNORE_RETURN position is exempt.
+                && !executor.errexit_suppressed_terminal())
         {
             pending.clear();
         }

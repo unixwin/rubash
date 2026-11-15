@@ -1498,7 +1498,9 @@ impl Executor {
                     return Ok(Some((diagnostic, String::new(), 127)));
                 }
                 if !is_closed_redirect_target(&target) && redirect_target_fd(&target).is_none() {
-                    if let Ok(mut file) = self.create_redirect_output(&target, redirect.clobber) {
+                    if let Ok(mut file) =
+                        self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)
+                    {
                         let _ = file.write_all(diagnostic.as_bytes());
                     }
                     // rubash#1571: the diagnostic was just delivered
@@ -1834,6 +1836,21 @@ impl Executor {
                 OutputTarget::Closed => {
                     process.stderr(Stdio::piped());
                 }
+                // rubash#3308: ambient dup snapshots of the shell's stdout
+                // (`2>&1`), a coproc's input, /dev/full, a synthetic
+                // /proc entry, and an in-memory channel have no direct
+                // child handle — pipe them like the merged arm so the
+                // driver's routing pass places the bytes at the resolved
+                // target instead of the child inheriting the process
+                // stderr past the binding.
+                OutputTarget::ProcessStdout
+                | OutputTarget::ProcessStdoutAt(_)
+                | OutputTarget::CoprocStdin(_)
+                | OutputTarget::FullDevice
+                | OutputTarget::ProcContentWrite
+                | OutputTarget::PipeChannel(_) => {
+                    process.stderr(Stdio::piped());
+                }
                 // Ambient stderr, dup snapshots the walk cannot express, or
                 // a failed walk: keep the per-redirect legacy handling.
                 _ => {
@@ -1842,8 +1859,11 @@ impl Executor {
                         if !is_closed_redirect_target(&target)
                             && redirect_target_fd(&target).is_none()
                         {
-                            if let Ok(file) = self.create_redirect_output(&target, redirect.clobber)
-                            {
+                            if let Ok(file) = self.create_redirect_output_for(
+                                Some(redirect),
+                                &target,
+                                redirect.clobber,
+                            ) {
                                 process.stderr(Stdio::from(file));
                             }
                         }

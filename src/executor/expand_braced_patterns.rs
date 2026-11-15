@@ -208,6 +208,12 @@ impl Executor {
 
     fn expand_braced_case_parameter(&self, name: &str) -> Option<String> {
         let (var_name, operation, pattern) = parse_parameter_case_mod(name)?;
+        // GNU subst.c:9604-9608 parameter_brace_casemod: the same
+        // `if (value == 0) return NULL` gate as patsub — an unset parameter
+        // word never expands its pattern (rubash#3501).
+        if self.pattern_word_is_silent(var_name, false) {
+            return Some(String::new());
+        }
         let pattern = self.expand_embedded_parameters(pattern);
         if let Some(value) = self.indirect_case_parameter(var_name, operation, &pattern) {
             return Some(value);

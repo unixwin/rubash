@@ -126,7 +126,7 @@ fn issue2078_hash_p_entry_does_not_leak_into_another_session() {
     let dir_a = root.join("a");
     let dir_b = root.join("b");
     let tool_a = make_tool(&dir_a, "A", &count);
-    let tool_b = make_tool(&dir_b, "B", &count);
+    let _tool_b = make_tool(&dir_b, "B", &count);
 
     let mut a = session(&dir_a.join("bin").to_string_lossy());
     let mut b = session(&dir_b.join("bin").to_string_lossy());

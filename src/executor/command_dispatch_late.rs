@@ -401,11 +401,30 @@ impl Executor {
                             }
                             return Err(error);
                         }
+                        // GNU execute_cmd.c:4138 — same post-redirect
+                        // line_number_for_err_trap stamp as the
+                        // with-redirects path (rubash#3553).
+                        if !self.error_trap_running {
+                            self.err_trap_line.set(cmd.line);
+                        }
                         self.exit_code = self.execute_conditional_command(command);
                         // rubash#1177: same `=~` nounset-fatal conversion
                         // as the with-redirects path.
                         if let Some(result) = self.take_conditional_nounset_fatal() {
                             return result;
+                        }
+                        // rubash#3382: same fatal-arith consumption as
+                        // the primary `[[ ]]` wrapper in
+                        // command_prepare.rs — the operands' evalerror
+                        // belongs to THIS command. The nounset check
+                        // above runs first so a FORCE_EOF is never
+                        // downgraded to a DISCARD when both are latched.
+                        if self.take_conditional_arith_evalerror() {
+                            self.exit_code = 1;
+                            // rubash#439: an expansion error, not a
+                            // failed command.
+                            self.command_expansion_failed.set(true);
+                            return Err(ExecuteError::ExpansionFailure(1));
                         }
                         Ok(())
                     }
@@ -428,8 +447,12 @@ impl Executor {
                 // `((a+=1)) 2>&1` reports on stdout (rubash#1127). Bind the
                 // output redirects in the fd table around the evaluation;
                 // the diagnostic printers route through fd 2 (arith_diag).
+                // rubash#3287: execute_arithmetic_command returns
+                // Err(ExpansionFailure) when this `(( ))`'s own expansion
+                // failed fatally — propagate it so the DISCARD abandons
+                // the rest of the line.
                 let arith_status = self.with_compound_output_redirects(cmd, |executor| {
-                    Ok(executor.execute_arithmetic_command(cmd))
+                    executor.execute_arithmetic_command(cmd)
                 })?;
                 self.exit_code = arith_status;
                 // GNU expr.c:1190-1216: an unbound variable under `set -u`

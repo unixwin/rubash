@@ -1028,7 +1028,7 @@ impl Executor {
             self.open_append_target(target)
                 .map_err(|e| crate::posix_errors::path_error(target, e))?
         } else {
-            self.create_redirect_output(target, redirect.clobber)?
+            self.create_redirect_output_for(Some(redirect), target, redirect.clobber)?
         };
         Ok(Some(file))
     }
@@ -1044,7 +1044,11 @@ impl Executor {
             let stdout_target = self.expand_redirect_target(stdout_redirect);
             let stderr_target = self.expand_redirect_target(stderr_redirect);
             if stdout_target == stderr_target {
-                let file = self.create_redirect_output(&stdout_target, stdout_redirect.clobber)?;
+                let file = self.create_redirect_output_for(
+                    Some(stdout_redirect),
+                    &stdout_target,
+                    stdout_redirect.clobber,
+                )?;
                 process.stderr(Stdio::from(file.try_clone()?));
                 process.stdout(Stdio::from(file));
                 return Ok(true);
@@ -1339,7 +1343,8 @@ impl Executor {
             } else if self.has_output_fd_target(&target) {
                 process.stderr(Stdio::from(self.open_output_fd_append(&target)?));
             } else if redirect_target_fd(&target).is_none() {
-                let file = self.create_redirect_output(&target, redirect.clobber)?;
+                let file =
+                    self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?;
                 process.stderr(Stdio::from(file));
             }
             redirected = true;

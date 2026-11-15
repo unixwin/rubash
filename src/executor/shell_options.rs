@@ -1253,6 +1253,57 @@ impl Executor {
         }
     }
 
+    /// Drain a fd-table read endpoint to bytes (rubash#2793): the
+    /// socket-aware form of the `read_to_end` the stdin text channel
+    /// performs on the stream `open_fd_read_endpoint_stream` returns.
+    /// A netopen endpoint's File wraps a SOCKET handle, and std's
+    /// `File::read_to_end` reaches ReadFile, which rejects an
+    /// overlapped socket with ERROR_INVALID_PARAMETER (rubash#1976)
+    /// — the channel declined and the consumer saw an empty stdin
+    /// (or the emulation declined and the command fell through to a
+    /// foreign spawn that failed the same way). Socket endpoints
+    /// drain through `crate::fd::read_some` (recv) until EOF instead;
+    /// every other endpoint keeps the existing shared-offset dup +
+    /// `read_to_end` exactly. Partial bytes survive a later hard
+    /// error, like the call sites' existing `is_err() &&
+    /// buf.is_empty()` decline; a hard error with zero bytes read
+    /// is the Err (the call sites decline the text channel on it).
+    pub(in crate::executor) fn read_fd_read_endpoint_bytes(
+        &self,
+        fd: u32,
+        target: &str,
+    ) -> io::Result<Vec<u8>> {
+        #[cfg(windows)]
+        if let Some(FdReadEndpoint::File(file_fd)) = self.fd_table.read_endpoint(fd) {
+            if crate::fd::is_socket_handle(file_fd.handle) {
+                let mut out = Vec::new();
+                loop {
+                    match crate::fd::read_some(file_fd.handle, 8192) {
+                        Ok(chunk) if chunk.is_empty() => break,
+                        Ok(chunk) => out.extend_from_slice(&chunk),
+                        Err(error) => {
+                            if out.is_empty() {
+                                return Err(error);
+                            }
+                            break;
+                        }
+                    }
+                }
+                return Ok(out);
+            }
+        }
+        let mut file = self.open_fd_read_endpoint_stream(fd, target)?;
+        use std::io::Read as _;
+        let mut buf = Vec::new();
+        if file.read_to_end(&mut buf).is_err() && buf.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "failed to read fd endpoint",
+            ));
+        }
+        Ok(buf)
+    }
+
     /// niubash#529: fd 0's `test -t` verdict (GNU test.c isatty). The
     /// inherited-process-stdin endpoint names the process stdin only while
     /// no virtual input buffer is bound: a pipeline element or redirected
@@ -1533,7 +1584,9 @@ impl Executor {
         redirects: Option<&[crate::parser::Redirect]>,
     ) {
         self.shell_state.env_vars.retain(|key, _| {
-            !key.starts_with(FD_TARGET_PREFIX) && !key.starts_with(FD_ACCESS_PREFIX)
+            !key.starts_with(FD_TARGET_PREFIX)
+                && !key.starts_with(FD_ACCESS_PREFIX)
+                && !key.starts_with(FD_STAT_PREFIX)
         });
         for (fd, entry) in &self.fd_table.entries {
             if entry.closed {
@@ -1779,6 +1832,42 @@ impl Executor {
                 }
                 None => {}
             }
+            // rubash#3432 (unix): the kernel handle behind this entry,
+            // when it has one — the identity/mtime source for the STAT
+            // mark, minted beside the TARGET/ACCESS fact so both arms
+            // carry it. The read endpoint wins: a `<>` pair shares one
+            // inode. A File endpoint's handle is the bound file/pipe
+            // itself (a procsub pipe included); CoprocStdout's is the
+            // coproc pipe; the inherited-stdin handle is the process's
+            // fd 0, and Stdout/Stderr are the process's fds 1/2. Text/
+            // ProcessSubstitution snapshots, the synthetic Directory
+            // bind, and symbolic write endpoints (FullDevice,
+            // ProcContentWrite, PipeChannel) carry no kernel handle of
+            // the referent — those keep the literal-stat fallback.
+            #[cfg(unix)]
+            let stat_handle: Option<crate::fd::HANDLE> = match &entry.read {
+                Some(FdReadEndpoint::File(file)) => Some(file.handle),
+                Some(FdReadEndpoint::CoprocStdout { fd, .. }) => Some(fd.handle),
+                Some(FdReadEndpoint::InheritedProcessStdin) => {
+                    Some(crate::fd::process_std_handle(0))
+                }
+                _ => match &entry.write {
+                    Some(FdWriteEndpoint::File(file)) => Some(file.handle),
+                    Some(FdWriteEndpoint::CoprocStdin { fd, .. }) => Some(fd.handle),
+                    Some(FdWriteEndpoint::Stdout) => Some(crate::fd::process_std_handle(1)),
+                    Some(FdWriteEndpoint::Stderr) => Some(crate::fd::process_std_handle(2)),
+                    _ => None,
+                },
+            };
+            #[cfg(unix)]
+            if let Some(handle) = stat_handle {
+                if let Some((dev, ino, sec, nsec)) = crate::fd::fd_stat_parts(handle) {
+                    self.shell_state.env_vars.insert(
+                        format!("{FD_STAT_PREFIX}{fd}"),
+                        format!("{dev} {ino} {sec} {nsec}"),
+                    );
+                }
+            }
             if let Some(target) = target {
                 self.shell_state
                     .env_vars
@@ -1878,6 +1967,14 @@ impl Executor {
         self.shell_state
             .env_vars
             .remove(&format!("{FD_ACCESS_PREFIX}{fd}"));
+        // rubash#3432: an overlay supersedes the entry's fact, so a
+        // stale STAT mark must not survive it — the Target arm's
+        // path fallback re-stats the new referent, and the Access/
+        // Closed arms fall back to the literal path. Only DupOf
+        // carries the source's STAT forward (below).
+        self.shell_state
+            .env_vars
+            .remove(&format!("{FD_STAT_PREFIX}{fd}"));
         match mark {
             FdFactMark::Target(target) => {
                 self.shell_state
@@ -1897,6 +1994,19 @@ impl Executor {
             FdFactMark::DupOf(source) => {
                 if *source == fd {
                     return;
+                }
+                // rubash#3432: a dup shares the source's open file
+                // description (redir.c r_duplicating_input/output), so
+                // its fstat identity/mtime travels with it.
+                if let Some(stat) = self
+                    .shell_state
+                    .env_vars
+                    .get(&format!("{FD_STAT_PREFIX}{source}"))
+                    .cloned()
+                {
+                    self.shell_state
+                        .env_vars
+                        .insert(format!("{FD_STAT_PREFIX}{fd}"), stat);
                 }
                 let source_target = self
                     .shell_state
@@ -2249,27 +2359,93 @@ impl Executor {
     }
 
     /// The filesystem path for an expanded redirect target. When the
-    /// target's expansion carried raw-byte transport (recorded by
-    /// expand_redirect_operand_fields in `redirect_target_had_transport`),
-    /// its byte chars emit raw bytes — GNU redir.c:298 opens the name
-    /// bytes verbatim, so a folded U+009C must reach the disk as 0x9C,
-    /// not re-encoded as UTF-8 C2 9C. Any other target takes the
-    /// existing shell-name funnel unchanged, so a genuine non-ASCII
-    /// name keeps its UTF-8 bytes. (rubash#3104 p23)
+    /// target's expansion carried raw-byte transport, its byte
+    /// spelling was recorded at expansion time
+    /// (`redirect_target_transport_spellings`): GNU redir.c:298 opens
+    /// the name bytes verbatim, so a folded U+009C must reach the disk
+    /// as 0x9C, not re-encoded as UTF-8 C2 9C — while a genuine char
+    /// in the same name keeps its UTF-8 bytes, which only the
+    /// pre-fold spelling knows (rubash#3218). Any target without a
+    /// recorded spelling takes the existing shell-name funnel
+    /// unchanged, so a genuine non-ASCII name keeps its UTF-8 bytes.
+    /// (rubash#3104 p23, rubash#3218)
     pub(in crate::executor) fn redirect_target_filesystem_path(
         &self,
         target: &str,
     ) -> std::path::PathBuf {
         let normalized = shell_path_to_windows(target, &self.shell_state.env_vars);
-        if self.redirect_target_had_transport.borrow().contains(target) {
+        let spelling = self
+            .redirect_target_transport_spellings
+            .borrow()
+            .get(target)
+            .cloned();
+        match spelling {
+            Some(spelling) => Self::transport_spelling_path(&spelling, &normalized),
+            None => normalized,
+        }
+    }
+
+    /// Node-aware form of [`Self::redirect_target_filesystem_path`]:
+    /// the redirect walks hold the node, and two redirects in one
+    /// command can fold to the same string with different transport
+    /// verdicts — both expansions are recorded before either open
+    /// runs — so the node's own recorded spelling is authoritative:
+    /// present, it decides; absent, the target takes the plain funnel
+    /// and NEVER the string-keyed record, which may belong to a
+    /// different redirect that folded to the same string
+    /// (rubash#3218 face 2). (rubash#3218)
+    pub(in crate::executor) fn redirect_target_filesystem_path_for(
+        &self,
+        redirect: &crate::parser::Redirect,
+        target: &str,
+    ) -> std::path::PathBuf {
+        let key = Self::redirect_target_memo_key(redirect);
+        let spelling = self
+            .redirect_target_node_spellings
+            .borrow()
+            .get(&key)
+            .cloned();
+        let normalized = shell_path_to_windows(target, &self.shell_state.env_vars);
+        match spelling {
+            Some(spelling) => Self::transport_spelling_path(&spelling, &normalized),
+            None => normalized,
+        }
+    }
+
+    /// The path for a recorded transport spelling: on unix the
+    /// spelling IS the name's byte sequence (GNU redir.c:298 opens
+    /// the bytes verbatim); elsewhere the folded-name conversion
+    /// stands in, as it did before spellings were recorded.
+    fn transport_spelling_path(
+        spelling: &[u8],
+        normalized: &std::path::Path,
+    ) -> std::path::PathBuf {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            std::path::PathBuf::from(std::ffi::OsStr::from_bytes(spelling))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = spelling;
             crate::executor::path::path_buf_from_folded_name(&normalized.to_string_lossy())
-        } else {
-            normalized
         }
     }
 
     pub(in crate::executor) fn create_redirect_output(
         &self,
+        target: &str,
+        clobber: bool,
+    ) -> io::Result<File> {
+        self.create_redirect_output_for(None, target, clobber)
+    }
+
+    /// [`Self::create_redirect_output`] with the redirect node, so a
+    /// recorded transport spelling is resolved per-node
+    /// (rubash#3218).
+    pub(in crate::executor) fn create_redirect_output_for(
+        &self,
+        redirect: Option<&crate::parser::Redirect>,
         target: &str,
         clobber: bool,
     ) -> io::Result<File> {
@@ -2358,7 +2534,11 @@ impl Executor {
             };
         }
         let target = self.redirect_output_path_target(target);
-        let path = self.session_path(self.redirect_target_filesystem_path(&target));
+        let fs_path = match redirect {
+            Some(redirect) => self.redirect_target_filesystem_path_for(redirect, &target),
+            None => self.redirect_target_filesystem_path(&target),
+        };
+        let path = self.session_path(fs_path.clone());
         if !clobber
             && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "noclobber")
             && !Self::noclobber_target_is_device_like(&path)
@@ -2369,7 +2549,7 @@ impl Executor {
             // out of the inode walk itself).
             #[cfg(unix)]
             {
-                let fs_operand = self.redirect_target_filesystem_path(&target);
+                let fs_operand = fs_path.clone();
                 if fs_operand.is_relative() {
                     if let Some(result) = self.open_via_cwd_anchor(
                         &fs_operand,
@@ -2443,7 +2623,7 @@ impl Executor {
         // consume the bind's rendezvous (rubash#1820).
         #[cfg(unix)]
         {
-            let fs_operand = self.redirect_target_filesystem_path(&target);
+            let fs_operand = fs_path.clone();
             if fs_operand.is_relative() {
                 let is_fifo = matches!(
                     self.fstatat_via_cwd_anchor(&fs_operand),
@@ -2474,6 +2654,18 @@ impl Executor {
     /// command just created.
     pub(in crate::executor) fn create_redirect_output_prepared(
         &self,
+        target: &str,
+        clobber: bool,
+    ) -> io::Result<File> {
+        self.create_redirect_output_prepared_for(None, target, clobber)
+    }
+
+    /// [`Self::create_redirect_output_prepared`] with the redirect
+    /// node, so the create resolves a recorded transport spelling
+    /// per-node (rubash#3218).
+    pub(in crate::executor) fn create_redirect_output_prepared_for(
+        &self,
+        redirect: Option<&crate::parser::Redirect>,
         target: &str,
         clobber: bool,
     ) -> io::Result<File> {
@@ -2520,7 +2712,7 @@ impl Executor {
                 }
             }
         }
-        let file = self.create_redirect_output(target, clobber)?;
+        let file = self.create_redirect_output_for(redirect, target, clobber)?;
         if !clobber
             && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "noclobber")
         {
@@ -3996,13 +4188,20 @@ impl Executor {
                 // fd 0 inherited from the process dups the real stdin
                 // handle — a terminal blocks, matching GNU; a null/closed
                 // stdin yields EOF.
-                if let Ok(mut file) = self.open_fd_read_endpoint_stream(effective_fd, &target) {
-                    // Raw fd bytes are not necessarily UTF-8 (fd_redirects
-                    // c_external_cat_reads_raw_bytes: `exec 3<bin; cat <&3`
-                    // must stream 0xff through). Read bytes and re-encode to
-                    // shell text; callers decode on the way out.
-                    let mut buf = Vec::new();
-                    if file.read_to_end(&mut buf).is_err() && buf.is_empty() {
+                // rubash#2793: a socket endpoint drains through recv
+                // (read_fd_read_endpoint_bytes) — the File form's
+                // read_to_end reaches ReadFile, which rejects a socket.
+                // Raw fd bytes are not necessarily UTF-8 (fd_redirects
+                // c_external_cat_reads_raw_bytes: `exec 3<bin; cat <&3`
+                // must stream 0xff through). Read bytes and re-encode to
+                // shell text; callers decode on the way out.
+                match self.read_fd_read_endpoint_bytes(effective_fd, &target) {
+                    Ok(buf) => {
+                        return Some(crate::executor::substitution_metadata::bytes_to_shell_text(
+                            &buf,
+                        ));
+                    }
+                    Err(_) => {
                         // rubash#2101: a hard read error is not an
                         // empty stream — a dup of a directory fd reads
                         // EISDIR (GNU's reader reports it and fails).
@@ -4010,11 +4209,7 @@ impl Executor {
                         // descriptor path surfaces the failure.
                         return None;
                     }
-                    return Some(crate::executor::substitution_metadata::bytes_to_shell_text(
-                        &buf,
-                    ));
                 }
-                return None;
             }
             // The string channel never slurps a socket (vfs audit
             // §3.3, slice S2): a net target's bytes exist only as the
@@ -4177,10 +4372,16 @@ impl Executor {
             self.fd_table.read_endpoint(0),
             Some(FdReadEndpoint::File(_))
         ) {
-            if let Ok(mut file) = self.open_fd_read_endpoint_stream(0, "fd 0") {
-                use std::io::Read as _;
-                let mut buf = Vec::new();
-                if file.read_to_end(&mut buf).is_err() && buf.is_empty() {
+            // rubash#2793: same socket-aware drain as the dup arm
+            // above (read_fd_read_endpoint_bytes) — an exec-bound
+            // fd 0 may be a netopen socket.
+            match self.read_fd_read_endpoint_bytes(0, "fd 0") {
+                Ok(buf) => {
+                    return Some(crate::executor::substitution_metadata::bytes_to_shell_text(
+                        &buf,
+                    ));
+                }
+                Err(_) => {
                     // rubash#2101: same decline as the dup arm above —
                     // an exec-bound directory's EISDIR is not an empty
                     // stream. Returning None (not the ambient buffer
@@ -4189,9 +4390,6 @@ impl Executor {
                     // surface the read failure themselves.
                     return None;
                 }
-                return Some(crate::executor::substitution_metadata::bytes_to_shell_text(
-                    &buf,
-                ));
             }
         }
 

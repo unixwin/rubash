@@ -1250,22 +1250,48 @@ impl Executor {
         }
 
         if word_slot == Some(ComsubWordSlot::Pwd) {
-            if words.get(1).map(String::as_str) == Some("-P") {
-                // rubash#537: the raw session cwd is a Windows path; the
-                // builtin renders get_working_directory in the one
-                // canonical POSIX form — the fast path must agree with it
-                // (pwd.def routes -P through the same display). G-02: the
-                // physical directory is the session cwd field.
-                return crate::executor::path::shell_pwd_display_path(
-                    &self.shell_state.cwd.to_string_lossy().replace('\\', "/"),
-                );
+            // rubash#3348: the old arm echoed env_vars["PWD"] verbatim —
+            // the forgeable variable, not the shell's logical cwd — so
+            // a forged $PWD (or `unset PWD`, which yielded the empty
+            // string) leaked straight into the capture, and the arm had
+            // none of pwd's own faces (invalid-option usage + status 2,
+            // `set -P` physical mode). GNU's pwd_builtin prints
+            // the_current_working_directory (builtins/cd.def
+            // pwd_builtin; builtins/common.c:589), never the variable.
+            // Route through the builtin's own session entry, exactly
+            // like execute_pwd_with_io: the stored validated logical
+            // cwd, the canonical spelling of a validated $PWD, else
+            // the physical display. The shared --help gate lives in
+            // the simple-command funnel (rubash#2753 CHECK_HELPOPT),
+            // which this arm bypasses, so replay it here first: on a
+            // help word the long help is the capture and the status is
+            // EX_USAGE (2), exactly as the real dispatch would give.
+            if let Some(row) = super::builtin_table::builtin_table_row("pwd") {
+                if super::builtin_opt::help_opt_requested(row, &words[1..]) {
+                    let mut out = Vec::new();
+                    let _ = crate::builtins::help::print_builtin_help(row.name, &mut out);
+                    self.last_command_substitution_status.set(Some(2));
+                    return String::from_utf8_lossy(&out)
+                        .trim_capture_terminator()
+                        .to_string();
+                }
             }
-            return self
-                .shell_state
-                .env_vars
-                .get("PWD")
-                .cloned()
-                .unwrap_or_default();
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            let status = crate::builtins::pwd::execute_with_env_and_io(
+                words[1..].iter().map(String::as_str),
+                &self.shell_state.env_vars,
+                &self.shell_state.cwd,
+                self.shell_state.logical_cwd.as_deref(),
+                &mut out,
+                &mut err,
+            )
+            .unwrap_or(1); // Vec<u8> writes are infallible
+            let _ = std::io::stderr().write_all(&err);
+            self.last_command_substitution_status.set(Some(status));
+            return String::from_utf8_lossy(&out)
+                .trim_capture_terminator()
+                .to_string();
         }
 
         if word_slot == Some(ComsubWordSlot::Type)
@@ -1520,7 +1546,13 @@ impl Executor {
         // pair; the physical probe above still gates existence and
         // directory-ness, so a logical name for a missing directory is
         // never produced.
+        // rubash#3348: the chain starts at the STORED logical cwd
+        // (the cloned tcwd state), not at a re-derivation from the
+        // $PWD variable — a forged $PWD that names no directory made
+        // the old base fall back to the physical cwd and lose the
+        // symlink spelling (`$(cd sub && pwd)` printed real/sub).
         let logical_display = crate::builtins::cd::logical_destination_display_from(
+            self.shell_state.logical_cwd.as_deref(),
             &self.shell_state.env_vars,
             &self.shell_state.cwd,
             std::path::Path::new(&target_display),
@@ -1791,6 +1823,18 @@ impl Executor {
         // pipeline stage when this substitution runs inside one, leaking
         // the substitution's output into the stage's pipe. Give the body
         // its own thread-local capture and merge both buffers.
+        // rubash#3401: arm the comsub conduit for the body span (the
+        // clone's blocked-wait drain notices a parent-death delivery
+        // and aborts the wait; the teardown below hands it back).
+        subshell.comsub_drain_permit.set(true);
+        // rubash#3387: the body runs in a forked child (GNU subst.c:7143
+        // command_substitute) — its `times` reads from this body's entry
+        // baseline. The guard lives for the body execution below and
+        // pops when it ends.
+        let _times_baseline = crate::executor::read_helpers::TimesBaselineGuard::enter(
+            crate::executor::read_helpers::TimesBaselineKind::ComsubBody,
+            subshell.shell_state.subshell_depth.get(),
+        );
         let (captured, status) = crate::executor::shell_options::capture_stdout(|| {
             if dbg_trap_enabled() {
                 eprintln!(
@@ -1848,6 +1892,21 @@ impl Executor {
             }
             status
         });
+        subshell.comsub_drain_permit.set(false);
+        // rubash#3401 (face 1): hand a termsig death the conduit
+        // recorded back to the parent for adjudication — re-queue the
+        // raw signal so the parent's next boundary poll (ast_exec,
+        // before the following command) takes it against the parent's
+        // own trap table and dies in GNU order (EXIT trap first, then
+        // death by the signal; jobs.c:3064 wait_for CHECK_TERMSIG).
+        // The clone never adjudicates: its table was reset for the
+        // subshell child. The mailbox is the chain through nesting —
+        // an outer clone's own drain re-records the re-queued delivery
+        // and its teardown re-queues it again, so the signal reaches
+        // the top shell whatever the nesting depth.
+        if let Some(sig) = subshell.comsub_termsig_pending.get() {
+            crate::builtins::kill::requeue_pending_signals(vec![sig]);
+        }
         let mut output = subshell.stdout_capture.take().unwrap_or_default();
         output.extend_from_slice(&captured);
 
@@ -1967,10 +2026,23 @@ impl Executor {
             signal_discard_pending: false,
             errexit_unwind_pending: false,
             errexit_unwind_armed: false,
+            errexit_suppressed_terminal: Cell::new(false),
             unit_signal_discard: false,
             unit_expansion_error_discard: false,
             termsig_death_pending: None,
             termsig_death_trap_status: None,
+            // rubash#3401: the comsub conduit snapshot — the clone's own
+            // trap table is reset for the subshell child below, so its
+            // termsig_death_armed can never fire; snapshot the parent's
+            // EXIT-armed bit here (OR the outer clone's snapshot, so a
+            // nested comsub still knows the top shell is armed).
+            comsub_drain_permit: Cell::new(false),
+            comsub_parent_exit_armed: Cell::new(
+                self.comsub_parent_exit_armed.get()
+                    || crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "EXIT")
+                        .is_some(),
+            ),
+            comsub_termsig_pending: Cell::new(None),
             // GNU exit.def bash_logout: subshells never source ~/.bash_logout
             // (subshell_environment check); inherit the parent's latch so a
             // subshell logout cannot double-source it either.
@@ -2042,6 +2114,7 @@ impl Executor {
             unit_lex_locale: std::cell::RefCell::new(None),
             line_lex_extquotes: std::cell::RefCell::new(HashMap::new()),
             ambient_line: Cell::new(None),
+            err_trap_line: Cell::new(None),
             conditional_invert_pending: Cell::new(false),
             inside_compound_condition: Cell::new(false),
             inside_assignment_rhs: Cell::new(false),
@@ -2159,6 +2232,7 @@ impl Executor {
             pipeline_stdin_consumed: Cell::new(None),
             pipeline_stage_fds_pre_wired: std::cell::Cell::new(false),
             stage_dup_channel_payloads: std::cell::RefCell::new(Vec::new()),
+            pipeline_stage_ordered_chunks: std::cell::RefCell::new(None),
             pipeline_final_stage: std::cell::Cell::new(false),
             pipeline_stage_pre_traced: std::cell::Cell::new(false),
             pipeline_stage_restricted_refused: std::cell::Cell::new(false),
@@ -2187,12 +2261,15 @@ impl Executor {
             posix_special_status_converted: Cell::new(false),
             exec_do_redirections_failed: Cell::new(false),
             timed_dispatch_depth: Cell::new(0),
+            timed_root_redirect_failure: Cell::new(false),
+            timed_err_owned_by_body: Cell::new(None),
             special_builtin_failed: Cell::new(false),
             last_builtin_write_failed: Cell::new(false),
             alias_introduced_words: Cell::new(0),
             redirect_target_memo: RefCell::new(HashMap::new()),
             redirect_target_single_glob_match: RefCell::new(std::collections::HashSet::new()),
-            redirect_target_had_transport: RefCell::new(std::collections::HashSet::new()),
+            redirect_target_transport_spellings: RefCell::new(HashMap::new()),
+            redirect_target_node_spellings: RefCell::new(HashMap::new()),
             assignment_expansion_memo: RefCell::new(HashMap::new()),
             alias_select_scan_memo: RefCell::new(None),
             fd_var_external_undo: Vec::new(),
@@ -2374,6 +2451,17 @@ impl Executor {
                 subshell.execute_ast(&ast)
             }
         };
+        // rubash#3401: arm the comsub conduit for the body span (same
+        // mechanism as the `$( )` typed site above).
+        subshell.comsub_drain_permit.set(true);
+        // rubash#3387: the funsub body runs in a forked child (GNU
+        // subst.c:7101 "nofork comsub") — its `times` reads from this
+        // body's entry baseline. The guard lives for the body
+        // execution below and pops when it ends.
+        let _times_baseline = crate::executor::read_helpers::TimesBaselineGuard::enter(
+            crate::executor::read_helpers::TimesBaselineKind::ComsubBody,
+            subshell.shell_state.subshell_depth.get(),
+        );
         let (result, captured) = if valsub {
             (run_body(&mut subshell), None)
         } else {
@@ -2384,6 +2472,14 @@ impl Executor {
             output.extend_from_slice(&thread_captured);
             (result, Some(output))
         };
+        subshell.comsub_drain_permit.set(false);
+        // rubash#3401 (face 1): hand a termsig death the conduit
+        // recorded back to the parent — re-queue the raw signal so the
+        // parent's next boundary poll adjudicates it (see the typed
+        // site for the full note).
+        if let Some(sig) = subshell.comsub_termsig_pending.get() {
+            crate::builtins::kill::requeue_pending_signals(vec![sig]);
+        }
         if subshell.parse_error_occurred {
             self.latch_command_substitution_parse_error();
             // rubash#2751: propagate "already reported" (see the typed

@@ -781,6 +781,10 @@ impl Executor {
         }
         self.note_compound_redirect_failure();
         if self.timed_dispatch_depth.get() > 0 {
+            // rubash#3325: nested lists mask the depth, so a site that
+            // still sees it raised is the timed command itself — the
+            // time branch owns this failure's adjudication.
+            self.timed_root_redirect_failure.set(true);
             return Ok(false);
         }
         self.maybe_run_error_trap(cmd)?;
@@ -856,7 +860,12 @@ impl Executor {
                     other => other.to_string(),
                 };
                 let mut stderr = Vec::new();
-                let _ = writeln!(&mut stderr, "{}{}", self.error_prefix(), message.trim_end());
+                let _ = writeln!(
+                    &mut stderr,
+                    "{}{}",
+                    self.compound_redirect_error_prefix(cmd),
+                    message.trim_end()
+                );
                 self.write_redirected_command_stderr(cmd, &stderr)?;
                 self.exit_code = 1;
                 // rubash#2659: same adjudication as the fd-0 open
@@ -1327,6 +1336,27 @@ impl Executor {
             let fd = redirect.fd.unwrap_or(0);
             if redirect.fd_var.is_some() {
                 continue;
+            }
+            // rubash#3195: a heredoc / here-string entry binds its
+            // redirector at this list position in GNU's walk — the
+            // body is materialized first (here_document_to_fd,
+            // redir.c:1072), then the dup2 onto a redirector at/above
+            // the RLIMIT_NOFILE soft limit fails EBADF (redir.c:1120)
+            // and the command never runs. The entries skip the kind
+            // filter below (their bodies are served textually, not
+            // bound into the table here), so without this gate an
+            // over-limit entry binds silently at any fd. `{var}`
+            // forms already continued above: their allocator stays
+            // below the limit by construction.
+            if matches!(
+                redirect.kind,
+                crate::parser::RedirectKind::HereDoc | crate::parser::RedirectKind::HereString
+            ) && self.redirect_fd_over_limit(fd)
+            {
+                return Err(ExecuteError::IoError(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("{fd}: Bad file descriptor"),
+                )));
             }
             if !matches!(
                 redirect.kind,
@@ -2931,7 +2961,7 @@ impl Executor {
             ) {
                 return Some(format!(
                     "{}{target}: No such file or directory",
-                    self.error_prefix()
+                    self.compound_redirect_error_prefix(cmd)
                 ));
             }
             return None;
@@ -2972,7 +3002,7 @@ impl Executor {
         {
             return Some(format!(
                 "{}{}",
-                self.error_prefix(),
+                self.compound_redirect_error_prefix(cmd),
                 crate::posix_errors::path_error(
                     &target,
                     std::io::Error::new(std::io::ErrorKind::NotFound, "No such file or directory",),
@@ -3028,7 +3058,7 @@ impl Executor {
             // redirection_error (redir.c:135) prints the strerror text.
             Some(error) => Some(format!(
                 "{}{}",
-                self.error_prefix(),
+                self.compound_redirect_error_prefix(cmd),
                 crate::posix_errors::path_error(&target, error)
             )),
         }
