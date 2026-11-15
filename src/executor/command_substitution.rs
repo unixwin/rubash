@@ -1276,6 +1276,10 @@ impl Executor {
                         .to_string();
                 }
             }
+            // The #3349 logical-cache poison is confined to the comsub
+            // fork (subst.c:7143 command_substitute) and this arm returns
+            // before anything could re-read the clone's cache, so only
+            // the status is taken.
             let mut out = Vec::new();
             let mut err = Vec::new();
             let status = crate::builtins::pwd::execute_with_env_and_io(
@@ -1286,6 +1290,7 @@ impl Executor {
                 &mut out,
                 &mut err,
             )
+            .map(|outcome| outcome.status)
             .unwrap_or(1); // Vec<u8> writes are infallible
             let _ = std::io::stderr().write_all(&err);
             self.last_command_substitution_status.set(Some(status));
