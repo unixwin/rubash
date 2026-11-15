@@ -756,6 +756,7 @@ fn run_script_grouped_at_line_offset(
             false,
             feeder_tokens.take(),
             Some(gather_info.entry_extended_glob),
+            pending.ends_with('\n'),
         );
         if executor.evalerror_failglob_pending.get() {
             failglob_discard_until = Some(group_last_line);
@@ -2102,6 +2103,7 @@ fn run_history_group(
     interactive: bool,
     feeder_tokens: Option<Vec<Token>>,
     entry_extended_glob: Option<bool>,
+    trailing_newline: bool,
 ) -> i32 {
     let history_on = executor.get_env("__RUBASH_SETOPT_history").as_deref() == Some("1");
     let histexpand_on = executor.get_env("__RUBASH_SETOPT_histexpand").as_deref() == Some("1");
@@ -2301,7 +2303,7 @@ fn run_history_group(
         session.borrow_mut().last_line_added = false;
     }
 
-    let exec_text = if modified_any {
+    let mut exec_text = if modified_any {
         exec_parts.join("\n")
     } else {
         group
@@ -2310,6 +2312,19 @@ fn run_history_group(
             .collect::<Vec<_>>()
             .join("\n")
     };
+    // GNU's reader sees the physical line's trailing newline: a
+    // `\<newline>` ending the input is a continuation that disappears
+    // (parse.y:5379 `peek_char == '\n'` -> `goto next_character`), while
+    // `\<EOF>` stays a literal backslash. Re-joining the group's
+    // stripped line texts drops that byte — `eval "x" ; echo AAA\\\n`
+    // (one physical line ending backslash-newline) printed `AAA\`
+    // where GNU prints `AAA` (rubash#3605 class B, run-parser). Put
+    // the newline back when the group's last raw line carried one so
+    // the re-parse sees the same stream GNU's reader fed it; for every
+    // other shape a trailing newline is just a command separator.
+    if trailing_newline {
+        exec_text.push('\n');
+    }
     let pre_alias_text = exec_text.clone();
     let exec_text = expand_group_aliases(executor, &exec_text);
     if exec_text.trim().is_empty() {
@@ -5737,6 +5752,7 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                         true,
                         None,
                         None,
+                        pending.ends_with('\n'),
                     )
                 } else {
                     run_source_with_line_offset(
