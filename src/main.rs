@@ -214,13 +214,27 @@ fn run_main() -> i32 {
     // restore and the signal-mailbox unregister — a dying process's
     // environment is unobservable, and stale markers self-heal in
     // deliver()'s dead-pid path plus the registration thread's prune.
-    if let Ok(path) = env::current_exe() {
+    // rubash#3318: GNU variables.c:776 get_bash_name seeds $BASH from the
+    // INVOCATION path (shell_name, i.e. argv[0]) — absolute verbatim,
+    // `./` PWD-joined, bare name through the PATH walk — never
+    // canonicalized, so an invocation through a symlink keeps the link.
+    // std::env::current_exe resolves symlinks; it stays only as the
+    // fallback when the invocation name resolves to nothing.
+    let process_env: std::collections::HashMap<String, String> = env::vars().collect();
+    let bash_value = args
+        .first()
+        .and_then(|argv0| rubash::executor::bash_invocation_name(argv0, &process_env))
+        .or_else(|| {
+            env::current_exe()
+                .ok()
+                .map(|path| path.to_string_lossy().into_owned())
+        });
+    if let Some(path) = bash_value {
         // rubash#331: self-produced path values render in POSIX form
         // (/d/...) like $PWD — GNU's own BASH is a POSIX path, and the
         // previous drive-form export made `$BASH` and `$PWD` disagree in
         // form within one shell.
-        let path =
-            rubash::executor::shell_pwd_display_path(&path.to_string_lossy().replace('\\', "/"));
+        let path = rubash::executor::shell_pwd_display_path(&path.replace('\\', "/"));
         // rubash#1325: GNU seeds $BASH WITHOUT the export attribute
         // (variables.c: BASH is a plain shell variable; `export -p` in a
         // clean env lists only OLDPWD/PWD/SHLVL). export_env here made
