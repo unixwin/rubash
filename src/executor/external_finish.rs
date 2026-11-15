@@ -1095,6 +1095,13 @@ impl Executor {
         // (rubash#2393). An `exit` in the env file ends the child
         // here, before the body; the EXIT-trap arm below still runs,
         // as exit_shell's would.
+        // rubash#3605: the whole child run — its env file, its body,
+        // and its EXIT trap — is one in-process GNU fork child; mark
+        // the depth so `ulimit` inside virtualizes instead of moving
+        // this process's real rlimits (a child's hard drop could not
+        // be restored below).
+        self.emulated_child_depth
+            .set(self.emulated_child_depth.get() + 1);
         let startup_exit = if fresh_shell {
             self.run_fresh_child_startup_env_file(cmd)
         } else {
@@ -1205,6 +1212,10 @@ impl Executor {
                 crate::builtins::ulimit::apply_process_rlimits(rlimits);
             }
         }
+        // rubash#3605: the in-process child's mark ends here — its
+        // env cells already died with the env restore above.
+        self.emulated_child_depth
+            .set(self.emulated_child_depth.get() - 1);
         self.shell_state.coproc_names = saved_coproc_names;
         self.shell_state.last_background_pid = saved_last_background_pid;
         self.shell_state.job_table = saved_job_table;

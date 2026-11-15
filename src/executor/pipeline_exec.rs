@@ -6174,6 +6174,15 @@ impl Executor {
         // setrlimit on unix); GNU's element child takes its limit
         // changes to its grave. Bracket the set like the mask above.
         let saved_process_rlimits = crate::builtins::ulimit::snapshot_process_rlimits();
+        // rubash#3605: the element is one more in-process GNU fork
+        // child — its `ulimit` sets must virtualize (env cells) instead
+        // of setrlimit, where a hard drop could never be restored. The
+        // env cells die with the element; an enclosing virtualized
+        // region's own cells are preserved.
+        let saved_ulimit_cells =
+            crate::builtins::ulimit::emulated_cells_snapshot(&self.shell_state.env_vars);
+        self.emulated_child_depth
+            .set(self.emulated_child_depth.get() + 1);
         // rubash#1349: GNU forks every pipeline element, and
         // execute_cmd.c's execute_subshell_builtin_or_function calls
         // without_job_control() (jobs.c: delete_all_jobs) in the child —
@@ -6480,6 +6489,12 @@ impl Executor {
         if let Some(rlimits) = &saved_process_rlimits {
             crate::builtins::ulimit::apply_process_rlimits(rlimits);
         }
+        self.emulated_child_depth
+            .set(self.emulated_child_depth.get() - 1);
+        crate::builtins::ulimit::emulated_cells_restore(
+            &mut self.shell_state.env_vars,
+            &saved_ulimit_cells,
+        );
         // rubash#2126: the stage's dispatches stay inside the element.
         self.shell_state.last_dispatch_was_eval_or_source = saved_dispatch_tracker;
         self.shell_state.this_builtin_class = saved_builtin_classes.0;

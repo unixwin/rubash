@@ -71,6 +71,77 @@ const UNLIMITED: u64 = u64::MAX;
 const LIMIT_HARD: u8 = 0x01;
 const LIMIT_SOFT: u8 = 0x02;
 
+/// Env-cell store for the emulated limit table: `__RUBASH_ULIMIT_<OPT>`
+/// maps to `"<soft>:<hard>"` decimal (u64::MAX = unlimited). The Windows
+/// platform layer always emulates (no OS rlimit API); on unix the cells
+/// only appear inside an in-process GNU-fork region — a `( )`/`$( )`
+/// layer, a pipeline element, or an in-process `${THIS_SH}`/script child
+/// (Executor::ulimit_virtualized) — where a real setrlimit hard drop
+/// could never be undone (setrlimit EPERM) and would leak into the
+/// parent the way GNU's forked child cannot. rubash#3605.
+const KEY_PREFIX: &str = "__RUBASH_ULIMIT_";
+
+/// Cell key for one resource. The option letter is UPPERCASED: the
+/// consumers of these cells (`__RUBASH_ULIMIT_N` in
+/// executor/trap_exec.rs `open_files_limit`, the `_N`/`_C`/`_F` rows of
+/// the spawn-inheritance whitelist in executor/compound_exec.rs) all
+/// spell the letter uppercase. rubash#773: the key used to carry the
+/// typed lowercase letter, so every reader missed it — the emulated
+/// limit existed but never reached the fd allocator, leaving that
+/// capped at its homemade 1024 ceiling.
+fn key(option: char) -> String {
+    format!("{KEY_PREFIX}{}", option.to_ascii_uppercase())
+}
+
+/// Parse a `"<soft>:<hard>"` cell (u64::MAX = unlimited), tolerating a
+/// bare single number as both sides.
+fn parse_limit_cell(cell: &str) -> (u64, u64) {
+    let (soft, hard) = cell.split_once(':').unwrap_or((cell, cell));
+    (
+        soft.parse::<u64>().unwrap_or(UNLIMITED),
+        hard.parse::<u64>().unwrap_or(UNLIMITED),
+    )
+}
+
+/// Drop every emulated limit cell — called at an in-process region's
+/// boundary restore where the region's env view is not wholesale
+/// replaced. Idempotent: removing absent keys is a no-op.
+pub(crate) fn clear_emulated_cells(env_vars: &mut VarTable) {
+    for spec in LIMITS {
+        env_vars.remove(&key(spec.option));
+    }
+}
+
+/// Snapshot the `__RUBASH_ULIMIT_*` cell subset of an env — paired with
+/// emulated_cells_restore at an in-process region's bracket
+/// (pipeline_exec.rs, command_substitution.rs) where the region shares
+/// the parent's VarTable: cells the region wrote die with it, cells
+/// that existed at entry (an enclosing virtualized region's sets)
+/// survive, so nested regions keep their own. rubash#3605.
+pub(crate) fn emulated_cells_snapshot(env_vars: &VarTable) -> Vec<(String, String)> {
+    env_vars
+        .iter()
+        .filter(|(name, _)| name.starts_with(KEY_PREFIX))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
+}
+
+/// Restore what emulated_cells_snapshot captured: drop every current
+/// cell, then reinsert the saved ones.
+pub(crate) fn emulated_cells_restore(env_vars: &mut VarTable, saved: &[(String, String)]) {
+    let keys: Vec<String> = env_vars
+        .iter()
+        .filter(|(name, _)| name.starts_with(KEY_PREFIX))
+        .map(|(name, _)| name.clone())
+        .collect();
+    for name in keys {
+        env_vars.remove(&name);
+    }
+    for (name, value) in saved {
+        env_vars.insert(name.clone(), value.clone());
+    }
+}
+
 // ---- limits[] (ulimit.def:239-298) ----------------------------------------
 
 /// Block scaling (ulimit.def:208-212): POSIXBLK is 512 in posix mode and
@@ -201,7 +272,16 @@ mod plat {
     /// get_limit (ulimit.def:519-576): getrlimit for table resources, the
     /// pipesize() special for `-p` (ulimit.def:681-713: pathconf, falling
     /// back to PIPE_BUF).
-    pub(super) fn get(option: char, _env_vars: &HashMap<String, String>) -> io::Result<(u64, u64)> {
+    ///
+    /// rubash#3605: inside an in-process fork region (`virtualized`) the
+    /// effective limit is the env-cell overlay — a cell carries the
+    /// region's own `ulimit` sets; absent cells inherit the real rlimit
+    /// (the parent process's value, exactly like GNU's child).
+    pub(super) fn get(
+        option: char,
+        env_vars: &HashMap<String, String>,
+        virtualized: bool,
+    ) -> io::Result<(u64, u64)> {
         if option == 'p' {
             let configured = unsafe {
                 libc::pathconf(b".\0".as_ptr() as *const libc::c_char, libc::_PC_PIPE_BUF)
@@ -213,20 +293,72 @@ mod plat {
             };
             return Ok((pipe_buf, pipe_buf));
         }
+        if virtualized {
+            if let Some(cell) = env_vars.get(&key(option)) {
+                return Ok(parse_limit_cell(cell));
+            }
+        }
         rlimit_get(resource(option))
     }
 
     /// set_limit (ulimit.def:578-638): `-p` has no settable limit
     /// (EINVAL); everything else goes through setrlimit with the
     /// non-root `unlimited` softening of ulimit.def:623-626.
+    ///
+    /// rubash#3605: inside an in-process fork region (`virtualized`) the
+    /// requested pair is recorded in the env-cell overlay and only the
+    /// SOFT side reaches the kernel — a soft set is always restorable by
+    /// the region's apply_process_rlimits, while a hard drop below the
+    /// parent's value would be irreversible without CAP_SYS_RESOURCE and
+    /// would leak into the parent the way GNU's real child cannot leak
+    /// (builtins/ulimit.def set_limit -> setrlimit, ulimit.def:632). The
+    /// kernel still enforces the soft side for real opens, so an EMFILE
+    /// consumer sees the same errno as under GNU.
     pub(super) fn set(
         option: char,
         newlim: u64,
         mode: u8,
-        _env_vars: &mut VarTable,
+        env_vars: &mut VarTable,
+        virtualized: bool,
     ) -> io::Result<()> {
         if option == 'p' {
             return Err(io::Error::from_raw_os_error(libc::EINVAL));
+        }
+        if virtualized {
+            let (cur_soft, cur_hard) = env_vars
+                .get(&key(option))
+                .map(|cell| parse_limit_cell(cell))
+                .map_or_else(|| rlimit_get(resource(option)).unwrap_or((0, 0)), |pair| pair);
+            let soft = if mode & LIMIT_SOFT != 0 { newlim } else { cur_soft };
+            let hard = if mode & LIMIT_HARD != 0 { newlim } else { cur_hard };
+            // The kernel's own pair check (setrlimit EINVAL): a
+            // submitted soft above the effective hard fails, exactly
+            // like the oracle.
+            if soft > hard {
+                return Err(io::Error::from_raw_os_error(libc::EINVAL));
+            }
+            // A hard raise an unprivileged GNU child could not perform
+            // fails with its errno; the root case models as a pure cell
+            // update (the kernel keeps the parent's higher value).
+            if mode & LIMIT_HARD != 0
+                && newlim > cur_hard
+                && unsafe { libc::geteuid() } != 0
+            {
+                return Err(io::Error::from_raw_os_error(libc::EPERM));
+            }
+            env_vars.insert(key(option), format!("{soft}:{hard}"));
+            if mode & LIMIT_SOFT != 0 {
+                let res = resource(option);
+                let mut limit: libc::rlimit = unsafe { std::mem::zeroed() };
+                if unsafe { libc::getrlimit(res, &mut limit) } < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                limit.rlim_cur = newlim as libc::rlim_t;
+                if unsafe { libc::setrlimit(res, &limit) } < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            return Ok(());
         }
         let res = resource(option);
         let mut limit: libc::rlimit = unsafe { std::mem::zeroed() };
@@ -404,20 +536,6 @@ pub(crate) fn apply_process_rlimits(snapshot: &[(char, u64, u64)]) {
 mod plat {
     use super::*;
 
-    const KEY_PREFIX: &str = "__RUBASH_ULIMIT_";
-
-    /// Cell key for one resource. The option letter is UPPERCASED: the
-    /// consumers of these cells (`__RUBASH_ULIMIT_N` in
-    /// executor/trap_exec.rs `open_files_limit`, the `_N`/`_C`/`_F` rows of
-    /// the spawn-inheritance whitelist in executor/compound_exec.rs) all
-    /// spell the letter uppercase. rubash#773: the key used to carry the
-    /// typed lowercase letter, so every reader missed it — the emulated
-    /// limit existed but never reached the fd allocator, leaving that
-    /// capped at its homemade 1024 ceiling.
-    fn key(option: char) -> String {
-        format!("{KEY_PREFIX}{}", option.to_ascii_uppercase())
-    }
-
     /// Emulated defaults (documented in the module platform-contract note).
     /// `n` mirrors the WSL GNU bash 5.3.0 oracle's own RLIMIT_NOFILE
     /// (2026-10-19 probe) — the old stub's soft-1024 opinion is what capped
@@ -441,12 +559,13 @@ mod plat {
         }
     }
 
-    pub(super) fn get(option: char, env_vars: &HashMap<String, String>) -> io::Result<(u64, u64)> {
+    pub(super) fn get(
+        option: char,
+        env_vars: &HashMap<String, String>,
+        _virtualized: bool,
+    ) -> io::Result<(u64, u64)> {
         if let Some(cell) = env_vars.get(&key(option)) {
-            let (soft, hard) = cell.split_once(':').unwrap_or((cell, cell));
-            let soft = soft.parse::<u64>().unwrap_or(UNLIMITED);
-            let hard = hard.parse::<u64>().unwrap_or(UNLIMITED);
-            return Ok((soft, hard));
+            return Ok(parse_limit_cell(cell));
         }
         Ok(default_for(option))
     }
@@ -456,6 +575,7 @@ mod plat {
         newlim: u64,
         mode: u8,
         env_vars: &mut VarTable,
+        _virtualized: bool,
     ) -> io::Result<()> {
         // The pipe buffer is a kernel constant, not a limit: GNU fails the
         // set with EINVAL on every platform, and so does the emulation.
@@ -468,7 +588,7 @@ mod plat {
                 "Invalid argument",
             ));
         }
-        let (soft, hard) = get(option, env_vars)?;
+        let (soft, hard) = get(option, env_vars, _virtualized)?;
         let soft = if mode & LIMIT_SOFT != 0 { newlim } else { soft };
         let hard = if mode & LIMIT_HARD != 0 { newlim } else { hard };
         // Linux kernel setrlimit invariant (verified against the WSL GNU
@@ -603,12 +723,17 @@ fn scan(args: &[String]) -> ScanOutcome {
 pub fn execute(args: &[String], env_vars: &mut VarTable) -> io::Result<i32> {
     let mut stdout = io::stdout().lock();
     let mut stderr = io::stderr().lock();
-    execute_with_io(args, env_vars, &mut stdout, &mut stderr)
+    execute_with_io(args, env_vars, false, &mut stdout, &mut stderr)
 }
 
+/// `virtualized` marks a dispatch inside an in-process GNU-fork region
+/// (Executor::ulimit_virtualized): the builtin then drives the env-cell
+/// emulation instead of process-global setrlimit where a hard drop
+/// could never be restored (rubash#3605).
 pub(crate) fn execute_with_io<W, E>(
     args: &[String],
     env_vars: &mut VarTable,
+    virtualized: bool,
     stdout: &mut W,
     stderr: &mut E,
 ) -> io::Result<i32>
@@ -646,7 +771,7 @@ where
             mode = LIMIT_SOFT;
         }
         for spec in LIMITS {
-            match plat::get(spec.option, env_vars) {
+            match plat::get(spec.option, env_vars, virtualized) {
                 Ok((soft, hard)) => {
                     let value = if mode & LIMIT_SOFT != 0 { soft } else { hard };
                     printone(spec, value, true, posix_mode, stdout)?;
@@ -687,6 +812,7 @@ where
             mode,
             cmdlist.len() > 1,
             env_vars,
+            virtualized,
             stdout,
             stderr,
             &prefix,
@@ -708,6 +834,7 @@ fn ulimit_internal<W, E>(
     mode_in: u8,
     multiple: bool,
     env_vars: &mut VarTable,
+    virtualized: bool,
     stdout: &mut W,
     stderr: &mut E,
     prefix: &str,
@@ -734,7 +861,7 @@ where
         };
     }
 
-    let (soft_limit, hard_limit) = match plat::get(cmd, env_vars) {
+    let (soft_limit, hard_limit) = match plat::get(cmd, env_vars, virtualized) {
         Ok(pair) => pair,
         Err(err) => {
             writeln!(
@@ -783,7 +910,7 @@ where
         return Ok(EXECUTION_FAILURE);
     };
 
-    if let Err(err) = plat::set(cmd, real_limit, mode, env_vars) {
+    if let Err(err) = plat::set(cmd, real_limit, mode, env_vars, virtualized) {
         writeln!(
             stderr,
             "{prefix}ulimit: {}: cannot modify limit: {}",

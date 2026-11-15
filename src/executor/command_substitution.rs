@@ -1235,9 +1235,12 @@ impl Executor {
             let mut comsub_env = self.shell_state.env_vars.clone();
             let mut out = Vec::new();
             let mut err = Vec::new();
+            // rubash#3605: a comsub body is a GNU fork — always model the
+            // set in env cells even on unix, never the process rlimits.
             let status = crate::builtins::ulimit::execute_with_io(
                 &words[1..],
                 &mut comsub_env,
+                true,
                 &mut out,
                 &mut err,
             )
@@ -2176,6 +2179,7 @@ impl Executor {
             // rubash#1175: a fork copy shares the parent shell's process;
             // it must never execve that process away.
             owns_process_image: false,
+            emulated_child_depth: std::cell::Cell::new(0),
             source_nest_depth: 0,
             sigchld_notifications_pending: std::cell::Cell::new(0),
             // jobs.c:4607-4612: a comsub child (startup_state 2 +

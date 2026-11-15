@@ -7382,10 +7382,7 @@ impl Executor {
             // carry the identical errno-aware payload; GNU's own line-2
             // target word for heredocs is the internal doc pointer, the
             // variable name is the honest stand-in.
-            return Err(ExecuteError::IoError(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                self.fd_dup_error_payload(name),
-            )));
+            return Err(ExecuteError::IoError(self.report_fd_dup_alloc_error(name)));
         };
         self.fd_table
             .open_input(fd, FdReadEndpoint::text(&body), true);
@@ -7755,10 +7752,7 @@ impl Executor {
                             // (redir.c:1144-1150 F_DUPFD).
                             if self.fd_table.is_open(source_fd) {
                                 let Some(fd) = self.allocate_dynamic_fd() else {
-                                    return Err(ExecuteError::IoError(std::io::Error::new(
-                                        std::io::ErrorKind::Other,
-                                        self.fd_dup_error_payload(&target),
-                                    )));
+                                    return Err(ExecuteError::IoError(self.report_fd_dup_alloc_error(&target)));
                                 };
                                 if write {
                                     self.copy_persistent_output_fd(fd, source_fd);
@@ -8043,10 +8037,7 @@ impl Executor {
                         return Ok(true);
                     }
                     let Some(fd) = self.allocate_dynamic_fd_in_walk(occupied_slots, walk) else {
-                        return Err(ExecuteError::IoError(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            self.fd_dup_error_payload(&target),
-                        )));
+                        return Err(ExecuteError::IoError(self.report_fd_dup_alloc_error(&target)));
                     };
                     self.copy_persistent_input_fd(fd, source_fd);
                     if !self.set_dynamic_fd_variable(name, fd) {
@@ -8101,10 +8092,7 @@ impl Executor {
                         return Ok(true);
                     }
                     let Some(fd) = self.allocate_dynamic_fd_in_walk(occupied_slots, walk) else {
-                        return Err(ExecuteError::IoError(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            self.fd_dup_error_payload(&target),
-                        )));
+                        return Err(ExecuteError::IoError(self.report_fd_dup_alloc_error(&target)));
                     };
                     self.copy_persistent_output_fd(fd, source_fd);
                     if !self.set_dynamic_fd_variable(name, fd) {
@@ -8156,10 +8144,7 @@ impl Executor {
                         if let Some(input) = self.process_substitution_output(source) {
                             let Some(fd) = self.allocate_dynamic_fd_in_walk(occupied_slots, walk)
                             else {
-                                return Err(ExecuteError::IoError(std::io::Error::new(
-                                    std::io::ErrorKind::Other,
-                                    self.fd_dup_error_payload(&target),
-                                )));
+                                return Err(ExecuteError::IoError(self.report_fd_dup_alloc_error(&target)));
                             };
                             self.fd_table.open_input(
                                 fd,
@@ -8227,10 +8212,7 @@ impl Executor {
                                     let Some(fd) =
                                         self.allocate_dynamic_fd_in_walk(occupied_slots, walk)
                                     else {
-                                        return Err(ExecuteError::IoError(std::io::Error::new(
-                                            std::io::ErrorKind::Other,
-                                            self.fd_dup_error_payload(&target),
-                                        )));
+                                        return Err(ExecuteError::IoError(self.report_fd_dup_alloc_error(&target)));
                                     };
                                     self.copy_persistent_input_fd(fd, slot);
                                     if !self.set_dynamic_fd_variable(name, fd) {
@@ -8262,10 +8244,7 @@ impl Executor {
                     };
                 let file = read_file;
                 let Some(fd) = self.allocate_dynamic_fd_in_walk(occupied_slots, walk) else {
-                    return Err(ExecuteError::IoError(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        self.fd_dup_error_payload(&target),
-                    )));
+                    return Err(ExecuteError::IoError(self.report_fd_dup_alloc_error(&target)));
                 };
                 self.set_fd_input_file(fd, file, true);
                 if redirect.kind == crate::parser::RedirectKind::ReadWrite {
@@ -8290,10 +8269,7 @@ impl Executor {
             | crate::parser::RedirectKind::Append
             | crate::parser::RedirectKind::ClobberOutput => {
                 let Some(fd) = self.allocate_dynamic_fd_in_walk(occupied_slots, walk) else {
-                    return Err(ExecuteError::IoError(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        self.fd_dup_error_payload(&target),
-                    )));
+                    return Err(ExecuteError::IoError(self.report_fd_dup_alloc_error(&target)));
                 };
                 if let Some(source) = target
                     .strip_prefix(">(")
@@ -8568,15 +8544,28 @@ impl Executor {
     /// limit (`ulimit -Sn 6`). rubash#773: report the same split instead of
     /// the hardcoded EINVAL text, which sent EMFILE scripts debugging the
     /// wrong layer.
-    fn fd_dup_error_payload(&self, target: &str) -> String {
+    /// rubash#3605: emit the REDIR_VARASSIGN failure as GNU's TWO
+    /// reporters emit it — the `sys_error` line goes to fd 2 NOW with
+    /// the script-name-only prolog (error.c error_prolog(0): no line
+    /// segment), and only the `file_error` line returns for the
+    /// caller's line-stamped prefix. The old single-payload shape let
+    /// the caller's `line N:` prefix leak onto the sys_error line —
+    /// GNU prints `./vredir6.sub: redirection error: ...` with no line
+    /// on line 1 and `./vredir6.sub: line 13: /dev/null: ...` on
+    /// line 2.
+    fn report_fd_dup_alloc_error(&mut self, target: &str) -> std::io::Error {
         let errno = match self.open_files_limit() {
             Some(limit) if limit <= 10 => "Invalid argument",
             _ => "Too many open files",
         };
-        format!(
-            "redirection error: cannot duplicate fd: {errno}\n{}{target}: {errno}",
-            self.diagnostic_prefix()
-        )
+        let line1 = format!(
+            "{}redirection error: cannot duplicate fd: {errno}\n",
+            self.script_name_prefix()
+        );
+        // A routed write that itself fails (closed fd 2) is lost like
+        // GNU's fprintf(stderr) — never a second diagnostic.
+        let _ = self.write_default_stderr(line1.as_bytes());
+        std::io::Error::new(std::io::ErrorKind::Other, format!("{target}: {errno}"))
     }
 
     /// rubash#2272: record the descriptor a `{var}<&-` / `{var}>&-`

@@ -1170,6 +1170,20 @@ pub struct Executor {
     /// opted in (builtins::exec::enable_process_replacement) and the
     /// live context passes the dispatcher's gates.
     owns_process_image: bool,
+    /// rubash#3605: depth of in-process GNU-fork regions enclosing this
+    /// dispatch — pipeline elements (pipeline_exec.rs), in-process
+    /// `${THIS_SH}`/script children (external_finish.rs), and
+    /// shared-executor command-substitution interiors
+    /// (command_substitution.rs). While nonzero — or on a fork-copy
+    /// executor (`!owns_process_image`) or a flat `( )` layer
+    /// (`subshell_depth > 0`) — the ulimit builtin must not move the
+    /// real rlimits: a child's hard-limit drop is irreversible without
+    /// CAP_SYS_RESOURCE and would leak into the parent, where GNU's
+    /// real child takes it to the grave. ulimit_virtualized() is the
+    /// predicate; the virtualized set applies only the SOFT side to the
+    /// kernel (always restorable) and records the effective pair in
+    /// `__RUBASH_ULIMIT_*` env cells (builtins/ulimit.rs).
+    pub(crate) emulated_child_depth: std::cell::Cell<u32>,
     /// GNU execute_cmd.c:330 sourcenest — active `.`/source frames.
     source_nest_depth: usize,
     /// Child-death notifications that arrived while the SIGCHLD trap action

@@ -579,15 +579,32 @@ impl Executor {
         }
     }
 
+    /// rubash#3605: whether `ulimit` runs inside a GNU-fork boundary
+    /// modeled in-process — a fork-copy executor (`$( ... )` under the
+    /// !owns_process_image clone), a flat `( )` layer
+    /// (`subshell_depth`), or an emulated child region
+    /// (`emulated_child_depth`: pipeline elements, in-process
+    /// `${THIS_SH}`/script children, shared-executor comsub interiors).
+    /// Inside any of these a real setrlimit hard drop could never be
+    /// restored, so the builtin drives the env-cell emulation instead
+    /// (builtins/ulimit.rs `virtualized`).
+    pub(crate) fn ulimit_virtualized(&self) -> bool {
+        !self.owns_process_image
+            || self.shell_state.subshell_depth.get() > 0
+            || self.emulated_child_depth.get() > 0
+    }
+
     pub(in crate::executor) fn execute_ulimit(
         &mut self,
         cmd: &CommandNode,
     ) -> Result<i32, ExecuteError> {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
+        let virtualized = self.ulimit_virtualized();
         let status = crate::builtins::ulimit::execute_with_io(
             &cmd.words[1..],
             &mut self.shell_state.env_vars,
+            virtualized,
             &mut stdout,
             &mut stderr,
         )?;
