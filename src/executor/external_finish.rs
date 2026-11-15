@@ -514,7 +514,7 @@ impl Executor {
         // dup still resolves against the pre-command stdin; fd-0
         // heredocs stay with the command-input scope (include_stdin
         // false). A failed later bind unwinds the earlier ones.
-        let saved_numbered_heredocs = self.bind_numbered_heredoc_redirects(cmd, false);
+        let saved_numbered_heredocs = self.bind_numbered_heredoc_redirects(cmd, false)?;
         // rubash#2310: the numbered inputs bind in segments split
         // at the command's `{var}` entries, applying each such
         // entry's dup/close effect at its list position — the

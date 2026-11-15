@@ -385,7 +385,17 @@ impl Executor {
                 occupied_slots.insert(fd);
             }
             if redirect.fd_var.is_some() {
-                self.snapshot_dynamic_close_targets(redirect, &mut saved_dynamic_closes);
+                // rubash#3706: a dup failure while snapshotting the
+                // pass's close targets unwinds like an apply failure
+                // (the `{var}` entries before this one already mutated
+                // the table) — GNU fails the whole redirect list and
+                // undoes the partial walk (undo_partial_redirects).
+                if let Err(error) =
+                    self.snapshot_dynamic_close_targets(redirect, &mut saved_dynamic_closes)
+                {
+                    self.unwind_dynamic_fd_pass(&bound_dynamic_fds, saved_dynamic_closes);
+                    return Err(error);
+                }
                 // The bound-fd readback after a successful apply must
                 // not mistake a value the entry never wrote for its
                 // binding: a dup whose source is closed applies
@@ -480,10 +490,24 @@ impl Executor {
                         if let super::trap_exec::FdWalkBinding::TableSlot(table_slot) =
                             self.fd_walk_resolve(&walk_space, source)
                         {
-                            if let Some(entry) = self.fd_table.entries.get(&table_slot).cloned() {
-                                if !entry.closed && (entry.read.is_some() || entry.write.is_some())
-                                {
-                                    materialized_saves.push((slot, entry));
+                            // rubash#3706: a dup failure while
+                            // materializing this save unwinds like an
+                            // apply failure (see the snapshot arm above).
+                            match self.fd_table.saved_entry(table_slot) {
+                                Ok(Some(entry)) => {
+                                    if !entry.closed
+                                        && (entry.read.is_some() || entry.write.is_some())
+                                    {
+                                        materialized_saves.push((slot, entry));
+                                    }
+                                }
+                                Ok(None) => {}
+                                Err(error) => {
+                                    self.unwind_dynamic_fd_pass(
+                                        &bound_dynamic_fds,
+                                        saved_dynamic_closes,
+                                    );
+                                    return Err(error);
                                 }
                             }
                         }
@@ -605,12 +629,12 @@ impl Executor {
         &self,
         redirect: &crate::parser::Redirect,
         saved: &mut Vec<SavedDynamicClose>,
-    ) {
+    ) -> Result<(), ExecuteError> {
         match redirect.kind {
             crate::parser::RedirectKind::CloseInput | crate::parser::RedirectKind::CloseOutput => {
                 if let Some(name) = redirect.fd_var.as_deref() {
                     if let Some(fd) = self.dynamic_fd_variable_value(name) {
-                        self.save_dynamic_close_snapshot(saved, fd);
+                        self.save_dynamic_close_snapshot(saved, fd)?;
                     }
                 }
             }
@@ -618,24 +642,29 @@ impl Executor {
             | crate::parser::RedirectKind::DuplicateOutput => {
                 let target = self.expand_redirect_target(redirect);
                 if let Some((source_fd, true)) = redirect_target_fd_and_move(&target) {
-                    self.save_dynamic_close_snapshot(saved, source_fd);
+                    self.save_dynamic_close_snapshot(saved, source_fd)?;
                 }
             }
             _ => {}
         }
+        Ok(())
     }
 
     /// First-snapshot-wins accumulation of a SavedDynamicClose (the
     /// SavedNumberedFd/SavedOutputFd discipline): the state before the
     /// scope's first mutation of the slot is the pre-command state
     /// GNU's undo chain restores.
-    fn save_dynamic_close_snapshot(&self, saved: &mut Vec<SavedDynamicClose>, fd: u32) {
+    fn save_dynamic_close_snapshot(
+        &self,
+        saved: &mut Vec<SavedDynamicClose>,
+        fd: u32,
+    ) -> Result<(), ExecuteError> {
         if saved.iter().any(|saved| saved.fd == fd) {
-            return;
+            return Ok(());
         }
         saved.push(SavedDynamicClose {
             fd,
-            entry: self.fd_table.entries.get(&fd).cloned(),
+            entry: self.fd_table.saved_entry(fd)?,
             alias_generation: self.fd_table.stdout_alias_generation.get(&fd).cloned(),
             fd_stdin: self.shell_state.env_vars.get(&fd_stdin_key(fd)).cloned(),
             fd_stdin_offset: self
@@ -656,6 +685,7 @@ impl Executor {
                 .cloned(),
             fd_closed: self.shell_state.env_vars.get(&fd_closed_key(fd)).cloned(),
         });
+        Ok(())
     }
 
     fn restore_dynamic_close_snapshots(&mut self, saved: Vec<SavedDynamicClose>) {
@@ -958,7 +988,7 @@ impl Executor {
                         &source,
                         super::command_text::procsub_body_seed_line(cmd, self.ambient_line.get()),
                     ) {
-                        let saved_fd0_entry = self.fd_table.entries.get(&0).cloned();
+                        let saved_fd0_entry = self.fd_table.saved_entry(0)?;
                         let saved_function_stdin =
                             self.shell_state.env_vars.get(FUNCTION_STDIN).cloned();
                         let saved_function_stdin_offset = self
@@ -984,7 +1014,7 @@ impl Executor {
                     if let Some((output, body_timing)) =
                         self.process_substitution_output_bytes_timed(&source)
                     {
-                        let saved_fd0_entry = self.fd_table.entries.get(&0).cloned();
+                        let saved_fd0_entry = self.fd_table.saved_entry(0)?;
                         let saved_function_stdin =
                             self.shell_state.env_vars.get(FUNCTION_STDIN).cloned();
                         let saved_function_stdin_offset = self
@@ -1036,7 +1066,7 @@ impl Executor {
                     &self.shell_state.env_vars,
                 ));
                 if let Some((data, offset, timing)) = self.procsub_stream_lookup(&path) {
-                    let saved_fd0_entry = self.fd_table.entries.get(&0).cloned();
+                    let saved_fd0_entry = self.fd_table.saved_entry(0)?;
                     let saved_function_stdin =
                         self.shell_state.env_vars.get(FUNCTION_STDIN).cloned();
                     let saved_function_stdin_offset = self
@@ -1086,7 +1116,7 @@ impl Executor {
                 let target = self.expand_redirect_target(redirect);
                 if crate::special_paths::is_net_redirect_target(&target) {
                     let file = self.open_net_redirect(&target)?;
-                    let saved_fd0_entry = self.fd_table.entries.get(&0).cloned();
+                    let saved_fd0_entry = self.fd_table.saved_entry(0)?;
                     let saved_function_stdin =
                         self.shell_state.env_vars.get(FUNCTION_STDIN).cloned();
                     let saved_function_stdin_offset = self
@@ -1117,7 +1147,7 @@ impl Executor {
             // Snapshot the FUNCTION_STDIN pair too: restore_command_fd0_input
             // is unconditional, and this branch never rewrites the text
             // channel — the guard must put back exactly what it found.
-            let saved_fd0_entry = self.fd_table.entries.get(&0).cloned();
+            let saved_fd0_entry = self.fd_table.saved_entry(0)?;
             let saved_function_stdin = self.shell_state.env_vars.get(FUNCTION_STDIN).cloned();
             let saved_function_stdin_offset = self
                 .shell_state
@@ -1141,7 +1171,7 @@ impl Executor {
         let Some(input) = self.command_input_redirect(cmd) else {
             return Ok(None);
         };
-        let saved_fd0_entry = self.fd_table.entries.get(&0).cloned();
+        let saved_fd0_entry = self.fd_table.saved_entry(0)?;
         let saved_function_stdin = self.shell_state.env_vars.get(FUNCTION_STDIN).cloned();
         let saved_function_stdin_offset = self
             .shell_state
@@ -1257,13 +1287,17 @@ impl Executor {
     /// Snapshot one numbered input slot into `saved` (the first
     /// snapshot of a slot wins — it carries the pre-list state the
     /// scope's restore must replay).
-    fn save_compound_numbered_input_fd(&self, saved: &mut Vec<SavedNumberedFd>, fd: u32) {
+    fn save_compound_numbered_input_fd(
+        &self,
+        saved: &mut Vec<SavedNumberedFd>,
+        fd: u32,
+    ) -> Result<(), ExecuteError> {
         if saved.iter().any(|saved| saved.fd == fd) {
-            return;
+            return Ok(());
         }
         saved.push(SavedNumberedFd {
             fd,
-            entry: self.fd_table.entries.get(&fd).cloned(),
+            entry: self.fd_table.saved_entry(fd)?,
             fd_stdin: self.shell_state.env_vars.get(&fd_stdin_key(fd)).cloned(),
             fd_stdin_offset: self
                 .shell_state
@@ -1277,6 +1311,7 @@ impl Executor {
                 .cloned(),
             fd_closed: self.shell_state.env_vars.get(&fd_closed_key(fd)).cloned(),
         });
+        Ok(())
     }
 
     /// Whether the descriptor is open at the current walk position.
@@ -1438,7 +1473,7 @@ impl Executor {
                     }
                 }
             }
-            self.save_compound_numbered_input_fd(saved, fd);
+            self.save_compound_numbered_input_fd(saved, fd)?;
             match redirect.kind {
                 // `{ cmd; } N<&-` / `N>&-` — scoped close (redir.c
                 // do_redirection_internal r_close_input).
@@ -1469,7 +1504,7 @@ impl Executor {
                             && (move_source_save == MoveSourceSave::RestoreAlways
                                 || self.redirector_open_at_position(fd))
                         {
-                            self.save_compound_numbered_input_fd(saved, source_fd);
+                            self.save_compound_numbered_input_fd(saved, source_fd)?;
                         }
                         let _ = self.fd_table.dup_input(fd, source_fd);
                         self.shell_state.env_vars.remove(&fd_closed_key(fd));
@@ -1748,7 +1783,7 @@ impl Executor {
                         if let super::trap_exec::FdWalkBinding::TableSlot(table_slot) =
                             self.fd_walk_resolve(&walk_space, source)
                         {
-                            if let Some(entry) = self.fd_table.entries.get(&table_slot).cloned() {
+                            if let Some(entry) = self.fd_table.saved_entry(table_slot)? {
                                 if !entry.closed && (entry.read.is_some() || entry.write.is_some())
                                 {
                                     materialized_saves.push((slot, entry));
@@ -1762,7 +1797,7 @@ impl Executor {
         }
         let mut saved: Vec<SavedOutputFd> = Vec::new();
         for (slot, _entry) in &materialized_saves {
-            self.save_compound_output_fd(&mut saved, *slot);
+            self.save_compound_output_fd(&mut saved, *slot)?;
         }
         if let Err(error) = self.open_compound_output_redirects_in(
             cmd,
@@ -1788,13 +1823,17 @@ impl Executor {
         Ok(saved)
     }
 
-    fn save_compound_output_fd(&mut self, saved: &mut Vec<SavedOutputFd>, fd: u32) {
+    fn save_compound_output_fd(
+        &mut self,
+        saved: &mut Vec<SavedOutputFd>,
+        fd: u32,
+    ) -> Result<(), ExecuteError> {
         if saved.iter().any(|entry| entry.fd == fd) {
-            return;
+            return Ok(());
         }
         saved.push(SavedOutputFd {
             fd,
-            entry: self.fd_table.entries.get(&fd).cloned(),
+            entry: self.fd_table.saved_entry(fd)?,
             alias_generation: self.fd_table.stdout_alias_generation.get(&fd).cloned(),
             fd_output: self.shell_state.env_vars.get(&fd_output_key(fd)).cloned(),
             fd_procsub: self
@@ -1804,6 +1843,7 @@ impl Executor {
                 .cloned(),
             fd_closed: self.shell_state.env_vars.get(&fd_closed_key(fd)).cloned(),
         });
+        Ok(())
     }
 
     /// Range-scoped twin of open_compound_output_redirects (the
@@ -1906,14 +1946,14 @@ impl Executor {
 
             match redirect.kind {
                 crate::parser::RedirectKind::CloseOutput => {
-                    self.save_compound_output_fd(saved, fd);
+                    self.save_compound_output_fd(saved, fd)?;
                     self.fd_table.close_output(fd);
                     self.shell_state
                         .env_vars
                         .insert(fd_closed_key(fd), "1".to_string());
                 }
                 crate::parser::RedirectKind::DuplicateOutput => {
-                    self.save_compound_output_fd(saved, fd);
+                    self.save_compound_output_fd(saved, fd)?;
                     if is_closed_redirect_target(&target) {
                         self.fd_table.close_output(fd);
                         self.shell_state
@@ -1943,7 +1983,7 @@ impl Executor {
                             && (move_source_save == MoveSourceSave::RestoreAlways
                                 || self.redirector_open_at_position(fd))
                         {
-                            self.save_compound_output_fd(saved, source_fd);
+                            self.save_compound_output_fd(saved, source_fd)?;
                         }
                         // GNU dup2 copies the whole descriptor — the group's
                         // fd takes the source's open file description, shared
@@ -2006,7 +2046,7 @@ impl Executor {
                             self.set_fd_output_file(1, path.to_string(), false, false)
                         }
                         .map_err(|error| crate::posix_errors::path_error(path, error))?;
-                        self.save_compound_output_fd(saved, 2);
+                        self.save_compound_output_fd(saved, 2)?;
                         self.share_fd_output_file(1, 2, path, false);
                     }
                 }
@@ -2024,8 +2064,8 @@ impl Executor {
                     // writes (select prompt, loop diagnostics) follow it,
                     // and the body's leaf writes arrive through the per-leaf
                     // splice on the same carrier.
-                    self.save_compound_output_fd(saved, 1);
-                    self.save_compound_output_fd(saved, 2);
+                    self.save_compound_output_fd(saved, 1)?;
+                    self.save_compound_output_fd(saved, 2)?;
                     let append = redirect.kind == crate::parser::RedirectKind::CombinedAppend;
                     // rubash#1025: same prepare/bind pair as the Output
                     // arm below — consume the prepare phase's record.
@@ -2045,7 +2085,7 @@ impl Executor {
                 }
                 // Output | Append | ClobberOutput
                 _ => {
-                    self.save_compound_output_fd(saved, fd);
+                    self.save_compound_output_fd(saved, fd)?;
                     if is_closed_redirect_target(&target) {
                         self.fd_table.close_output(fd);
                         self.shell_state
