@@ -3101,15 +3101,14 @@ impl Executor {
         // keeps its own rule).
         let word_is_unquoted = !cmd.words.first().is_some_and(|word| word == "[[")
             && !raw_word_is_partially_quoted(raw);
-        let expanded = if word_is_unquoted
-            && expanded.contains(crate::executor::markers::QUOTED_NULL_MARKER)
-        {
-            std::borrow::Cow::Owned(crate::executor::markers::restore_bare_sentinels(
+        let expanded = if word_is_unquoted {
+            crate::executor::markers::restore_bare_sentinel_cow(
                 &expanded,
-                &[(crate::executor::markers::QUOTED_NULL_MARKER, "")],
-            ))
+                crate::executor::markers::QUOTED_NULL_MARKER,
+                "",
+            )
         } else {
-            std::borrow::Cow::Borrowed(&expanded)
+            std::borrow::Cow::Borrowed(expanded.as_str())
         };
         let expanded = expanded.as_ref();
         if expanded.is_empty() && self.removes_unquoted_null_word(cmd, index) {
