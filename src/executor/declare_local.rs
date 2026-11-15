@@ -2160,6 +2160,30 @@ impl Executor {
             let status =
                 self.execute_declare_functions("local", &cmd.words[1..], &mut stdout, &mut stderr)?;
             (status, Vec::new())
+        } else if declare_args_request_print(&cmd.words[1..])
+            && !local_operands(&cmd.words[1..]).is_empty()
+        {
+            // rubash#3529: `local -p NAME...` is one in-order walk over
+            // the operands (declare.def:389-406 ->
+            // setattr.def:555 show_localname_attributes); see
+            // execute_local_print_operands.
+            let written_args = self.expand_declare_assignment_args(&cmd.words[1..]);
+            let args = match self.rewrite_declare_operand_subscripts(
+                &written_args,
+                &cmd.word_metadata,
+                "local",
+            ) {
+                Ok(args) => args,
+                Err(()) => return Ok(1),
+            };
+            let mut written_hints = declare_written_operand_hints(&written_args, &args);
+            let status = self.execute_local_print_operands(
+                &args,
+                &mut written_hints,
+                &mut stdout,
+                &mut stderr,
+            )?;
+            (status, args)
         } else {
             let written_args = self.expand_declare_assignment_args(&cmd.words[1..]);
             let mut args = match self.rewrite_declare_operand_subscripts(
@@ -2260,48 +2284,6 @@ impl Executor {
                 } else {
                     args.clear();
                 }
-            }
-            // GNU setattr.def:555-570 show_localname_attributes:
-            // `local -p name` reports the operand only when it is a local at
-            // the CURRENT variable context (local_p && var->context ==
-            // variable_context) — an outer frame's local is "not found", so
-            // `local -p s` inside a function that declared no s reports an
-            // error even when the caller's local s is dynamically visible
-            // (varenv25.sub init_vars).
-            let mut print_missing: Vec<String> = Vec::new();
-            if declare_args_request_print(&args) && !local_names(&args).is_empty() {
-                let innermost = self.shell_state.local_var_scopes.last();
-                args.retain(|arg| {
-                    // GNU setattr.def:564-568: a `-` operand to `local -p`
-                    // prints `local -` when the frame holds the option-snapshot
-                    // local (created by `local -` above).
-                    if arg == "-" {
-                        let found = innermost.is_some_and(|scope| scope.contains_key("-"));
-                        if found {
-                            writeln!(stdout, "local -").ok();
-                            dash_printed = true;
-                        } else {
-                            print_missing.push("-".to_string());
-                        }
-                        return false;
-                    }
-                    if arg.starts_with('-') || arg.starts_with('+') {
-                        return true;
-                    }
-                    let (base, _) = assignment_name_and_append(arg);
-                    let found = innermost.is_some_and(|scope| scope.contains_key(base));
-                    if !found {
-                        print_missing.push(base.to_string());
-                    }
-                    found
-                });
-            }
-            for name in &print_missing {
-                writeln!(
-                    stderr,
-                    "{}local: {name}: not found",
-                    self.diagnostic_prefix()
-                )?;
             }
             // GNU variables.c:2651-2665 (make_local_variable): readonly
             // global bindings reject local creation — drop those operands
@@ -2409,14 +2391,10 @@ impl Executor {
                 && (had_dash_operand
                     || dash_printed
                     || !local_blocked.is_empty()
-                    || !noassign_blocked.is_empty()
-                    || !print_missing.is_empty())
+                    || !noassign_blocked.is_empty())
             {
                 (
-                    if local_blocked.is_empty()
-                        && noassign_blocked.is_empty()
-                        && print_missing.is_empty()
-                    {
+                    if local_blocked.is_empty() && noassign_blocked.is_empty() {
                         0
                     } else {
                         1
@@ -2474,10 +2452,7 @@ impl Executor {
                     &mut written_hints,
                 )?;
                 diag.flush_with(|| prolog.build(&self.shell_state.env_vars));
-                let status = if local_blocked.is_empty()
-                    && noassign_blocked.is_empty()
-                    && print_missing.is_empty()
-                {
+                let status = if local_blocked.is_empty() && noassign_blocked.is_empty() {
                     builtin_status
                 } else {
                     builtin_status.max(1)
@@ -2668,6 +2643,123 @@ impl Executor {
         }
         let stderr = local_stderr_from_declare(stderr);
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+        Ok(status)
+    }
+
+    /// `local -p NAME...` (rubash#3529): GNU builtins/declare.def:389-406
+    /// walks the operands ONCE, in order, calling setattr.def:555
+    /// show_localname_attributes on each word verbatim. A word naming a
+    /// local of the CURRENT variable context (`local_p (var) &&
+    /// var->context == variable_context`) is printed — `local -` for the
+    /// option-snapshot local — and every other word (a missing or outer
+    /// name, an option-shaped word after the first operand, a valued or
+    /// subscripted word) is reported `not found` and fails the command.
+    /// `-g` does not enter the lookup. Consecutive found names render
+    /// through one declare-printer call, so each stream keeps operand
+    /// order.
+    fn execute_local_print_operands(
+        &mut self,
+        args: &[String],
+        written_hints: &mut crate::builtins::declare::WrittenOperandHints,
+        stdout: &mut Vec<u8>,
+        stderr: &mut Vec<u8>,
+    ) -> Result<i32, ExecuteError> {
+        let operands: Vec<String> = local_operands(args)
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        // The operands are the suffix after the option region; a `--`
+        // terminator is dropped (the printer only receives names, which
+        // never start with '-').
+        let option_words: Vec<String> = args[..args.len() - operands.len()]
+            .iter()
+            .filter(|word| *word != "--")
+            .cloned()
+            .collect();
+        let found: Vec<bool> = {
+            let innermost = self.shell_state.local_var_scopes.last();
+            operands
+                .iter()
+                .map(|word| innermost.is_some_and(|scope| scope.contains_key(word.as_str())))
+                .collect()
+        };
+        let mut status = 0;
+        let mut run: Vec<String> = Vec::new();
+        for (word, found) in operands.iter().zip(found) {
+            if found && word != "-" {
+                run.push(word.clone());
+                continue;
+            }
+            status = status.max(self.local_print_run(
+                &option_words,
+                &mut run,
+                written_hints,
+                stdout,
+                stderr,
+            )?);
+            if found {
+                writeln!(stdout, "local -")?;
+            } else {
+                writeln!(
+                    stderr,
+                    "{}local: {word}: not found",
+                    self.diagnostic_prefix()
+                )?;
+                status = 1;
+            }
+        }
+        status = status.max(self.local_print_run(
+            &option_words,
+            &mut run,
+            written_hints,
+            stdout,
+            stderr,
+        )?);
+        Ok(status)
+    }
+
+    /// Render one run of frame-local names through the declare printer
+    /// (the same core call the non-print route makes), then clear it.
+    fn local_print_run(
+        &mut self,
+        option_words: &[String],
+        run: &mut Vec<String>,
+        written_hints: &mut crate::builtins::declare::WrittenOperandHints,
+        stdout: &mut Vec<u8>,
+        stderr: &mut Vec<u8>,
+    ) -> Result<i32, ExecuteError> {
+        if run.is_empty() {
+            return Ok(0);
+        }
+        let mut core_args = option_words.to_vec();
+        core_args.append(run);
+        let dynamic_views: Vec<crate::builtins::declare::DynamicDeclarationView> = core_args
+            [option_words.len()..]
+            .iter()
+            .filter_map(|name| self.dynamic_view(name))
+            .collect();
+        let underlay = self.tempenv_listing_underlay();
+        let dynamic_set_views = self.dynamic_set_views();
+        let row = crate::executor::builtin_table::builtin_table_row("local").expect("local row");
+        let mut diag = crate::executor::builtin_diag::Diag::new(row, stderr);
+        let prolog = self.diagnostic_prolog_parts();
+        let mut oob_word = None;
+        let status = crate::builtins::declare::execute_with_io_named_in_context(
+            "local",
+            &core_args,
+            &mut self.shell_state.env_vars,
+            stdout,
+            &mut diag,
+            &prolog,
+            true,
+            &[],
+            &dynamic_views,
+            &dynamic_set_views,
+            &underlay,
+            &mut oob_word,
+            written_hints,
+        )?;
+        diag.flush_with(|| prolog.build(&self.shell_state.env_vars));
         Ok(status)
     }
 
