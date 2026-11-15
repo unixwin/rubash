@@ -2658,6 +2658,30 @@ impl Executor {
     /// background child observes its own mailbox even inside its subshell
     /// body.
     pub(crate) fn observe_signals_while_blocked(&mut self) -> Result<(), ExecuteError> {
+        self.observe_signals_while_blocked_ex(None)
+    }
+
+    /// rubash#2729: the GNU wait_for recording model — while the shell
+    /// waits for a foreground job with no job control, its
+    /// wait_sigint_handler (jobs.c:2908) only RECORDS a shell-side
+    /// SIGINT (wait_sigint_received); trapped or not, the delivery is
+    /// never dispatched mid-wait. The wait's tail adjudicates it by
+    /// the job's outcome (jobs.c:4157-4163 child_caught_sigint, the
+    /// 4410ff cleanup's maybe_call_trap_handler / termsig_handler
+    /// re-raise). `sigint_received` swallows every queued SIGINT into
+    /// the flag for that tail classification.
+    #[cfg(unix)]
+    pub(crate) fn observe_signals_while_blocked_recording_sigint(
+        &mut self,
+        sigint_received: &mut bool,
+    ) -> Result<(), ExecuteError> {
+        self.observe_signals_while_blocked_ex(Some(sigint_received))
+    }
+
+    fn observe_signals_while_blocked_ex(
+        &mut self,
+        mut record_sigint: Option<&mut bool>,
+    ) -> Result<(), ExecuteError> {
         // rubash#3401: the command-substitution conduit is exempt from
         // the flat-layer guard below — a clone whose drain permit is
         // set drains the shared mailbox only to hand a parent-death
@@ -2681,6 +2705,17 @@ impl Executor {
         }
         let mut trapped = Vec::new();
         for &signal in &signals {
+            // rubash#2729: inside a recording foreground wait every
+            // queued SIGINT — trapped or untrapped — is the delivery
+            // GNU's wait_sigint_handler records; its dispatch is the
+            // wait tail's, by the child's outcome.
+            #[cfg(unix)]
+            if signal == libc::SIGINT as i32 {
+                if let Some(sink) = record_sigint.as_deref_mut() {
+                    *sink = true;
+                    continue;
+                }
+            }
             // Stale registry flag from a disposition flip: drop it (see
             // run_pending_signal_traps above).
             #[cfg(unix)]
