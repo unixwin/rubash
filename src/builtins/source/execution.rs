@@ -281,6 +281,9 @@ fn run_source_groups(
             for token in &mut tokens {
                 token.position += line_offset;
                 token.column += line_offset;
+                // rubash#3605: end_position shifts with position (same line
+                // space) — see script_driver.rs.
+                token.end_position += line_offset;
                 // rubash#1186: keep logical_line in the same (absolute)
                 // line space as position; see script_driver.rs.
                 token.logical_line += line_offset;

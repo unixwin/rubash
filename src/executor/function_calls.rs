@@ -327,6 +327,8 @@ impl Executor {
         if base_line > 1 {
             for token in &mut tokens {
                 token.position += base_line - 1;
+                // rubash#3605: end_position shares position's line space.
+                token.end_position += base_line - 1;
             }
         }
         let body = crate::parser::parse_with_options(

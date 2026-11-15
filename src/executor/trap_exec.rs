@@ -1199,6 +1199,8 @@ impl Executor {
         if caller_line > 1 {
             for token in tokens.iter_mut() {
                 token.position += caller_line - 1;
+                // rubash#3605: end_position shares position's line space.
+                token.end_position += caller_line - 1;
             }
         }
         let mut ast = crate::parser::parse_with_options(
@@ -9954,6 +9956,8 @@ impl Executor {
         if line_offset > 0 {
             for token in tokens.iter_mut() {
                 token.position += line_offset as usize;
+                // rubash#3605: end_position shares position's line space.
+                token.end_position += line_offset as usize;
             }
         }
         let ast = crate::parser::parse_with_options(
