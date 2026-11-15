@@ -3766,8 +3766,7 @@ impl Executor {
         spawn_plan: &ProcsubSpawnPlan,
         live: ProcsubLiveStdio,
     ) -> Result<(), ExecuteError> {
-        let exe = std::env::var_os("CARGO_BIN_EXE_rubash")
-            .map(std::path::PathBuf::from)
+        let exe = test_rubash_binary_from_env()
             .or_else(test_rubash_binary_from_current_exe)
             .or_else(|| std::env::current_exe().ok())
             .unwrap_or_else(|| "rubash".into());

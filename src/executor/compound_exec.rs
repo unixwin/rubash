@@ -1375,8 +1375,7 @@ impl Executor {
                 Err(error) => return Err(error.into()),
             }
         }
-        let exe = std::env::var_os("CARGO_BIN_EXE_rubash")
-            .map(std::path::PathBuf::from)
+        let exe = test_rubash_binary_from_env()
             .or_else(test_rubash_binary_from_current_exe)
             .or_else(|| std::env::current_exe().ok())
             .unwrap_or_else(|| "rubash".into());
@@ -5251,8 +5250,7 @@ impl Executor {
             }
         }
         use std::process::{Command, Stdio};
-        let exe = std::env::var_os("CARGO_BIN_EXE_rubash")
-            .map(std::path::PathBuf::from)
+        let exe = test_rubash_binary_from_env()
             .or_else(test_rubash_binary_from_current_exe)
             .or_else(|| std::env::current_exe().ok())
             .unwrap_or_else(|| "rubash".into());
@@ -7624,6 +7622,24 @@ fn parameter_expansion_assigns(raw: &str) -> bool {
         scan_from = name_start.max(scan_from + 1);
     }
     false
+}
+
+/// `CARGO_BIN_EXE_rubash` is trustworthy only when it names a real
+/// engine binary: `cargo test --lib` and `cargo nextest` export the
+/// lib-test binary itself under that name, and every cargo test
+/// artifact lands in `target/<profile>/deps` while the engine bin sits
+/// directly under the profile dir. A `-c` respawn pointed at the test
+/// binary prints `error: Unrecognized option: 'c'` and drops its body
+/// (rubash#2875), so reject env values inside a `deps` dir — or missing
+/// on disk — and let the current-exe helper take over.
+pub(in crate::executor) fn test_rubash_binary_from_env() -> Option<std::path::PathBuf> {
+    let candidate = std::path::PathBuf::from(std::env::var_os("CARGO_BIN_EXE_rubash")?);
+    let parent = candidate.parent()?;
+    if candidate.is_file() && parent.file_name().and_then(|name| name.to_str()) != Some("deps") {
+        Some(candidate)
+    } else {
+        None
+    }
 }
 
 pub(in crate::executor) fn test_rubash_binary_from_current_exe() -> Option<std::path::PathBuf> {
