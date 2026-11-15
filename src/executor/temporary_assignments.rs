@@ -1316,33 +1316,54 @@ impl Executor {
         value: String,
         mut diag: Option<&mut Diag>,
     ) -> bool {
-        // GNU variables.c:3839 unbind_variable / bind paths: BASH_ALIASES
-        // and BASH_CMDS are dynamic views of the alias/hash tables only
-        // while unbound — a direct whole-name bind (scalar or compound,
-        // live or already-unset) replaces the cell with an ordinary
-        // variable for the rest of the shell's lifetime. The UNSET
-        // marker is rubash's severance record: the rebuild gates
-        // (dynamic parameter materialization, dynamic_assoc publish)
-        // already honor it. Unbinding first is what makes a compound
-        // `NAME=([k]=v)` land as a fresh INDEXED array — the stale
-        // assoc identity is gone when the binding is inferred
-        // (rubash#3573).
+        // GNU variables.c:3128-3144 bind_variable_internal: a scalar
+        // whole-name bind on a LIVE dynamic assoc dispatches to the
+        // variable's assign_func with key "0" — assign_aliasvar /
+        // assign_hashcmd (variables.c:1785 / :1715) write the value into
+        // the OWNER table as element [0], so `BASH_ALIASES=hello` adds
+        // alias `0='hello'` and `declare -p` renders `([r]="echo r"
+        // [0]="hello")` with the dynamic link intact (5.3.20 oracle:
+        // a later `alias s=…` still merges in). Only `unset` severs the
+        // name (variables.c:3839) — a severed name has no assign_func
+        // and falls through to the plain store below. A compound
+        // `NAME=(...)` on the live name is a separate merge mechanism
+        // owned by the assoc write-through path, so the scalar arm
+        // excludes `(`-led values.
         {
-            let base = assignment_name_and_append(name).0;
-            // Scalar binds only: a compound `NAME=(...)` on the LIVE name
-            // merges into the owner table as assoc elements (alias.c /
-            // hashcmd.c — the keys become real aliases/hashes), which the
-            // assoc write-through path owns; scalar `=v` severs outright.
+            let (base, append) = assignment_name_and_append(name);
             if matches!(base, "BASH_ALIASES" | "BASH_CMDS")
                 && !is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, base)
                 && !value.trim_start().starts_with('(')
             {
-                self.shell_state.env_vars.remove(base);
-                crate::executor::local_helpers::mirror_env_remove(base);
-                self.shell_state.variables.remove(base);
-                unmark_env_name(&mut self.shell_state.env_vars, ASSOC_VARS, base);
-                unmark_env_name(&mut self.shell_state.env_vars, ARRAY_VARS, base);
-                mark_env_name(&mut self.shell_state.env_vars, UNSET_DYNAMIC_VARS, base);
+                // ASS_APPEND rebuilds the bound string from the old
+                // value first (variables.c:3137 make_variable_value):
+                // `NAME+=x` appends to element [0]'s current text.
+                let bound = if append {
+                    let prev = if base == "BASH_ALIASES" {
+                        self.shell_state
+                            .aliases
+                            .get("0")
+                            .map(|alias| alias.value.clone())
+                    } else {
+                        crate::builtins::hash::hashed_path(&self.shell_state.env_vars, "0")
+                    };
+                    prev.map_or(value.clone(), |prev| prev + &value)
+                } else {
+                    value.clone()
+                };
+                if base == "BASH_ALIASES" {
+                    self.shell_state
+                        .aliases
+                        .insert("0".to_string(), Alias::new(&bound));
+                } else {
+                    crate::builtins::hash::set_hashed_path(
+                        &mut self.shell_state.env_vars,
+                        "0",
+                        &bound,
+                    );
+                }
+                self.sync_dynamic_assoc_vars();
+                return true;
             }
         }
         let result = self.apply_shell_assignment_inner(name, value, diag.as_deref_mut());

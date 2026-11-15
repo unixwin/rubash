@@ -1,14 +1,18 @@
 //! rubash#3573: BASH_ALIASES and BASH_CMDS are dynamic views of the
 //! alias/hash tables only while unbound. GNU variables.c:3839
 //! unbind_variable severs that link permanently: `unset` makes the name
-//! an ordinary variable for the rest of the shell's lifetime, and a
-//! direct whole-name bind (scalar or compound) replaces the dynamic
-//! cell the same way. A compound `NAME=([k]=v)` on the severed name
-//! therefore builds a fresh INDEXED array (do_compound_assignment
-//! subst.c:3441), never the assoc the stale attribute would imply.
+//! an ordinary variable for the rest of the shell's lifetime, so a
+//! compound `NAME=([k]=v)` on the severed name builds a fresh INDEXED
+//! array (do_compound_assignment subst.c:3441), never the assoc the
+//! stale attribute would imply. `unset` is the ONLY sever: a scalar
+//! `NAME=v` on the LIVE name does NOT sever — bind_variable_internal
+//! (variables.c:3128-3144) dispatches it to the variable's assign_func
+//! with key "0", so the value lands as owner-table element [0] and the
+//! dynamic link survives.
 //!
 //! Oracle: vendored GNU bash 5.3.20 (third_party/bash/bash) run on the
-//! same script files.
+//! same script files; the `declare -p` assertions below are GNU's own
+//! hash-bucket render order, byte-for-byte.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -81,25 +85,54 @@ fn unset_then_compound_assign_builds_indexed() {
 }
 
 #[test]
-fn live_scalar_assign_severs_to_plain() {
-    // A scalar `NAME=v` bind on the LIVE dynamic name severs it to a
-    // plain scalar; a later owner-table write does not rebuild it.
+fn live_scalar_assign_binds_element_zero() {
+    // GNU variables.c:3128-3144: a scalar `NAME=v` bind on the LIVE
+    // dynamic name dispatches to assign_aliasvar with key "0" — it
+    // binds owner-table element [0] and the dynamic link survives,
+    // so the later `alias s` still merges in. The element order below
+    // is GNU's own hash-bucket order, byte-for-byte from the 5.3.20
+    // oracle (`[r] [0]` then `[s] [r] [0]`).
     // (A compound `NAME=(...)` on the live name merges into the owner
-    // table instead — a separate GNU mechanism.)
+    // table too — a separate GNU mechanism.)
     let (stdout, stderr, code, _) = run_script(
         "live-scalar",
         "alias r='echo r'\n\
          BASH_ALIASES=hello\n\
          declare -p BASH_ALIASES\n\
          alias s='echo s'\n\
-         declare -p BASH_ALIASES\n",
+         declare -p BASH_ALIASES\n\
+         echo \"elem0:${BASH_ALIASES[0]}\"\n",
     );
     assert_eq!(code, Some(0), "stdout={stdout:?} stderr={stderr:?}");
     assert_eq!(stderr, "", "stdout={stdout:?}");
     assert_eq!(
         stdout,
-        "declare -- BASH_ALIASES=\"hello\"\n\
-         declare -- BASH_ALIASES=\"hello\"\n"
+        "declare -A BASH_ALIASES=([r]=\"echo r\" [0]=\"hello\" )\n\
+         declare -A BASH_ALIASES=([s]=\"echo s\" [r]=\"echo r\" [0]=\"hello\" )\n\
+         elem0:hello\n"
+    );
+}
+
+#[test]
+fn live_scalar_assign_binds_element_zero_hashcmds() {
+    // Same dispatch for BASH_CMDS (assign_hashcmd,
+    // variables.c:1715): scalar `BASH_CMDS=v` is hash element [0],
+    // and `hash -p` afterwards still merges into the live view.
+    let (stdout, stderr, code, _) = run_script(
+        "live-scalar-cmds",
+        "BASH_CMDS=hi\n\
+         declare -p BASH_CMDS\n\
+         hash -p /bin/ls ls2\n\
+         declare -p BASH_CMDS\n\
+         echo \"elem0:${BASH_CMDS[0]}\"\n",
+    );
+    assert_eq!(code, Some(0), "stdout={stdout:?} stderr={stderr:?}");
+    assert_eq!(stderr, "", "stdout={stdout:?}");
+    assert_eq!(
+        stdout,
+        "declare -A BASH_CMDS=([0]=\"hi\" )\n\
+         declare -A BASH_CMDS=([0]=\"hi\" [ls2]=\"/bin/ls\" )\n\
+         elem0:hi\n"
     );
 }
 
