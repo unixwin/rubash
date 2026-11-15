@@ -76,6 +76,13 @@ pub struct JobEntry {
     /// SIGSTOP, `Stopped (tty input)` for SIGTTIN, ...; rubash#1246).
     /// Recorded by the kill path, the shell's only stop detector.
     pub stop_signal: Option<i32>,
+    /// rubash#2777: an explicit operand `wait` already answered this
+    /// job's status (GNU wait_for_job marks J_NOTIFIED at
+    /// jobs.c:3434-3437 after answering). When the row later leaves
+    /// through cleanup_dead_jobs it must NOT leave a jobspec link —
+    /// GNU keeps no %N record for a wait-consumed row, so the next
+    /// `wait %N` answers 127.
+    pub wait_consumed: bool,
     /// Killing signal of the job's last process, mirroring
     /// ProcessEntry::term_signal at job granularity (rubash#1256).
     pub term_signal: Option<i32>,
@@ -263,6 +270,7 @@ impl JobTable {
             state: ProcessState::Running,
             exit_status: None,
             stop_signal: None,
+            wait_consumed: false,
             term_signal: None,
             background,
             foreground: !background,
@@ -724,6 +732,14 @@ impl JobTable {
     /// (the bgpids equivalent) so a later operand-addressed `wait $pid`
     /// still reports the exit status.
     pub fn cleanup_dead_jobs(&mut self) {
+        // rubash#2777: links retired by an EARLIER cleanup round die
+        // here. GNU's record only lives through the reap that noticed
+        // the death — one intervening command line (another REAP() ->
+        // cleanup_dead_jobs round) and `wait %N` must answer 127,
+        // exactly like a notified job row GNU already deleted
+        // (jobs.c:1303 cleanup_dead_jobs; REAP sites
+        // execute_cmd.c:2979).
+        self.completed_job_pids.clear();
         let dead_notified: Vec<JobId> = self
             .jobs
             .iter()
@@ -742,7 +758,7 @@ impl JobTable {
                 // still reach it. Only a pid with a recorded status
                 // is retained — anything else still answers 127.
                 if let Some(last_pid) = job.pids.last().copied() {
-                    if self.completed_statuses.contains_key(&last_pid) {
+                    if !job.wait_consumed && self.completed_statuses.contains_key(&last_pid) {
                         self.completed_job_pids.insert(job_id, last_pid);
                     }
                 }
@@ -769,6 +785,19 @@ impl JobTable {
         if let Some(job_id) = self.pid_to_job.get(&pid).copied() {
             if let Some(job) = self.jobs.get_mut(&job_id) {
                 job.notified = true;
+            }
+        }
+    }
+
+    /// rubash#2777: the operand-`wait` mark — notified AND consumed
+    /// (GNU wait_for_job, jobs.c:3434-3437). The consumed flag keeps
+    /// cleanup_dead_jobs from leaving a jobspec link for a row GNU
+    /// would no longer let `%N` reach.
+    pub fn mark_job_waited_by_pid(&mut self, pid: u32) {
+        if let Some(job_id) = self.pid_to_job.get(&pid).copied() {
+            if let Some(job) = self.jobs.get_mut(&job_id) {
+                job.notified = true;
+                job.wait_consumed = true;
             }
         }
     }

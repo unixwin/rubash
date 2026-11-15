@@ -1204,7 +1204,24 @@ impl Executor {
                     // status lands in its NotFound arm (127) exactly
                     // where GNU has no record.
                     match self.retired_job_pid_for_wait_operand(&operand) {
-                        Some(pid) => pid,
+                        Some(pid) => {
+                            // rubash#2777 R2: an operand wait that
+                            // reaches the saved status through the
+                            // retired link consumes it, matching GNU
+                            // wait_for_job (jobs.c:3434-3437 marks the
+                            // slot J_NOTIFIED after answering) — a
+                            // second `wait %N` must answer 127.
+                            if let Some(job_id) = operand
+                                .strip_prefix('%')
+                                .and_then(|body| body.parse::<u32>().ok())
+                            {
+                                self.shell_state
+                                    .job_table
+                                    .completed_job_pids
+                                    .remove(&job_id);
+                            }
+                            pid
+                        }
                         None => {
                             status = write_wait_operand_error(
                                 &operand,
@@ -2473,7 +2490,7 @@ impl Executor {
             // (settle_bare_wait) owns the marking there.
             self.shell_state.job_table.cleanup_dead_jobs();
             if retain_for_explicit_wait {
-                self.shell_state.job_table.mark_job_notified_by_pid(pid);
+                self.shell_state.job_table.mark_job_waited_by_pid(pid);
             }
             self.forget_background_runtime(pid);
             return Ok(WaitPidOutcome::Status(status));
@@ -2541,7 +2558,7 @@ impl Executor {
         // next cleanup point. The exit status stays in
         // completed_statuses for repeated explicit PID waits.
         self.shell_state.job_table.cleanup_dead_jobs();
-        self.shell_state.job_table.mark_job_notified_by_pid(pid);
+        self.shell_state.job_table.mark_job_waited_by_pid(pid);
         self.forget_background_runtime(pid);
         Ok(WaitPidOutcome::Status(status))
     }
