@@ -2401,6 +2401,7 @@ impl Executor {
             ProcsubPlanMode::WriteAppend => match open_redirect_append(&session_target) {
                 Ok(file) => ProcsubPlanCapture::Captured(Rc::new(FileFd {
                     handle: crate::fd::into_handle(file),
+                    closed: std::cell::Cell::new(false),
                     path: session_target,
                 })),
                 Err(_) => ProcsubPlanCapture::Failed,
@@ -2409,6 +2410,7 @@ impl Executor {
                 match self.create_redirect_output_for(Some(redirect), target, redirect.clobber) {
                     Ok(file) => ProcsubPlanCapture::Captured(Rc::new(FileFd {
                         handle: crate::fd::into_handle(file),
+                        closed: std::cell::Cell::new(false),
                         path: session_target,
                     })),
                     Err(_) => ProcsubPlanCapture::Failed,
@@ -2422,6 +2424,7 @@ impl Executor {
                 {
                     Ok(file) => ProcsubPlanCapture::Captured(Rc::new(FileFd {
                         handle: crate::fd::into_handle(file),
+                        closed: std::cell::Cell::new(false),
                         path: session_target,
                     })),
                     Err(_) => ProcsubPlanCapture::Failed,
@@ -2482,6 +2485,7 @@ impl Executor {
         let handle = crate::fd::duplicate_handle_inheritable(stream).ok()?;
         Some(Rc::new(crate::executor::fd_table::FileFd {
             handle,
+            closed: std::cell::Cell::new(false),
             path: PathBuf::from("ambient:stdout"),
         }))
     }
@@ -2493,6 +2497,7 @@ impl Executor {
         let file = crate::executor::shell_options::background_capture_write_end()?;
         Some(Rc::new(crate::executor::fd_table::FileFd {
             handle: crate::fd::into_handle(file),
+            closed: std::cell::Cell::new(false),
             path: PathBuf::from("ambient:stdout"),
         }))
     }
@@ -2513,6 +2518,7 @@ impl Executor {
                     .map(|dup| {
                         Rc::new(crate::executor::fd_table::FileFd {
                             handle: dup,
+                            closed: std::cell::Cell::new(false),
                             path: PathBuf::from(label),
                         })
                     })
@@ -2552,6 +2558,7 @@ impl Executor {
                             .map(|dup| {
                                 Rc::new(crate::executor::fd_table::FileFd {
                                     handle: dup,
+                                    closed: std::cell::Cell::new(false),
                                     path: PathBuf::from(label),
                                 })
                             })
@@ -2570,6 +2577,7 @@ impl Executor {
                     .map(|dup| {
                         Rc::new(crate::executor::fd_table::FileFd {
                             handle: dup,
+                            closed: std::cell::Cell::new(false),
                             path: PathBuf::from(label),
                         })
                     })
