@@ -2082,6 +2082,10 @@ impl Executor {
             return Ok(());
         }
         self.exit_code = self.execute_declare(cmd)?;
+        // GNU variables.c:5820/6257-6266 sv_strict_posix: a declare/
+        // typeset bind of POSIXLY_CORRECT re-derives the mode
+        // (rubash#3661).
+        self.sync_posix_mode_if_assignment_operands(&cmd.words[1..]);
         Ok(())
     }
 
@@ -2667,6 +2671,11 @@ impl Executor {
             }
             stdout = stripped.into_bytes();
         }
+        // GNU variables.c:5820/6257-6266 sv_strict_posix: a local bind
+        // of POSIXLY_CORRECT re-derives the mode for the frame (the
+        // frame pop re-derives it back in restore_function_locals,
+        // rubash#3661).
+        self.sync_posix_mode_if_assignment_operands(&final_args);
         let stderr = local_stderr_from_declare(stderr);
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
         Ok(status)

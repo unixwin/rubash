@@ -77,6 +77,18 @@ impl Executor {
             &mut stdout_buf,
             &mut stderr,
         )?;
+        // GNU variables.c:5820/6257-6266 sv_strict_posix: unbinding
+        // POSIXLY_CORRECT takes the `var == 0` arm — posixly_correct
+        // re-derives from the name's CURRENT isset-ness (an outer
+        // binding revealed by unsetting a local counts). Element
+        // unsets (`unset 'POSIXLY_CORRECT[0]'`) leave the variable
+        // itself bound and do not re-derive (rubash#3661).
+        if cmd.words[1..]
+            .iter()
+            .any(|word| crate::builtins::arrayref::take_arrayref_flag(word).1 == "POSIXLY_CORRECT")
+        {
+            self.sync_posix_mode_from_variable();
+        }
         let _ = self.write_buffered_builtin_output(cmd, &stdout_buf, &stderr);
         Ok(status)
     }

@@ -67,6 +67,34 @@ impl Executor {
             &mut log.stderr_writer(),
             Some(&mut pass_boundary),
         )?;
+        // GNU variables.c:5820/6257-6266 sv_strict_posix via
+        // builtins/printf.def:112-113: the post-bind hook is keyed on
+        // the -v operand AS WRITTEN, so only a bare POSIXLY_CORRECT
+        // operand re-derives the mode; an element operand's text
+        // carries the subscript and matches no special variable
+        // (rubash#3661).
+        {
+            let mut index = 0;
+            while index < words.len() {
+                let word = &words[index];
+                let operand = if word == "-v" {
+                    index += 1;
+                    words.get(index).map(String::as_str)
+                } else if let Some(fused) = word.strip_prefix("-v") {
+                    (!fused.is_empty()).then_some(fused)
+                } else {
+                    None
+                };
+                if let Some(operand) = operand {
+                    let operand = crate::builtins::arrayref::take_arrayref_flag(operand).1;
+                    if operand == "POSIXLY_CORRECT" {
+                        self.sync_posix_mode_from_variable();
+                        break;
+                    }
+                }
+                index += 1;
+            }
+        }
         self.write_buffered_builtin_output_chunks(cmd, &log)?;
         // GNU builtins/printf.def printf_builtin returns
         // sh_chkwrite(format/operands success): a failed flush (a closed
