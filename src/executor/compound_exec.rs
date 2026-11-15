@@ -5222,6 +5222,22 @@ impl Executor {
         }
     }
 
+    /// rubash#3267: spellings a fresh `-c` re-parse reads as non-words
+    /// at command position — `!`, `{`, `}`, `[[`, `]]`, and the
+    /// reserved-word set. The coproc simple-body respawn re-renders
+    /// collected words back to source text, so an unquoted head word
+    /// with one of these spellings regains keyword/operator status in
+    /// the child (`coproc >x done` came back a DONE token and errored
+    /// as a syntax error where GNU's forked child ran `done` and
+    /// reported `done: command not found`). `time` is deliberately
+    /// included even though GNU keeps it a timespec (parse.y:1416):
+    /// the #1653 pins assert `time: command not found` and rewriting
+    /// them to timespec output is a separate ledger.
+    fn coproc_head_word_needs_quote(word: &str) -> bool {
+        matches!(word, "!" | "{" | "}" | "[[" | "]]")
+            || super::support_names::is_reserved_word(word)
+    }
+
     pub(in crate::executor) fn execute_coproc_command(
         &mut self,
         cmd: &CommandNode,
@@ -5318,25 +5334,31 @@ impl Executor {
                     child.arg(word);
                 }
             } else {
-                // rubash#1653: the child re-parses this text, so a bare
-                // head word `time` would regain keyword status in the
-                // child even though the coproc parser never granted it
-                // (GNU parse.y:1125-1175: after `coproc`, `time` is a
-                // plain word — GNU forks the same parse tree, rubash
-                // respawns through `-c`). Quote the bare head word so
-                // the re-parse keeps it an ordinary command name: the
-                // child's lookup then matches GNU's forked child
-                // (function, builtin, PATH, else 127 `time: command
-                // not found`). A head word already quoted in source
-                // keeps its own raw spelling; only the bare `time`
-                // spelling needs the quote.
+                // rubash#1653 + rubash#3267: the child re-parses this
+                // text, so a bare head word whose spelling is a
+                // keyword or operator AT COMMAND POSITION would regain
+                // non-word status on re-parse even though the coproc
+                // parser already bound it as a word — GNU forks the
+                // parse tree, so a `!` collected after a redirection
+                // stays the command name (`coproc >x ! echo hi`
+                // reports `!: command not found` in GNU; `done`, `}`,
+                // `[[`, `]]`, `function` the same). Quote such a head
+                // word's raw spelling so the re-parse keeps it the
+                // command name. The quote must be `"` — not `'`: the
+                // lexer folds `'!'` back into a BANG token (GNU's
+                // lexer never does; the fold lives in continuation.rs
+                // and is a captain-lane residual). `{`, `coproc` and
+                // `time` are fold-blocked in every quoting form, so
+                // head words with those spellings still re-parse as
+                // their keywords — the same anti-GNU residual the
+                // #1653 `time` expectations already pin. A head word
+                // already quoted in source keeps its own raw
+                // spelling.
                 let mut metadata = coproc_cmd.word_metadata.clone();
-                if coproc_cmd.words.first().map(String::as_str) == Some("time")
-                    && metadata
-                        .first()
-                        .is_some_and(|meta| meta.value == "time" && meta.raw == "time")
-                {
-                    metadata[0].raw = "'time'".to_string();
+                if let Some(meta) = metadata.first_mut() {
+                    if meta.raw == meta.value && Self::coproc_head_word_needs_quote(&meta.value) {
+                        meta.raw = format!("\"{}\"", meta.value);
+                    }
                 }
                 let words_text = command_words_source_text(&coproc_cmd.words, &metadata);
                 respawn_argv_bytes += words_text.len();

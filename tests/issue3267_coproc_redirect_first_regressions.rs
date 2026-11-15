@@ -30,13 +30,19 @@
 //! bar` — both rc 0); the #1652 second-word-`!` error fires only with
 //! no redirection consumed yet (`coproc foo ! bar` stays rc 2).
 //!
-//! Deliberately NOT pinned: a redirect before a COMPOUND body
-//! (`coproc >x { ...; }`, `coproc >x ( ... )`, `coproc >x if ...`)
-//! — GNU rejects those too (rc 2), but rubash already rejected
-//! them on the base (same rc, different blame token), so they are
-//! locked only as rc-2 guards below, not as exact-blame cells.
-//! GNU blames `}`, `(`, `do`, `then` there; rubash blames the
-//! compound starter (`{`, `(`, `for`, `if`) — a known residual.
+//! Post-redirect word position (rework lane, GNU 5.3.20 oracle
+//! matrix): EVERY reserved-word spelling is a WORD once a
+//! redirection precedes the first word — `!`, `{`, `}`, `done`,
+//! `fi`, `[[`, `]]`, `function`, `coproc`, `if`, `for`, `while`,
+//! `until`, `case`, `select`, `do`, `then`, `else`, `elif`,
+//! `esac`, `in` all run as command names (`X: command not found`,
+//! rc 0) or make the NEXT command-position token the syntax-error
+//! blame (`coproc >x if true; then ...` blames `then`, `coproc
+//! >x { ...; }` blames `}`). Genuine operator tokens still stop
+//! the body: `(`, `((`, `;`, `&`, `|`. The lone GNU exception is
+//! `time`, which survives as the timespec keyword (parse.y:1416);
+//! rubash keeps the #1653 pinned `time: command not found` shape
+//! for now — a disclosed anti-GNU residual.
 
 use std::process::Command;
 
@@ -203,7 +209,13 @@ fn issue3267_dangling_second_redirect_still_errors() {
 
 #[test]
 fn issue3267_redirect_before_brace_group_still_errors() {
-    check_syntax_error_near("coproc >x { echo inner; }\n", "{");
+    // GNU takes `{` as a WORD here (`{` is only a brace-group
+    // opener at command position): the coproc body runs `{ echo
+    // inner` asynchronously, `;` terminates it, and the `}` at
+    // command position is what GNU blames — verified byte-for-byte
+    // on the 5.3.20 oracle (`syntax error near unexpected token
+    // `}'`). The old `{` blame was the pre-fix residual.
+    check_syntax_error_near("coproc >x { echo inner; }\n", "}");
 }
 
 #[test]
@@ -213,5 +225,36 @@ fn issue3267_redirect_before_subshell_still_errors() {
 
 #[test]
 fn issue3267_redirect_before_if_still_errors() {
-    check_syntax_error_near("coproc >x if true; then echo y; fi\n", "if");
+    // Same word-position mechanism: `if` after the redirect is a
+    // plain word in GNU, so `if true` is the coproc body and the
+    // `then` at command position is what GNU blames (5.3.20
+    // oracle). The old `if` blame was the pre-fix residual.
+    check_syntax_error_near("coproc >x if true; then echo y; fi\n", "then");
+}
+
+// -----------------------------------------------------------------
+// Post-redirect reserved-word spellings are WORDS (GNU rc 0)
+// -----------------------------------------------------------------
+
+#[test]
+fn issue3267_redirect_before_reserved_word_is_word() {
+    // GNU 5.3.20: `done` after a leading redirect is the command
+    // name, not a DONE token.
+    check(
+        "coproc >x done echo hi\n",
+        "",
+        "case.sh: line 1: done: command not found\n",
+        0,
+    );
+}
+
+#[test]
+fn issue3267_redirect_before_close_brace_is_word() {
+    // GNU 5.3.20: `}` after a leading redirect is a plain word.
+    check(
+        "coproc >x } echo hi\n",
+        "",
+        "case.sh: line 1: }: command not found\n",
+        0,
+    );
 }

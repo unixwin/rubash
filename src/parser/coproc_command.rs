@@ -406,22 +406,29 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
             saw_redirect = true;
             continue;
         }
-        // No compound body may follow a leading redirect: GNU's
-        // `COPROC shell_command` production carries no leading
-        // redirection (`coproc >x { ...; }` / `( ... )` / `if ...`
-        // are syntax errors there), and the base already reports
-        // them rc 2 via the main loop's unexpected-token path once
-        // the redirect-only coproc is built — so stop here with no
-        // words collected and let that path fire with its blame
-        // token unchanged. After the first word a compound starter
-        // is a plain word (`coproc foo {` runs `foo` with `{` as
-        // an argument), so the guard only applies pre-word.
+        // After a leading redirect, GNU's read_token reads every
+        // reserved-word spelling as a WORD — the simple_command's
+        // first element is not a reserved-word position once a
+        // redirection precedes it (bash 5.3.20 oracle matrix:
+        // `coproc >x if true; ...` blames `then`, `coproc >x { ...
+        // ; }` blames `}` — i.e. `if`/`{` themselves were words;
+        // `done`, `fi`, `}`, `]]`, `[[`, `function`, `coproc`,
+        // `do`, `esac`, `in`, `then`, `else`, `elif`, `!` all run
+        // as command names `X: command not found`). The only
+        // spellings that still stop collection pre-word are real
+        // operator tokens (`(`, `((`-prefixed arithmetic open —
+        // `coproc >x ( ... )` / `>x ((x))` blame `(`) and folded
+        // brace-group tokens. `time` is GNU's lone keyword
+        // exception (timespec survives), but rubash keeps the
+        // #1653 pinned behavior: collect it as a word and let the
+        // spawn quote decide — anti-GNU residual disclosed there.
         if words.is_empty()
             && saw_redirect
             && (tokens.get(i).is_some_and(is_brace_group_token)
-                || is_keyword(tokens, i, "{")
                 || is_keyword(tokens, i, "(")
-                || is_coproc_shell_command_start(tokens, i))
+                || tokens.get(i).is_some_and(|token| {
+                    token.kind == TokenKind::Keyword && token.value.starts_with("((")
+                }))
         {
             break;
         }
