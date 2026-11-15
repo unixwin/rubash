@@ -3164,7 +3164,15 @@ impl Executor {
         // the tracking value with — pin the action's node lines instead, the
         // way run_debug_trap does. The flat-region caller pins the subshell's
         // close-paren line (execute_cmd.c:696, honored by the :769 fire).
-        let failed_line = line_override.or(command.line);
+        // GNU binds `line_number_for_err_trap` here (execute_cmd.c:873):
+        // for a leaf command it IS command.line (the leaf stamped it), but
+        // a compound's own redirect failure reports the PREVIOUS leaf's
+        // line — `{ :; } </bad` after `echo x` names echo's line, and a
+        // failing compound inside a function names the call line
+        // (rubash#3553).
+        let failed_line = line_override
+            .or_else(|| self.err_trap_line.get())
+            .or(command.line);
         let action = self.comsub_body_alias_splice(&action);
         let tokens = crate::lexer::tokenize(&action);
         let mut ast = crate::parser::parse(&tokens);

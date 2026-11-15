@@ -1437,6 +1437,7 @@ impl Executor {
             unit_lex_locale: std::cell::RefCell::new(None),
             line_lex_extquotes: std::cell::RefCell::new(HashMap::new()),
             ambient_line: Cell::new(None),
+            err_trap_line: Cell::new(None),
             inside_compound_condition: Cell::new(false),
             conditional_invert_pending: Cell::new(false),
             inside_assignment_rhs: Cell::new(false),

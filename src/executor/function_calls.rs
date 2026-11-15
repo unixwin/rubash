@@ -368,7 +368,13 @@ impl Executor {
         // shapes land on the function boundary like GNU's unwind-protected
         // frame restore does. Off path: one relaxed AtomicBool load.
         let _profiler_frame = super::profiler::enter_function(name);
+        // GNU execute_cmd.c:5242 unwind_protect_int(line_number_for_err_trap):
+        // a function body's leaf stamps are per-frame — on return the tracker
+        // restores to the CALL's value, so an enclosing compound's redirect
+        // failure reports the call line (rubash#3553).
+        let saved_err_trap_line = self.err_trap_line.get();
         let result = self.execute_function_dispatch(name, args, call_cmd);
+        self.err_trap_line.set(saved_err_trap_line);
         // rubash#846: a function call is a call boundary (GNU
         // execute_cmd.c:5200 execute_function runs the body as a fresh
         // frame) — an inner compound's own redirect failure arrives here

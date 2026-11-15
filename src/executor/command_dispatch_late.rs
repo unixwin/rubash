@@ -401,6 +401,12 @@ impl Executor {
                             }
                             return Err(error);
                         }
+                        // GNU execute_cmd.c:4138 — same post-redirect
+                        // line_number_for_err_trap stamp as the
+                        // with-redirects path (rubash#3553).
+                        if !self.error_trap_running {
+                            self.err_trap_line.set(cmd.line);
+                        }
                         self.exit_code = self.execute_conditional_command(command);
                         // rubash#1177: same `=~` nounset-fatal conversion
                         // as the with-redirects path.

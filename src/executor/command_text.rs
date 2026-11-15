@@ -225,6 +225,37 @@ pub(in crate::executor) fn command_sets_own_line(cmd: &CommandNode) -> bool {
         && !command_is_time_prefixed_compound(cmd)
 }
 
+/// Whether THIS command kind stamps GNU `line_number_for_err_trap`
+/// (execute_cmd.c:295 SET_LINE_NUMBER callers): simple :936, subshell
+/// :696 — the leaf commands whose own line lands before their
+/// redirections run. while/until/if/group/for/select/case never stamp
+/// at all, so a failing one reports the previous leaf's line in the
+/// ERR trap (rubash#3553). Arith/cond stamp their own line too, but
+/// only from inside execute_arith_command :3904 / execute_cond_command
+/// :4138 — AFTER the :1141 frame's do_redirections has passed — so
+/// they take the ambient entry pin here and the own-line stamp at
+/// their real execution point instead.
+pub(in crate::executor) fn command_stamps_err_trap_line(cmd: &CommandNode) -> bool {
+    command_sets_own_line(cmd)
+        && cmd.for_command.is_none()
+        && cmd.select_command.is_none()
+        && cmd.case_command.is_none()
+        && cmd.arithmetic_command.is_none()
+        && cmd.conditional_command.is_none()
+}
+
+/// The ambient-line stamps of the same tracker: execute_cmd.c:2895 pins
+/// `line_number_for_err_trap` to `line_number` at pipeline entry, and
+/// :1141's misc-compound frame does the same for a function-def/
+/// arithmetic/conditional statement — all three read as "the current
+/// line", which the caller's computed `line` already is.
+pub(in crate::executor) fn command_stamps_err_trap_line_ambient(cmd: &CommandNode) -> bool {
+    cmd.pipeline_command.is_some()
+        || cmd.function_command.is_some()
+        || cmd.arithmetic_command.is_some()
+        || cmd.conditional_command.is_some()
+}
+
 /// Whether a failure opening THIS command's own redirections reports
 /// at the command's COMPLETION line (its parse-end line) rather than
 /// its first line. GNU's parser stamps cm_arith / cm_cond nodes when

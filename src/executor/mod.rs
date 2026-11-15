@@ -1074,7 +1074,9 @@ pub struct Executor {
     /// GNU trap.c SIG_INPROGRESS: _run_trap_internal marks a trap
     /// in-progress before executing its action, and run_error_trap refuses
     /// to re-enter while it is set — an ERR trap action that itself fails
-    /// must not recursively re-trigger the ERR trap (niubash #121).
+    /// must not recursively re-trigger the ERR trap (niubash #121). The
+    /// err_trap_line stamp is gated on it too (SET_LINE_NUMBER skips the
+    /// update while the trap runs, execute_cmd.c:295).
     error_trap_running: bool,
     /// The EXIT trap action's execution window (trap.c:1027
     /// run_exit_trap sets running_trap for the action's duration).
@@ -1619,6 +1621,15 @@ pub struct Executor {
     /// simple/for/select/case/arith/cond/subshell commands stamp their
     /// own `->line`; while/until/if/group inherit the ambient).
     ambient_line: Cell<Option<usize>>,
+    /// GNU `line_number_for_err_trap` (execute_cmd.c:291): the line the
+    /// ERR trap reports, stamped ONLY by the leaf kinds — simple :936,
+    /// subshell :696, pipeline :2895, arith :3904, cond :4138, and the
+    /// misc-compound frame's function-def/arithmetic/conditional entry
+    /// :1141. A compound command's OWN redirect failure runs the trap
+    /// with this stale value (execute_cmd.c:873), so `{ :; } </bad`
+    /// reports the previous leaf's line and a failing compound inside a
+    /// function reports the CALL line (rubash#3553).
+    err_trap_line: Cell<Option<usize>>,
     /// True while an if/elif condition list is executing: word-expansion
     /// failures must pierce function frames so the enclosing compound
     /// command can abandon itself entirely (GNU probe f4).

@@ -366,6 +366,13 @@ impl Executor {
             self.current_conditional_redirects = saved_conditional_redirects;
             return Err(error);
         }
+        // GNU execute_cmd.c:4138 SET_LINE_NUMBER(cond_command->line):
+        // the conditional stamps line_number_for_err_trap only once its
+        // own redirections have bound — reaching this point means the
+        // :1141-frame do_redirections succeeded (rubash#3553).
+        if !self.error_trap_running {
+            self.err_trap_line.set(cmd.line);
+        }
         self.exit_code = self.execute_conditional_command(conditional_command);
         // rubash#1130: a [[ ]] operand hit a FATAL word-expansion error
         // (nounset unbound) — the diagnostic and exit_code are already
