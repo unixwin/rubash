@@ -259,6 +259,29 @@ fn test_help_appends_stderr() {
     let _ = fs::remove_file(error_path);
 }
 
+/// The POSIX `/<drive>/…` display form of a native absolute path —
+/// the same normalization `shell_pwd_display_path` performs
+/// (executor/path.rs:7957; mirrors issue659's test-side
+/// `posix_display_form`, repeated here because the function is
+/// `pub(crate)` and unreachable from integration tests).
+fn posix_display_form(path: &std::path::Path) -> String {
+    let value = path.to_string_lossy().replace('\\', "/");
+    let value = if let Some(rest) = value.strip_prefix("//?/UNC/") {
+        format!("//{rest}")
+    } else if let Some(rest) = value.strip_prefix("//?/") {
+        rest.to_string()
+    } else {
+        value
+    };
+    let bytes = value.as_bytes();
+    if bytes.len() >= 3 && bytes[1] == b':' && bytes[2] == b'/' && bytes[0].is_ascii_alphabetic() {
+        let drive = (bytes[0] as char).to_ascii_lowercase();
+        format!("/{}/{}", drive, &value[3..])
+    } else {
+        value
+    }
+}
+
 /// rubash#3397: `dirs` prints the real working directory, never a
 /// temporary `PWD=` assignment. GNU `dirs_builtin` takes the first
 /// entry from `get_working_directory ("dirs")` and prints it through
@@ -275,8 +298,24 @@ fn test_help_appends_stderr() {
 /// snapshot mirrors the executor's own.
 fn expected_dirs_output() -> String {
     let cwd = std::env::current_dir().expect("test process cwd");
-    let cwd = cwd.to_string_lossy().into_owned();
-    let home = std::env::var("HOME").unwrap_or_default();
+    // The dir-stack entry the builtin prints is stored in the
+    // canonical POSIX display spelling (shell_pwd_display_path), so
+    // the expectation derives from that same form — the native
+    // `X:\…` spelling never reaches stdout.
+    let cwd = posix_display_form(&cwd);
+    // polite_directory_format (builtins/pushd.rs:30) compares the
+    // display name against the executor env's HOME verbatim; on
+    // Windows Executor::new injects the same USERPROFILE /
+    // HOMEDRIVE+HOMEPATH fallback when HOME is absent
+    // (executor/init.rs:510-519), so mirror that lookup chain.
+    let home = std::env::var("HOME").unwrap_or_else(|_| {
+        std::env::var("USERPROFILE").unwrap_or_else(|_| {
+            match (std::env::var("HOMEDRIVE"), std::env::var("HOMEPATH")) {
+                (Ok(drive), Ok(path)) => format!("{drive}{path}"),
+                _ => String::new(),
+            }
+        })
+    });
     if home.len() > 1 && (cwd == home || cwd.starts_with(&format!("{home}/"))) {
         format!("~{}\n", &cwd[home.len()..])
     } else {
