@@ -4102,6 +4102,16 @@ impl Executor {
             return self.execute_if_command(if_command);
         }
 
+        // rubash#3454: `if ... fi > $nope` under `set -u` — GNU's
+        // do_redirections (execute_cmd.c:854) fails the target expansion
+        // with `name: unbound variable` and aborts the script; the
+        // prologue arms expand with no nounset gate, so report before
+        // any procsub materialization or create side effect and unwind
+        // as ExitCode(1), the same fatal the brace gate returns.
+        if self.compound_redirect_nounset_fatal(cmd)? {
+            return Err(ExecuteError::ExitCode(1));
+        }
+
         // rubash#2246: GNU walks the stored tree by pointer and binds
         // the redirects once at entry (execute_cmd.c:854-883). The
         // deep clones this wrapper used to take — cmd.clone() plus
@@ -4167,6 +4177,12 @@ impl Executor {
                 self.exit_code = 1;
                 return Ok(());
             }
+        }
+        // rubash#3454: same `set -u` unbound-target gate as `if` —
+        // `while/until ... done > $nope` aborts in GNU's compound
+        // do_redirections before any expansion side effect.
+        if self.compound_redirect_nounset_fatal(cmd)? {
+            return Err(ExecuteError::ExitCode(1));
         }
         // rubash#2246: same borrow conversion as the if wrapper —
         // cmd.clone() + loop_command.clone() existed only for the
@@ -7274,6 +7290,13 @@ impl Executor {
             // via the per-command wrapper (command_execute.rs).
             let _ = self.finish_assignment_output_process_substitutions_for_command(cmd);
             return result;
+        }
+
+        // rubash#3454: same `set -u` unbound-target gate as `if` —
+        // `case ... esac > $nope` aborts in GNU's compound
+        // do_redirections before any expansion side effect.
+        if self.compound_redirect_nounset_fatal(cmd)? {
+            return Err(ExecuteError::ExitCode(1));
         }
 
         // rubash#2246: same borrow conversion as the if wrapper — the
