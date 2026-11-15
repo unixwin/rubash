@@ -584,8 +584,7 @@ impl Executor {
         // consumed boundary and byte-wise sources never over-read.
         let bounded_values = if callback.is_none() {
             count.filter(|count| *count > 0).and_then(|limit| {
-                let mut source =
-                    self.mapfile_record_source(cmd, read_fd, delimiter, trim_newline)?;
+                let mut source = self.mapfile_record_source(cmd, read_fd, false)?;
                 let mut values = Vec::new();
                 let mut skipped = 0usize;
                 while values.len() < limit {

@@ -43,6 +43,29 @@ impl TextInput {
     pub(crate) fn append_bytes(&mut self, bytes: &[u8]) {
         self.data.extend_from_slice(bytes);
     }
+
+    /// A fresh in-memory stream over already-materialized bytes
+    /// (the mapfile record source's shared cursor, rubash#3660).
+    pub(crate) fn from_data(data: Vec<u8>) -> Self {
+        Self {
+            data,
+            offset: 0,
+            timing: None,
+            origin_path: None,
+        }
+    }
+
+    pub(crate) fn data(&self) -> &[u8] {
+        &self.data
+    }
+
+    pub(crate) fn offset(&self) -> usize {
+        self.offset
+    }
+
+    pub(crate) fn set_offset(&mut self, offset: usize) {
+        self.offset = offset;
+    }
 }
 
 /// rubash#2385: one complementary (write) end of an in-memory byte
