@@ -506,7 +506,17 @@ impl Executor {
                 if crate::special_paths::is_net_redirect_target(&target) {
                     match self.open_net_redirect(&target) {
                         Ok(file) => {
-                            self.bind_net_input_fd(&mut saved, 0, &target, file, readwrite);
+                            // rubash#3728: a dup failure while saving
+                            // the displaced fd unwinds like a connect
+                            // failure (GNU REDIRECTION_ERROR on a
+                            // failed F_DUPFD save, redir.c:965).
+                            if let Err(error) =
+                                self.bind_net_input_fd(&mut saved, 0, &target, file, readwrite)
+                            {
+                                self.restore_simple_command_net_inputs(saved);
+                                self.net_input_bind_failure(cmd, &error);
+                                return Err(());
+                            }
                         }
                         Err(error) => {
                             self.restore_simple_command_net_inputs(saved);
@@ -518,7 +528,11 @@ impl Executor {
             }
         }
         for (fd, (file, target, readwrite)) in numbered {
-            self.bind_net_input_fd(&mut saved, fd, &target, file, readwrite);
+            if let Err(error) = self.bind_net_input_fd(&mut saved, fd, &target, file, readwrite) {
+                self.restore_simple_command_net_inputs(saved);
+                self.net_input_bind_failure(cmd, &error);
+                return Err(());
+            }
         }
         Ok(saved)
     }
@@ -530,9 +544,17 @@ impl Executor {
         target: &str,
         file: std::fs::File,
         readwrite: bool,
-    ) {
+    ) -> Result<(), std::io::Error> {
         if !saved.iter().any(|(saved_fd, _)| *saved_fd == fd) {
-            saved.push((fd, self.fd_table.entries.get(&fd).cloned()));
+            // rubash#3728: snapshot the displaced fd with a kernel
+            // dup (saved_entry), not a bare Rc clone — the bind below
+            // retires the displaced descriptor (rubash#3213), so a
+            // cloned save would restore a dead entry (same hazard as
+            // #3706). This is the live path for `read x < /dev/tcp/...`:
+            // every in-process builtin dispatch binds its net inputs
+            // here before the body runs, and the read builtin then
+            // serves the already-bound endpoint.
+            saved.push((fd, self.fd_table.saved_entry(fd)?));
         }
         let file_fd = FileFd::from_file(file, target.into());
         self.fd_table
@@ -548,6 +570,7 @@ impl Executor {
         if !self.dispatch_net_bound_fds.contains(&fd) {
             self.dispatch_net_bound_fds.push(fd);
         }
+        Ok(())
     }
 
     fn net_input_bind_failure(&mut self, cmd: &CommandNode, error: &std::io::Error) {
