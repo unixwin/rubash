@@ -1762,15 +1762,13 @@ impl Executor {
         // out of the cache cell, re-stamped and executed, then put back —
         // no clone on the per-firing path.
         let action = self.comsub_body_alias_splice(action);
-        // rubash#3327: GNU _run_trap_internal (trap.c:1196-1198) does NOT
-        // set SEVAL_RESETLINE for the DEBUG trap — the action parses at
-        // the caller's current line, so a syntax error reports the
-        // firing line, not action-relative line 1. Tokenize at the
-        // firing line (the cached AST's recorded base is that line, so
-        // a later firing's rebase stays exact); the EOF error's line
-        // is last-token-line + 1 (parse_loop.rs eof_line_extra), which
-        // lands one past the firing line, as GNU reports it.
-        let start_line = call_line.unwrap_or(1);
+        // rubash#3327 bisection: plain tokenize + recorded base 1
+        // (pre-fix shape). The __RUBASH_TRAP_CONTEXT insert and the
+        // take_parse_error() containment below are kept — this step
+        // isolates whether the tokenize/start_line half causes the
+        // two bashdb head-only regressions (CI run 43673700641).
+        // The firing-line rationale lives in REPORT.md Round 3;
+        // do NOT re-derive the DEBUG shape in this commit.
         let old_trap_context = self.shell_state.env_vars.insert(
             "__RUBASH_TRAP_CONTEXT".to_string(),
             "debug trap".to_string(),
@@ -1780,9 +1778,7 @@ impl Executor {
             match taken {
                 Some((key, cached_ast, base)) if key == action => (cached_ast, base),
                 _ => {
-                    let tokens = crate::lexer::tokenize_with_initial_posix_and_line(
-                        &action, false, start_line,
-                    );
+                    let tokens = crate::lexer::tokenize(&action);
                     // rubash#3328: thread the spliced action as the
                     // diagnostic source (same shape as the EXIT-trap
                     // site): the bare parse() re-serialized the echo line.
@@ -1793,7 +1789,7 @@ impl Executor {
                             ..Default::default()
                         },
                     );
-                    (ast, start_line as i64)
+                    (ast, 1)
                 }
             }
         };
