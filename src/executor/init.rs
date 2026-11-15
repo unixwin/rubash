@@ -946,6 +946,21 @@ impl Executor {
         env_vars.remove(super::compound_exec::POSITIONAL_PARAMS_TRANSPORT);
         mirror_env_remove(super::compound_exec::POSITIONAL_PARAMS_TRANSPORT);
 
+        // rubash#3605: the fork-shaped children that execute the
+        // parent's flagged command node (the async `&` wrapper and
+        // the coproc respawn — execute_cmd.c:1576/:2546 through
+        // execute_in_subshell) stamp the live CMD_IGNORE_RETURN
+        // depth under SUPPRESS_ERREXIT_TRANSPORT; seed it only for
+        // internal respawns and strip it either way so it never
+        // surfaces as a shell variable. A nonzero seed suppresses
+        // `set -e` inside the body, matching GNU's node-flag model —
+        // exec16's `! coproc C { set -e; false; echo reached coproc
+        // body; }`.
+        let respawn_suppress_errexit = internal_respawn
+            && env_vars.contains_key(super::compound_exec::SUPPRESS_ERREXIT_TRANSPORT);
+        env_vars.remove(super::compound_exec::SUPPRESS_ERREXIT_TRANSPORT);
+        mirror_env_remove(super::compound_exec::SUPPRESS_ERREXIT_TRANSPORT);
+
         // rubash#2058: the fork-context stamp (see
         // Executor::fork_context_transport_entries) — the parent's
         // effective call-stack views, its PIPESTATUS cell, and the
@@ -1355,7 +1370,8 @@ impl Executor {
             conditional_output_procsubs: Vec::new(),
             current_conditional_redirects: None,
             pending_scalar_assignment: false,
-            suppress_errexit: 0,
+            suppress_errexit: if respawn_suppress_errexit { 1 } else { 0 },
+            comsub_ignore_return: 0,
             errexit_ignore_frame: 0,
             parse_and_execute_frames: Vec::new(),
             command_builtin_depth: 0,

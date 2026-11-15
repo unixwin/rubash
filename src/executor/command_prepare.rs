@@ -739,7 +739,21 @@ impl Executor {
                 }
                 None => value.as_str(),
             };
+            // rubash#3605: GNU's expand_words bracket — a bare
+            // `x=$(...)` command expands its RHS inside the same
+            // expand_words call the CMD_IGNORE_RETURN check wraps
+            // (execute_cmd.c:4616), so a comsub in an exempt
+            // assignment stamps CMD_IGNORE_RETURN on its body
+            // (builtins/evalstring.c:496). Pure-assignment commands
+            // reach this loop without expand_command_words, so they
+            // need their own bracket.
+            if self.suppress_errexit > 0 {
+                self.comsub_ignore_return += 1;
+            }
             let assignment_result = self.expand_assignment_value_result_with_raw(name, value, raw);
+            if self.comsub_ignore_return > 0 {
+                self.comsub_ignore_return -= 1;
+            }
             // GNU subst.c:10277-10288: a bad substitution raised while
             // expanding the assignment RHS is an expand_word_error. The
             // flag is checked after word expansion in execute_command, but
