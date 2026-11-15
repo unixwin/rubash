@@ -235,6 +235,22 @@ impl Executor {
                     self.finish_external_error(cmd, &stderr, status)?;
                     return Ok(true);
                 }
+                // rubash#3415: a `#!` line naming a resolvable NON-shell
+                // interpreter is not a shell script — decline so the
+                // ordinary disk-command path spawns the interpreter (the
+                // MSYS/Git Bash model; GNU execute_shell_script,
+                // execute_cmd.c:6001-6043, re-execs through the NAMED
+                // interpreter). Running it here would parse a node body
+                // as bash (syntax error, rc 2) and let a shebang-only
+                // file exit 0 in silence.
+                if crate::executor::path::foreign_shebang_interpreter(
+                    &script_path,
+                    &self.shell_state.env_vars,
+                )
+                .is_some()
+                {
+                    return Ok(false);
+                }
                 // Exec model, like GNU: a `#!` script is exec'd by the
                 // kernel as a NEW interpreter process, and a shebangless
                 // text file hits execute_cmd.c:6237-6260's ENOEXEC tail,
@@ -1197,6 +1213,15 @@ impl Executor {
             // half — a `ulimit` inside the child script re-limited
             // this process and must die at this boundary too.
             let fork_saved_process_rlimits = saved_shell_state.fork_saved_process_rlimits.clone();
+            // rubash#3387: the same bypass applies to the rusage
+            // half — this direct-assignment restore skips
+            // restore_flat_subshell, so pop the CloneBoundary
+            // baseline the entry clone_for_child_save pushed (same
+            // kind-and-depth condition) explicitly here.
+            crate::executor::read_helpers::pop_times_baseline_if(
+                crate::executor::read_helpers::TimesBaselineKind::CloneBoundary,
+                saved_shell_state.subshell_depth.get(),
+            );
             self.shell_state = saved_shell_state;
             if let Some(mask) = fork_saved_process_umask {
                 crate::builtins::umask::apply_process_umask(mask);

@@ -13,6 +13,7 @@ pub(crate) mod paths;
 
 use super::diagnostic::{diagnostic_prefix, readonly_error_prefix};
 use crate::builtins::pushd::{load_stack, save_stack, DIR_STACK};
+use crate::expand::tilde::tilde::expand_tilde_segment;
 
 use paths::{
     current_logical_pwd, filesystem_path_for_display, logical_canon_erased_components_exist,
@@ -512,20 +513,23 @@ where
                 .unwrap_or_else(|| shell_pwd_display_path(&new_pwd_display));
             writeln!(stdout, "{verbatim}")?
         }
-        // GNU builtins/cd.def: the CDPATH announcement prints the path
-        // that was FOUND (the CDPATH-joined pathname), even under -P —
-        // only $PWD becomes the physical directory. new_pwd_display is
-        // the resolved physical path in Mode::Physical, which leaked
-        // into the announcement (rubash#1329); the logical destination
-        // built from the target display is the found path in both modes.
-        PrintPath::CdPath => writeln!(
-            stdout,
-            "{}",
-            shell_pwd_display_path(&logical_destination_display(
-                &old_logical,
-                target.display.as_deref().unwrap_or(&target.path)
-            ))
-        )?,
+        // GNU builtins/cd.def:370 `path = no_symlinks ? temp :
+        // the_current_working_directory`: under -P the announcement is
+        // `temp` itself — the sh_makepath join of the CDPATH unit and the
+        // operand, verbatim (a relative unit stays relative, `./` and
+        // `..` components stay; rubash#3395) — never the resolved
+        // physical directory (rubash#1329). Under -L it is the new
+        // logical cwd, the canonical absolute destination.
+        PrintPath::CdPath => {
+            let found = target.display.as_deref().unwrap_or(&target.path);
+            let announced = match mode {
+                Mode::Physical => found.to_string_lossy().into_owned(),
+                Mode::Logical => {
+                    shell_pwd_display_path(&logical_destination_display(&old_logical, found))
+                }
+            };
+            writeln!(stdout, "{announced}")?
+        }
         _ => {}
     }
 
@@ -740,17 +744,35 @@ fn operand_is_dot_only(path: &Path) -> bool {
 
 /// The logical destination display the real cd/pwd pair produces for
 /// `target` from the given session state: logical_destination_display
-/// built on validated_logical_pwd — the same chain cd_builtin binds
-/// into $PWD (builtins/cd.def bindpwd) and pwd_builtin prints verbatim.
-/// Exposed for the `$(cd X && pwd)` fast path (rubash#2220) so its
-/// bare-`pwd` rendering is the builtin's own chain rather than a
-/// parallel implementation that could drift from it.
+/// built on the session's STORED logical cwd — the same chain
+/// cd_builtin binds into $PWD (builtins/cd.def bindpwd) and
+/// pwd_builtin prints verbatim. Exposed for the `$(cd X && pwd)` fast
+/// path (rubash#2220) so its bare-`pwd` rendering is the builtin's own
+/// chain rather than a parallel implementation that could drift from
+/// it.
+///
+/// rubash#3348: the base is the stored value, not a re-derivation
+/// from $PWD — GNU's change_to_directory builds from
+/// the_current_working_directory (builtins/cd.def:535), never from
+/// the variable, which a user assignment can desynchronize. The
+/// stored value is used when it still names the session cwd (the
+/// reader protocol pwd's logical face and cd's old_logical share);
+/// otherwise — a mover outside the cd family changed the cwd without
+/// maintaining it — the validated derivation stands in, exactly as
+/// before.
 pub(crate) fn logical_destination_display_from(
+    logical_cwd: Option<&str>,
     env_vars: &HashMap<String, String>,
     cwd: &Path,
     target: &Path,
 ) -> String {
-    paths::logical_destination_display(&paths::validated_logical_pwd(env_vars, cwd), target)
+    let base = match logical_cwd {
+        Some(tcwd) if crate::builtins::pwd::logical_value_names_cwd(tcwd, cwd, env_vars) => {
+            PathBuf::from(tcwd)
+        }
+        _ => paths::validated_logical_pwd(env_vars, cwd),
+    };
+    paths::logical_destination_display(&base, target)
 }
 
 fn resolve_cdpath(
@@ -774,8 +796,43 @@ fn resolve_cdpath(
     let cdpath = shell_var(env_vars, "CDPATH")?;
     for unit in cdpath.split(':') {
         let base = if unit.is_empty() { "." } else { unit };
+        // rubash#3394: GNU tilde-expands each CDPATH element before
+        // the join (builtins/cd.def:360 `sh_makepath (path, dirname,
+        // MP_DOTILDE)`; lib/sh/makepath.c:98 expands a `~`-led path
+        // with bash_tilde_expand). `expand_tilde_segment` is that
+        // expansion: `~`/`~/` glue $HOME (an empty HOME still glues,
+        // lib/tilde/tilde.c:304-317), `~+`/`~-`/`~N` take the stack,
+        // `~user` takes the passwd home, and an unresolvable prefix
+        // keeps the unit verbatim (tilde.c:398 savestring fallback) —
+        // so one call covers the whole GNU rule, not just `~/`.
+        // The expanded base feeds BOTH the filesystem probe and the
+        // display spelling: GNU announces the found (joined, expanded)
+        // path (cd.def:375-377) and binds $PWD from it.
+        let expanded_base;
+        let base = if base.starts_with('~') {
+            expanded_base = expand_tilde_segment(base, env_vars);
+            expanded_base.as_str()
+        } else {
+            base
+        };
         let candidate = filesystem_path_for_display(base, env_vars).join(&target.path);
-        let display = Path::new(base).join(&target.path);
+        // GNU builtins/cd.def:360 `temp = sh_makepath (path, dirname,
+        // MP_DOTILDE)` — lib/sh/makepath.c:66 sh_makepath glues the unit
+        // and the operand AS SPELLED with one `/` (none when the unit
+        // already ends in one). That string is both the chdir target and,
+        // under -P, the announcement (cd.def:370), so it is built
+        // textually here rather than through Path::join, whose separator
+        // is the host's (rubash#3395).
+        let operand = target
+            .display
+            .as_deref()
+            .unwrap_or(&target.path)
+            .to_string_lossy();
+        let display = if base.ends_with('/') {
+            PathBuf::from(format!("{base}{operand}"))
+        } else {
+            PathBuf::from(format!("{base}/{operand}"))
+        };
 
         // G-02: CDPATH units are relative to the SESSION cwd, not the
         // process cwd; the returned candidate keeps its as-spelled form

@@ -1350,7 +1350,7 @@ impl Executor {
         // rubash#3210: the body's diagnostic seed is the enclosing
         // command's first-element end line (execute_cmd.c:936), not
         // its start line — see procsub_body_seed_line.
-        let cmd_line = super::command_text::procsub_body_seed_line(cmd);
+        let cmd_line = super::command_text::procsub_body_seed_line(cmd, self.ambient_line.get());
         let mut redirect_target_rewrites = Vec::new();
         // GNU subst.c: an unquoted `name=<( )` word is an assignment whose
         // value is the process substitution (make_dev_fd_filename,
@@ -2401,6 +2401,7 @@ impl Executor {
             ProcsubPlanMode::WriteAppend => match open_redirect_append(&session_target) {
                 Ok(file) => ProcsubPlanCapture::Captured(Rc::new(FileFd {
                     handle: crate::fd::into_handle(file),
+                    closed: std::cell::Cell::new(false),
                     path: session_target,
                 })),
                 Err(_) => ProcsubPlanCapture::Failed,
@@ -2409,6 +2410,7 @@ impl Executor {
                 match self.create_redirect_output_for(Some(redirect), target, redirect.clobber) {
                     Ok(file) => ProcsubPlanCapture::Captured(Rc::new(FileFd {
                         handle: crate::fd::into_handle(file),
+                        closed: std::cell::Cell::new(false),
                         path: session_target,
                     })),
                     Err(_) => ProcsubPlanCapture::Failed,
@@ -2422,6 +2424,7 @@ impl Executor {
                 {
                     Ok(file) => ProcsubPlanCapture::Captured(Rc::new(FileFd {
                         handle: crate::fd::into_handle(file),
+                        closed: std::cell::Cell::new(false),
                         path: session_target,
                     })),
                     Err(_) => ProcsubPlanCapture::Failed,
@@ -2482,6 +2485,7 @@ impl Executor {
         let handle = crate::fd::duplicate_handle_inheritable(stream).ok()?;
         Some(Rc::new(crate::executor::fd_table::FileFd {
             handle,
+            closed: std::cell::Cell::new(false),
             path: PathBuf::from("ambient:stdout"),
         }))
     }
@@ -2493,6 +2497,7 @@ impl Executor {
         let file = crate::executor::shell_options::background_capture_write_end()?;
         Some(Rc::new(crate::executor::fd_table::FileFd {
             handle: crate::fd::into_handle(file),
+            closed: std::cell::Cell::new(false),
             path: PathBuf::from("ambient:stdout"),
         }))
     }
@@ -2513,6 +2518,7 @@ impl Executor {
                     .map(|dup| {
                         Rc::new(crate::executor::fd_table::FileFd {
                             handle: dup,
+                            closed: std::cell::Cell::new(false),
                             path: PathBuf::from(label),
                         })
                     })
@@ -2552,6 +2558,7 @@ impl Executor {
                             .map(|dup| {
                                 Rc::new(crate::executor::fd_table::FileFd {
                                     handle: dup,
+                                    closed: std::cell::Cell::new(false),
                                     path: PathBuf::from(label),
                                 })
                             })
@@ -2570,6 +2577,7 @@ impl Executor {
                     .map(|dup| {
                         Rc::new(crate::executor::fd_table::FileFd {
                             handle: dup,
+                            closed: std::cell::Cell::new(false),
                             path: PathBuf::from(label),
                         })
                     })
@@ -2718,6 +2726,7 @@ impl Executor {
                     let handle = crate::fd::into_handle(seeked);
                     let bound = std::rc::Rc::new(crate::executor::fd_table::FileFd {
                         handle,
+                        closed: std::cell::Cell::new(false),
                         path: file.path.clone(),
                     });
                     self.fd_table
@@ -2760,6 +2769,7 @@ impl Executor {
                 if let Ok(dup) = crate::fd::duplicate_handle_inheritable(file.handle) {
                     let bound = std::rc::Rc::new(crate::executor::fd_table::FileFd {
                         handle: dup,
+                        closed: std::cell::Cell::new(false),
                         path: file.path.clone(),
                     });
                     self.fd_table
@@ -2901,7 +2911,41 @@ impl Executor {
         files: &mut ProcessSubstitutionFiles,
         line: Option<usize>,
     ) -> Result<(), ExecuteError> {
-        for substitution in substitutions {
+        // rubash#3353: the recorded `target` is the RAW span spelling.
+        // Word expansion rewrites the span interior before this runs —
+        // quote removal always applies, and `$` / backquote evaluation
+        // inside the body text follows the word's own quoting — so
+        // `replacen(target)` misses on exactly the embedded mid-word
+        // spans GNU splices (subst.c:11364-11378 expand_word_internal
+        // '<'/'>' arms extract the span from the word being expanded,
+        // subst.c:1311 extract_process_subst). When the recorded
+        // spelling is absent, rescan the expanded word once and pair
+        // spans by order; the recorded `source` still feeds the body,
+        // so body quoting is untouched. A span-count mismatch (expansion
+        // introduced or destroyed a `<(`/`>(` span) keeps the recorded
+        // spelling — the pre-#3353 miss — rather than guessing a pairing.
+        let recorded_count = substitutions.len();
+        let mut expanded_span_targets: Option<Vec<String>> = None;
+        for (substitution_index, substitution) in substitutions.into_iter().enumerate() {
+            let splice_target = if word.contains(&substitution.target) {
+                substitution.target.clone()
+            } else {
+                let targets = expanded_span_targets.get_or_insert_with(|| {
+                    WordMetadata::new(0, word.clone(), word.clone())
+                        .process_substitutions
+                        .into_iter()
+                        .map(|substitution| substitution.target)
+                        .collect()
+                });
+                if targets.len() == recorded_count {
+                    targets
+                        .get(substitution_index)
+                        .cloned()
+                        .unwrap_or_else(|| substitution.target.clone())
+                } else {
+                    substitution.target.clone()
+                }
+            };
             if substitution.output {
                 let path = self.empty_process_substitution_temp()?;
                 files.outputs.push(OutputProcessSubstitution {
@@ -2911,7 +2955,7 @@ impl Executor {
                     spawn_plan: ProcsubSpawnPlan::default(),
                 });
                 let display_path = self.process_substitution_output_fd_word(&path);
-                *word = word.replacen(&substitution.target, &display_path, 1);
+                *word = word.replacen(&splice_target, &display_path, 1);
             } else {
                 // rubash#1952: stream first (see
                 // materialize_standalone_process_substitution_word);
@@ -2920,7 +2964,7 @@ impl Executor {
                 if let Some(streamed) =
                     self.process_substitution_child_fd_word(&substitution.source, line)
                 {
-                    *word = word.replacen(&substitution.target, &streamed, 1);
+                    *word = word.replacen(&splice_target, &streamed, 1);
                     continue;
                 }
                 let Some((output, body_timing)) =
@@ -2936,7 +2980,7 @@ impl Executor {
                 // path form) share one virtual clock.
                 self.procsub_stream_set_timing(&path, body_timing.clone());
                 let display_path = self.process_substitution_fd_word_timed(&output, body_timing);
-                *word = word.replacen(&substitution.target, &display_path, 1);
+                *word = word.replacen(&splice_target, &display_path, 1);
             };
         }
         Ok(())
@@ -3766,8 +3810,7 @@ impl Executor {
         spawn_plan: &ProcsubSpawnPlan,
         live: ProcsubLiveStdio,
     ) -> Result<(), ExecuteError> {
-        let exe = std::env::var_os("CARGO_BIN_EXE_rubash")
-            .map(std::path::PathBuf::from)
+        let exe = test_rubash_binary_from_env()
             .or_else(test_rubash_binary_from_current_exe)
             .or_else(|| std::env::current_exe().ok())
             .unwrap_or_else(|| "rubash".into());

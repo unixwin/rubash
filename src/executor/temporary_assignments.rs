@@ -1316,6 +1316,56 @@ impl Executor {
         value: String,
         mut diag: Option<&mut Diag>,
     ) -> bool {
+        // GNU variables.c:3128-3144 bind_variable_internal: a scalar
+        // whole-name bind on a LIVE dynamic assoc dispatches to the
+        // variable's assign_func with key "0" — assign_aliasvar /
+        // assign_hashcmd (variables.c:1785 / :1715) write the value into
+        // the OWNER table as element [0], so `BASH_ALIASES=hello` adds
+        // alias `0='hello'` and `declare -p` renders `([r]="echo r"
+        // [0]="hello")` with the dynamic link intact (5.3.20 oracle:
+        // a later `alias s=…` still merges in). Only `unset` severs the
+        // name (variables.c:3839) — a severed name has no assign_func
+        // and falls through to the plain store below. A compound
+        // `NAME=(...)` on the live name is a separate merge mechanism
+        // owned by the assoc write-through path, so the scalar arm
+        // excludes `(`-led values.
+        {
+            let (base, append) = assignment_name_and_append(name);
+            if matches!(base, "BASH_ALIASES" | "BASH_CMDS")
+                && !is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, base)
+                && !value.trim_start().starts_with('(')
+            {
+                // ASS_APPEND rebuilds the bound string from the old
+                // value first (variables.c:3137 make_variable_value):
+                // `NAME+=x` appends to element [0]'s current text.
+                let bound = if append {
+                    let prev = if base == "BASH_ALIASES" {
+                        self.shell_state
+                            .aliases
+                            .get("0")
+                            .map(|alias| alias.value.clone())
+                    } else {
+                        crate::builtins::hash::hashed_path(&self.shell_state.env_vars, "0")
+                    };
+                    prev.map_or(value.clone(), |prev| prev + &value)
+                } else {
+                    value.clone()
+                };
+                if base == "BASH_ALIASES" {
+                    self.shell_state
+                        .aliases
+                        .insert("0".to_string(), Alias::new(&bound));
+                } else {
+                    crate::builtins::hash::set_hashed_path(
+                        &mut self.shell_state.env_vars,
+                        "0",
+                        &bound,
+                    );
+                }
+                self.sync_dynamic_assoc_vars();
+                return true;
+            }
+        }
         let result = self.apply_shell_assignment_inner(name, value, diag.as_deref_mut());
         // GNU variables.c:5761 { "BASH_XTRACEFD", sv_xtracefd }: assigning
         // the variable retargets xtrace (or reports an invalid fd) through
@@ -1826,6 +1876,18 @@ impl Executor {
         // takes the generic store below and the caller's
         // note_pipestatus_assignment derives the shape from the
         // stored form (rubash#1364, rubash#2369).
+        // rubash#3211: the dynamic associative pair routes whole-variable
+        // binds through the owner-table door, mirroring the DIRSTACK arm
+        // above — GNU's assign_aliasvar / assign_hashcmd hooks fire for
+        // every bind form (compound list, scalar, append; variables.c:1785
+        // / 1715). Without the door the generic machinery wrote the mirror
+        // + typed cell only and the command-boundary reconciliation
+        // rebuilt both from the untouched owner table, discarding the
+        // assignment. Unset names and plain-cell shadows (local/tempenv)
+        // stand the door down exactly as for DIRSTACK.
+        if matches!(base_name, "BASH_ALIASES" | "BASH_CMDS") && !dynamic_unbound && !dynamic_plain {
+            return self.apply_dynamic_assoc_assignment(base_name, &value, append);
+        }
         if is_noassign_bash_array(base_name) && !append {
             return true;
         }

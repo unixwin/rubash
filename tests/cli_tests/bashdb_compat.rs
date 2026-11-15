@@ -1034,10 +1034,21 @@ fn bash_compat_debugger_options_run_init_file_before_script() {
             String::from_utf8_lossy(&output_b.stdout),
             "value= starter=\n"
         );
+        // rubash#3254: the debugger pair carries the driver-time name
+        // ($0 as bound at driver time — here the script name, per GNU
+        // shell.c:1547-1566; the new pin
+        // `issue3254_debugger_missing_starter_uses_script_name` nails
+        // the same shape). `cli_normalized_text` only normalizes the
+        // harness's own exe path and must not wrap a script-path
+        // leader (its doc comment says so).
         assert_eq!(
             String::from_utf8_lossy(&output_b.stderr),
-            "rubash: /usr/local/share/bashdb/bashdb-main.inc: No such file or directory\n\
-             rubash: warning: cannot start debugger; debugging mode disabled\n"
+            format!(
+                "{}: /usr/local/share/bashdb/bashdb-main.inc: No such file or directory\n\
+                 {}: warning: cannot start debugger; debugging mode disabled\n",
+                script.display(),
+                script.display()
+            )
         );
     }
 

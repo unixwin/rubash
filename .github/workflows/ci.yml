@@ -124,16 +124,16 @@ jobs:
           cargo nextest run --test issue1467_test_procsub_path_regressions
           --test issue2237_bracket_word_expansion --profile ci
 
-      # rubash#3430: the dynamic pin-stem census. The named lanes
-      # above are a hand-curated list, so any pin stem not on it never
-      # executed while CI stayed green (PR #3424's issue3406 stem ran
-      # 0 times under a green CI; its only execution evidence was the
-      # review's box legs). scripts/ci-run-pin-stems.sh enumerates
-      # tests/issue*.rs from the tree at run time, so a new pin is
-      # covered by default; the only way out is an explicit, reasoned
+      # rubash#3430 + unixwin/niubash#955: the dynamic test-stem census.
+      # The named lanes above are a hand-curated list, so any stem not
+      # on it never executed while CI stayed green (PR #3424's
+      # issue3406 stem ran 0 times under a green CI; its only execution
+      # evidence was the review's box legs). scripts/ci-run-pin-stems.sh
+      # enumerates tests/*.rs from the tree at run time, so a new target
+      # is covered by default; the only way out is an explicit, reasoned
       # entry in scripts/ci-pin-exclusions.txt. A stem missing from
       # the run fails loudly instead of silently never running.
-      - name: Run all regression pin stems
+      - name: Run all integration test stems
         run: bash scripts/ci-run-pin-stems.sh
 
   # rubash#2176: cli_tests used to run as a continue-on-error step inside

@@ -199,8 +199,13 @@ pub struct ShellState {
     /// cd family and the startup funnel maintain this field; other
     /// movers (pushd/popd) do not, so readers must confirm it still
     /// names `cwd` before trusting it and fall back to the derived
-    /// value when it does not. `None` until a session funnel seeds it.
-    /// Like `cwd`, it rides the Clone fork boundary.
+    /// value when it does not. `None` until a session funnel seeds it,
+    /// and `None` again after a failed physical resolution poisons it
+    /// (rubash#3349: GNU builtins/cd.def:183-191 resetpwd frees
+    /// the_current_working_directory, leaving it NULL, so the next
+    /// logical face re-derives through the getcwd gate instead of
+    /// printing the stale value). Like `cwd`, it rides the Clone fork
+    /// boundary.
     pub(crate) logical_cwd: Option<String>,
     /// rubash#618/#616: element writes append one storage segment in O(1)
     /// instead of re-rendering every key, so the storage string accumulates
@@ -988,6 +993,18 @@ impl ShellState {
         // this process, and only a snapshot taken NOW lets the
         // restore put the parent's limits back (see the field docs).
         saved.fork_saved_process_rlimits = crate::builtins::ulimit::snapshot_process_rlimits();
+        // rubash#3387: the fork boundary also snapshots the process's
+        // raw rusage — the child face's `times` reads current minus
+        // this baseline (GNU's forked child starts near zero;
+        // builtins/times.def:65-84). Popped by restore_flat_subshell
+        // (or the direct-assignment restore in external_finish.rs)
+        // when the stack top is this boundary at the same depth;
+        // `saved` carries the entry depth, which is the depth the
+        // boundary was entered from.
+        crate::executor::read_helpers::push_times_baseline(
+            crate::executor::read_helpers::TimesBaselineKind::CloneBoundary,
+            saved.subshell_depth.get(),
+        );
         saved
     }
 

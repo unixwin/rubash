@@ -643,6 +643,10 @@ impl Executor {
                     .map(|current| indexed_array_entries(current))
                     .unwrap_or_default();
             }
+            // rubash#3659: the callback above received the raw record
+            // (GNU mapfile.def:195-203); the attribute conversion applies
+            // at the bind, like bind_array_element.
+            let record = self.convert_array_element_value(name, &record);
             let previous_max = entries.keys().next_back().copied();
             entries.insert(target, record.clone());
             self.bind_mapfile_element_live(name, &entries, target, &record, previous_max);
