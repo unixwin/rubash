@@ -4886,7 +4886,7 @@ impl Executor {
                 Ok(saved) => saved,
                 Err(error) => {
                     self.restore_numbered_heredoc_redirects(std::mem::take(&mut saved_fd_inputs));
-                    return Err(error);
+                    return Err(ExecuteError::IoError(error));
                 }
             };
             saved_fd_inputs.push((fd, saved));

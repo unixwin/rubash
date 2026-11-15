@@ -507,7 +507,7 @@ impl Executor {
                                         &bound_dynamic_fds,
                                         saved_dynamic_closes,
                                     );
-                                    return Err(error);
+                                    return Err(ExecuteError::IoError(error));
                                 }
                             }
                         }
