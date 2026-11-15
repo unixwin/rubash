@@ -827,6 +827,28 @@ impl Executor {
             };
             self.shell_state.env_vars.remove(name);
             self.shell_state.variables.remove(name);
+            // rubash#2771: GNU's merge_temporary_env pops the tempvar
+            // before its bind_variable replay (variables.c:4662), so the
+            // rebind runs with no temporary cell in scope — the dynamic
+            // assign hook then fires on the kept value. A kept command's
+            // tempenv frame is still live here (keep means no restore
+            // popped its mark), so the name's registration would still
+            // shadow the dynamic cell: dynamic_bind_targets_plain_cell
+            // stands the hook down and the replay would land a second
+            // plain cell (`SECONDS=100 :` under posix read back a static
+            // 100). Retire the tempvar's frame registration — and the
+            // frame's pre-bind snapshot, which no restore will consume —
+            // exactly the pop GNU performs.
+            if let Some(mark) = self.tempenv_marks.last().copied() {
+                let mut index = self.tempenv_names.len();
+                while index > mark {
+                    index -= 1;
+                    if self.tempenv_names[index] == name {
+                        self.tempenv_names.remove(index);
+                    }
+                }
+            }
+            self.tempenv_previous.remove(name);
             self.apply_shell_assignment(name, value, None);
         }
     }
