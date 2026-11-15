@@ -1643,15 +1643,14 @@ fn apply_globignore(
 }
 
 fn ignore_pattern_matches(pattern: &str, word: &str, extglob: bool, nocase: bool) -> bool {
-    if extglob && super::parameter_decode::pattern_uses_extglob_syntax(pattern) {
-        if nocase {
-            return super::conditional::extglob_case_pattern_matches_nocase(pattern, word);
-        }
-        return super::conditional::extglob_case_pattern_matches(pattern, word);
-    }
-    // Plain patterns go through the strmatch FNM_PATHNAME port below —
-    // the case-pattern engine lets `*` cross `/`, which would wrongly
-    // ignore `d/x/inner` under a GLOBIGNORE of `*/inner`.
+    // GNU pathexp.c:546 glob_name_is_acceptable(): every GLOBIGNORE
+    // pattern — plain or extglob — is matched by ONE strmatch call with
+    // FNM_PATHNAME|EXTFLAG|NOCASEGLOB. The case-pattern engine must not
+    // be used here: it has no FNM_PATHNAME, so `*` crosses `/` and an
+    // extglob alternative after a `*` can match `/` (rubash#2664:
+    // GLOBIGNORE `*@(/)cd/efg` wrongly ignored ab/cd/efg, and
+    // `*/inner` wrongly ignored `d/x/inner`). strmatch_pathname below
+    // is the FNM_PATHNAME port (extglob-aware when `extglob` is on).
     // rubash#1533: byte locale — ASCII-only fold and byte-unit staging
     // (see glob_vector_expand / case_pattern_matches_nocase).
     let byte_locale = !crate::locale::is_utf8();
@@ -1668,15 +1667,27 @@ fn ignore_pattern_matches(pattern: &str, word: &str, extglob: bool, nocase: bool
         } else {
             (pattern.to_lowercase(), word.to_lowercase())
         };
-        return strmatch_pathname(&stage(&pattern_lower), &stage(&word_lower));
+        return strmatch_pathname(&stage(&pattern_lower), &stage(&word_lower), extglob);
     }
-    strmatch_pathname(&stage(pattern), &stage(word))
+    strmatch_pathname(&stage(pattern), &stage(word), extglob)
 }
 
 /// Port of bash lib/glob GMATCH (sm_loop.c) under FNM_PATHNAME, as
 /// used by pathexp.c glob_name_is_acceptable() for GLOBIGNORE. The
 /// rules that differ from the case-pattern engine:
-/// - `?`, `[...]` and a `*` followed by more pattern never match `/`.
+/// - `?` never matches `/`, and a `*` followed by more pattern never
+///   advances past `/` (sm_loop.c: the star's retry positions stop
+///   before the next slash, so a following bracket or extglob group
+///   is never tried at the slash).
+/// - `[...]` CAN match `/` — but only as GNU BRACKMATCH does: while
+///   scanning members, a member followed by `/` voids the whole
+///   bracket (`[a/]`, `[c/d]` match nothing; `[/]`, `[/a]`, `[!a]`,
+///   `[.-0]` match `/`; a range matched before the slash, as in
+///   `[a-c/]`, still matches).
+/// - Extglob groups use the same FNM_PATHNAME rules (sm_loop.c
+///   EXTMATCH): an alternative may match a literal `/`
+///   (`@(ab/cd)`, `@(/)`), but a `*` before a group cannot carry the
+///   group across a slash (`*@(/)cd/efg` never matches `ab/cd/efg`).
 /// - A `*` that is the LAST pattern character matches the entire
 ///   remainder of the name, slashes included (sm_loop.c case '*':
 ///   `if (p == pe) return 0` before the collapse loop).
@@ -1687,12 +1698,34 @@ fn ignore_pattern_matches(pattern: &str, word: &str, extglob: bool, nocase: bool
 ///   the current character like any other run member.
 /// FNM_PERIOD/FNM_DOTDOT/FNM_LEADING_DIR are not in the
 /// glob_name_is_acceptable flag set and are not modeled.
-fn strmatch_pathname(pattern: &[char], name: &[char]) -> bool {
+fn strmatch_pathname(pattern: &[char], name: &[char], extglob: bool) -> bool {
     let mut p = pattern;
     let mut s = name;
     while let Some(&c) = p.first() {
         p = &p[1..];
         let sc = s.first().copied();
+        // Extglob group (sm_loop.c EXTMATCH entry): an op followed by
+        // `(`. Only when extglob is on — GLOBIGNORE patterns are
+        // literal otherwise (GNU keeps the shopt gate here). A
+        // malformed group falls through to the ordinary arms below.
+        if extglob && matches!(c, '*' | '?' | '+' | '@' | '!') && p.first() == Some(&'(') {
+            if let Some(end) = super::conditional::extglob_group_end(p, 0) {
+                let inner = &p[1..end];
+                let rest = &p[end + 1..];
+                let alts = super::conditional::extglob_split_alternatives(inner);
+                return match c {
+                    '@' => extglob_alt_then_rest_pathname(&alts, rest, s, extglob),
+                    '?' => {
+                        strmatch_pathname(rest, s, extglob)
+                            || extglob_alt_then_rest_pathname(&alts, rest, s, extglob)
+                    }
+                    '*' => extglob_star_pathname(&alts, rest, s, true, extglob),
+                    '+' => extglob_star_pathname(&alts, rest, s, false, extglob),
+                    '!' => extglob_negation_pathname(&alts, rest, s, extglob),
+                    _ => false,
+                };
+            }
+        }
         match c {
             '?' => match sc {
                 None | Some('/') => return false,
@@ -1715,7 +1748,10 @@ fn strmatch_pathname(pattern: &[char], name: &[char]) -> bool {
             '[' => match parse_bracket_match(p) {
                 Some(class) => {
                     match sc {
-                        None | Some('/') => return false,
+                        // No blanket `/` bar: GNU BRACKMATCH lets a
+                        // bracket match `/`; the FNM_PATHNAME slash
+                        // rule lives in bracket_class_matches.
+                        None => return false,
                         Some(ch) => {
                             if !bracket_class_matches(&class.body, ch) {
                                 return false;
@@ -1753,6 +1789,38 @@ fn strmatch_pathname(pattern: &[char], name: &[char]) -> bool {
                         // only if the remaining name has no `/`.
                         return !cur.contains(&'/');
                     };
+                    // GNU collapse-loop EXTMATCH arms (sm_loop.c:183
+                    // `?(` and :213 `*(`): a `?`/`*` run member
+                    // immediately followed by `(` is an extglob group,
+                    // not a wildcard. The slash check for the member
+                    // itself still runs first (a group op at a slash
+                    // fails the whole match: `a**(x)y` never matches
+                    // `a/bxy`).
+                    if extglob && (cc == '?' || cc == '*') && rest.get(1) == Some(&'(') {
+                        if let Some(end) = super::conditional::extglob_group_end(rest, 1) {
+                            if cur.first() == Some(&'/') {
+                                return false;
+                            }
+                            let inner = &rest[2..end];
+                            let after = &rest[end + 1..];
+                            let alts = super::conditional::extglob_split_alternatives(inner);
+                            if cc == '?' {
+                                if strmatch_pathname(after, cur, extglob)
+                                    || extglob_alt_then_rest_pathname(&alts, after, cur, extglob)
+                                {
+                                    return true;
+                                }
+                            } else if (0..=cur.len()).any(|k| {
+                                extglob_star_pathname(&alts, after, &cur[k..], true, extglob)
+                            }) {
+                                return true;
+                            }
+                            // Group did not match: skip it and keep
+                            // collapsing the run.
+                            rest = after;
+                            continue;
+                        }
+                    }
                     rest = &rest[1..];
                     next = cc;
                     if cc != '?' && cc != '*' {
@@ -1784,17 +1852,21 @@ fn strmatch_pathname(pattern: &[char], name: &[char]) -> bool {
                     if j >= cur.len() {
                         return false;
                     }
-                    return strmatch_pathname(rest, &cur[j + 1..]);
+                    return strmatch_pathname(rest, &cur[j + 1..], extglob);
                 }
                 // General case: the `*` spans a slash-free prefix of
                 // the current component; retry matching at `next`
-                // from each position in the component.
+                // from each position in the component. The bound is
+                // EXCLUSIVE (sm_loop.c `n < endp`): the slash position
+                // itself is never tried, so a following bracket or
+                // extglob group cannot match the slash — without this
+                // the bracket fix below would make `*[/]*/efg` match.
                 let comp_end = cur.iter().position(|&ch| ch == '/').unwrap_or(cur.len());
                 let mut retry: Vec<char> = Vec::with_capacity(rest.len() + 1);
                 retry.push(next);
                 retry.extend_from_slice(rest);
-                for k in 0..=comp_end {
-                    if strmatch_pathname(&retry, &cur[k..]) {
+                for k in 0..comp_end {
+                    if strmatch_pathname(&retry, &cur[k..], extglob) {
                         return true;
                     }
                 }
@@ -1809,6 +1881,66 @@ fn strmatch_pathname(pattern: &[char], name: &[char]) -> bool {
         }
     }
     s.is_empty()
+}
+
+/// Try each extglob alternative against a prefix of `s`, then match
+/// `rest` against the remainder (sm_loop.c EXTMATCH `@`/`?`).
+fn extglob_alt_then_rest_pathname(
+    alts: &[Vec<char>],
+    rest: &[char],
+    s: &[char],
+    extglob: bool,
+) -> bool {
+    for alt in alts {
+        for len in 0..=s.len() {
+            if strmatch_pathname(alt, &s[..len], extglob)
+                && strmatch_pathname(rest, &s[len..], extglob)
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Match zero or more (`allow_zero`, `*`) or one or more (`+`)
+/// occurrences of any alternative, then `rest` (sm_loop.c EXTMATCH
+/// `*`/`+`).
+fn extglob_star_pathname(
+    alts: &[Vec<char>],
+    rest: &[char],
+    s: &[char],
+    allow_zero: bool,
+    extglob: bool,
+) -> bool {
+    if allow_zero && strmatch_pathname(rest, s, extglob) {
+        return true;
+    }
+    for alt in alts {
+        for len in 1..=s.len() {
+            if strmatch_pathname(alt, &s[..len], extglob)
+                && extglob_star_pathname(alts, rest, &s[len..], true, extglob)
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Match `!` negation (sm_loop.c EXTMATCH `!`): some split of `s`
+/// where no alternative matches the prefix, and `rest` matches the
+/// remainder.
+fn extglob_negation_pathname(alts: &[Vec<char>], rest: &[char], s: &[char], extglob: bool) -> bool {
+    for split in 0..=s.len() {
+        let prefix_matches = alts
+            .iter()
+            .any(|alt| strmatch_pathname(alt, &s[..split], extglob));
+        if !prefix_matches && strmatch_pathname(rest, &s[split..], extglob) {
+            return true;
+        }
+    }
+    false
 }
 
 struct BracketMatch {
@@ -1851,55 +1983,70 @@ fn parse_bracket_match(pattern: &[char]) -> Option<BracketMatch> {
 /// Test one character against a bracket class body (the text between
 /// `[` and `]`, including any leading `!`/`^` negation and any POSIX
 /// `[:class:]` items).
+/// This is GNU BRACKMATCH (lib/glob/sm_loop.c)
+/// under FNM_PATHNAME, and its slash rule is NOT a blanket bar: members
+/// are tested in order and the scan returns on the first match, but it
+/// aborts (no match at all) as soon as a member is followed by `/`
+/// (sm_loop.c: `if ((flags & FNM_PATHNAME) && c == '/') return 0`).
+/// So `[/]`, `[/a]`, `[!a]` and `[.-0]` match `/`, a range matched
+/// before the slash still matches (`[a-c/]` matches `a`), and `[a/]`
+/// or `[c/d]` — a plain member followed by `/` — match nothing.
+/// A POSIX `[:class:]` is one opaque member (no slash check on the
+/// character after it); `[=...=]` / `[....]` constructs keep their
+/// historical literal-member treatment here.
 fn bracket_class_matches(class: &[char], ch: char) -> bool {
     let (negate, body) = match class.first() {
         Some('!') | Some('^') => (true, &class[1..]),
         _ => (false, class),
     };
     let mut i = 0;
-    let mut matched = false;
     while i < body.len() {
-        // POSIX character class [:alpha:] etc.
+        // POSIX character class [:alpha:] etc.: one opaque member.
         if body[i] == '[' && i + 1 < body.len() && body[i + 1] == ':' {
             if let Some(end) = (i + 2..body.len().saturating_sub(1))
                 .find(|&j| body[j] == ':' && body[j + 1] == ']')
             {
                 let name: String = body[i + 2..end].iter().collect();
                 if posix_class_matches(&name, ch) {
-                    matched = true;
+                    return !negate;
                 }
                 i = end + 2;
                 continue;
             }
         }
-        let lo = if body[i] == '\\' && i + 1 < body.len() {
-            i += 1;
-            body[i]
+        // One member character (possibly backslash-escaped).
+        let (lo, after_first) = if body[i] == '\\' && i + 1 < body.len() {
+            (body[i + 1], i + 2)
         } else {
-            body[i]
+            (body[i], i + 1)
         };
-        if i + 2 < body.len() && body[i + 1] == '-' && body[i + 2] != ']' {
-            let hi = if body[i + 2] == '\\' && i + 3 < body.len() {
-                body[i + 3]
+        // BRACKMATCH slash veto: the character after this member is `/`.
+        if after_first < body.len() && body[after_first] == '/' {
+            return false;
+        }
+        // Range member (a `-` that is not the last class character).
+        if after_first < body.len()
+            && body[after_first] == '-'
+            && after_first + 1 < body.len()
+            && body[after_first + 1] != ']'
+        {
+            let (hi, next_i) = if body[after_first + 1] == '\\' && after_first + 2 < body.len() {
+                (body[after_first + 2], after_first + 3)
             } else {
-                body[i + 2]
+                (body[after_first + 1], after_first + 2)
             };
             if lo <= ch && ch <= hi {
-                matched = true;
+                return !negate;
             }
-            i += if body[i + 2] == '\\' && i + 3 < body.len() {
-                4
-            } else {
-                3
-            };
+            i = next_i;
             continue;
         }
         if lo == ch {
-            matched = true;
+            return !negate;
         }
-        i += 1;
+        i = after_first;
     }
-    matched != negate
+    negate
 }
 
 fn posix_class_matches(name: &str, ch: char) -> bool {
