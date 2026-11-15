@@ -71,6 +71,9 @@ fn run_driver(tag: &str, driver: &str) -> (String, String, Option<i32>) {
     let (tx, rx) = mpsc::channel();
     let driver = driver.to_string();
     let tag = tag.to_string();
+    // The `move` closure below takes `tag`; keep a clone for the
+    // timeout message, otherwise E0382 (borrow of moved value).
+    let tag_for_timeout = tag.clone();
     std::thread::spawn(move || {
         let dir = std::env::temp_dir().join(format!("rubash-3728-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -94,7 +97,7 @@ fn run_driver(tag: &str, driver: &str) -> (String, String, Option<i32>) {
         ));
     });
     rx.recv_timeout(Duration::from_secs(30))
-        .unwrap_or_else(|_| panic!("{tag}: rubash run timed out"))
+        .unwrap_or_else(|_| panic!("{tag_for_timeout}: rubash run timed out"))
 }
 
 /// Run a driver that reads once from /dev/tcp: start the listener,
