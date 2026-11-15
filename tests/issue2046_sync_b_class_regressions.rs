@@ -15,14 +15,14 @@
 use std::process::Command;
 
 fn rubash() -> std::path::PathBuf {
-    let mut path = std::env::current_exe().expect("current exe");
-    path.pop();
-    path.pop();
-    path.push("rubash");
-    if cfg!(windows) {
-        path.set_extension("exe");
-    }
-    path
+    // `current_exe` is the test binary, and its directory is
+    // toolchain-layout-dependent (`deps/` on the classic build dir,
+    // `build/<pkg>/<fingerprint>/out/` on the newer cargo layout), so
+    // a fixed pop-pop walk cannot name the bin target. `CARGO_BIN_EXE`
+    // is the compile-time anchor cargo sets for integration tests of a
+    // package with a `rubash` bin — layout-independent on every
+    // toolchain (rubash#3605 CI).
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_rubash"))
 }
 
 struct Output {
