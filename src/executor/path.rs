@@ -641,13 +641,35 @@ pub fn find_user_command(name: &str, env_vars: &HashMap<String, String>) -> Opti
         // hash table survives PATH changes — consult the mirrored
         // hash-table entries first, even right after a fingerprint reset
         // (rubash#1137).
+        //
+        // The consult is phash_search itself (hashcmd.c:126): a stored
+        // relative spelling is re-validated against the cwd on every read
+        // and may answer NULL (a deleted `./name`), which sends the lookup
+        // on to the PATH walk with the entry kept (rubash#3359). The
+        // PATH-scan memo for the name is stale evidence then too.
         if let Some(result) = mirror.get(name).cloned() {
             if let Some(path) = &result {
-                if crate::builtins::shopt::checkhash_enabled() && !cached_path_still_valid(path) {
-                    mirror.remove(name);
-                    cache.results.remove(name);
-                } else {
-                    return Some(path.clone());
+                match crate::builtins::hash::phash_search_spelling(
+                    &path.to_string_lossy(),
+                    env_vars,
+                ) {
+                    None => {
+                        cache.results.remove(name);
+                    }
+                    Some(served) => {
+                        let served = PathBuf::from(served);
+                        if crate::builtins::shopt::checkhash_enabled()
+                            && !cached_path_still_valid(&anchor_at_session_cwd(
+                                served.clone(),
+                                env_vars,
+                            ))
+                        {
+                            mirror.remove(name);
+                            cache.results.remove(name);
+                        } else {
+                            return Some(served);
+                        }
+                    }
                 }
             } else {
                 return None;

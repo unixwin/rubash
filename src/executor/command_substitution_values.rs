@@ -1,7 +1,6 @@
 use super::command_registry::{comsub_front_slot, ComsubFrontSlot};
 use super::*;
 use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
-use std::io::Read;
 
 impl Executor {
     /// Expand one command-substitution argument word, applying pathname
