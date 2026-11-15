@@ -136,8 +136,13 @@ fn prolog_for_env(env_vars: &crate::shell::var_table::VarTable) -> Prolog {
     // the shell-name carrier VERBATIM as the interactive name —
     // a renamed shell invoked by path reported its full path —
     // and a hard-coded "rubash" as the error name, rubash#3256).
-    let script_file = env_vars.get("__RUBASH_SCRIPT_NAME").cloned();
+    // rubash#3048: the file arm prefers the FRAME file carrier
+    // (__RUBASH_CURRENT_FILE = BASH_SOURCE[0], the definition file
+    // inside a function) over the top-level SCRIPT_NAME —
+    // prefix::error_file_name, the same pairing
+    // Executor::current_error_file_name composes.
     let get = |key: &str| env_vars.get(key).cloned();
+    let script_file = crate::builtins::prefix::error_file_name(&get);
     Prolog {
         interactive: env_vars.get("__RUBASH_INTERACTIVE").is_some(),
         shell_basename: crate::builtins::prefix::shell_basename(&get),
