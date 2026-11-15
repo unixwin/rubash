@@ -729,6 +729,21 @@ impl Executor {
         // find the variable already set.
         if expression.contains("${") {
             self.apply_parameter_assignment_expansions_in_word(expression);
+            // rubash#2701 — same `:?`/bad-substitution fatal class as
+            // expand_word's `$((` arm (subst.c:10347/10414/10418 ->
+            // FORCE_EOF); the nounset latch carries it to the
+            // command-level abort.
+            if let Some((name, message, _)) =
+                self.parameter_expansion_error_in_word_isolated(expression)
+            {
+                if !self.shell_state.arithmetic_expansion_error.replace(true) {
+                    self.write_diagnostic_fd2(
+                        format!("{}{}: {}\n", self.error_prefix(), name, message).as_bytes(),
+                    );
+                }
+                self.shell_state.arithmetic_nounset_error.set(true);
+                return String::new();
+            }
         }
         let routed = self.route_current_shell_substitutions(expression);
         let expanded = self.expand_arithmetic_special_parameters(&routed);
@@ -749,6 +764,24 @@ impl Executor {
     /// walker's quote toggling disabled and the data carriers restored to
     /// the literal characters evalexp would see.
     pub(crate) fn expand_arithmetic_subscript_mut(&mut self, expression: &str) -> String {
+        // rubash#2701 — `arr[${x:?w}]`: the subscript's parameter
+        // expansion hits the same fatal class (subst.c:10347 case '?',
+        // 10414/10418) before evalexp ever runs; latch it like the
+        // `$((` arms.
+        if expression.contains("${") {
+            self.apply_parameter_assignment_expansions_in_word(expression);
+            if let Some((name, message, _)) =
+                self.parameter_expansion_error_in_word_isolated(expression)
+            {
+                if !self.shell_state.arithmetic_expansion_error.replace(true) {
+                    self.write_diagnostic_fd2(
+                        format!("{}{}: {}\n", self.error_prefix(), name, message).as_bytes(),
+                    );
+                }
+                self.shell_state.arithmetic_nounset_error.set(true);
+                return String::new();
+            }
+        }
         let routed = self.route_current_shell_substitutions(expression);
         // The same $#/$- special-parameter substitutions
         // expand_arithmetic_special_parameters performs.

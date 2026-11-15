@@ -1828,6 +1828,28 @@ impl Executor {
             }
             return self.parameter_expansion_error_in_word(word);
         }
+        // rubash#2701 — `${var/pat/repl}`: GNU expands the replacement
+        // word (parameter_brace_patsub -> expand_string on the repl text,
+        // subst.c:9408+ skip_to_delim split) whenever the variable is SET
+        // — even when the value is empty or the pattern never matches
+        // (WSL 5.3.20 probe: `v=""; ${v/b/${u:?m}}` still reports
+        // `u: m`). A nested `:?` inside it is fatal exactly like the
+        // `-`/`+`/`=` operator words above.
+        if let Some((var_name, tail)) = split_once_outside_subscript_str(inner, "/") {
+            if is_parameter_error_name(var_name) {
+                let tail = tail.strip_prefix('/').unwrap_or(tail);
+                let tail = tail.strip_prefix(['#', '%']).unwrap_or(tail);
+                if let Some((_, replacement)) = split_parameter_separator(tail) {
+                    if !replacement.is_empty()
+                        && self
+                            .scan_operator_value(var_name)
+                            .is_some_and(|value| value.is_some())
+                    {
+                        return self.parameter_expansion_error_in_word(replacement);
+                    }
+                }
+            }
+        }
         None
     }
 
