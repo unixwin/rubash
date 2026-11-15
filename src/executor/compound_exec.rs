@@ -603,6 +603,92 @@ fn dup_coproc_process_fd(fd: u32) -> std::io::Result<std::fs::File> {
     Ok(crate::fd::handle_to_file(dup))
 }
 
+/// rubash#3032: GNU subst.c expand_word_internal sets quoted_dollar_at
+/// (via chk_atstar, subst.c:7600) when a `$@` is expanded inside double
+/// quotes, and an otherwise-empty word carrying that flag is discarded
+/// (NULL) — `coproc "$@"` with no positional parameters reports
+/// `(null)`, while `coproc "$*"` keeps one empty word. Scan the raw NAME
+/// word tracking double-quote state: a `$@` / `${@` reached while inside
+/// `"..."` counts; single-quoted spans, `$'...'` spans, `$(...)` bodies
+/// (a nested expansion context) and backslash-escaped characters do not.
+/// `${...}` bodies are NOT skipped — a `$@` in a braced alternate is
+/// expanded in this word's own expansion, so it sets the flag too.
+fn raw_word_has_double_quoted_dollar_at(raw: &str) -> bool {
+    let chars: Vec<char> = raw.chars().collect();
+    let mut index = 0usize;
+    let mut in_double = false;
+    while index < chars.len() {
+        let ch = chars[index];
+        if in_double {
+            match ch {
+                '"' => in_double = false,
+                '\\' => index += 1,
+                '$' => {
+                    if chars.get(index + 1) == Some(&'@') {
+                        return true;
+                    }
+                    if chars.get(index + 1) == Some(&'{') && chars.get(index + 2) == Some(&'@') {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        } else {
+            match ch {
+                '"' => in_double = true,
+                '\'' => {
+                    // Single-quoted span: a `$@` inside it is literal text.
+                    index += 1;
+                    while index < chars.len() && chars[index] != '\'' {
+                        index += 1;
+                    }
+                }
+                '\\' => index += 1,
+                '$' if chars.get(index + 1) == Some(&'\'') => {
+                    // `$'...'` span: skip to the closing quote.
+                    index += 2;
+                    while index < chars.len() {
+                        if chars[index] == '\\' {
+                            index += 1;
+                        } else if chars[index] == '\'' {
+                            break;
+                        }
+                        index += 1;
+                    }
+                }
+                '$' if chars.get(index + 1) == Some(&'(') => {
+                    // `$(...)` body: skip the matched parens.
+                    let mut depth = 1usize;
+                    index += 2;
+                    while index < chars.len() && depth > 0 {
+                        match chars[index] {
+                            '(' => depth += 1,
+                            ')' => depth -= 1,
+                            '\\' => index += 1,
+                            _ => {}
+                        }
+                        index += 1;
+                    }
+                    continue;
+                }
+                '`' => {
+                    // Backquote span: skip to the closing backquote.
+                    index += 1;
+                    while index < chars.len() && chars[index] != '`' {
+                        if chars[index] == '\\' {
+                            index += 1;
+                        }
+                        index += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        index += 1;
+    }
+    false
+}
+
 /// rubash#1632 save-slot hand-back under the ordered redirect pass
 /// (rubash#1644): replacing the fd-1 spec must not drop the coproc
 /// pipe writer while the coproc lives — when the spec still holds
@@ -5283,34 +5369,78 @@ impl Executor {
             || super::support_names::is_reserved_word(word)
     }
 
+    /// rubash#3032: GNU subst.c expand_word_internal (finished_with_string)
+    /// decides whether an empty expansion yields a word or NULL: an empty
+    /// expansion is DISCARDED (NULL) when the word carried no quoting, and
+    /// a double-quoted `"$@"` anywhere in the word removes it too
+    /// (quoted_dollar_at — the single documented exception, for "$@" with
+    /// no positional parameters); any other quoted span keeps one empty
+    /// word. The raw NAME word carries the quoting (the cooked value has
+    /// quotes stripped), so the test runs on the name metadata's raw text.
+    fn coproc_name_expands_to_null(coproc_cmd: &crate::parser::CoprocCommand) -> bool {
+        let Some(raw) = coproc_cmd
+            .name_metadata
+            .as_ref()
+            .map(|metadata| metadata.raw.as_str())
+            .or_else(|| coproc_cmd.name.as_deref())
+        else {
+            return false;
+        };
+        if !crate::executor::command_prepare::raw_word_is_quoted(Some(raw)) {
+            return true;
+        }
+        raw_word_has_double_quoted_dollar_at(raw)
+    }
     pub(in crate::executor) fn execute_coproc_command(
         &mut self,
         cmd: &CommandNode,
         coproc_cmd: &crate::parser::CoprocCommand,
     ) -> Result<(), ExecuteError> {
-        let array_name = coproc_cmd
-            .name
-            .clone()
-            .unwrap_or_else(|| "COPROC".to_string());
-        // GNU execute_cmd.c execute_coproc validates an explicit NAME
-        // before anything is spawned: valid_identifier fails ->
-        // err_invalidid (`` `<name>': not a valid identifier ``) and
-        // EXECUTION_FAILURE, and no coprocess is created (rubash#1153:
-        // `coproc "" { echo hi; }` printed the same text but exited 0
-        // after spawning). The default COPROC name never takes this
-        // branch, and a nameref name is a valid identifier itself — its
-        // target is adjudicated at bind time below.
-        if let Some(name) = &coproc_cmd.name {
-            if !is_shell_name(name) {
-                eprintln!(
-                    "{}`{}': not a valid identifier",
-                    self.diagnostic_prefix(),
-                    name
-                );
-                self.exit_code = 1;
-                return Ok(());
+        // GNU execute_cmd.c:2508-2516 execute_coproc: the NAME word is
+        // expanded unsplit (expand_string_unsplit_to_string) BEFORE the
+        // identifier check, and the EXPANDED name is what binds below.
+        // An unset $namevar expands to NO word, so the expansion returns
+        // NULL (subst.c:3848-3865 expand_string_to_string_internal) and
+        // err_invalidid prints `(null)` (error.c:461, glibc %s of NULL)
+        // instead of the unexpanded `$namevar`. A quoted empty word
+        // ("" / "$namevar") keeps one empty word (subst.c
+        // expand_word_internal, finished_with_string: partially-quoted
+        // empty strings are retained), so it reports `''` — and the SET
+        // case binds the expanded name (`namevar=FOO; coproc $namevar`
+        // names the coproc FOO, like GNU). The default COPROC name never
+        // takes this branch, and a nameref name is a valid identifier
+        // itself — its target is adjudicated at bind time below.
+        let array_name = match &coproc_cmd.name {
+            None => "COPROC".to_string(),
+            Some(raw_name) => {
+                let expanded = self.expand_word_mut(raw_name);
+                // Strip the lexer's whole-word quote carriers so the
+                // emptiness/identifier tests see the plain text.
+                let expanded = expanded
+                    .strip_prefix(crate::executor::markers::STORAGE_WORD_PREFIX)
+                    .or_else(|| expanded.strip_prefix(crate::executor::markers::QUOTED_WORD_PREFIX))
+                    .unwrap_or(&expanded)
+                    .replace(crate::executor::markers::QUOTED_NULL_MARKER, "");
+                if expanded.is_empty() && Self::coproc_name_expands_to_null(coproc_cmd) {
+                    eprintln!(
+                        "{}`(null)': not a valid identifier",
+                        self.diagnostic_prefix()
+                    );
+                    self.exit_code = 1;
+                    return Ok(());
+                }
+                if !is_shell_name(&expanded) {
+                    eprintln!(
+                        "{}`{}': not a valid identifier",
+                        self.diagnostic_prefix(),
+                        expanded
+                    );
+                    self.exit_code = 1;
+                    return Ok(());
+                }
+                expanded
             }
-        }
+        };
         use std::process::{Command, Stdio};
         let exe = test_rubash_binary_from_env()
             .or_else(test_rubash_binary_from_current_exe)
