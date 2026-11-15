@@ -2564,6 +2564,14 @@ impl Executor {
             // array unassigned too (GNU validates every name before
             // the array store; see the post-scan validation comment).
             if !invalid_name {
+                // rubash#3659: convert each split word through the array's
+                // attributes before the store (GNU read.def:976
+                // assign_array_var_from_word_list -> make_variable_value,
+                // variables.c:2905).
+                let values: Vec<String> = values
+                    .into_iter()
+                    .map(|value| self.convert_array_element_value(&name, &value))
+                    .collect();
                 let value = read_array_storage(&values);
                 let _ = replace_typed_indexed_array(&mut self.shell_state.variables, &name, values);
                 self.shell_state.env_vars.insert(name.clone(), value);
