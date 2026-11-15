@@ -468,7 +468,17 @@ impl Executor {
             Some(pre) => alias_expanded.words != pre,
             None => false,
         };
-        if alias_expanded.words.is_empty() && !self.shell_state.arithmetic_expansion_error.get() {
+        // rubash#3019: the null-command path is only legitimate when the
+        // words vanished WITHOUT an expansion-error verdict — a `bad
+        // substitution`/`missing }` latch means expand_words failed
+        // (subst.c:10273-10288 -> expand_wdesc_error -> DISCARD), so the
+        // command must fall through to abort_on_expansion_errors and take
+        // status 1 instead of the null command's 0.
+        if alias_expanded.words.is_empty()
+            && !self.shell_state.arithmetic_expansion_error.get()
+            && !self.shell_state.parameter_bad_substitution.get()
+            && !self.no_closing_brace_failure.get()
+        {
             // GNU execute_simple_command (execute_cmd.c): a simple command
             // whose words all expand to nothing is still executed as a null
             // command - its redirections run and create/truncate their

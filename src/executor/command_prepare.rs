@@ -1885,16 +1885,29 @@ impl Executor {
                     }
                     _ => word.as_str(),
                 };
-                self.expand_command_word(cmd, index, word, raw)
-                    .into_iter()
-                    .map(move |word| {
-                        let word = if arrayref_marked {
-                            format!("{}{word}", crate::builtins::arrayref::ARRAYREF_FLAG)
-                        } else {
-                            word
-                        };
-                        (word, suppress_glob)
-                    })
+                // rubash#3019 — GNU subst.c:4288-4296
+                // call_expand_word_internal: the FIRST word-expansion
+                // error sentinel (bad substitution / no closing brace)
+                // unwinds the command via exp_jump_to_top_level(DISCARD)
+                // — no later word of the command is expanded, so a second
+                // bad substitution can never raise its diagnostic
+                // (`${(aO)foo} ${(s/x/)foo}` reports only the first).
+                if self.shell_state.parameter_bad_substitution.get()
+                    || self.no_closing_brace_failure.get()
+                {
+                    Vec::new()
+                } else {
+                    self.expand_command_word(cmd, index, word, raw)
+                }
+                .into_iter()
+                .map(move |word| {
+                    let word = if arrayref_marked {
+                        format!("{}{word}", crate::builtins::arrayref::ARRAYREF_FLAG)
+                    } else {
+                        word
+                    };
+                    (word, suppress_glob)
+                })
             })
             .collect::<Vec<_>>();
         drop(_declare_assoc_guard);
