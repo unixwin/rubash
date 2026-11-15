@@ -620,6 +620,29 @@ impl Executor {
         eval_conditional_arith_value(value, &self.shell_state.env_vars).unwrap_or(0)
     }
 
+    /// GNU `make_variable_value` (variables.c:2905) for one array-element
+    /// store, shared by `mapfile` (both drivers) and `read -a` (rubash#3659):
+    /// an integer array's element is evaluated arithmetically first
+    /// (`evalexp`, empty/non-numeric -> 0), then the case attributes fold
+    /// it — the same two steps the direct element assignment path
+    /// (array_assignment_exec.rs) applies inline. The case step after an
+    /// integer eval is a no-op on `itos` output, so this matches GNU's
+    /// if/else-if chain observably. A mapfile -C callback still receives
+    /// the raw record; conversion happens only at the bind.
+    pub(in crate::executor) fn convert_array_element_value(
+        &self,
+        name: &str,
+        value: &str,
+    ) -> String {
+        let attrs = self.shell_state.env_vars.attr_of(name);
+        let value = if attrs.integer {
+            self.eval_integer_assignment_value(value).to_string()
+        } else {
+            value.to_string()
+        };
+        self.apply_case_assignment_attributes(name, value)
+    }
+
     pub(in crate::executor) fn mark_exported(&mut self, name: &str) {
         // VarTable keeps the structured att_exported bit and the serialized
         // EXPORTED_VARS list in sync in one call (variables.h:124-133).
