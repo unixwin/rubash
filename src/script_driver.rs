@@ -5433,7 +5433,11 @@ pub fn initialize_interactive_history(executor: &mut Executor) {
         // the same read-time HISTTIMEFORMAT state as `history -r` — it
         // arms the comment char (variables.c:6168 sv_histtimefmt) and
         // gates multi-line regrouping (histfile.c:384, rubash#3393).
-        let _ = shell.load_file_with_arming(&path.to_string_lossy(), histsize, write_ts);
+        // The comment-char arming is sticky (rubash#3535): include the
+        // latch a previous session segment may have set.
+        let comment_armed = executor.shell_state.history_comment_char_armed || write_ts;
+        let _ =
+            shell.load_file_with_arming(&path.to_string_lossy(), histsize, write_ts, comment_armed);
     }
 }
 

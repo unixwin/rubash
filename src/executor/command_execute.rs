@@ -30,6 +30,17 @@ impl Executor {
         // undo_redirections would close them.
         let varredir_close_base = self.deferred_varredir_closes.len();
         let result = self.execute_command_with_procsub_scope(cmd, procsub_fd_base);
+        // variables.c:6168-6177 sv_histtimefmt: a bind that leaves
+        // HISTTIMEFORMAT existing arms readline's history_comment_char
+        // ('#'), and no later unbind disarms it. GNU runs sv_histtimefmt
+        // at bind time; this funnel is the engine's per-command
+        // boundary, so a HISTTIMEFORMAT that exists as a command
+        // completes latches the sticky arming here (rubash#3535).
+        // Prefix (temporary) binds restore the variable before this
+        // boundary, so apply_temporary_assignments latches them itself.
+        if self.get_env("HISTTIMEFORMAT").is_some() {
+            self.shell_state.history_comment_char_armed = true;
+        }
         self.close_command_scoped_procsub_input_fds_from(procsub_fd_base);
         self.drain_deferred_varredir_closes(varredir_close_base);
         // rubash#3107: the dynamic associative variables' owner tables

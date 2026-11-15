@@ -186,6 +186,19 @@ impl Executor {
         // the previous shell variable values (both the legacy env_vars value
         // and the typed shell_state.variables owner, so parameter expansion
         // does not keep seeing a leaked temporary value).
+        // variables.c:6168-6177 sv_histtimefmt: a temporary (prefix)
+        // bind of HISTTIMEFORMAT is still a bind — GNU arms
+        // history_comment_char while the variable exists and never
+        // disarms it, so the arming must latch NOW, before
+        // restore_temporary_assignments removes the variable and the
+        // per-command boundary in execute_command can no longer see
+        // that it ever existed (rubash#3535).
+        if assignments
+            .iter()
+            .any(|(name, _)| assignment_name_and_append(name).0 == "HISTTIMEFORMAT")
+        {
+            self.shell_state.history_comment_char_armed = true;
+        }
         self.tempenv_marks.push(self.tempenv_names.len());
         // rubash#3071: the bound-value frame for this apply, popped by
         // restore_temporary_assignments in lockstep with the mark. The
