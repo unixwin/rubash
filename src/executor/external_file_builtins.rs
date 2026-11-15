@@ -4946,6 +4946,48 @@ impl CpNode {
             }
         }
     }
+
+    /// rubash#3448: the fallible twin of `set_mode_bits` — chmod's
+    /// apply arm needs the failure, not a swallowed one. Under a
+    /// dead cwd the node's stat succeeds through the anchor while
+    /// the joined string path dies ENOENT at the dead component,
+    /// so the apply must go through the node (fchmodat for an At
+    /// node, std::fs::set_permissions for a Plain node) and the
+    /// caller renders the raw errno — the fts verdict GNU reports
+    /// (coreutils 9.4 src/chmod.c:231).
+    #[cfg(unix)]
+    pub(in crate::executor) fn set_mode_bits_checked(&self, mode: u32) -> io::Result<()> {
+        match &self.root {
+            CpRoot::Plain(_) => {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(self.eff_path(), fs::Permissions::from_mode(mode & 0o7777))
+            }
+            CpRoot::At { dir, .. } => {
+                use std::os::unix::io::AsRawFd;
+                let rel = self.at_rel();
+                let c_rel =
+                    std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(rel.as_os_str()))
+                        .map_err(|_| {
+                            io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte")
+                        })?;
+                // SAFETY: see cp_fstatat; fchmodat takes no
+                // descriptor. Flags 0 follows links, as chmod
+                // does.
+                let rc = unsafe {
+                    libc::fchmodat(
+                        dir.as_raw_fd(),
+                        c_rel.as_ptr(),
+                        (mode & 0o7777) as libc::mode_t,
+                        0,
+                    )
+                };
+                if rc != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 /// Copy one regular file, honoring --preserve=links: a source inode
@@ -5859,29 +5901,28 @@ impl Executor {
                         // is the single source of truth on unix; the readonly
                         // attribute + emulated store below is the Windows
                         // port (no POSIX mode bits there).
+                        //
+                        // rubash#3448: the apply itself must go through
+                        // the node, not the joined string path: under a
+                        // dead cwd the node's stat succeeds through the
+                        // anchor while `metadata(&host)` /
+                        // `set_permissions(&host)` die ENOENT on the
+                        // dead component, so the mode never landed even
+                        // though the classification was right. fchmodat
+                        // against the anchor is the walk GNU's forked
+                        // child gets.
                         match classified {
-                            Ok(_) => match std::fs::metadata(&host) {
-                                Ok(metadata) => {
-                                    use std::os::unix::fs::PermissionsExt;
-                                    let mut permissions = metadata.permissions();
-                                    permissions.set_mode(new_mode);
-                                    if std::fs::set_permissions(&host, permissions).is_err() {
-                                        failures += 1;
-                                    }
-                                }
-                                Err(raw) => {
-                                    // The node stat just succeeded
-                                    // (anchor face or a race): keep
-                                    // the raw verdict, unclassified.
+                            Ok(_) => {
+                                if let Err(error) = node.set_mode_bits_checked(new_mode) {
                                     failures += 1;
                                     writeln!(
                                         stderr,
                                         "chmod: cannot access '{}': {}",
                                         file,
-                                        crate::posix_errors::message(&raw)
+                                        crate::posix_errors::message(&error)
                                     )?;
                                 }
-                            },
+                            }
                             Err(error) => {
                                 failures += 1;
                                 writeln!(
