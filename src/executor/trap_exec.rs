@@ -1762,12 +1762,27 @@ impl Executor {
         // out of the cache cell, re-stamped and executed, then put back —
         // no clone on the per-firing path.
         let action = self.comsub_body_alias_splice(action);
+        // rubash#3327: GNU _run_trap_internal (trap.c:1196-1198) does NOT
+        // set SEVAL_RESETLINE for the DEBUG trap — the action parses at
+        // the caller's current line, so a syntax error reports the
+        // firing line, not action-relative line 1. Tokenize at the
+        // firing line (the cached AST's recorded base is that line, so
+        // a later firing's rebase stays exact); the EOF error's line
+        // is last-token-line + 1 (parse_loop.rs eof_line_extra), which
+        // lands one past the firing line, as GNU reports it.
+        let start_line = call_line.unwrap_or(1);
+        let old_trap_context = self.shell_state.env_vars.insert(
+            "__RUBASH_TRAP_CONTEXT".to_string(),
+            "debug trap".to_string(),
+        );
         let (mut ast, ast_base) = {
             let taken = self.debug_trap_action_cache.borrow_mut().take();
             match taken {
                 Some((key, cached_ast, base)) if key == action => (cached_ast, base),
                 _ => {
-                    let tokens = crate::lexer::tokenize(&action);
+                    let tokens = crate::lexer::tokenize_with_initial_posix_and_line(
+                        &action, false, start_line,
+                    );
                     // rubash#3328: thread the spliced action as the
                     // diagnostic source (same shape as the EXIT-trap
                     // site): the bare parse() re-serialized the echo line.
@@ -1778,7 +1793,7 @@ impl Executor {
                             ..Default::default()
                         },
                     );
-                    (ast, 1)
+                    (ast, start_line as i64)
                 }
             }
         };
@@ -1813,7 +1828,30 @@ impl Executor {
             *self.shell_state.debug_trap_command.borrow_mut() = None;
         }
         self.debug_trap_running = false;
-        result?;
+        match old_trap_context {
+            Some(value) => {
+                self.shell_state
+                    .env_vars
+                    .insert("__RUBASH_TRAP_CONTEXT".to_string(), value);
+            }
+            None => {
+                self.shell_state.env_vars.remove("__RUBASH_TRAP_CONTEXT");
+            }
+        }
+        // rubash#3327: a parse failure of the action is contained, like
+        // the EXIT runner's — its diagnostics stand, but the pending
+        // status is not replaced and the script continues (GNU
+        // parse_and_execute's own status is discarded). A parse error
+        // that exit_shell(2)ed under live errexit keeps propagating,
+        // marked (parser_error_errexited, same as the signal/exit
+        // runners).
+        let parse_error_raised = self.take_parse_error();
+        let parser_error_errexited = self.parser_error_errexited.take();
+        if parse_error_raised && !parser_error_errexited {
+            self.exit_code = saved_exit_code;
+        } else {
+            result?;
+        }
         let trap_status = self.exit_code;
         self.exit_code = saved_exit_code;
         let extdebug =
@@ -1852,34 +1890,41 @@ impl Executor {
             &mut self.trap_saved_exit_context,
             self.shell_state.function_depth + self.source_nest_depth,
         );
-        let tokens = crate::lexer::tokenize(&action);
+        // GNU trap.c:_run_trap_internal:1196 only sets SEVAL_RESETLINE for
+        // ordinary signal traps; the RETURN trap keeps the caller's current
+        // line_number, so $LINENO inside the action (and the DEBUG fire for
+        // the trap command itself, execute_simple_command:4506) reports the
+        // caller's line. Tokenize the action at that line (rubash#3327),
+        // which anchors both the node lines and the parse diagnostics —
+        // the post-parse rebase the old code did here is subsumed.
+        // Mirror the EXIT runner's __RUBASH_TRAP_CONTEXT marker with the
+        // return trap's own name for the duration of the re-parse and
+        // execution (trap.c:1340 passes "return trap").
+        let call_line = self
+            .shell_state
+            .env_vars
+            .get("__RUBASH_CURRENT_LINE")
+            .and_then(|line| line.parse::<usize>().ok());
+        let old_trap_context = self.shell_state.env_vars.insert(
+            "__RUBASH_TRAP_CONTEXT".to_string(),
+            "return trap".to_string(),
+        );
+        let tokens = crate::lexer::tokenize_with_initial_posix_and_line(
+            &action,
+            false,
+            call_line.unwrap_or(1),
+        );
         // rubash#3328: thread the action as the diagnostic source
         // (same shape as the EXIT-trap site): GNU _run_trap_internal
         // parses the action string as fresh input, so the echo line
         // is the action's own line verbatim, not a token-join rebuild.
-        let mut ast = crate::parser::parse_with_options(
+        let ast = crate::parser::parse_with_options(
             &tokens,
             crate::parser::ParseLoopOptions {
                 source_text: Some(action.into()),
                 ..Default::default()
             },
         );
-        // GNU trap.c:_run_trap_internal:1196 only sets SEVAL_RESETLINE for
-        // ordinary signal traps; the RETURN trap keeps the caller's current
-        // line_number, so $LINENO inside the action (and the DEBUG fire for
-        // the trap command itself, execute_simple_command:4506) reports the
-        // caller's line. Stamp the parsed action with that line, mirroring
-        // run_debug_trap above.
-        let call_line = self
-            .shell_state
-            .env_vars
-            .get("__RUBASH_CURRENT_LINE")
-            .and_then(|line| line.parse::<usize>().ok());
-        if let Some(call_line) = call_line {
-            // rubash#1166: rebase, don't just stamp the top level (see
-            // shift_trap_action_lines).
-            shift_trap_action_lines(&mut ast.commands, call_line as i64 - 1);
-        }
         // rubash#1165: the function's return status is fixed BEFORE the
         // RETURN trap runs (execute_cmd.c's return_catch value becomes
         // last_command_exit_value; trap.c _run_trap_internal saves and
@@ -1905,6 +1950,27 @@ impl Executor {
         self.trap_saved_exit_value = prev_saved_exit;
         self.trap_saved_exit_context = prev_saved_context;
         self.return_trap_running = false;
+        match old_trap_context {
+            Some(value) => {
+                self.shell_state
+                    .env_vars
+                    .insert("__RUBASH_TRAP_CONTEXT".to_string(), value);
+            }
+            None => {
+                self.shell_state.env_vars.remove("__RUBASH_TRAP_CONTEXT");
+            }
+        }
+        // rubash#3327: a parse failure of the action is contained, like
+        // the EXIT runner's — its diagnostics stand, the pending return
+        // status is not replaced, and the script continues. A parse error
+        // that exit_shell(2)ed under live errexit keeps propagating,
+        // marked (parser_error_errexited).
+        let parse_error_raised = self.take_parse_error();
+        let parser_error_errexited = self.parser_error_errexited.take();
+        if parse_error_raised && !parser_error_errexited {
+            self.exit_code = saved_exit;
+            return Ok(());
+        }
         if result.is_ok() {
             self.exit_code = saved_exit;
         }
@@ -3216,27 +3282,48 @@ impl Executor {
             .or_else(|| self.err_trap_line.get())
             .or(command.line);
         let action = self.comsub_body_alias_splice(&action);
-        let tokens = crate::lexer::tokenize(&action);
+        // rubash#3327: GNU _run_trap_internal (trap.c:1196-1198) does NOT
+        // set SEVAL_RESETLINE for the ERR trap — the action parses at the
+        // failed command's line, so a syntax error reports that line, not
+        // action-relative line 1. Tokenize at the failed line (the
+        // post-parse rebase the old code did here is subsumed: the
+        // tokens already carry the right lines). Mirror the EXIT
+        // runner's __RUBASH_TRAP_CONTEXT marker with the error trap's
+        // own name for the duration of the re-parse and execution
+        // (trap.c:1324 passes "error trap").
+        let old_trap_context = self.shell_state.env_vars.insert(
+            "__RUBASH_TRAP_CONTEXT".to_string(),
+            "error trap".to_string(),
+        );
+        let tokens = crate::lexer::tokenize_with_initial_posix_and_line(
+            &action,
+            false,
+            failed_line.unwrap_or(1),
+        );
         // rubash#3328: thread the spliced action as the diagnostic
         // source (same shape as the EXIT-trap site): the bare parse()
         // re-serialized the echo line.
-        let mut ast = crate::parser::parse_with_options(
+        let ast = crate::parser::parse_with_options(
             &tokens,
             crate::parser::ParseLoopOptions {
                 source_text: Some(action.as_str().into()),
                 ..Default::default()
             },
         );
-        if let Some(line) = failed_line {
-            // rubash#1166: rebase the whole action onto the failed
-            // command's line, nested nodes included (see
-            // shift_trap_action_lines).
-            shift_trap_action_lines(&mut ast.commands, line as i64 - 1);
-        }
         let saved_alias_streamed = self.mark_alias_streamed();
         let result = self.with_xtrace_indirection(|executor| executor.execute_ast(&ast));
         self.resume_alias_streamed(saved_alias_streamed);
         *self.shell_state.debug_trap_command.borrow_mut() = saved_trap_command;
+        match old_trap_context {
+            Some(value) => {
+                self.shell_state
+                    .env_vars
+                    .insert("__RUBASH_TRAP_CONTEXT".to_string(), value);
+            }
+            None => {
+                self.shell_state.env_vars.remove("__RUBASH_TRAP_CONTEXT");
+            }
+        }
         self.error_trap_running = false;
         self.trap_saved_exit_value = prev_saved_exit;
         self.trap_saved_exit_context = prev_saved_context;
@@ -3275,6 +3362,19 @@ impl Executor {
             Err(ExecuteError::Break(_)) | Err(ExecuteError::Continue(_))
         );
         self.exit_code = saved_exit;
+        // rubash#3327: a parse failure of the action is contained, like
+        // the EXIT runner's — its diagnostics stand, the failing
+        // command's status is not replaced, and the script continues.
+        // The parse-error arm precedes the unwind arms (same order as
+        // the EXIT runner's match): GNU never executes an action that
+        // failed to parse, so no unwind from it is live. A parse error
+        // that exit_shell(2)ed under live errexit keeps propagating,
+        // marked (parser_error_errexited).
+        let parse_error_raised = self.take_parse_error();
+        let parser_error_errexited = self.parser_error_errexited.take();
+        if parse_error_raised && !parser_error_errexited {
+            return Ok(());
+        }
         if exit_unwind || return_unwind || loop_unwind {
             // For Break/Continue from the trap, preserve the failing
             // command's status (saved_exit) as the loop's exit status.
