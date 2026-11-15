@@ -119,3 +119,55 @@ fn named_reference_materializes_groups_and_bash_argv0_into_later_listings() {
     assert_eq!(lines.next(), Some("BASH_ARGV0=chain.sh"));
     assert_eq!(lines.next(), None);
 }
+
+/// Chain, declaration form: a by-name reference materializes the
+/// cell for the `declare -p` (no-operand) listing too, not only for
+/// the assignment form — GNU's show_var_attributes renders the
+/// bound cell once a read has stored into it
+/// (builtins/setattr.def:510-511), and the bare name before that.
+#[test]
+fn declare_p_listing_shows_materialized_values_after_named_read() {
+    let (stdout, stderr, rc) = run_driver(
+        "declarep",
+        &[(
+            "d1.sh",
+            "declare -p GROUPS\ndeclare -p BASH_ARGV0\ndeclare -p | grep ^'declare -a GROUPS='\ndeclare -p | grep ^'declare -- BASH_ARGV0='\n",
+        )],
+        "d1.sh",
+    );
+    assert_eq!(rc, Some(0));
+    assert_eq!(stderr, "");
+    let mut lines = stdout.lines();
+    let decl = lines.next().unwrap_or_default();
+    assert!(
+        decl.starts_with("declare -a GROUPS=([0]=") && decl.ends_with(')'),
+        "declare -p GROUPS should print an array with a [0] element, got {decl:?}"
+    );
+    assert_eq!(lines.next(), Some("declare -- BASH_ARGV0=\"d1.sh\""));
+    let listed_groups = lines.next().unwrap_or_default();
+    assert!(
+        listed_groups.starts_with("declare -a GROUPS=([0]=") && listed_groups.ends_with(')'),
+        "declare -p listing should show the materialized GROUPS array, got {listed_groups:?}"
+    );
+    assert_eq!(lines.next(), Some("declare -- BASH_ARGV0=\"d1.sh\""));
+    assert_eq!(lines.next(), None);
+}
+
+/// Chain, expansion read: `$BASH_ARGV0` is a by-name reference
+/// (find_variable fires get_bash_argv0, variables.c:1175-1189), so
+/// it materializes the cell exactly like `declare -p` does — a
+/// later listing shows the bound value.
+#[test]
+fn expansion_read_materializes_bash_argv0_into_later_listings() {
+    let (stdout, stderr, rc) = run_driver(
+        "expansion",
+        &[(
+            "exp.sh",
+            "echo \"seen:$BASH_ARGV0\"\ntypeset | grep ^BASH_ARGV0=\n",
+        )],
+        "exp.sh",
+    );
+    assert_eq!(rc, Some(0));
+    assert_eq!(stderr, "");
+    assert_eq!(stdout, "seen:exp.sh\nBASH_ARGV0=exp.sh\n");
+}

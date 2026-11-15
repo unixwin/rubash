@@ -325,8 +325,14 @@ impl Executor {
     /// cached value, not a fresh computation (rubash#2973). Record
     /// the materialization for the getter-backed scalar cells; the
     /// live-maintained faces (PIPESTATUS, the stack arrays, the
-    /// option strings, the table-backed BASH_ARGV0) keep their own
-    /// storage and are not cached here.
+    /// option strings) keep their own storage and are not cached
+    /// here. BASH_ARGV0 is cached too: its live $0 carrier lives in
+    /// the table (set at startup, variables.c:1552 set_argv0), but
+    /// the table value is NOT the listing cell — the cell is NULL
+    /// until a by-name read binds it (variables.c:1850
+    /// INIT_DYNAMIC_VAR with a NULL value cell), so the cached value
+    /// here IS the cell listings render, and its mere presence is
+    /// the materialization record (rubash#3026).
     pub(in crate::executor) fn dynamic_parameter_value(&self, name: &str) -> Option<String> {
         let value = self.dynamic_parameter_value_live(name)?;
         match name {
@@ -338,7 +344,8 @@ impl Executor {
                 cells.integer_earned.insert(name.to_string());
             }
             "EPOCHSECONDS" | "EPOCHREALTIME" | "BASH_MONOSECONDS" | "RANDOM" | "SRANDOM"
-            | "BASHPID" | "BASH_SUBSHELL" | "HISTCMD" | "LINENO" | "BASH_COMMAND" => {
+            | "BASHPID" | "BASH_SUBSHELL" | "HISTCMD" | "LINENO" | "BASH_COMMAND"
+            | "BASH_ARGV0" => {
                 self.shell_state
                     .dynamic_cells
                     .borrow_mut()
@@ -754,7 +761,35 @@ impl Executor {
             views.push(crate::builtins::set::DynamicSetView {
                 name: name.to_string(),
                 storage: format_indexed_array_values(values),
+                scalar: false,
             });
+        }
+        // rubash#3026: BASH_ARGV0's listing cell is the value a
+        // by-name read cached (variables.c:1850 INIT_DYNAMIC_VAR
+        // with a NULL value cell; the table holds the live $0
+        // carrier, not the cell). Supply the scalar cell here once
+        // materialized so the assignment form renders it; while the
+        // cell is unmaterialized there is no supply and the
+        // att_invisible table entry stays out of the listing, exactly
+        // like GNU's print_assignment skipping the unset cell
+        // (variables.c:1096-1104).
+        if !is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, "BASH_ARGV0")
+            && !self.dynamic_name_shadowed("BASH_ARGV0")
+        {
+            let cell = self
+                .shell_state
+                .dynamic_cells
+                .borrow()
+                .values
+                .get("BASH_ARGV0")
+                .cloned();
+            if let Some(cell) = cell {
+                views.push(crate::builtins::set::DynamicSetView {
+                    name: "BASH_ARGV0".to_string(),
+                    storage: cell,
+                    scalar: true,
+                });
+            }
         }
         // rubash#2770: FUNCNAME is invisible (and empty) at depth 0,
         // so the assignment form shows no line there — only a live,
@@ -772,6 +807,7 @@ impl Executor {
                 views.push(crate::builtins::set::DynamicSetView {
                     name: "FUNCNAME".to_string(),
                     storage: format_indexed_array_values(values),
+                    scalar: false,
                 });
             }
         }
@@ -790,6 +826,7 @@ impl Executor {
                         .map(|(_, status)| status.to_string())
                         .collect(),
                 ),
+                scalar: false,
             });
         }
         views
@@ -882,6 +919,12 @@ impl Executor {
                 | "HISTCMD"
                 | "LINENO"
                 | "BASH_COMMAND"
+                // rubash#3026: BASH_ARGV0's cell is the cached value a
+                // by-name read stored (variables.c:1850); the provider
+                // arm below renders it valued once materialized and
+                // bare while the cell is still NULL, matching GNU's
+                // show_var_attributes (builtins/setattr.def:510-511).
+                | "BASH_ARGV0"
         ) {
             return None;
         }
@@ -1100,7 +1143,15 @@ impl Executor {
                 Some(format!("declare -i{readonly}{exported} {name}={quoted}"))
             }
             "GROUPS" => {
-                let elements = groups_words()
+                // A by-name read regenerates the cell (variables.c:1637
+                // get_groupset runs from find_variable_internal), so
+                // the read goes through the method, whose materialized
+                // flag makes later listings render the elements instead
+                // of the empty fresh cell (rubash#3026). The free
+                // function below would render the same elements without
+                // recording the regeneration.
+                let elements = self
+                    .groups_words()
                     .iter()
                     .enumerate()
                     .map(|(index, group)| format!("[{index}]={}", sh_double_quote_text(group)))

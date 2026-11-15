@@ -431,6 +431,13 @@ where
 pub(crate) struct DynamicSetView {
     pub name: String,
     pub storage: String,
+    /// Scalar-cell supply (rubash#3026): when true, `storage` holds a
+    /// scalar cell value rendered as `NAME=value` through the scalar
+    /// quoting path. When false, `storage` holds the indexed-array
+    /// storage form rendered through `format_array_for_output`.
+    /// Array-valued entries are the historical shape; only a scalar
+    /// dynamic cell (BASH_ARGV0) sets this.
+    pub scalar: bool,
 }
 
 /// GNU `set` with no arguments: print_var_list (variables.c) — assignment
@@ -446,9 +453,9 @@ pub(crate) fn print_shell_variables<W>(
 where
     W: Write,
 {
-    let entry_storage: std::collections::HashMap<&str, &str> = dynamic
+    let entry_storage: std::collections::HashMap<&str, (&str, bool)> = dynamic
         .iter()
-        .map(|entry| (entry.name.as_str(), entry.storage.as_str()))
+        .map(|entry| (entry.name.as_str(), (entry.storage.as_str(), entry.scalar)))
         .collect();
     // rubash#2702 (owner decision D7): the injected THIS_SH spelling
     // (the running executable's own path) is an internal face, not a
@@ -489,8 +496,13 @@ where
         // GNU att_invisible (variables.c print_var_list skips
         // invisible_p): COMP_WORDBREAKS is bound invisible at startup, so
         // `set` never lists it even though the variable exists
-        // (rubash#1325).
-        if unset::is_marked_variable(env_vars, INVISIBLE_VARS, name) {
+        // (rubash#1325). A name the executor explicitly supplies in the
+        // dynamic listing (rubash#3026: a materialized BASH_ARGV0 cell)
+        // is listing-visible by construction — the supply asserts the
+        // cell exists — so the invisible skip exempts supplied names.
+        if unset::is_marked_variable(env_vars, INVISIBLE_VARS, name)
+            && !entry_storage.contains_key(name)
+        {
             continue;
         }
         // GNU variables.c:511-526 (initialize_shell_variables): environment
@@ -540,16 +552,22 @@ where
             continue;
         }
         // A dynamic registry entry supersedes the mirror cell: the
-        // composition is the live value (rubash#2700). The visible
-        // registry class is array-valued, so it renders through the
-        // same array_to_assign form as an array cell.
-        if let Some(storage) = entry_storage.get(name) {
-            writeln!(
-                stdout,
-                "{}={}",
-                name,
-                crate::builtins::declare::format_array_for_output(storage)
-            )?;
+        // composition is the live value (rubash#2700). Array-valued
+        // entries render through the same array_to_assign form as an
+        // array cell; a scalar entry (rubash#3026: the materialized
+        // BASH_ARGV0 cell) renders through the scalar print_var_value
+        // path, like a table scalar below.
+        if let Some((storage, scalar)) = entry_storage.get(name) {
+            if *scalar {
+                writeln!(stdout, "{}={}", name, shell_quote(storage, posix_mode))?;
+            } else {
+                writeln!(
+                    stdout,
+                    "{}={}",
+                    name,
+                    crate::builtins::declare::format_array_for_output(storage)
+                )?;
+            }
             continue;
         }
         let Some(value) = value else {
