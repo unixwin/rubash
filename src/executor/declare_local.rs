@@ -1782,10 +1782,13 @@ impl Executor {
                                 "BASH_MONOSECONDS",
                                 "LINENO",
                                 "BASH_SUBSHELL",
-                                // BASH_ARGV0 is a table cell (an
-                                // att_invisible one, rendered by the
-                                // builtin's invisible rule); it has no
-                                // dynamic view (rubash#2973).
+                                // BASH_ARGV0's table cell is only
+                                // valueless — never att_invisible in
+                                // GNU — so it joins the registry once
+                                // a by-name read stores into it; the
+                                // cell view answers None before that
+                                // (rubash#3026).
+                                "BASH_ARGV0",
                                 "BASH_COMMAND",
                             ] {
                                 push_registry(name);
