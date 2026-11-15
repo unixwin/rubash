@@ -1446,7 +1446,11 @@ fn parse_long_options(
 fn show_shell_usage(startup_error_name: &str) {
     // The usage name is the shell_name face, not the $0 face: empty
     // means "bash" here (see the doc comment above).
-    let usage_name = if startup_error_name.is_empty() { "bash" } else { startup_error_name };
+    let usage_name = if startup_error_name.is_empty() {
+        "bash"
+    } else {
+        startup_error_name
+    };
     eprint!(
         "{usage_name} [GNU long option] [option] ...
 {usage_name} [GNU long option] [option] script-file ...

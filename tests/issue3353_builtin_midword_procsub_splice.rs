@@ -100,10 +100,7 @@ fn read_cap_or_empty(dir: &Path) -> String {
 #[test]
 fn issue3353_01_echo_midword_output_procsub_splices_dev_fd() {
     let dir = test_dir("01");
-    let output = run_single_process(
-        &dir,
-        "echo pre>(printf 'hello\\n' > ./cap.txt)post\n",
-    );
+    let output = run_single_process(&dir, "echo pre>(printf 'hello\\n' > ./cap.txt)post\n");
     assert!(
         output.status.success(),
         "stderr: {}",
@@ -231,10 +228,7 @@ fn issue3353_06_assignment_rhs_midword_output_procsub_splices_dev_fd() {
 #[test]
 fn issue3353_07_echo_midword_output_procsub_double_quoted_body() {
     let dir = test_dir("07");
-    let output = run_single_process(
-        &dir,
-        "echo pre>(printf \"hello\\n\" > ./cap.txt)post\n",
-    );
+    let output = run_single_process(&dir, "echo pre>(printf \"hello\\n\" > ./cap.txt)post\n");
     assert!(
         output.status.success(),
         "stderr: {}",

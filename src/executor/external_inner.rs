@@ -9,6 +9,122 @@ type FdPinVec = Vec<(std::os::unix::io::RawFd, u32)>;
 #[cfg(not(unix))]
 type FdPinVec = Vec<(i32, u32)>;
 
+/// rubash#3311: the unix pre_exec pin registration one fd delivery
+/// computed (collect_external_fd_delivery): the ambient + own pins in
+/// precedence order, the carrier duplicates the pin pass retires,
+/// and the revoked carriers. Plain data, so a spawn face that builds
+/// its Command elsewhere (the exec builtin) can replay it. Empty on
+/// other platforms — the env channel alone delivers there.
+#[derive(Clone, Default)]
+pub(crate) struct FdPinPlan {
+    #[cfg(unix)]
+    pins: Vec<(std::os::unix::io::RawFd, u32)>,
+    #[cfg(unix)]
+    carriers: Vec<(std::os::unix::io::RawFd, u32)>,
+    #[cfg(unix)]
+    dead: Vec<std::os::unix::io::RawFd>,
+}
+
+impl FdPinPlan {
+    /// Register the pin pass on `process` (one pre_exec closure;
+    /// nothing when the plan pins no slot — the pre-#3311 shape).
+    pub(crate) fn register(&self, process: &mut Command) {
+        #[cfg(unix)]
+        if !self.pins.is_empty() {
+            use std::os::unix::process::CommandExt;
+            let pins = self.pins.clone();
+            let carriers = self.carriers.clone();
+            let dead = self.dead.clone();
+            // SAFETY: the closure runs only in the forked child before
+            // exec and only dup2/closes raw descriptors.
+            unsafe {
+                process
+                    .pre_exec(move || pin_ambient_fds_and_close_carriers(&pins, &carriers, &dead));
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = process;
+    }
+}
+
+/// rubash#3311: one collected fd delivery — the parent-side
+/// inheritable duplicates the caller closes once its spawn resolves,
+/// plus the pin plan to register on the child Command.
+pub(in crate::executor) struct ExternalFdDelivery {
+    pub(in crate::executor) parent_side_dups: Vec<crate::fd::HANDLE>,
+    pub(in crate::executor) pins: FdPinPlan,
+}
+
+/// rubash#3311/#3313: the child-side descriptor setup the exec
+/// builtin's spawn replays onto the Command it builds
+/// (builtins/exec.rs external_exec_process). GNU exec_builtin
+/// (builtins/exec.def:231) hands shell_execve the shell's OWN
+/// descriptor table exactly as do_redirections (redir.c:237) left it
+/// — every fd >= 3 the command or an earlier `exec N>f` bound, and a
+/// closed slot stays closed (redir.c:1239 r_close_this). `env` is the
+/// `__RUBASH_FD_*` transport the shared delivery stamps (rubash
+/// children replay it at startup, init.rs); `pins` is that delivery's
+/// unix pin plan; `close_fds` are std slots the image must start with
+/// closed (inherit + pre_exec close: a null device would read EOF or
+/// absorb writes the GNU image sees fail EBADF).
+#[derive(Clone, Default)]
+pub(crate) struct ChildFdSetup {
+    env: Vec<(std::ffi::OsString, Option<std::ffi::OsString>)>,
+    pins: FdPinPlan,
+    close_fds: Vec<u32>,
+}
+
+impl ChildFdSetup {
+    pub(in crate::executor) fn new(
+        env: Vec<(std::ffi::OsString, Option<std::ffi::OsString>)>,
+        pins: FdPinPlan,
+        close_fds: Vec<u32>,
+    ) -> Self {
+        Self {
+            env,
+            pins,
+            close_fds,
+        }
+    }
+
+    /// Replay the setup onto a fully composed child Command (after
+    /// its env_clear / exported-environment pass, so the transport
+    /// keys survive `exec -c` like the descriptors themselves do).
+    pub(crate) fn apply(&self, process: &mut Command) {
+        for (key, value) in &self.env {
+            match value {
+                Some(value) => {
+                    process.env(key, value);
+                }
+                None => {
+                    process.env_remove(key);
+                }
+            }
+        }
+        self.pins.register(process);
+        #[cfg(unix)]
+        if !self.close_fds.is_empty() {
+            use std::os::unix::process::CommandExt;
+            let fds: Vec<std::os::unix::io::RawFd> = self
+                .close_fds
+                .iter()
+                .map(|fd| *fd as std::os::unix::io::RawFd)
+                .collect();
+            // SAFETY: runs in the forked child before exec; close(2)
+            // only. std arranges the child's stdio first, so the close
+            // lands on the arranged slot.
+            unsafe {
+                process.pre_exec(move || {
+                    for fd in &fds {
+                        libc::close(*fd);
+                    }
+                    Ok(())
+                });
+            }
+        }
+    }
+}
+
 /// rubash#2278: the binding a numbered dup entry delivered to its
 /// slot, when that binding is not a FileFd the walk's walk_opened
 /// map can hold — recorded so a LATER dup entry in the same list
@@ -3152,9 +3268,34 @@ impl Executor {
     pub(in crate::executor) fn apply_external_fd_delivery(
         &mut self,
         cmd: &CommandNode,
-        mut process: &mut Command,
+        process: &mut Command,
         stage_stdio: Option<&StageStdioContext>,
     ) -> Vec<crate::fd::HANDLE> {
+        let delivery = self.collect_external_fd_delivery(cmd, process, stage_stdio, None);
+        delivery.pins.register(process);
+        delivery.parent_side_dups
+    }
+
+    /// rubash#3311: the body of apply_external_fd_delivery with the
+    /// unix pin registration handed back instead of registered — the
+    /// exec builtin's spawn builds its child Command inside the
+    /// builtin layer (builtins/exec.rs external_exec_process), so it
+    /// collects the delivery here and replays it onto that Command
+    /// through ChildFdSetup. `preopened` carries descriptions a
+    /// caller's own ordered walk already opened for this list, by
+    /// redirect position (the exec spawn walk opens every output
+    /// target at its own position — redir.c:237 do_redirections —
+    /// and must not have the target opened a second time here: a
+    /// second open re-truncates, and under noclobber it fails).
+    pub(in crate::executor) fn collect_external_fd_delivery(
+        &mut self,
+        cmd: &CommandNode,
+        mut process: &mut Command,
+        stage_stdio: Option<&StageStdioContext>,
+        mut preopened: Option<
+            &mut std::collections::HashMap<usize, std::rc::Rc<crate::executor::fd_table::FileFd>>,
+        >,
+    ) -> ExternalFdDelivery {
         // rubash#180: GNU's forked disk-command child inherits every fd >= 3
         // the command opened (`"$SH" -c 'echo hi >&3' 3>f` writes f) or that
         // a persistent `exec 3>f` bound in the parent. std::process::Command
@@ -3550,8 +3691,14 @@ impl Executor {
             // (the dup and the fd get independent carriers — the
             // snapshot model's standing cost, where GNU shares one
             // description).
+            // rubash#3311: an output entry the caller's own walk
+            // already opened at this position (see `preopened`) is
+            // stamped/pinned as THAT description, exactly like the
+            // input stash.
             let stashed = if write {
-                None
+                preopened
+                    .as_deref_mut()
+                    .and_then(|opened| opened.remove(&position))
             } else {
                 self.own_input_bindings.get(&fd).cloned()
             };
@@ -3744,25 +3891,27 @@ impl Executor {
             pins
         };
         // rubash#1626: pin the ambient descriptors at their slot numbers
-        // (see the pin table built above). Registered before the /dev/fd
-        // operand attach below so a command-scoped operand pin — the
-        // most local binding — wins any slot collision.
-        #[cfg(unix)]
-        if !ambient_fd_pins.is_empty() {
-            use std::os::unix::process::CommandExt;
-            let pins = ambient_fd_pins;
-            // rubash#2688: the same closure retires the carriers the
-            // delivery stamped (see fd_carriers above) once their
-            // slots are pinned — a foreign child then sees each file
-            // at its slot number only. Carriers of unpinned slots
-            // stay open as the rubash-child restore's fallback.
-            unsafe {
-                process.pre_exec(move || {
-                    pin_ambient_fds_and_close_carriers(&pins, &fd_carriers, &dead_carriers)
-                });
-            }
+        // (see the pin table built above). The caller registers the
+        // plan (FdPinPlan::register) before the /dev/fd operand attach
+        // so a command-scoped operand pin — the most local binding —
+        // wins any slot collision. rubash#2688: the same closure
+        // retires the carriers the delivery stamped (see fd_carriers
+        // above) once their slots are pinned — a foreign child then
+        // sees each file at its slot number only. Carriers of unpinned
+        // slots stay open as the rubash-child restore's fallback.
+        #[cfg(not(unix))]
+        let _ = (&fd_carriers, &dead_carriers);
+        ExternalFdDelivery {
+            parent_side_dups,
+            pins: FdPinPlan {
+                #[cfg(unix)]
+                pins: ambient_fd_pins,
+                #[cfg(unix)]
+                carriers: fd_carriers,
+                #[cfg(unix)]
+                dead: dead_carriers,
+            },
         }
-        parent_side_dups
     }
 
     /// rubash#2272: the env + pin stamp the numbered walk's tail
