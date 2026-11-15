@@ -70,6 +70,7 @@ fn rubash(script: &str) -> (String, String, Option<i32>) {
 }
 
 #[test]
+#[cfg(unix)]
 fn bg_ls_in_cd_deleted_cwd_is_silent() {
     let d = Scratch::new("ls-cd");
     let dir = d.path.to_string_lossy();
@@ -86,6 +87,7 @@ fn bg_ls_in_cd_deleted_cwd_is_silent() {
 }
 
 #[test]
+#[cfg(unix)]
 fn bg_ls_in_pushd_deleted_cwd_is_silent() {
     let d = Scratch::new("ls-pushd");
     let dir = d.path.to_string_lossy();
@@ -100,6 +102,7 @@ fn bg_ls_in_pushd_deleted_cwd_is_silent() {
 }
 
 #[test]
+#[cfg(unix)]
 fn bg_ls_relative_redirects_from_deleted_inode() {
     let d = Scratch::new("ls-relredir");
     let dir = d.path.to_string_lossy();
@@ -115,6 +118,7 @@ fn bg_ls_relative_redirects_from_deleted_inode() {
 }
 
 #[test]
+#[cfg(unix)]
 fn bg_ls_ghost_lands_in_old_inode() {
     let d = Scratch::new("ls-ghost");
     let dir = d.path.to_string_lossy();
@@ -146,6 +150,7 @@ fn bg_ls_in_alive_cwd_lists_marker() {
 }
 
 #[test]
+#[cfg(unix)]
 fn bg_false_in_deleted_cwd_keeps_command_rc() {
     let d = Scratch::new("false-deleted");
     let dir = d.path.to_string_lossy();
@@ -161,6 +166,7 @@ fn bg_false_in_deleted_cwd_keeps_command_rc() {
 }
 
 #[test]
+#[cfg(unix)]
 fn bg_missing_command_in_deleted_cwd_keeps_127() {
     let d = Scratch::new("missing-deleted");
     let dir = d.path.to_string_lossy();
