@@ -18,10 +18,11 @@
 //!
 //! The fake-applet PATH below mirrors the product face: an
 //! `stty.exe`-style applet file on PATH is the body dispatch would
-//! run, so the resolved-path answer is the honest one. The
-//! `.exe`-bearing spelling is pinned deliberately — dropping the
-//! suffix for `command -v`/`type -p` is niubash#993 S7's separate
-//! item.
+//! run, so the resolved-path answer is the honest one. niubash#993
+//! S7 (same file, later tests): the displayed join drops the `.exe`
+//! probe suffix Git Bash/MSYS never shows — `command -v cat` ->
+//! `/usr/bin/cat`, while a user-typed `cat.exe` keeps its suffix and
+//! a non-.exe body (`foo.bat`) keeps its real filename.
 
 #![cfg(windows)]
 
@@ -121,11 +122,8 @@ fn niubash993_s4_command_v_prints_resolved_path() {
     let fakebin = scratch.fakebin().to_string_lossy().replace('\\', "/");
     let (stdout, stderr, code) = scratch.rubash_with_path(&fakebin, "command -v cat; echo rc=$?");
     assert_eq!(code, Some(0), "stderr: {stderr}");
-    assert!(stdout.contains("cat.exe"), "stdout: {stdout}");
-    assert!(
-        !stdout.trim_start().starts_with("cat\n"),
-        "stdout: {stdout}"
-    );
+    assert!(stdout.contains("/cat"), "stdout: {stdout}");
+    assert!(!stdout.contains("cat.exe"), "stdout: {stdout}");
     assert!(stdout.contains("rc=0"), "stdout: {stdout}");
 }
 
@@ -138,7 +136,7 @@ fn niubash993_s4_type_p_prints_resolved_path() {
     let fakebin = scratch.fakebin().to_string_lossy().replace('\\', "/");
     let (stdout, stderr, _) = scratch.rubash_with_path(&fakebin, "type -p cat; echo rc=$?");
     assert!(
-        stdout.contains("cat.exe"),
+        stdout.contains("/cat") && !stdout.contains("cat.exe"),
         "stdout: {stdout} stderr: {stderr}"
     );
     assert!(stdout.contains("rc=0"), "stdout: {stdout}");
@@ -152,7 +150,7 @@ fn niubash993_s4_verbose_describe_names_the_file() {
     let fakebin = scratch.fakebin().to_string_lossy().replace('\\', "/");
     let (stdout, stderr, _) = scratch.rubash_with_path(&fakebin, "type cat; command -V cat");
     assert!(
-        stdout.contains("cat is ") && stdout.contains("cat.exe"),
+        stdout.contains("cat is ") && stdout.contains("/cat") && !stdout.contains("cat.exe"),
         "stdout: {stdout} stderr: {stderr}"
     );
     assert!(!stdout.contains("shell emulation"), "stdout: {stdout}");
@@ -166,10 +164,7 @@ fn niubash993_s4_type_a_lists_only_real_hits() {
     fs::write(scratch.fakebin().join("cat.exe"), b"").expect("fake applet");
     let fakebin = scratch.fakebin().to_string_lossy().replace('\\', "/");
     let (stdout, stderr, _) = scratch.rubash_with_path(&fakebin, "type -a cat");
-    assert!(
-        stdout.contains("cat.exe"),
-        "stdout: {stdout} stderr: {stderr}"
-    );
+    assert!(stdout.contains("/cat"), "stdout: {stdout} stderr: {stderr}");
     assert!(!stdout.contains("/bin/cat"), "stdout: {stdout}");
     assert!(!stdout.contains("emulation"), "stdout: {stdout}");
 }
@@ -202,6 +197,54 @@ fn niubash993_s4_builtins_still_report_builtin() {
         "stdout: {stdout}"
     );
     assert!(stdout.contains("rc=0"), "stdout: {stdout}");
+}
+
+/// niubash#993 S7: a name typed WITH the `.exe` suffix keeps it —
+/// Git Bash `command -v cat.exe` -> `/usr/bin/cat.exe`.
+#[test]
+fn niubash993_s7_typed_exe_suffix_is_preserved() {
+    let scratch = Scratch::new("typedexe");
+    fs::write(scratch.fakebin().join("cat.exe"), b"").expect("fake applet");
+    let fakebin = scratch.fakebin().to_string_lossy().replace('\\', "/");
+    let (stdout, stderr, _) = scratch.rubash_with_path(&fakebin, "command -v cat.exe; echo rc=$?");
+    assert!(
+        stdout.contains("cat.exe"),
+        "stdout: {stdout} stderr: {stderr}"
+    );
+    assert!(stdout.contains("rc=0"), "stdout: {stdout}");
+}
+
+/// niubash#993 S7: a non-.exe body keeps its real filename — the
+/// strip is the `.exe` probe suffix only, never an arbitrary
+/// extension (`foo.bat` is not a suffix Git Bash hides either).
+#[test]
+fn niubash993_s7_non_exe_body_keeps_filename() {
+    let scratch = Scratch::new("batbody");
+    fs::write(scratch.fakebin().join("foo.bat"), b"@echo off\n").expect("fake bat");
+    let fakebin = scratch.fakebin().to_string_lossy().replace('\\', "/");
+    let (stdout, stderr, _) = scratch.rubash_with_path(&fakebin, "command -v foo; echo rc=$?");
+    assert!(
+        stdout.contains("foo.bat"),
+        "stdout: {stdout} stderr: {stderr}"
+    );
+}
+
+/// niubash#993 S7: a bare `name` file beside `name.exe` in one PATH
+/// element collapses to the single as-written join — `type -a` must
+/// not print the same spelling twice.
+#[test]
+fn niubash993_s7_bare_and_exe_pair_enumerate_once() {
+    let scratch = Scratch::new("pair");
+    fs::write(scratch.fakebin().join("cat"), b"").expect("bare body");
+    fs::write(scratch.fakebin().join("cat.exe"), b"").expect("exe body");
+    let fakebin = scratch.fakebin().to_string_lossy().replace('\\', "/");
+    let (stdout, stderr, _) = scratch.rubash_with_path(&fakebin, "type -a cat");
+    assert_eq!(
+        stdout.matches("/cat").count(),
+        1,
+        "stdout: {stdout} stderr: {stderr}"
+    );
+    assert!(!stdout.contains("cat.exe"), "stdout: {stdout}");
 }
 
 /// Dispatch routing is untouched: the emulated body still runs
