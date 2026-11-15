@@ -3566,6 +3566,32 @@ pub fn unclosed_comsub_eof_shape(
                 escaped = true;
             } else if ch == '"' {
                 double = false;
+            } else if ch == '`' {
+                // rubash#3664: a backquote inside double quotes opens a
+                // command substitution whose body is a unit — GNU
+                // read_token_word hands it to parse_matched_pair
+                // (parse.y:5419-5440) and string_extract_double_quoted
+                // runs in backquote mode (subst.c:925-932), so the
+                // body's `"` bytes neither close the enclosing quote
+                // nor toggle this scan's state. Skip the unit whole,
+                // with the same backslash walk the unquoted backquote
+                // arm below performs; without this, the body's first
+                // `"` closed the quote here and a quoted `(` in the
+                // body (`"`: "("`"`) landed on the paren stack as a
+                // bare opener, fabricating a token error at EOF. An
+                // unterminated unit consumes the rest of the input;
+                // the still-open quote is the close-char scan's
+                // verdict, not this scan's.
+                index += 1;
+                while index < chars.len() {
+                    match chars[index] {
+                        '\\' => index += 1,
+                        '`' => break,
+                        '\n' => line += 1,
+                        _ => {}
+                    }
+                    index += 1;
+                }
             }
             prev_escaped = false;
             index += 1;
