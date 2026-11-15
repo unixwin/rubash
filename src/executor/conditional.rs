@@ -1206,6 +1206,10 @@ impl Executor {
         if !crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset") {
             return false;
         }
+        // niubash#993 §1: the operand walks below record `:=`/`=` binds
+        // as they pass them — start from a fresh table so a previous
+        // command's scan records never adjudicate this `[[ =~ ]]`.
+        crate::executor::expand_braced_indices::scan_ctx_begin();
         let mut prefix_comsubs: Vec<String> = Vec::new();
         for word in [left, right] {
             // rubash#1915: same recorded-span masking as the operand
