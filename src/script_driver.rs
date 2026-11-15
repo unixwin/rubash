@@ -4840,6 +4840,13 @@ fn run_source_impl_inner_body(
             // compound boundaries (`{ set -- /no/such/*.zzz; }; echo rc`
             // printed rc in the REPL only).
             token.logical_line += line_offset;
+            // rubash#3605 run-heredoc: the gather end line lives in the
+            // same line space as position — the `here-document delimited
+            // by end-of-file` warning and the unclosed-compound EOF error
+            // report it (make_cmd.c:626 internal_warning at the post-gather
+            // line_number; parse.y:6899). Unshifted, a group's EOF-heredoc
+            // diagnostics stamped the fragment-local line.
+            token.heredoc_end_line = token.heredoc_end_line.map(|line| line + line_offset);
         }
     }
     // GNU parse.y: a `)` or case-clause terminator at command position is
