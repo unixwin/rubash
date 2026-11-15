@@ -5257,6 +5257,10 @@ fn copy_comsub_body_verbatim_for_ifs_marking(
     // GNU read_token (parse.y:3630-3643): `#` opens a comment only at a
     // token boundary (issue #513). The verbatim copy carries its bytes.
     let mut token_boundary = true;
+    // rubash#3605: paren depth of a `$(` nested inside the case context
+    // (`$(case $(w) in e) ...`) — arm-for-arm with the parser extractor
+    // (nested_case_subst).
+    let mut nested_case_subst = 0usize;
     while *index < raw_chars.len() {
         let ch = raw_chars[*index];
         simulated.push(ch);
@@ -5334,6 +5338,30 @@ fn copy_comsub_body_verbatim_for_ifs_marking(
                 simulated.push('(');
                 *index += 1;
                 depth += 1;
+                if case_depth > 0 {
+                    nested_case_subst += 1;
+                }
+                // rubash#3605: feed the skipped `(` to the case word
+                // machine — `(` ends a token, so `case` right after `$(`
+                // is a command-position keyword; otherwise `$(case` never
+                // armed the tracker and the pattern `)` closed the body
+                // one `)` early.
+                update_command_substitution_case_depth(
+                    '(',
+                    false,
+                    false,
+                    &mut word,
+                    &mut case_depth,
+                    &mut word_boundary,
+                    &mut current_word_boundary,
+                    raw_chars.get(*index).copied(),
+                    &mut case_in_stage,
+                    &mut case_pattern_region,
+                    prev_sig,
+                );
+                if esac_prev_token_char('(') {
+                    prev_sig = Some('(');
+                }
                 token_boundary = false;
             }
             '\'' => {
@@ -5407,12 +5435,18 @@ fn copy_comsub_body_verbatim_for_ifs_marking(
                 word_boundary = false;
                 token_boundary = false;
             }
-            '(' if case_depth == 0 => {
+            '(' if case_depth == 0 || nested_case_subst > 0 => {
                 depth += 1;
+                if nested_case_subst > 0 {
+                    nested_case_subst += 1;
+                }
                 token_boundary = true;
             }
-            ')' if case_depth == 0 => {
+            ')' if case_depth == 0 || nested_case_subst > 0 => {
                 depth = depth.saturating_sub(1);
+                if nested_case_subst > 0 {
+                    nested_case_subst -= 1;
+                }
                 if depth == 0 {
                     break;
                 }

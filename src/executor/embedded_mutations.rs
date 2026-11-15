@@ -3760,6 +3760,9 @@ pub(in crate::executor) fn collect_command_substitution_source_ex(
                 }
                 source.push(source_ch);
             }
+            ')' if !single && !double => {
+                source.push(source_ch);
+            }
             _ => source.push(source_ch),
         }
         // Quoted characters are word text handled by the quote arms; the
