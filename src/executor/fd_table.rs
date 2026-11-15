@@ -219,6 +219,38 @@ impl FileFd {
     pub(crate) fn is_retired(&self) -> bool {
         self.closed.get()
     }
+
+    /// rubash#3706 (also consumed by rubash#3730): duplicate this
+    /// descriptor's kernel handle into a fresh FileFd naming the same
+    /// open file description (shared offset and status flags) — the
+    /// undo-save dup. GNU's undoable redirect saves the displaced
+    /// descriptor BEFORE the redirect binds, with `fcntl (fd,
+    /// F_DUPFD, SHELL_FD_BASE)` (redir.c:965 for input, :1082 for
+    /// duplicating, :1144 for move; SHELL_FD_BASE is 10, redir.c:86),
+    /// and records the save with `add_undo_redirect` so
+    /// `undo_redirections` can dup it back. The duplicate carries
+    /// the table's close-on-exec discipline (unix: F_DUPFD_CLOEXEC,
+    /// like `crate::fd::dup_adopted_fd`; Windows:
+    /// `duplicate_handle` is already non-inheritable), so the spawn
+    /// path still arranges child layouts explicitly and no saved
+    /// descriptor ever leaks raw into a child.
+    pub(crate) fn duplicate(&self) -> std::io::Result<Rc<Self>> {
+        #[cfg(unix)]
+        let handle = {
+            let n = unsafe { libc::fcntl(self.handle, libc::F_DUPFD_CLOEXEC, 0) };
+            if n < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            n
+        };
+        #[cfg(windows)]
+        let handle = crate::fd::duplicate_handle(self.handle)?;
+        Ok(Rc::new(Self {
+            handle,
+            closed: std::cell::Cell::new(false),
+            path: self.path.clone(),
+        }))
+    }
 }
 
 impl Drop for FileFd {
@@ -347,6 +379,67 @@ pub(crate) struct FdEntry {
     pub(crate) write: Option<FdWriteEndpoint>,
     pub(crate) closed: bool,
     pub(crate) dynamic: bool,
+}
+
+impl FdEntry {
+    /// rubash#3706 (also consumed by rubash#3730): clone this entry
+    /// with every kernel-backed endpoint replaced by a fresh
+    /// duplicate of its descriptor (same open file description,
+    /// shared offset) — the undo-save form. A plain Rc clone shares
+    /// the descriptor the bind-time retire (`retire_read_arm` /
+    /// `retire_write_arm`, rubash#3213) closes when the scope's
+    /// redirect binds, so a scope that saved the clone restores a
+    /// dead entry; the duplicate keeps the saved descriptor alive
+    /// until the scope's restore replays it, exactly like GNU's
+    /// `fcntl (fd, F_DUPFD, SHELL_FD_BASE)` save
+    /// (redir.c:965/1082/1144). Only the File-backed endpoints carry
+    /// a kernel descriptor (File, CoprocStdout/CoprocStdin); text,
+    /// directory, marker and channel endpoints are in-memory or
+    /// symbolic and clone exactly. A `<>` pair's two arms share one
+    /// Rc (open_readwrite_pair); that sharing is preserved — the
+    /// write arm reuses the read arm's duplicate — so closing one
+    /// direction still retires the shared descriptor, as GNU's
+    /// close(2) closes the whole descriptor.
+    pub(crate) fn dup_file_endpoints(&self) -> std::io::Result<Self> {
+        let read = match &self.read {
+            Some(FdReadEndpoint::File(file)) => Some(FdReadEndpoint::File(file.duplicate()?)),
+            Some(FdReadEndpoint::CoprocStdout { pid, fd }) => Some(FdReadEndpoint::CoprocStdout {
+                pid: *pid,
+                fd: fd.duplicate()?,
+            }),
+            other => other.clone(),
+        };
+        let write = match &self.write {
+            Some(FdWriteEndpoint::File(file)) => {
+                // A `<>` pair shares ONE open file description
+                // between its arms (open_readwrite_pair mints a
+                // single Rc for both); reuse the read arm's
+                // duplicate so the saved entry preserves that
+                // sharing — closing one direction must retire the
+                // shared descriptor, as GNU's close(2) closes the
+                // whole descriptor.
+                match (&self.read, &read) {
+                    (Some(FdReadEndpoint::File(orig)), Some(FdReadEndpoint::File(dup)))
+                        if Rc::ptr_eq(orig, file) =>
+                    {
+                        Some(FdWriteEndpoint::File(dup.clone()))
+                    }
+                    _ => Some(FdWriteEndpoint::File(file.duplicate()?)),
+                }
+            }
+            Some(FdWriteEndpoint::CoprocStdin { pid, fd }) => Some(FdWriteEndpoint::CoprocStdin {
+                pid: *pid,
+                fd: fd.duplicate()?,
+            }),
+            other => other.clone(),
+        };
+        Ok(Self {
+            read,
+            write,
+            closed: self.closed,
+            dynamic: self.dynamic,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1119,6 +1212,24 @@ impl FdTable {
         });
         if !still_bound {
             file.close_now();
+        }
+    }
+
+    /// rubash#3706 (also consumed by rubash#3730): snapshot slot
+    /// `fd` for a scope's undo record — the entry with its
+    /// kernel-backed endpoints duplicated
+    /// (`FdEntry::dup_file_endpoints`), so the descriptor the scope's
+    /// redirect is about to displace stays alive until the scope's
+    /// restore replays it. A plain clone would share the descriptor
+    /// the bind-time retire closes (retire_read_arm /
+    /// retire_write_arm, rubash#3213). Fails only when the process
+    /// cannot duplicate a descriptor (fd exhaustion) — GNU fails the
+    /// whole redirect the same way (redir.c REDIRECTION_ERROR on a
+    /// failed F_DUPFD save).
+    pub(crate) fn saved_entry(&self, fd: u32) -> std::io::Result<Option<FdEntry>> {
+        match self.entries.get(&fd) {
+            Some(entry) => Ok(Some(entry.dup_file_endpoints()?)),
+            None => Ok(None),
         }
     }
 
