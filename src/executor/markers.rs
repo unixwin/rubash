@@ -697,6 +697,7 @@ pub(crate) const HASH_ENV_FIELD_SEP: char = SUBSCRIPT_CARRIER;
 // EXACT __RUBASH_STARTUP_FILES_DONE - state key (startup files done) - serialized across the respawn/subshell boundary; see the owning subsystem
 // EXACT __RUBASH_STATE_FILE - state key (state file) - serialized across the respawn/subshell boundary; see the owning subsystem
 // EXACT __RUBASH_SUBSHELL_DEPTH - state key (subshell depth) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_SUPPRESS_ERREXIT - state key (suppress errexit) - serialized across the respawn/subshell boundary; see the owning subsystem
 // EXACT __RUBASH_TEMP_PATH - state key (temp path) - serialized across the respawn/subshell boundary; see the owning subsystem
 // EXACT __RUBASH_TOP_LEVEL_NAME - state key (top level name) - serialized across the respawn/subshell boundary; see the owning subsystem
 // EXACT __RUBASH_TRACE_VARS - serialized variable-name set (trace) for child/subshell state transfer
