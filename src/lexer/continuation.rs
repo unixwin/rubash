@@ -2803,6 +2803,21 @@ fn skip_parenthesized_unit_ex(chars: &[char], open: usize) -> Option<(usize, boo
             }
         }
         match ch {
+            // ANSI-C `$'...'` (parse.y:5476-5480 → parse_matched_pair
+            // P_ALLOWESC): `\'` inside is an escaped quote, not the close —
+            // a plain `'` toggle truncates `$(...$'a\')b'...)` at `')`.
+            '$' if chars.get(index + 1) == Some(&'\'') => {
+                index += 2;
+                while index < chars.len() {
+                    match chars[index] {
+                        '\\' => index += 1,
+                        '\'' => break,
+                        _ => {}
+                    }
+                    index += 1;
+                }
+                token_boundary = false;
+            }
             '\'' => single = true,
             '"' => double = true,
             '(' if case_depth == 0 => depth += 1,
@@ -3946,6 +3961,21 @@ fn skip_parenthesized_unit_corrected_ex(chars: &[char], open: usize) -> Option<(
             case_pattern_seen = true;
         }
         match ch {
+            // ANSI-C `$'...'` (parse.y:5476-5480 → parse_matched_pair
+            // P_ALLOWESC): `\'` inside is an escaped quote, not the close —
+            // a plain `'` toggle truncates `$(...$'a\')b'...)` at `')`.
+            '$' if chars.get(index + 1) == Some(&'\'') => {
+                index += 2;
+                while index < chars.len() {
+                    match chars[index] {
+                        '\\' => index += 1,
+                        '\'' => break,
+                        _ => {}
+                    }
+                    index += 1;
+                }
+                token_boundary = false;
+            }
             '\'' => single = true,
             '"' => double = true,
             // GNU read_token_word (parse.y:5377-5397): outside quotes a

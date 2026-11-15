@@ -1240,6 +1240,35 @@ pub(in crate::executor) fn scan_substitution_spans(raw: &str) -> Vec<Substitutio
                             continue;
                         }
                     }
+                    // ANSI-C `$'...'` inside the body (parse.y
+                    // xparse_dolparen keeps it a quoted region): `\'` is an
+                    // escaped quote, so it must not toggle `inner_single`,
+                    // and a `)` inside is body text. The plain `'`
+                    // toggle below would end the region early at `\'`,
+                    // letting `')` close the span (`$(echo $'a\')b')`).
+                    if !inner_single
+                        && !inner_double
+                        && inner == '$'
+                        && chars.get(cursor + 1).is_some_and(|&(_, next)| next == '\'')
+                    {
+                        cursor += 2;
+                        let mut ansi_escaped = false;
+                        while cursor < chars.len() {
+                            let c = chars[cursor].1;
+                            cursor += 1;
+                            if ansi_escaped {
+                                ansi_escaped = false;
+                            } else if c == '\\' {
+                                ansi_escaped = true;
+                            } else if c == '\'' {
+                                break;
+                            }
+                        }
+                        inner_word.clear();
+                        inner_word_boundary = false;
+                        inner_token_boundary = false;
+                        continue;
+                    }
                     if inner == '\'' && !inner_double {
                         inner_single = !inner_single;
                     }
