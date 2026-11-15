@@ -960,7 +960,13 @@ impl Executor {
             // same way `while ... done <f` does — the check lives in
             // execute_command for the other kinds; brace groups dispatch
             // here instead.
-            if !command.redirects.is_empty() {
+            // rubash#3605: same pipe-element skip as command_execute's
+            // :826 port — a `{ }` element's own redirects were consumed
+            // by its execute_in_subshell (:1759-1764) before the inner
+            // dispatch, so GNU never assigns from them; consume the
+            // marker here so a nested structure assigns its own verdict.
+            let element_pipe_stdin = self.shell_state.element_pipe_stdin.replace(false);
+            if !command.redirects.is_empty() && !element_pipe_stdin {
                 self.shell_state
                     .stdin_redir
                     .set(command.redirects.iter().any(redirect_updates_stdin_redir));
@@ -2134,6 +2140,7 @@ impl Executor {
                                     &input,
                                     stage0_stdin_inherit,
                                     stage0_stdin_live,
+                                    stage_index > 0,
                                 )
                             }
                         })?
@@ -2152,6 +2159,7 @@ impl Executor {
                             &input,
                             stage0_stdin_inherit,
                             stage0_stdin_live,
+                            stage_index > 0,
                         )?
                     } else {
                         // Non-final simple pipeline stages never trigger errexit
@@ -2163,6 +2171,7 @@ impl Executor {
                                 &input,
                                 stage0_stdin_inherit,
                                 stage0_stdin_live,
+                                stage_index > 0,
                             )
                         })?
                     })
@@ -2749,7 +2758,7 @@ impl Executor {
         let _ = self.apply_shell_assignment_command("read", name, value.to_string(), None);
         self.exit_code = status;
         let result = self
-            .execute_pipeline_stage(command, "", false, false)
+            .execute_pipeline_stage(command, "", false, false, false)
             .ok()
             .flatten();
         self.exit_code = saved_status;
@@ -3375,6 +3384,7 @@ impl Executor {
             &stage0_input,
             stage0_stdin_inherit,
             stage0_stdin_live,
+            false,
         );
         self.pipeline_stdout_stream = saved_pipeline_stream;
         self.pipeline_stage_stderr_live = saved_stderr_live;
@@ -4437,7 +4447,7 @@ impl Executor {
         let saved_stdin_stream = self.pipeline_stdin_stream;
         self.pipeline_stdin_stream = Some(tail_handle);
         self.set_current_command(tail);
-        let tail_result = self.execute_pipeline_stage(tail, "", false, false);
+        let tail_result = self.execute_pipeline_stage(tail, "", false, false, true);
         self.pipeline_stdin_stream = saved_stdin_stream;
         // Restoring fd 0 drops the File endpoint's read handle (FileFd::drop
         // -> close_handle): the producers' next write is a broken pipe.
@@ -4893,7 +4903,7 @@ impl Executor {
         let saved_stderr_live = self.pipeline_stage_stderr_live;
         self.pipeline_stage_stderr_live = self.pipeline_stage_stderr_may_stream(shell_command);
         self.set_current_command(shell_command);
-        let stage_result = self.execute_pipeline_stage(shell_command, "", false, false);
+        let stage_result = self.execute_pipeline_stage(shell_command, "", false, false, true);
         self.pipeline_stage_stderr_live = saved_stderr_live;
         self.pipeline_final_stage.set(saved_final_stage);
         self.pipeline_stdout_stream = saved_stdout_stream;
@@ -6245,6 +6255,7 @@ impl Executor {
         input: &str,
         stdin_inherit: bool,
         live_stdin: bool,
+        stdin_is_pipe: bool,
     ) -> Result<Option<(String, String, i32)>, ExecuteError> {
         // rubash#3387: a pipeline element is a forked child (GNU
         // execute_cmd.c:2620 execute_pipeline), so its `times` reads
@@ -6396,6 +6407,21 @@ impl Executor {
         self.evalerror_failglob_pending.set(false);
         self.evalerror_pending.set(false);
         self.evalerror_exit_toomany_pending.set(false);
+        // rubash#3605: GNU's element child ORs the async-stdin flag
+        // with its own pipe-fed fd 0 (execute_cmd.c:4570,
+        // `stdin_redir |= (pipe_in != NO_PIPE)`, in the forked element
+        // before its inner dispatch) — a pipe-fed element's `cmd &`
+        // then inherits the pipe instead of taking the /dev/null arm
+        // at execute_cmd.c:2837. The stage runs in place on this
+        // executor, so bracket the same verdict and restore below.
+        // Stage 0 reads the shell's fd 0 (pipe_in == NO_PIPE ->
+        // stdin_is_pipe false); the lastpipe element never reaches
+        // here — GNU dispatches it with prev == NO_PIPE
+        // (execute_cmd.c:2725-2741), so it keeps the shell's flag.
+        let saved_stdin_redir = self.shell_state.stdin_redir.get();
+        if stdin_is_pipe {
+            self.shell_state.stdin_redir.set(true);
+        }
         // rubash#1564: the same fork containment for the VARIABLE
         // state — the one piece of child state the brackets above do
         // not cover. The stage's word expansions, classification
@@ -6544,6 +6570,7 @@ impl Executor {
                         stdin_inherit,
                         streaming_stdin,
                         live_stdin,
+                        stdin_is_pipe,
                     );
                     // A stage whose runner already placed its streams
                     // itself — a function stage applying redirects to
@@ -6593,6 +6620,7 @@ impl Executor {
                 stdin_inherit,
                 streaming_stdin,
                 live_stdin,
+                stdin_is_pipe,
             )
         };
         // Restore the parent's job table (rubash#1349 swap above).
@@ -6640,6 +6668,8 @@ impl Executor {
         // (after the FUNCTION_STDIN bookkeeping above has read and
         // restored its own mirror entries in the stage's table).
         self.restore_spec_variables(saved_stage_variables);
+        // rubash#3605: the element's stdin_redir verdict dies with it.
+        self.shell_state.stdin_redir.set(saved_stdin_redir);
         self.shell_state.random_state.restore_state(&saved_random);
         // rubash#2438: the element's login reset dies with the element.
         self.shell_state
@@ -6726,6 +6756,7 @@ impl Executor {
         stdin_inherit: bool,
         streaming_stdin: bool,
         live_stdin: bool,
+        stdin_is_pipe: bool,
     ) -> Result<Option<(String, String, i32)>, ExecuteError> {
         // rubash#3324: an inline arm records its ordered output
         // chunks here for the driver's merge (see the field doc); a
@@ -6743,8 +6774,13 @@ impl Executor {
         let inner_saved_no_closing_brace = self.no_closing_brace_failure.get();
         if let Some(time_command) = &command.time_command {
             let started = time_command_started();
-            let Some((output, stderr, status)) =
-                self.execute_pipeline_stage(&time_command.command, input, false, live_stdin)?
+            let Some((output, stderr, status)) = self.execute_pipeline_stage(
+                &time_command.command,
+                input,
+                false,
+                live_stdin,
+                stdin_is_pipe,
+            )?
             else {
                 return Ok(None);
             };
@@ -6766,7 +6802,13 @@ impl Executor {
 
         if command_is_compound_pipeline_stage(command) {
             return self
-                .execute_compound_pipeline_stage(command, input, streaming_stdin, live_stdin)
+                .execute_compound_pipeline_stage(
+                    command,
+                    input,
+                    streaming_stdin,
+                    live_stdin,
+                    stdin_is_pipe,
+                )
                 .map(Some);
         }
 
@@ -6779,7 +6821,13 @@ impl Executor {
         // runs the mixed-statement arm.
         if mixed_assignment_statement_admission(command) {
             return self
-                .execute_compound_pipeline_stage(command, input, streaming_stdin, live_stdin)
+                .execute_compound_pipeline_stage(
+                    command,
+                    input,
+                    streaming_stdin,
+                    live_stdin,
+                    stdin_is_pipe,
+                )
                 .map(Some);
         }
 
@@ -6891,7 +6939,13 @@ impl Executor {
         let command = &command;
         let Some(name) = command.words.first().map(String::as_str) else {
             return self
-                .execute_compound_pipeline_stage(command, input, streaming_stdin, live_stdin)
+                .execute_compound_pipeline_stage(
+                    command,
+                    input,
+                    streaming_stdin,
+                    live_stdin,
+                    stdin_is_pipe,
+                )
                 .map(Some);
         };
 

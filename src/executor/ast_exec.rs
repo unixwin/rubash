@@ -1038,10 +1038,21 @@ impl Executor {
                             });
                     }
                 }
-                // GNU eval.c:181 (reader_loop/parse_and_execute): stdin_redir
-                // is cleared before each top-level command, so a redirected
-                // control structure's flag never leaks into the next command.
-                self.shell_state.stdin_redir.set(false);
+                // GNU eval.c:181 (reader_loop ONLY — evalstring.c's
+                // parse_and_execute does not clear it): stdin_redir is
+                // cleared before each top-level command, so a redirected
+                // control structure's flag never leaks into the next
+                // command. A subshell clone's outermost walk also lands
+                // at exec_depth 1 — but its body is a pre-parsed element
+                // list, never a reader loop, and GNU's forked element
+                // child keeps the flag its dispatch set (execute_cmd.c:
+                // 4570 `|= pipe_in`, the :826/:1733 assigns). Skip the
+                // clear on clones: subshell_depth > 0 marks them (the
+                // in-place ( )/`{ }` regions run on this executor at
+                // walk depth >= 2, so they never reach this line).
+                if self.shell_state.subshell_depth.get() == 0 {
+                    self.shell_state.stdin_redir.set(false);
+                }
                 // rubash#846: same per-command hygiene for the
                 // compound-redirect-failure mark — a stale mark (set by a
                 // previous command whose `!` consult never ran) must never

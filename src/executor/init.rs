@@ -1268,6 +1268,7 @@ impl Executor {
                 reader_unit_source: std::cell::RefCell::new(None),
                 in_command_substitution: Cell::new(false),
                 stdin_redir: Cell::new(false),
+                element_pipe_stdin: Cell::new(false),
                 xtrace_indirection_level: Cell::new(0),
                 xtrace_suspended: Cell::new(0),
                 job_table: crate::jobs::table::JobTable::default(),
