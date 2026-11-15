@@ -2246,6 +2246,16 @@ pub struct Executor {
     /// heredoc/FUNCTION_STDIN payload — the flag lands on
     /// `statuses[..]`, which stage 0's feed predates).
     pipeline_stage_feed_sigpipe: Cell<bool>,
+    /// rubash#3091: the stage just executed was a member that died
+    /// without running (command lookup miss, exec classification, or
+    /// a failed spawn — GNU's forked child reporting shell_execve's
+    /// verdict and exiting 126/127). Its inter-member pipe read end
+    /// was closed before the upstream element wrote, so the stage
+    /// loop's producer-SIGPIPE verdict applies the dead-reader
+    /// branch: any produced payload dies on EPIPE unless the
+    /// producer was an in-process simple builtin whose write beat
+    /// the dead child's exit.
+    pipeline_stage_spawn_dead: Cell<bool>,
     /// niubash#144: outcome of the external stdio plan from the last
     /// `apply_external_redirects` (ordered-walk shared handles), consumed
     /// by the immediately following `spawn_external_process`. `Some(..)`

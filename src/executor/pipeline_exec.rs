@@ -2298,6 +2298,17 @@ impl Executor {
             //    `spec.consumed`, the FUNCTION_STDIN cursor fallback —
             //    while a spawned member's feed claims the full payload
             //    so the capacity arm stays quiet for it.
+            //  * rubash#3091: a member that DIED without running
+            //    (`pipeline_stage_spawn_dead` — lookup miss, exec
+            //    classification, failed spawn) never opened the pipe's
+            //    read end at all; the upstream element's writes die on
+            //    EPIPE unless they completed inside the dead child's
+            //    execve-fail latency, which only an in-process simple
+            //    builtin stage beats (WSL GNU probe: `echo hi |
+            //    ./pnoexec` -> `0 126`, but `cat file | ./pnoexec` ->
+            //    `141 126` and `fn(){ cat; } | ./pnoexec` ->
+            //    `0 141 126`).
+            let member_spawn_dead = self.pipeline_stage_spawn_dead.replace(false);
             let producer_died_sigpipe = self.pipeline_stage_feed_sigpipe.replace(false)
                 || (stage_index > first_stage && statuses.len() == stage_index && {
                     let consumed = self.pipeline_stdin_consumed.take().unwrap_or(0);
@@ -2311,7 +2322,13 @@ impl Executor {
                                 .len()
                         })
                         .unwrap_or_else(|| consumed.min(written));
-                    written > read + PIPE_STAGE_CAPACITY
+                    if member_spawn_dead && written > 0 {
+                        commands.get(stage_index - 1).is_some_and(|producer| {
+                            !self.pipeline_producer_beats_dead_member(producer)
+                        }) || written > read + PIPE_STAGE_CAPACITY
+                    } else {
+                        written > read + PIPE_STAGE_CAPACITY
+                    }
                 });
             input = next_input;
             statuses.push(next_status);
@@ -3175,7 +3192,14 @@ impl Executor {
         }
         let capture_intermediate_stderr =
             self.fd_table.write_endpoint(2) == Some(FdWriteEndpoint::Stdout);
-        let mut processes = Vec::with_capacity(consumer_count);
+        // rubash#3091: a consumer whose spawn fails keeps its pipeline
+        // slot as a pseudo-member (None) — GNU's forked child reports
+        // shell_execve's classification on fd 2 and exits 126/127, and
+        // the recorded status lands in `results` here so PIPESTATUS is
+        // still published. The Option slot keeps every stage index
+        // aligned while the live members keep their Child handles.
+        let mut processes: Vec<Option<std::process::Child>> = Vec::with_capacity(consumer_count);
+        let mut results: Vec<(String, String, i32)> = vec![Default::default(); consumer_count];
         let mut intermediate_stderr = Vec::new();
         for (index, (program, expanded_name, args)) in specs.iter().enumerate() {
             let (mut process, _) = if let Some(name) = internal_pipeline_program_name(program) {
@@ -3241,19 +3265,39 @@ impl Executor {
             for dup in parent_side_dups {
                 crate::fd::close_handle(dup);
             }
-            let mut child = spawned.map_err(|error| {
-                ExecuteError::IoError(io::Error::new(
-                    error.kind(),
-                    format!(
-                        "{}: {}",
-                        program
-                            .file_name()
-                            .and_then(|name| name.to_str())
-                            .unwrap_or("external"),
-                        crate::posix_errors::message(&error)
-                    ),
-                ))
-            })?;
+            let mut child = match spawned {
+                Ok(child) => child,
+                Err(error) => {
+                    // rubash#3091: a failed consumer spawn is GNU's
+                    // child exiting 126/127 after reporting shell_execve's
+                    // classification — the pipeline continues and the
+                    // member's slot carries the status. Dropping the
+                    // Command releases the stage's pipe write end, so the
+                    // downstream member's stdin sees EOF exactly as it
+                    // would when the dead child closed it.
+                    let (diagnostic, status) =
+                        self.member_spawn_failure(program, expanded_name, &error);
+                    results[index].2 = status;
+                    if index + 1 == consumer_count {
+                        // The last consumer's fd 2 is always a capture
+                        // pipe here — its bytes land in the slot the
+                        // tail relays through write_default_stderr.
+                        results[index].1 = diagnostic;
+                    } else {
+                        // A non-last member's fd 2 is either the capture
+                        // pipe (relayed through write_default_stderr by
+                        // the finish) or the ambient stderr — both land
+                        // on the same fd-table face.
+                        let _ = self.write_default_stderr(
+                            &crate::executor::substitution_metadata::shell_text_to_raw_bytes(
+                                &diagnostic,
+                            ),
+                        );
+                    }
+                    processes.push(None);
+                    continue;
+                }
+            };
             adopt_orphan_console(child.id());
             if capture_intermediate_stderr && index + 1 < consumer_count {
                 if let Some(mut stderr) = child.stderr.take() {
@@ -3264,7 +3308,7 @@ impl Executor {
                     }));
                 }
             }
-            processes.push(child);
+            processes.push(Some(child));
         }
 
         // The producer stage runs in-process with its fd 1 bound to pipe[0]'s
@@ -3355,12 +3399,12 @@ impl Executor {
             PipelineDrainTarget::Collect
         };
         let last_stdout = processes[last_index]
-            .stdout
-            .take()
+            .as_mut()
+            .and_then(|member| member.stdout.take())
             .map(|reader| spawn_pipe_drain(reader, stdout_target));
         let last_stderr = processes[last_index]
-            .stderr
-            .take()
+            .as_mut()
+            .and_then(|member| member.stderr.take())
             .map(|reader| spawn_pipe_drain(reader, PipelineDrainTarget::Collect));
         let saved_pipeline_stream = self.pipeline_stdout_stream;
         self.pipeline_stdout_stream = stream_handle;
@@ -3445,29 +3489,44 @@ impl Executor {
         // rubash#2244 above): wait each member against its immediate
         // downstream so the Windows broken-pipe window only arms after
         // that downstream exited.
-        let mut results: Vec<(String, String, i32)> = vec![Default::default(); consumer_count];
         for index in 0..last_index {
             let (head, tail) = processes.split_at_mut(index + 1);
-            let member = head.last_mut().expect("member index inside pipeline");
-            let downstream = tail.first_mut().expect("downstream member after index");
-            let status = wait_for_windows_pipeline_member(self, member, Some(downstream))?;
+            let Some(member) = head.last_mut().and_then(|slot| slot.as_mut()) else {
+                // A spawn-failed member has no child to reap — its
+                // pseudo-entry already sits in results[index]
+                // (rubash#3091).
+                continue;
+            };
+            let downstream = tail
+                .first_mut()
+                .expect("downstream member after index")
+                .as_mut();
+            let status = wait_for_windows_pipeline_member(self, member, downstream)?;
             results[index] = (
                 String::new(),
                 String::new(),
                 crate::executor::wait_status::process_exit_status(&status),
             );
         }
-        let mut last = processes.pop().expect("pipeline has at least two stages");
         self.note_foreground_wait();
-        let status = wait_pipeline_member_interruptibly(self, &mut last)?;
-        let stdout_bytes = join_pipe_drain(last_stdout)?;
-        results[last_index] = (
-            crate::executor::substitution_metadata::bytes_to_shell_text(&stdout_bytes),
-            crate::executor::substitution_metadata::bytes_to_shell_text(&join_pipe_drain(
-                last_stderr,
-            )?),
-            crate::executor::wait_status::process_exit_status(&status),
-        );
+        if let Some(last) = processes
+            .pop()
+            .expect("pipeline has at least two stages")
+            .as_mut()
+        {
+            let status = wait_pipeline_member_interruptibly(self, last)?;
+            let stdout_bytes = join_pipe_drain(last_stdout)?;
+            results[last_index] = (
+                crate::executor::substitution_metadata::bytes_to_shell_text(&stdout_bytes),
+                crate::executor::substitution_metadata::bytes_to_shell_text(&join_pipe_drain(
+                    last_stderr,
+                )?),
+                crate::executor::wait_status::process_exit_status(&status),
+            );
+        }
+        // rubash#3091: a spawn-failed last consumer has no child to
+        // wait — its slot already carries the classified status and
+        // the fd-2 diagnostic, and the drains never started.
         for reader in intermediate_stderr {
             let output = reader.join().map_err(|_| {
                 ExecuteError::IoError(std::io::Error::other("pipeline stderr reader panicked"))
@@ -3870,7 +3929,16 @@ impl Executor {
                 None => true,
             };
 
-        let mut processes = Vec::with_capacity(commands.len());
+        // `processes` holds one slot per stage — `None` for a member
+        // whose spawn itself failed (GNU: the forked child's execve
+        // failed; it reported on its fd 2 and exited with the
+        // classified status, so the pipeline still completes and
+        // PIPESTATUS records it — rubash#3091). `results` is created
+        // before the spawn loop for the same reason: a failed member
+        // writes its (empty output, fd-2 diagnostic, status) slot at
+        // spawn time.
+        let mut processes: Vec<Option<std::process::Child>> = Vec::with_capacity(commands.len());
+        let mut results: Vec<(String, String, i32)> = vec![Default::default(); commands.len()];
         let mut stage_dev_ops = Vec::with_capacity(commands.len());
         let mut stage_proc_ops = Vec::with_capacity(commands.len());
         let capture_intermediate_stderr =
@@ -4045,46 +4113,66 @@ impl Executor {
             for dup in parent_side_dups {
                 crate::fd::close_handle(dup);
             }
-            let mut child = match spawned {
-                Ok(child) => child,
+            match spawned {
+                Ok(mut child) => {
+                    adopt_orphan_console(child.id());
+                    if capture_intermediate_stderr && index + 1 < commands.len() {
+                        if let Some(mut stderr) = child.stderr.take() {
+                            intermediate_stderr.push(std::thread::spawn(move || {
+                                let mut output = Vec::new();
+                                stderr.read_to_end(&mut output)?;
+                                Ok::<_, std::io::Error>(output)
+                            }));
+                        }
+                    }
+                    processes.push(Some(child));
+                }
                 Err(error) => {
+                    // GNU execute_cmd.c:2620 execute_pipeline runs every
+                    // element through execute_simple_command's forked
+                    // child: a member whose execve fails does NOT abort
+                    // the pipeline — the child reports shell_execve's
+                    // errno classification (execute_cmd.c:6126-6159:
+                    // EACCES -> 126 "Permission denied", ENOENT -> 127
+                    // "No such file or directory") on ITS fd 2 and exits
+                    // with that status, which wait_for records into
+                    // PIPESTATUS (execute_cmd.c:1210-1224). The old Err
+                    // abort left PIPESTATUS empty and named the member
+                    // by file_name, dropping the as-typed `./` spelling
+                    // (rubash#3091). Model the dead child instead: no
+                    // process entry, the diagnostic on the channel its
+                    // fd 2 would have used, and the classified status in
+                    // the member's results slot.
                     // rubash#2602: this stage's child never ran, so its
                     // operand record must not perform the deferred
-                    // finish when it drops with the error return — the
-                    // donor advance models a child's reads, and there
-                    // are none. Earlier stages' records stay armed:
-                    // their children exist and may have consumed, so
-                    // the drop settles them.
+                    // finish when it drops — the donor advance models a
+                    // child's reads, and there are none.
                     stage_dev_ops[index].disarm_finish();
-                    return Err(ExecuteError::IoError(io::Error::new(
-                        error.kind(),
-                        format!(
-                            "{}: {}",
-                            program
-                                .file_name()
-                                .and_then(|name| name.to_str())
-                                .unwrap_or("external"),
-                            crate::posix_errors::message(&error)
-                        ),
-                    )));
-                }
-            };
-            adopt_orphan_console(child.id());
-            if capture_intermediate_stderr && index + 1 < commands.len() {
-                if let Some(mut stderr) = child.stderr.take() {
-                    intermediate_stderr.push(std::thread::spawn(move || {
-                        let mut output = Vec::new();
-                        stderr.read_to_end(&mut output)?;
-                        Ok::<_, std::io::Error>(output)
-                    }));
+                    processes.push(None);
+                    let (diagnostic, status) =
+                        self.member_spawn_failure(program, expanded_name, &error);
+                    results[index].2 = status;
+                    if index + 1 == commands.len() {
+                        // The final member's fd 2 is a capture pipe the
+                        // caller drains into the shell's stderr.
+                        results[index].1 = diagnostic;
+                    } else {
+                        let bytes = crate::executor::substitution_metadata::shell_text_to_raw_bytes(
+                            &diagnostic,
+                        );
+                        if capture_intermediate_stderr {
+                            let _ = self.write_default_stdout(&bytes);
+                        } else {
+                            let _ = self.write_default_stderr(&bytes);
+                        }
+                    }
                 }
             }
-            processes.push(child);
         }
 
         // Spawn every stage before writing a heredoc. A large heredoc can fill
         // the first stdin pipe while the downstream stages are still absent.
-        if let Some(mut stdin) = processes[0].stdin.take() {
+        if let Some(mut stdin) = processes[0].as_mut().and_then(|child| child.stdin.take()) {
             if let Some(base) = stage0_stdin_base {
                 // The spawned child was handed the whole unread tail; GNU's
                 // shared fd 0 models that as consumed. `stage0_input` is
@@ -4108,7 +4196,6 @@ impl Executor {
             }
         }
 
-        let mut results: Vec<(String, String, i32)> = vec![Default::default(); processes.len()];
         let last_index = processes.len() - 1;
         // niubash#158: start draining the last member's captured stdout and
         // stderr BEFORE waiting on the upstream members. The last member
@@ -4132,12 +4219,12 @@ impl Executor {
             PipelineDrainTarget::Collect
         };
         let last_stdout = processes[last_index]
-            .stdout
-            .take()
+            .as_mut()
+            .and_then(|child| child.stdout.take())
             .map(|reader| spawn_pipe_drain(reader, stdout_target));
         let last_stderr = processes[last_index]
-            .stderr
-            .take()
+            .as_mut()
+            .and_then(|child| child.stderr.take())
             .map(|reader| spawn_pipe_drain(reader, PipelineDrainTarget::Collect));
         // Reap non-final stages in forward order: a `/dev/stdout`-family
         // operand on stage N flushes into a dup'd writer of pipe N, and that
@@ -4150,9 +4237,15 @@ impl Executor {
         // downstream from the one Vec that still owns every child.
         for index in 0..last_index {
             let (head, tail) = processes.split_at_mut(index + 1);
-            let member = head.last_mut().expect("member index inside pipeline");
-            let downstream = tail.first_mut().expect("downstream member after index");
-            let status = wait_for_windows_pipeline_member(self, member, Some(downstream))?;
+            let Some(member) = head.last_mut().and_then(|slot| slot.as_mut()) else {
+                // A member whose spawn failed has no child to reap —
+                // its spawn-error slot already holds the classified
+                // status, and its disarmed operand record settles its
+                // own cleanup on drop (rubash#3091).
+                continue;
+            };
+            let downstream = tail.iter_mut().find_map(|slot| slot.as_mut());
+            let status = wait_for_windows_pipeline_member(self, member, downstream)?;
             results[index] = (
                 String::new(),
                 String::new(),
@@ -4164,18 +4257,21 @@ impl Executor {
         let mut last = processes.pop().expect("pipeline has at least two stages");
         debug_assert_eq!(processes.len(), last_index);
         self.note_foreground_wait();
-        let status = wait_pipeline_member_interruptibly(self, &mut last)?;
-        let mut stdout_bytes = join_pipe_drain(last_stdout)?;
-        stdout_bytes
-            .extend(self.finish_dev_fd_operands(std::mem::take(&mut stage_dev_ops[last_index])));
-        drop(std::mem::take(&mut stage_proc_ops[last_index]));
-        results[last_index] = (
-            crate::executor::substitution_metadata::bytes_to_shell_text(&stdout_bytes),
-            crate::executor::substitution_metadata::bytes_to_shell_text(&join_pipe_drain(
-                last_stderr,
-            )?),
-            crate::executor::wait_status::process_exit_status(&status),
-        );
+        if let Some(last_child) = last.as_mut() {
+            let status = wait_pipeline_member_interruptibly(self, last_child)?;
+            let mut stdout_bytes = join_pipe_drain(last_stdout)?;
+            stdout_bytes.extend(
+                self.finish_dev_fd_operands(std::mem::take(&mut stage_dev_ops[last_index])),
+            );
+            drop(std::mem::take(&mut stage_proc_ops[last_index]));
+            results[last_index] = (
+                crate::executor::substitution_metadata::bytes_to_shell_text(&stdout_bytes),
+                crate::executor::substitution_metadata::bytes_to_shell_text(&join_pipe_drain(
+                    last_stderr,
+                )?),
+                crate::executor::wait_status::process_exit_status(&status),
+            );
+        }
         for reader in intermediate_stderr {
             let output = reader.join().map_err(|_| {
                 ExecuteError::IoError(std::io::Error::other("pipeline stderr reader panicked"))
@@ -4299,7 +4395,13 @@ impl Executor {
             std::thread::JoinHandle<std::io::Result<Vec<u8>>>,
         > = Vec::with_capacity(tail_index);
 
-        let mut processes = Vec::with_capacity(tail_index);
+        // rubash#3091: a prefix member whose spawn fails keeps its
+        // pipeline slot as a pseudo-member (None) — GNU's forked child
+        // reports shell_execve's classification on fd 2 and exits
+        // 126/127, and `statuses` pre-holds one slot per member so the
+        // classified status still lands under the member's index.
+        let mut processes: Vec<Option<std::process::Child>> = Vec::with_capacity(tail_index);
+        let mut statuses: Vec<i32> = vec![0; tail_index + 1];
         for (index, (program, expanded_name, args)) in specs.iter().enumerate() {
             let (mut process, _) = if let Some(name) = internal_pipeline_program_name(program) {
                 let mut process = std::process::Command::new(std::env::current_exe()?);
@@ -4373,19 +4475,30 @@ impl Executor {
             for dup in parent_side_dups {
                 crate::fd::close_handle(dup);
             }
-            let mut child = spawned.map_err(|error| {
-                ExecuteError::IoError(io::Error::new(
-                    error.kind(),
-                    format!(
-                        "{}: {}",
-                        program
-                            .file_name()
-                            .and_then(|name| name.to_str())
-                            .unwrap_or("external"),
-                        crate::posix_errors::message(&error)
-                    ),
-                ))
-            })?;
+            let mut child = match spawned {
+                Ok(child) => child,
+                Err(error) => {
+                    // rubash#3091: the failed member's pseudo-status
+                    // lands under its own index; dropping the Command
+                    // releases the stage's pipe write end, so the next
+                    // member (or the tail) reads EOF exactly as when
+                    // GNU's dead child closed it. Its fd 2 is the
+                    // ambient binding (prefix members carry no own
+                    // redirects), so the diagnostic goes through the
+                    // fd-table face now — the same channel the piped
+                    // members' drained bytes relay through.
+                    let (diagnostic, status) =
+                        self.member_spawn_failure(program, expanded_name, &error);
+                    statuses[index] = status;
+                    let _ = self.write_default_stderr(
+                        &crate::executor::substitution_metadata::shell_text_to_raw_bytes(
+                            &diagnostic,
+                        ),
+                    );
+                    processes.push(None);
+                    continue;
+                }
+            };
             adopt_orphan_console(child.id());
             // rubash#3308: drain a piped member stderr from spawn time
             // so a chatty member cannot block on a full pipe buffer;
@@ -4400,7 +4513,7 @@ impl Executor {
                     }));
                 }
             }
-            processes.push(child);
+            processes.push(Some(child));
         }
 
         // The tail's fd 0 is the last pipe's read end. Wrap it as a file
@@ -4457,12 +4570,23 @@ impl Executor {
         // window (wait_for_windows_pipeline_member -> 141); on Unix the
         // wait is unbounded and the producer's reaped status is reported
         // verbatim — a genuine SIGPIPE death included (rubash#2250).
-        let mut statuses: Vec<i32> = Vec::with_capacity(tail_index + 1);
         for index in 0..tail_index {
             let (head, downstream) = processes.split_at_mut(index + 1);
-            let member = head.last_mut().expect("member index inside pipeline");
-            let status = wait_for_windows_pipeline_member(self, member, downstream.first_mut())?;
-            statuses.push(crate::executor::wait_status::process_exit_status(&status));
+            let Some(member) = head.last_mut().and_then(|slot| slot.as_mut()) else {
+                // A spawn-failed member has no child to reap — its
+                // classified pseudo-status already sits in
+                // statuses[index] (rubash#3091).
+                continue;
+            };
+            let status = wait_for_windows_pipeline_member(
+                self,
+                member,
+                // The last prefix member's downstream is the in-shell
+                // tail — not a Child — so `first_mut` yields None for
+                // it exactly as it always did.
+                downstream.first_mut().and_then(|slot| slot.as_mut()),
+            )?;
+            statuses[index] = crate::executor::wait_status::process_exit_status(&status);
         }
 
         // rubash#3308: relay the prefix members' collected stderr
@@ -4485,7 +4609,7 @@ impl Executor {
             Some(triple) => triple,
             None => (String::new(), String::new(), 0),
         };
-        statuses.push(tail_status);
+        statuses[tail_index] = tail_status;
 
         self.write_pipeline_output(tail, &tail_out, false)?;
         if !tail_err.is_empty() {
@@ -4734,7 +4858,13 @@ impl Executor {
         // the whole chain is live while the shell stage works (the
         // #2244 discipline: member output is drained from the start,
         // never only once the in-process member returns).
-        let mut processes: Vec<(usize, std::process::Child)> = Vec::new();
+        // rubash#3091: a member whose spawn fails keeps its slot as a
+        // pseudo-member (None in the Child slot) — GNU's forked child
+        // reports shell_execve's classification on fd 2 and exits
+        // 126/127, and `statuses` pre-holds one slot per member so the
+        // classified status lands under the member's stage index.
+        let mut processes: Vec<(usize, Option<std::process::Child>)> = Vec::new();
+        let mut statuses = vec![0; commands.len()];
         for (index, spec) in specs.iter().enumerate() {
             let Some((program, expanded_name, args)) = spec else {
                 continue;
@@ -4800,43 +4930,62 @@ impl Executor {
             for dup in parent_side_dups {
                 crate::fd::close_handle(dup);
             }
-            let mut child = spawned.map_err(|error| {
-                ExecuteError::IoError(io::Error::new(
-                    error.kind(),
-                    format!(
-                        "{}: {}",
-                        program
-                            .file_name()
-                            .and_then(|name| name.to_str())
-                            .unwrap_or("external"),
-                        crate::posix_errors::message(&error)
-                    ),
-                ))
-            })?;
+            let mut child = match spawned {
+                Ok(child) => child,
+                Err(error) => {
+                    // rubash#3091: the failed member's pseudo-status
+                    // lands under its stage index; dropping the Command
+                    // releases the stage's pipe write end, so its
+                    // downstream reads EOF exactly as when GNU's dead
+                    // child closed it. Intermediate members' fd 2 is the
+                    // ambient binding and the last member's piped fd 2 is
+                    // relayed through the same fd-table face — write the
+                    // diagnostic through it now.
+                    let (diagnostic, status) =
+                        self.member_spawn_failure(program, expanded_name, &error);
+                    statuses[index] = status;
+                    let _ = self.write_default_stderr(
+                        &crate::executor::substitution_metadata::shell_text_to_raw_bytes(
+                            &diagnostic,
+                        ),
+                    );
+                    processes.push((index, None));
+                    continue;
+                }
+            };
             adopt_orphan_console(child.id());
-            processes.push((index, child));
+            processes.push((index, Some(child)));
         }
         // The last member's drains start NOW when it is a process (its
         // bytes may not wait for the shell stage to finish).
         let last_is_process = last_index != shell_index;
         let (mut last_child, last_stdout_drain, last_stderr_drain) = if last_is_process {
-            let (_, mut child) = processes
-                .pop()
+            let position = processes
+                .iter()
+                .position(|(stage_index, _)| *stage_index == last_index)
                 .expect("last member process was spawned above");
-            let stdout_target = if self.final_member_stdout_streams_to_host(commands[last_index]) {
-                PipelineDrainTarget::StreamHostStdout
+            let mut child = processes.remove(position).1;
+            if let Some(member) = child.as_mut() {
+                let stdout_target =
+                    if self.final_member_stdout_streams_to_host(commands[last_index]) {
+                        PipelineDrainTarget::StreamHostStdout
+                    } else {
+                        PipelineDrainTarget::Collect
+                    };
+                let stdout_drain = member
+                    .stdout
+                    .take()
+                    .map(|reader| spawn_pipe_drain(reader, stdout_target));
+                let stderr_drain = member
+                    .stderr
+                    .take()
+                    .map(|reader| spawn_pipe_drain(reader, PipelineDrainTarget::Collect));
+                (child.take(), stdout_drain, stderr_drain)
             } else {
-                PipelineDrainTarget::Collect
-            };
-            let stdout_drain = child
-                .stdout
-                .take()
-                .map(|reader| spawn_pipe_drain(reader, stdout_target));
-            let stderr_drain = child
-                .stderr
-                .take()
-                .map(|reader| spawn_pipe_drain(reader, PipelineDrainTarget::Collect));
-            (Some(child), stdout_drain, stderr_drain)
+                // rubash#3091: the last member's spawn failed — its
+                // pseudo-status and diagnostic are already published.
+                (None, None, None)
+            }
         } else {
             (None, None, None)
         };
@@ -4915,17 +5064,21 @@ impl Executor {
 
         // Reap the process members in stage order, each waited against
         // its immediate downstream (the windows broken-pipe window
-        // discipline of the sibling paths).
-        let mut statuses = vec![0; commands.len()];
+        // discipline of the sibling paths). A member with a None slot
+        // spawn-failed — its pseudo-status already sits in
+        // statuses[stage_idx] (rubash#3091).
         if let Some(mut last) = last_child {
             for position in 0..processes.len() {
                 let (head, tail) = processes.split_at_mut(position + 1);
                 let (stage_idx, member) = head.last_mut().expect("member inside pipeline");
-                let downstream = match tail.first_mut() {
-                    Some((_, next)) => next,
-                    None => &mut last,
+                let Some(member) = member.as_mut() else {
+                    continue;
                 };
-                let status = wait_for_windows_pipeline_member(self, member, Some(downstream))?;
+                let downstream = match tail.first_mut() {
+                    Some((_, next)) => next.as_mut(),
+                    None => Some(&mut last),
+                };
+                let status = wait_for_windows_pipeline_member(self, member, downstream)?;
                 statuses[*stage_idx] = crate::executor::wait_status::process_exit_status(&status);
             }
             self.note_foreground_wait();
@@ -4935,10 +5088,13 @@ impl Executor {
             for position in 0..processes.len() {
                 let (head, tail) = processes.split_at_mut(position + 1);
                 let (stage_idx, member) = head.last_mut().expect("member inside pipeline");
+                let Some(member) = member.as_mut() else {
+                    continue;
+                };
                 let status = wait_for_windows_pipeline_member(
                     self,
                     member,
-                    tail.first_mut().map(|(_, next)| next),
+                    tail.first_mut().and_then(|(_, next)| next.as_mut()),
                 )?;
                 statuses[*stage_idx] = crate::executor::wait_status::process_exit_status(&status);
             }
@@ -5410,6 +5566,73 @@ impl Executor {
         }
     }
 
+    /// GNU execute_cmd.c:2620 execute_pipeline runs every element
+    /// through execute_simple_command's forked child: a member whose
+    /// execve fails does NOT abort the pipeline — the child reports
+    /// shell_execve's errno classification (execute_cmd.c:6126-6159:
+    /// EACCES -> 126 "Permission denied", ENOENT -> 127 "No such file
+    /// or directory") on ITS fd 2 and exits with that status, which
+    /// wait_for records into PIPESTATUS (execute_cmd.c:1210-1224).
+    /// The concurrent member spawners share this classifier
+    /// (rubash#3091): it returns the member's fd-2 diagnostic text and
+    /// its exit status, so the caller can keep the pipeline running
+    /// and publish the member's slot instead of aborting the whole
+    /// pipeline with an Err (which left PIPESTATUS empty and named
+    /// the member by `file_name`, dropping the as-typed `./`
+    /// spelling).
+    ///
+    /// shell_execve names the filename it handed execve: the as-typed
+    /// word when it carries a separator (`./pnoexec`), else the
+    /// resolved pathname the PATH walk produced (execute_cmd.c:6139;
+    /// findcmd.c:385-387) — the same rule report_external_spawn_error
+    /// applies on the simple-command path.
+    pub(in crate::executor) fn member_spawn_failure(
+        &self,
+        program: &std::path::Path,
+        expanded_name: &str,
+        error: &io::Error,
+    ) -> (String, i32) {
+        let (message, status, sys_error) = crate::executor::external_inner::spawn_error_diagnostic(
+            &program.to_path_buf(),
+            &self.shell_state.cwd,
+            error,
+        );
+        let report_name = if crate::executor::path::has_path_separator(expanded_name) {
+            expanded_name.to_string()
+        } else {
+            program.display().to_string()
+        };
+        let prefix = if sys_error {
+            self.sys_error_prefix()
+        } else {
+            self.error_prefix()
+        };
+        (format!("{prefix}{report_name}: {message}\n"), status)
+    }
+
+    /// rubash#3091: could the producer element's writes have finished
+    /// before a dead member closed the inter-member pipe's read end?
+    /// GNU forks every element together (execute_cmd.c:2620); the dead
+    /// child exits inside its execve-fail latency, so only an
+    /// in-process simple builtin stage writes soon enough to beat it.
+    /// External children, functions, and compound stages all start
+    /// slower than a failed execve, so their payload dies on EPIPE
+    /// (jobs.c:3064 records them 141). WSL GNU probe: `echo hi |
+    /// ./pnoexec` -> `0 126`, but `cat file | ./pnoexec` -> `141 126`
+    /// and `fn(){ cat; } | ./pnoexec` -> `0 141 126`.
+    fn pipeline_producer_beats_dead_member(&self, command: &CommandNode) -> bool {
+        if command_is_compound_pipeline_stage(command)
+            || command.subshell
+            || command.brace_group.is_some()
+        {
+            return false;
+        }
+        command
+            .words
+            .first()
+            .is_some_and(|word| self.routes_as_builtin(word))
+    }
+
     #[cfg(not(windows))]
     fn execute_external_pipeline_concurrently(
         &mut self,
@@ -5611,7 +5834,14 @@ impl Executor {
                 None => true,
             };
 
-        let mut processes: Vec<std::process::Child> = Vec::with_capacity(commands.len());
+        // `processes` holds one slot per stage — `None` for a member
+        // whose spawn itself failed (GNU: the forked child's execve
+        // failed; it reported on its fd 2 and exited with the
+        // classified status, so the pipeline still completes and
+        // PIPESTATUS records it — rubash#3091). `results` carries the
+        // pseudo-member entries written at spawn time.
+        let mut processes: Vec<Option<std::process::Child>> = Vec::with_capacity(commands.len());
+        let mut results: Vec<(String, String, i32)> = vec![Default::default(); commands.len()];
         let capture_intermediate_stderr =
             self.fd_table.write_endpoint(2) == Some(FdWriteEndpoint::Stdout);
         // rubash#1454: GNU execute_cmd.c:2620 leaves the rightmost
@@ -5705,6 +5935,13 @@ impl Executor {
                 } else {
                     process.stdin(Stdio::piped());
                 }
+            } else {
+                // rubash#3091: the upstream member's spawn failed — its
+                // fd 1 was the inter-member pipe and the dead child
+                // closed it instantly, so this member's stdin is an
+                // already-EOF pipe. An inherited stdin would read the
+                // shell's own fd 0, which GNU never hands here.
+                process.stdin(Stdio::null());
             }
 
             if index + 1 < commands.len() {
@@ -5781,65 +6018,102 @@ impl Executor {
             for dup in parent_side_dups {
                 crate::fd::close_handle(dup);
             }
-            let mut child = match spawned {
-                Ok(child) => child,
+            match spawned {
+                Ok(child) => {
+                    adopt_orphan_console(child.id());
+                    // rubash#2836 slice 4: the parent repeats the child's
+                    // setpgid after spawn (jobs.c:2455, "to avoid possible race
+                    // conditions") so the group exists before the next stage
+                    // spawns — a ^Z arriving between spawns finds the whole job
+                    // in one group. Stage 0 leads; later stages join it.
+                    #[cfg(unix)]
+                    if job_control {
+                        match job_pgrp {
+                            None => {
+                                crate::builtins::kill::group_spawned_child(child.id());
+                                job_pgrp = Some(child.id());
+                            }
+                            Some(leader) => {
+                                crate::builtins::kill::group_spawned_child_into(child.id(), leader);
+                            }
+                        }
+                    }
+                    let mut child = child;
+                    if stderr_plan_is_piped && index + 1 < commands.len() {
+                        if let Some(mut stderr) = child.stderr.take() {
+                            intermediate_stderr.push(std::thread::spawn(move || {
+                                let mut output = Vec::new();
+                                stderr.read_to_end(&mut output)?;
+                                Ok::<_, std::io::Error>(output)
+                            }));
+                        }
+                    }
+                    if index == 0 {
+                        first_stdin = child.stdin.take();
+                    }
+                    if index + 1 < commands.len() {
+                        previous_stdout = child.stdout.take();
+                    }
+                    stage_dev_ops.push(dev_ops);
+                    processes.push(Some(child));
+                }
                 Err(error) => {
+                    // GNU execute_cmd.c:2620 execute_pipeline runs every
+                    // element through execute_simple_command's forked
+                    // child: a member whose execve fails does NOT abort
+                    // the pipeline — the child reports shell_execve's
+                    // errno classification (execute_cmd.c:6126-6159:
+                    // EACCES -> 126 "Permission denied", ENOENT -> 127
+                    // "No such file or directory") on ITS fd 2 and exits
+                    // with that status, which wait_for records into
+                    // PIPESTATUS (execute_cmd.c:1210-1224). The old Err
+                    // abort left PIPESTATUS empty and named the member
+                    // by file_name, dropping the as-typed `./` spelling
+                    // (rubash#3091). Model the dead child: a None slot,
+                    // the diagnostic on the channel its fd 2 would have
+                    // used, the classified status in its results slot,
+                    // and no stdout pipe handed downstream — the dead
+                    // member's fd 1 never carried data, so the next
+                    // member reads an already-EOF stdin.
                     // rubash#2602: this stage's child never ran, so its
                     // operand record must not perform the deferred
-                    // finish when it drops with the error return — the
-                    // donor advance models a child's reads, and there
-                    // are none. Earlier stages' records (already in
-                    // `stage_dev_ops`) stay armed: their children exist
-                    // and may have consumed, so the drop settles them.
+                    // finish when it drops — the donor advance models a
+                    // child's reads, and there are none. The record is
+                    // still pushed (index-aligned with the stages) so the
+                    // unconditional cleanup settles it at scope end.
                     dev_ops.disarm_finish();
-                    return Err(ExecuteError::IoError(io::Error::new(
-                        error.kind(),
-                        format!(
-                            "{}: {}",
-                            program
-                                .file_name()
-                                .and_then(|name| name.to_str())
-                                .unwrap_or("external"),
-                            crate::posix_errors::message(&error)
-                        ),
-                    )));
-                }
-            };
-            adopt_orphan_console(child.id());
-            // rubash#2836 slice 4: the parent repeats the child's
-            // setpgid after spawn (jobs.c:2455, "to avoid possible race
-            // conditions") so the group exists before the next stage
-            // spawns — a ^Z arriving between spawns finds the whole job
-            // in one group. Stage 0 leads; later stages join it.
-            #[cfg(unix)]
-            if job_control {
-                match job_pgrp {
-                    None => {
-                        crate::builtins::kill::group_spawned_child(child.id());
-                        job_pgrp = Some(child.id());
+                    stage_dev_ops.push(dev_ops);
+                    processes.push(None);
+                    let (diagnostic, status) =
+                        self.member_spawn_failure(program, expanded_name, &error);
+                    results[index].2 = status;
+                    let bytes = crate::executor::substitution_metadata::shell_text_to_raw_bytes(
+                        &diagnostic,
+                    );
+                    match &stderr_plan {
+                        // The last member's fd 2 is a capture pipe the
+                        // caller drains into the shell's stderr.
+                        ConcurrentPipelineStderr::Piped if index + 1 == commands.len() => {
+                            results[index].1 = diagnostic;
+                        }
+                        // A null-bound fd 2 swallows the diagnostic
+                        // exactly as the child's own write would.
+                        ConcurrentPipelineStderr::Null => {}
+                        // Inherit/Direct (and a non-last member under
+                        // Piped, whose real siblings' captured bytes
+                        // relay through the same face at the finish):
+                        // the child's fd 2 was the shell's fd-2
+                        // binding — write it through the same face
+                        // now, as the exiting child would.
+                        _ => {
+                            let _ = self.write_default_stderr(&bytes);
+                        }
                     }
-                    Some(leader) => {
-                        crate::builtins::kill::group_spawned_child_into(child.id(), leader);
-                    }
+                    // The dead member holds the pipe's read end for zero
+                    // time: the NEXT member's stdin sees EOF
+                    // (previous_stdout stays None → Stdio::null()).
                 }
             }
-            if stderr_plan_is_piped && index + 1 < commands.len() {
-                if let Some(mut stderr) = child.stderr.take() {
-                    intermediate_stderr.push(std::thread::spawn(move || {
-                        let mut output = Vec::new();
-                        stderr.read_to_end(&mut output)?;
-                        Ok::<_, std::io::Error>(output)
-                    }));
-                }
-            }
-            if index == 0 {
-                first_stdin = child.stdin.take();
-            }
-            if index + 1 < commands.len() {
-                previous_stdout = child.stdout.take();
-            }
-            stage_dev_ops.push(dev_ops);
-            processes.push(child);
         }
 
         // rubash#2626: while this process supervises the pipeline,
@@ -5852,7 +6126,11 @@ impl Executor {
         // exactly this wait: it drops when the function returns,
         // after every member has been reaped.
         let _wrapper_relay_guard = crate::builtins::kill::WrapperRelayTargetGuard::publish(
-            processes.last().map(|child| child.id()).unwrap_or(0),
+            processes
+                .iter()
+                .rev()
+                .find_map(|slot| slot.as_ref().map(|child| child.id()))
+                .unwrap_or(0),
         );
 
         if let Some(mut stdin) = first_stdin {
@@ -5874,7 +6152,6 @@ impl Executor {
             )?;
         }
 
-        let mut results = Vec::with_capacity(processes.len());
         self.note_foreground_wait();
         // rubash#2836 slice 4: the job-control wait (GNU jobs.c:3064
         // wait_for with WUNTRACED). The plain waits below run only when
@@ -5891,7 +6168,7 @@ impl Executor {
                 // the intermediate-stderr drains.
                 let mut last_stdout_drain = None;
                 let mut last_stderr_drain = None;
-                if let Some(last) = processes.last_mut() {
+                if let Some(last) = processes.last_mut().and_then(|slot| slot.as_mut()) {
                     if let Some(mut stdout) = last.stdout.take() {
                         last_stdout_drain = Some(std::thread::spawn(move || {
                             let mut output = Vec::new();
@@ -5907,24 +6184,54 @@ impl Executor {
                         }));
                     }
                 }
+                // rubash#3091: the wait consumes only the spawned
+                // children; `member_index` maps their positions back to
+                // stage slots so a spawn-failed member keeps its
+                // classified pseudo-status while the live members'
+                // reaped statuses land under their own indices. The
+                // callee index-aligns pids with the command texts and
+                // the dev-fd records, so it receives the spawned
+                // subsets of all three — a failed member keeps its
+                // disarmed record in `stage_dev_ops` (settling on drop)
+                // and never enters the job table (GNU's dead child had
+                // a pid in it, but the record is observational only:
+                // the member exits immediately either way).
+                let mut member_index = Vec::with_capacity(processes.len());
+                let mut spawned_children = Vec::with_capacity(processes.len());
+                let mut spawned_commands = Vec::with_capacity(processes.len());
+                for (index, slot) in processes.into_iter().enumerate() {
+                    if let Some(child) = slot {
+                        member_index.push(index);
+                        spawned_children.push(child);
+                        spawned_commands.push(commands[index]);
+                    }
+                }
+                let mut spawned_dev_ops: Vec<_> = member_index
+                    .iter()
+                    .map(|index| std::mem::take(&mut stage_dev_ops[*index]))
+                    .collect();
                 let (statuses, stopped, stop_signal, last_out, last_err) = self
                     .wait_pipeline_job_control(
-                        processes,
-                        commands,
+                        spawned_children,
+                        &spawned_commands,
                         leader,
-                        &mut stage_dev_ops,
+                        &mut spawned_dev_ops,
                         last_stdout_drain,
                         last_stderr_drain,
                     )?;
-                for (index, status) in statuses.iter().enumerate() {
-                    if index + 1 == statuses.len() {
-                        results.push((
+                for (position, record) in spawned_dev_ops.into_iter().enumerate() {
+                    stage_dev_ops[member_index[position]] = record;
+                }
+                for (position, status) in statuses.iter().enumerate() {
+                    let index = member_index[position];
+                    if index + 1 == commands.len() {
+                        results[index] = (
                             crate::executor::substitution_metadata::bytes_to_shell_text(&last_out),
                             crate::executor::substitution_metadata::bytes_to_shell_text(&last_err),
                             *status,
-                        ));
+                        );
                     } else {
-                        results.push((String::new(), String::new(), *status));
+                        results[index].2 = *status;
                     }
                 }
                 if stopped {
@@ -5944,20 +6251,27 @@ impl Executor {
                 );
             }
         }
-        let mut last = processes.pop().expect("pipeline has at least two stages");
-        // rubash#3284: the last member's wait is the interruptible
-        // one, not a plain blocking wait_with_output — the capture
-        // drains run on threads inside wait_pipeline_stage_output,
-        // so the sliced mailbox drain fits and a recorded terminating
-        // delivery aborts the wait instead of waiting for the member's
-        // natural end.
-        let output = wait_pipeline_stage_output(self, &mut last)?;
-        results.push((
-            crate::executor::substitution_metadata::bytes_to_shell_text(&output.stdout),
-            crate::executor::substitution_metadata::bytes_to_shell_text(&output.stderr),
-            crate::executor::wait_status::process_exit_status(&output.status),
-        ));
-        for mut process in processes.into_iter().rev() {
+        if let Some(mut last) = processes[last_index].take() {
+            // rubash#3284: the last member's wait is the interruptible
+            // one, not a plain blocking wait_with_output — the capture
+            // drains run on threads inside wait_pipeline_stage_output,
+            // so the sliced mailbox drain fits and a recorded terminating
+            // delivery aborts the wait instead of waiting for the member's
+            // natural end.
+            let output = wait_pipeline_stage_output(self, &mut last)?;
+            results[last_index] = (
+                crate::executor::substitution_metadata::bytes_to_shell_text(&output.stdout),
+                crate::executor::substitution_metadata::bytes_to_shell_text(&output.stderr),
+                crate::executor::wait_status::process_exit_status(&output.status),
+            );
+        }
+        for index in (0..last_index).rev() {
+            let Some(mut process) = processes[index].take() else {
+                // A spawn-failed member has no child to reap — its
+                // pseudo-entry (classified status + fd-2 diagnostic)
+                // already sits in results[index] (rubash#3091).
+                continue;
+            };
             let status = match process.try_wait()? {
                 Some(status) => {
                     // rubash#1776: sample the reaped member's CPU for
@@ -6000,13 +6314,12 @@ impl Executor {
                     status
                 }
             };
-            results.push((
+            results[index] = (
                 String::new(),
                 String::new(),
                 crate::executor::wait_status::process_exit_status(&status),
-            ));
+            );
         }
-        results.reverse();
         return self.finish_concurrent_pipeline_results(
             commands,
             results,
