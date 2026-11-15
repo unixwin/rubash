@@ -1818,18 +1818,35 @@ impl Executor {
     /// command run its do_redirections in a subshell; otherwise they
     /// apply in the current shell (rubash#535's `> $nope` shape: an
     /// fd-1-only null command stays in the shell).
-    fn null_command_redirects_force_fork(cmd: &CommandNode) -> bool {
+    ///
+    /// rubash#3021: the redirector test is GNU's `rd->redirector.dest ==
+    /// 0` (execute_cmd.c:4213) for every instruction, not only the
+    /// input kinds — `0>file`, `0<&1`, `<>file`, `<&-` force the fork
+    /// too. The redirector defaults follow parse.y's make_redirection
+    /// calls: input-side operators default to fd 0, every other operator
+    /// to fd 1 (`&>` / `&>>` are r_err_and_out with redirector 1).
+    pub(in crate::executor) fn null_command_redirects_force_fork(cmd: &CommandNode) -> bool {
         cmd.heredoc.is_some()
             || cmd.here_string.is_some()
             || cmd.redirects.iter().any(|redirect| {
-                redirect.fd_var.is_some()
-                    || (matches!(
-                        redirect.kind,
-                        crate::parser::RedirectKind::HereDoc
-                            | crate::parser::RedirectKind::HereString
-                            | crate::parser::RedirectKind::Input
-                    ) && matches!(redirect.fd, None | Some(0)))
+                if redirect.fd_var.is_some() {
+                    return true;
+                }
+                let default_fd = if redirect.is_input_side() { 0 } else { 1 };
+                let redirector = redirect.fd.unwrap_or_else(|| {
+                    let digits: String = redirect
+                        .operator
+                        .chars()
+                        .take_while(|ch| ch.is_ascii_digit())
+                        .collect();
+                    digits.parse().unwrap_or(default_fd)
+                });
+                redirector == 0
             })
+            || cmd
+                .heredoc_redirects
+                .iter()
+                .any(|redirect| redirect.fd_var.is_some() || redirect.fd == Some(0))
     }
 
     /// rubash#2615: whether THIS command's own do_redirections walk
