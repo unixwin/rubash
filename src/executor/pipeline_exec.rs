@@ -1466,10 +1466,19 @@ impl Executor {
                 let input = fs::read_to_string(&output.path).unwrap_or_default();
                 let source = output.source.clone();
                 let plan = output.spawn_plan.clone();
-                if let Err(output_error) = self.with_procsub_spawn_plan(&plan, |executor| {
+                // rubash#3732: with_procsub_spawn_plan now returns
+                // Result<T, ExecuteError> — a dup failure while
+                // saving a plan fd's pre-bind snapshot fails the run
+                // before the consumer starts, and must surface here
+                // exactly like the consumer's own error (both layers
+                // carry the same ExecuteError).
+                match self.with_procsub_spawn_plan(&plan, |executor| {
                     executor.execute_persistent_output_process_substitution(&source, input, None)
                 }) {
-                    error = Some(output_error);
+                    Ok(Ok(())) => {}
+                    Ok(Err(output_error)) | Err(output_error) => {
+                        error = Some(output_error);
+                    }
                 }
             }
             let _ = fs::remove_file(&output.path);
