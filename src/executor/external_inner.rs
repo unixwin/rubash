@@ -2083,6 +2083,14 @@ impl Executor {
             // (rubash#1250; GNU survives with rc=130). Non-interactive
             // shells keep SIG_DFL and die like GNU scripts do.
             let sigint_guard = ForegroundWaitSigintGuard::hold_if_interactive_untrapped(self);
+            // rubash#2729: a non-interactive shell gets GNU's other
+            // arm — wait_for installs wait_sigint_handler for EVERY
+            // non-job-controlled foreground wait (jobs.c:3088-3102,
+            // `job_control == 0`; a rubash foreground child shares the
+            // shell's pgrp), so a shell-only SIGINT records instead of
+            // dying mid-wait, and the wait's tail adjudicates it by
+            // the child's outcome.
+            let script_guard = ForegroundWaitSigintGuard::hold_for_script_wait(self);
             self.note_foreground_wait();
             // rubash#1990: with the guard armed (interactive, untrapped),
             // wait in slices so a recorded terminal SIGINT can be
@@ -2092,6 +2100,38 @@ impl Executor {
             // recorded terminating delivery until the child ends).
             let status = if sigint_guard.is_armed() {
                 wait_fg_child_sliced(child, &sigint_guard)?
+            } else if script_guard.records_for_script() {
+                let mut sigint_received = false;
+                let status = wait_fg_child_recording(self, child, &mut sigint_received)?;
+                // jobs.c:4157-4163 + 4410ff wait_for cleanup: the
+                // recorded shell-side SIGINT acts only when the job
+                // itself died by SIGINT (child_caught_sigint == 0).
+                // Trapped, the pending trap runs at the next boundary
+                // (maybe_call_trap_handler). Untrapped, the restored
+                // SIG_DFL means termsig_handler (sig.c:590): EXIT trap,
+                // then kill_shell re-raises so the shell dies BY
+                // SIGINT. A child that exited normally or by another
+                // signal (child_caught_sigint == 1) discards the
+                // delivery — the script continues with the child's
+                // own status.
+                if sigint_received
+                    && crate::executor::wait_status::exit_status_signal(&status)
+                        == Some(libc::SIGINT)
+                {
+                    let trapped = crate::builtins::trap::get_trap_action(
+                        &self.shell_state.env_vars,
+                        "SIGINT",
+                    );
+                    if trapped.is_some() {
+                        crate::builtins::kill::requeue_pending_signals(vec![libc::SIGINT]);
+                    } else {
+                        self.termsig_death_trap_status = Some(self.exit_code);
+                        self.exit_code = 128 + libc::SIGINT;
+                        self.termsig_death_pending = Some(libc::SIGINT);
+                        return Err(ExecuteError::ExitCode(128 + libc::SIGINT));
+                    }
+                }
+                status
             } else {
                 wait_fg_child_draining(self, child)?
             };
@@ -5479,6 +5519,20 @@ impl Executor {
 /// one child — hence the executor-wide visibility.
 pub(in crate::executor) struct ForegroundWaitSigintGuard {
     armed: bool,
+    /// rubash#2729: the record-only arm GNU installs for every
+    /// non-job-controlled foreground wait (jobs.c:3088-3102
+    /// wait_sigint_handler), including a non-interactive script
+    /// shell's: a shell-addressed SIGINT during the wait is recorded
+    /// (wait_sigint_received) and adjudicated by the job's outcome
+    /// (jobs.c:4157-4163 child_caught_sigint, 4410ff cleanup) —
+    /// never forwarded and never a mid-wait death.
+    script_recording: bool,
+    /// Whether this arm installed the mailbox routing itself
+    /// (hold_fg_sigint); Drop releases the hold only then — a
+    /// trapped/ignored SIGINT arm changes no disposition, and
+    /// releasing would flip the trap table's Handler back to the
+    /// steady state mid-session.
+    held: bool,
     /// Kernel-SIGINT epoch snapshot taken when the wait starts
     /// (rubash#1990): the sliced wait forwards the interrupt to the
     /// child once the epoch moves past this value.
@@ -5491,14 +5545,57 @@ impl ForegroundWaitSigintGuard {
         if !foreground_sigint_needs_protection(executor) {
             return Self {
                 armed: false,
+                script_recording: false,
+                held: false,
                 sigint_epoch_at_arm: 0,
             };
         }
         crate::builtins::kill::hold_fg_sigint();
         Self {
             armed: true,
+            script_recording: false,
+            held: true,
             sigint_epoch_at_arm: crate::builtins::kill::sigint_kernel_epoch(),
         }
+    }
+
+    /// rubash#2729: the script-shell arm — GNU installs the recording
+    /// handler for a non-interactive wait too (the jobs.c:3088
+    /// `job_control == 0` branch; rubash foreground children share the
+    /// shell's process group, so the arm covers every script wait).
+    /// An untrapped SIG_DFL swaps to the mailbox handler for the
+    /// wait's span; a trapped SIGINT is already mailbox-routed (the
+    /// arm only enables the drain's swallow, no disposition change);
+    /// an ignored SIGINT stays unarmed (GNU restores SIG_IGN:
+    /// jobs.c:3100-3101).
+    pub(in crate::executor) fn hold_for_script_wait(executor: &Executor) -> Self {
+        if executor.interactive_reader_session() || sigint_disposition_is_ignored() {
+            return Self {
+                armed: false,
+                script_recording: false,
+                held: false,
+                sigint_epoch_at_arm: 0,
+            };
+        }
+        if sigint_disposition_is_default() {
+            crate::builtins::kill::hold_fg_sigint();
+            return Self {
+                armed: false,
+                script_recording: true,
+                held: true,
+                sigint_epoch_at_arm: 0,
+            };
+        }
+        Self {
+            armed: false,
+            script_recording: true,
+            held: false,
+            sigint_epoch_at_arm: 0,
+        }
+    }
+
+    pub(in crate::executor) fn records_for_script(&self) -> bool {
+        self.script_recording
     }
 
     pub(in crate::executor) fn is_armed(&self) -> bool {
@@ -5612,6 +5709,56 @@ pub(crate) fn wait_fg_child_draining(
     child.wait().map_err(ExecuteError::IoError)
 }
 
+/// rubash#2729: the record-only foreground wait for a script shell —
+/// the shape of wait_fg_child_draining with GNU's wait_sigint_handler
+/// discipline (jobs.c:2908): a shell-addressed SIGINT arriving during
+/// the wait is swallowed into `sigint_received` (wait_sigint_received)
+/// instead of adjudicating mid-wait; the caller's tail classifies it
+/// by the child's outcome (jobs.c:4157-4163, 4410ff). Every other
+/// delivery drains through the shared observe path — a termsig death
+/// still aborts the wait (CHECK_TERMSIG, quit.h:53). The tail drain
+/// inside the loop's final try_wait covers a SIGINT that lands
+/// between the last slice and the reap: GNU's handler stays installed
+/// until wait_for's cleanup restores it, so such an arrival is still
+/// wait_sigint_received for this wait.
+#[cfg(unix)]
+fn wait_fg_child_recording(
+    executor: &mut Executor,
+    child: &mut std::process::Child,
+    sigint_received: &mut bool,
+) -> Result<std::process::ExitStatus, ExecuteError> {
+    const SLICE: std::time::Duration = std::time::Duration::from_millis(10);
+    loop {
+        if let Some(status) = child.try_wait().map_err(ExecuteError::IoError)? {
+            // The handler is still installed for one more instant —
+            // give a just-landed SIGINT its recorded verdict before
+            // the guard's Drop restores the steady disposition.
+            let pending = crate::builtins::kill::take_pending_signals_now(std::process::id())
+                .unwrap_or_default();
+            if !pending.is_empty() {
+                let mut rest = Vec::with_capacity(pending.len());
+                for signal in pending {
+                    if signal == libc::SIGINT {
+                        *sigint_received = true;
+                    } else {
+                        rest.push(signal);
+                    }
+                }
+                crate::builtins::kill::requeue_pending_signals(rest);
+            }
+            return Ok(status);
+        }
+        if let Err(error) = executor.observe_signals_while_blocked_recording_sigint(sigint_received)
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            super::read_helpers::note_reaped_child_cpu(child);
+            return Err(error);
+        }
+        std::thread::sleep(SLICE);
+    }
+}
+
 /// rubash#1990: sliced form of the armed foreground wait. GNU never
 /// needs to forward: its children lead their own process groups and
 /// the terminal's group delivery reaches them directly, so wait_for
@@ -5716,10 +5863,21 @@ fn sigint_disposition_is_default() -> bool {
     current.sa_sigaction == libc::SIG_DFL
 }
 
+/// rubash#2729: SIGINT at SIG_IGN (an entry-ignored launch keeps it —
+/// GNU restores the ignore across the wait, jobs.c:3100-3101).
+#[cfg(unix)]
+fn sigint_disposition_is_ignored() -> bool {
+    let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
+    if unsafe { libc::sigaction(libc::SIGINT, std::ptr::null(), &mut current) } != 0 {
+        return false;
+    }
+    current.sa_sigaction == libc::SIG_IGN
+}
+
 #[cfg(unix)]
 impl Drop for ForegroundWaitSigintGuard {
     fn drop(&mut self) {
-        if !self.armed {
+        if !self.armed && !self.held {
             return;
         }
         crate::builtins::kill::release_fg_sigint();
