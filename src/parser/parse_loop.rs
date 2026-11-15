@@ -1069,6 +1069,16 @@ fn fold_pipeline_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
         pipeline.inverted = first.inverted;
         pipeline.background = last.background;
         pipeline.and_or = last.and_or;
+        // GNU's reader advances `line_number` while parsing the WHOLE
+        // pipeline before any element runs — when execute_cmd.c:854's
+        // do_redirections expands a compound stage's `<(` body, the
+        // ambient line the procsub fork inherits (subst.c:6362
+        // make_child) is the pipeline's parse-end line (rubash#3299:
+        // `{ } < <(x) | cat` reports the line of `cat`, not the
+        // group's). The stage lines stay on the stages; the folded
+        // node's end_line is the last stage's parse-end so the
+        // executor's ambient-line stamp sees the same value.
+        pipeline.end_line = last.end_line.or(last.line);
         if let Some(first_stage) = stages.first_mut() {
             first_stage.inverted = false;
         }

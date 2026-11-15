@@ -244,8 +244,22 @@ impl Executor {
         if let Some(coproc_cmd) = &cmd.coproc_command {
             return Some(self.execute_coproc_command(cmd, coproc_cmd));
         }
+        // GNU execute_cmd.c:854 do_redirections runs for cm_cond like any
+        // other command — a `[[ ]]` whose redirects carry `<(`/`>(`
+        // process substitutions (parse.y:5494-5524 read_token_word's
+        // shellexp arm) must run the materializing path so the
+        // substitution is spawned and its `/dev/fd/N` name bound as the
+        // redirect target. The fast entry bypasses that machinery and
+        // would open the literal `<(…)` text as a file, so it admits only
+        // commands with no node-level substitutions; operand
+        // substitutions inside the `[[ ]]` expression live in the
+        // ConditionalCommand's own arg metadata and keep this path.
         if let Some(conditional_command) = &cmd.conditional_command {
-            return Some(self.execute_conditional_command_with_redirects(cmd, conditional_command));
+            if cmd.process_substitutions.is_empty() {
+                return Some(
+                    self.execute_conditional_command_with_redirects(cmd, conditional_command),
+                );
+            }
         }
         if let Some(function_command) = &cmd.function_command {
             return Some(self.define_function(cmd, function_command));
