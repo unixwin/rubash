@@ -747,6 +747,42 @@ impl Executor {
             == Some("1")
     }
 
+    /// GNU variables.c:6257-6266 sv_strict_posix, invoked from every
+    /// funnel that binds, unbinds or restores POSIXLY_CORRECT (the
+    /// assignment funnel, the declare-family stores, unset, the
+    /// tempenv restore and the function-frame pop): the mode
+    /// re-derives from the variable's CURRENT isset-ness — present in
+    /// either store (scalar env text or a typed array/assoc cell),
+    /// with any value including empty. The variable itself is never
+    /// written by the sync (rubash#3661).
+    pub(in crate::executor) fn sync_posix_mode_from_variable(&mut self) {
+        let isset = self.shell_state.env_vars.contains_key("POSIXLY_CORRECT")
+            || self.shell_state.variables.get("POSIXLY_CORRECT").is_some();
+        crate::builtins::set::sync_posix_mode_from_variable(&mut self.shell_state.env_vars, isset);
+    }
+
+    /// The declare-family entry points (declare/typeset/local/export/
+    /// readonly) store their operands through the builtin layer, not
+    /// through apply_shell_assignment, so the sv_strict_posix hook
+    /// fires here instead: when any operand is a BIND of
+    /// POSIXLY_CORRECT (`name=value`, `name+=value`, `name[sub]=value`
+    /// or the compound `name=(...)`), re-derive the mode once the
+    /// builtin has stored it. Bare-name operands only set attributes
+    /// in GNU (no bind_variable, no hook) and do not fire it
+    /// (rubash#3661).
+    pub(in crate::executor) fn sync_posix_mode_if_assignment_operands(&mut self, words: &[String]) {
+        let binds = words.iter().any(|word| {
+            let Some((lhs, _)) = word.split_once('=') else {
+                return false;
+            };
+            let lhs = lhs.strip_suffix('+').unwrap_or(lhs);
+            lhs.split('[').next().unwrap_or(lhs) == "POSIXLY_CORRECT"
+        });
+        if binds {
+            self.sync_posix_mode_from_variable();
+        }
+    }
+
     /// GNU variables.c + execute_cmd.c: a listing builtin (export -p,
     /// declare -p, readonly -p, bare set, compgen -e/-v) iterates the
     /// real variable contexts (all_shell_variables / vapply); a
@@ -871,6 +907,11 @@ impl Executor {
         // and function-local restores both emit). A restore that removed
         // the variable takes the `v == 0` arm (flags off, no diagnostic).
         let touched_bashcompat = previous.iter().any(|(name, ..)| name == "BASH_COMPAT");
+        // GNU variables.c:5820/6257-6266 sv_strict_posix: reinstalling
+        // (or dropping) a tempenv POSIXLY_CORRECT binding re-derives
+        // the mode from the restored isset-ness — a temp prefix flips
+        // POSIX on for the command and back off here (rubash#3661).
+        let touched_posixly_correct = previous.iter().any(|(name, ..)| name == "POSIXLY_CORRECT");
         // rubash#1525: this restore consumes the PIPESTATUS (shape,
         // vector) snapshot apply_temporary_assignments recorded, so
         // the promotion mirror of it has served its purpose.
@@ -1019,6 +1060,9 @@ impl Executor {
                 let line = format!("{}{diagnostic}\n", self.diagnostic_prefix());
                 self.emit_assignment_diag(line);
             }
+        }
+        if touched_posixly_correct {
+            self.sync_posix_mode_from_variable();
         }
     }
 

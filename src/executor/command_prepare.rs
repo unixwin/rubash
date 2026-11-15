@@ -4194,6 +4194,10 @@ impl Executor {
             return true;
         }
         if self.execute_array_element_assignment(cmd) {
+            // GNU variables.c:5820/6257-6266 sv_strict_posix: an
+            // element bind of POSIXLY_CORRECT re-derives the mode
+            // (rubash#3661).
+            self.sync_posix_mode_if_assignment_operands(&cmd.words);
             self.bind_underscore("");
             // rubash#1523: same finish as the assignment-words arm.
             let _ = self.finish_assignment_output_process_substitutions_for_command(cmd);
@@ -4268,6 +4272,11 @@ impl Executor {
                 if self.exit_code != 0 {
                     return true;
                 }
+                // GNU variables.c:5820/6257-6266 sv_strict_posix: an
+                // element bind of POSIXLY_CORRECT inside a mixed
+                // assignment statement re-derives the mode
+                // (rubash#3661).
+                self.sync_posix_mode_if_assignment_operands(&single.words);
             } else if let Some((name, value)) = split_assignment_word(&cmd.words[index]) {
                 let assignment = vec![(name.to_string(), value.to_string())];
                 if !self.apply_permanent_assignments(&assignment, None) {

@@ -1482,6 +1482,15 @@ impl Executor {
         if result && base == "PATH" {
             crate::builtins::hash::flush_command_hash_table(&mut self.shell_state.env_vars);
         }
+        // GNU variables.c:5820 { "POSIXLY_CORRECT", sv_strict_posix }
+        // -> variables.c:6257-6266: every successful bind of the name
+        // (scalar, append, element or compound — this funnel carries
+        // them all, plus the read/for/select/getopts binds) re-derives
+        // posixly_correct from the variable's isset-ness and runs
+        // posix_initialize + set_shellopts (rubash#3661).
+        if result && base == "POSIXLY_CORRECT" {
+            self.sync_posix_mode_from_variable();
+        }
         result
     }
 
