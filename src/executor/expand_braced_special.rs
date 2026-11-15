@@ -151,13 +151,13 @@ impl Executor {
         }
 
         if indirect_name == "#" {
-            return Some(
-                self.shell_state
-                    .positional_window()
-                    .last()
-                    .cloned()
-                    .unwrap_or_default(),
-            );
+            // `${!#}` indirects through the $# VALUE, not through the
+            // positional list itself: find_indir (subst.c:7917-7928)
+            // resolves t = itos($#) and names the parameter t — with N
+            // positionals that is the last one, with zero positionals
+            // it is parameter `0`, the script/function name.
+            let count = self.shell_state.positional_window().len().to_string();
+            return Some(self.parameter_error_value(&count).unwrap_or_default());
         }
 
         // GNU subst.c parameter_brace_expand_indir: the target may itself be

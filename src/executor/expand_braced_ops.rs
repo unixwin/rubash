@@ -90,7 +90,14 @@ impl Executor {
             }
         }
         if let Some((var_name, word)) = split_once_outside_subscript(name, '?') {
-            if !var_name.is_empty() {
+            // `${!?-d}`: outside posix mode `!` + `?` is an indirect
+            // source, not the `$!` parameter under `?` — the operator
+            // split on the FOLLOWING `-`/`=`/`+`/`:` owns that form
+            // (subst.c:9920 want_indir with VALID_INDIR_PARAM `?`,
+            // subst.c:122). The `!` parameter's own `?` operator only
+            // survives in posix mode (`${!?msg}` -> `!: msg`).
+            let bang_indirect_question = var_name == "!" && !self.posix_mode_enabled();
+            if !var_name.is_empty() && !bang_indirect_question {
                 return Some(
                     self.parameter_operator_value(var_name)
                         .map(|value| shell_safe_value(&value))
