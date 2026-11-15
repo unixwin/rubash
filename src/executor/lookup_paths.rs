@@ -1,3 +1,4 @@
+use super::path::drop_exe_probe_suffix;
 use super::*;
 
 impl Executor {
@@ -34,7 +35,7 @@ impl Executor {
             if let Some(path) =
                 crate::builtins::hash::phash_search(&self.shell_state.env_vars, name)
             {
-                return Some(path);
+                return Some(drop_exe_probe_suffix(name, path));
             }
         }
         // rubash#2717: a slash-bearing name is never PATH-walked at
@@ -109,10 +110,13 @@ impl Executor {
         // execution-decision face (command_path_without_bridge)
         // always keeps the anchored form.
         if describe_spelling {
-            Some(crate::executor::path::recorded_resolution_spelling(
+            Some(drop_exe_probe_suffix(
                 name,
-                &found,
-                &self.shell_state.env_vars,
+                crate::executor::path::recorded_resolution_spelling(
+                    name,
+                    &found,
+                    &self.shell_state.env_vars,
+                ),
             ))
         } else {
             Some(shell_display_path(
@@ -291,7 +295,7 @@ impl Executor {
             if let Some(path) =
                 crate::builtins::hash::phash_search(&self.shell_state.env_vars, name)
             {
-                paths.push(path);
+                paths.push(drop_exe_probe_suffix(name, path));
             }
         }
 
@@ -335,16 +339,18 @@ impl Executor {
                     &self.shell_state.env_vars,
                 );
                 if anchored.is_file() {
-                    paths.push(shell_display_path(
-                        &candidate.to_string_lossy().replace('\\', "/"),
+                    paths.push(drop_exe_probe_suffix(
+                        name,
+                        shell_display_path(&candidate.to_string_lossy().replace('\\', "/")),
                     ));
                 }
                 if cfg!(windows) {
                     for ext in executable_extensions() {
                         let candidate = candidate.with_extension(ext);
                         if candidate.is_file() {
-                            paths.push(shell_display_path(
-                                &candidate.to_string_lossy().replace('\\', "/"),
+                            paths.push(drop_exe_probe_suffix(
+                                name,
+                                shell_display_path(&candidate.to_string_lossy().replace('\\', "/")),
                             ));
                         }
                     }
@@ -372,6 +378,12 @@ impl Executor {
             }
         }
 
+        // niubash#993 S7: a `name` + `name.exe` pair in one PATH
+        // element collapses to the single as-written join Git Bash
+        // prints — drop the consecutive duplicate the .exe strip just
+        // produced (the walk pushes the bare file first, then each
+        // PATHEXT hit).
+        paths.dedup();
         paths
     }
 }

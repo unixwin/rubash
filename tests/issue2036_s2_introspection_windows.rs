@@ -99,12 +99,11 @@ fn issue2036_s2_windows_applet_path_disclosure() {
     // `file` for -t, the real resolved path for `type`/`command -v`,
     // and never the retired `emulation` word nor a bare name.
     assert!(out.stdout.contains("stty=file"), "{}", out.stdout);
-    assert!(
-        out.stdout.contains("stty is ") && out.stdout.contains("stty.exe"),
-        "{}",
-        out.stdout
-    );
-    assert!(out.stdout.contains("cat.exe"), "{}", out.stdout);
+    assert!(out.stdout.contains("stty is "), "{}", out.stdout);
+    // niubash#993 S7: the displayed join drops the .exe probe suffix.
+    assert!(!out.stdout.contains("stty.exe"), "{}", out.stdout);
+    assert!(out.stdout.contains("cat=/"), "{}", out.stdout);
+    assert!(!out.stdout.contains("cat.exe"), "{}", out.stdout);
     assert!(!out.stdout.contains("cat=cat"), "{}", out.stdout);
     assert!(out.stdout.contains("tput=file"), "{}", out.stdout);
     assert!(out.stdout.contains("sleep=file"), "{}", out.stdout);
