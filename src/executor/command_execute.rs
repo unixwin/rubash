@@ -2039,7 +2039,7 @@ impl Executor {
     /// order). A fatal word-expansion arithmetic failure in a bare command
     /// (e.g. bare `$((1/0))` with no other words) abandons the rest of the
     /// current command list (GNU Bash 5.2.37 evidence).
-    fn abort_on_expansion_errors(&mut self) -> Result<(), ExecuteError> {
+    pub(in crate::executor) fn abort_on_expansion_errors(&mut self) -> Result<(), ExecuteError> {
         if self.shell_state.arithmetic_expansion_error.get() {
             self.shell_state.arithmetic_expansion_error.set(false);
             let was_fatal = self.shell_state.arithmetic_fatal_error.replace(false);
@@ -2273,7 +2273,10 @@ impl Executor {
     /// expanded in the main shell (or no funsub exited): a main-shell
     /// latch stays on `current_shell_substitution_exit` for the caller
     /// to consume as a shell abort.
-    fn preexpand_command_stdin(&mut self, cmd: &mut CommandNode) -> Option<i32> {
+    pub(in crate::executor) fn preexpand_command_stdin(
+        &mut self,
+        cmd: &mut CommandNode,
+    ) -> Option<i32> {
         // rubash#2681: for a command GNU forks, the bodies expand in
         // the child — run the whole pre-expansion (every body of the
         // command, in redirect order, so later bodies still see
