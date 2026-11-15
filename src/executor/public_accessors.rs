@@ -699,17 +699,35 @@ impl Executor {
                 .next()
                 .and_then(|value| value.parse::<usize>().ok())
                 .unwrap_or(1);
+            // rubash#3405: GNU's suffix rule (parse.y:6858-6859) adds
+            // "while looking for matching" only when the offending
+            // token is NOT the sub-parse's EOF token. A missing-target
+            // error whose operator is the body's LAST token — no
+            // physical newline follows it inside the body text — died
+            // on the comsub's own `)' (the stream's EOF token,
+            // parse.y:4519): name it, without the suffix. An operator
+            // followed by a real newline inside the body keeps
+            // `newline' with the suffix.
+            let died_on_body_eof = token == "newline"
+                && body_text.is_some_and(|text| {
+                    let trimmed = text.trim_end_matches([' ', '\t', '\r']);
+                    !trimmed.ends_with('\n')
+                        && matches!(trimmed.chars().last(), Some('>' | '<' | '&' | '|'))
+                });
+            let (token, suffix) = if died_on_body_eof {
+                (")".to_string(), "")
+            } else {
+                (token, " while looking for matching `)'")
+            };
             self.write_diagnostic_fd2(
                 format!(
-                    "{}syntax error near unexpected token `{token}' while looking for matching `)'\n",
+                    "{}syntax error near unexpected token `{token}'{suffix}\n",
                     self.parser_error_prefix_for_line(line)
                 )
                 .as_bytes(),
             );
             self.record_run_diagnostic(
-                format!(
-                    "syntax error near unexpected token `{token}' while looking for matching `)'"
-                ),
+                format!("syntax error near unexpected token `{token}'{suffix}"),
                 Some(line),
             );
             if self.errexit_active_at_diagnostic() {
@@ -2345,6 +2363,15 @@ impl Executor {
         // rubash#2897: the depth this restore returns to — an in-place
         // `( )` region's process save is tagged with exactly it.
         let saved_depth = saved_state.subshell_depth.get();
+        // rubash#3387: pop the CloneBoundary baseline this boundary's
+        // clone_for_child_save pushed — only when the stack top is
+        // that boundary (same kind and depth). A restore whose save
+        // came from a plain clone (no push) must not eat an outer
+        // face's baseline.
+        crate::executor::read_helpers::pop_times_baseline_if(
+            crate::executor::read_helpers::TimesBaselineKind::CloneBoundary,
+            saved_depth,
+        );
         let process_save = if self
             .subshell_process_saves
             .last()
@@ -2752,6 +2779,35 @@ impl Executor {
             // the rendered value differs from what is already stored —
             // byte-identical inserts are idempotent, so skipping them
             // changes nothing observable.
+            // GNU line_number_for_err_trap (execute_cmd.c:291): a second
+            // tracker fed ONLY by the leaf kinds — simple :936, subshell
+            // :696, arith :3904, cond :4138 — and by the ambient pins at
+            // pipeline :2895 and the misc-compound frame :1141. The ERR
+            // trap action for a compound's OWN redirect failure reports
+            // this stale line rather than the compound's (execute_cmd.c:
+            // 854-883), so `{ :; } </bad` names the previous leaf and a
+            // failing compound inside a function names the call line
+            // (rubash#3553). SET_LINE_NUMBER skips the write while the
+            // ERR trap itself runs (the signal_in_progress guard).
+            if !self.error_trap_running {
+                if crate::executor::command_text::command_stamps_err_trap_line(cmd) {
+                    self.err_trap_line.set(Some(line));
+                } else if crate::executor::command_text::command_stamps_err_trap_line_ambient(cmd) {
+                    // The ambient pin reads `line_number` — the LAST
+                    // stamped line, which for/select/case advance by raw
+                    // assignment too (execute_cmd.c:3000/3513/3653).
+                    // `__RUBASH_CURRENT_LINE` still holds that stamp here;
+                    // this command's own lands just below.
+                    let last_stamped = self
+                        .shell_state
+                        .env_vars
+                        .get("__RUBASH_CURRENT_LINE")
+                        .and_then(|value| value.parse::<usize>().ok())
+                        .or(self.ambient_line.get());
+                    self.err_trap_line
+                        .set(last_stamped.or(cmd.line).or(Some(line)));
+                }
+            }
             self.set_current_line_value(line);
             // GNU's line_number is a single process-global C int
             // (execute_cmd.c:295 SET_LINE_NUMBER writes the one global;

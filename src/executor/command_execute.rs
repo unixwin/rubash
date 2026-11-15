@@ -243,11 +243,26 @@ impl Executor {
             // records status 1) and adjudicates ERR / errexit
             // against the final status, exactly as the pre-#2659
             // base did.
+            // rubash#3325: the passthrough is the timed command's own
+            // redirect failure (nested lists mask the depth) — record it
+            // so the time branch keeps the adjudication for it.
+            if self.timed_dispatch_depth.get() > 0
+                && self.compound_redirect_failed.get()
+                && matches!(result, Err(ExecuteError::IoError(_)))
+            {
+                self.timed_root_redirect_failure.set(true);
+            }
             if self.timed_dispatch_depth.get() == 0 && self.compound_redirect_failed.get() {
                 if let Err(ExecuteError::IoError(error)) = &result {
                     self.report_io_error_routed(cmd, error)?;
                     self.exit_code = 1;
                     self.maybe_run_error_trap(cmd)?;
+                    // The comment two paragraphs up promises the
+                    // fired-at-dispatch record for exactly this fire —
+                    // without it the list loop's own adjudication look
+                    // fires the same command's trap a second time
+                    // (`[[ x = x ]] </bad` double-fired; rubash#3553).
+                    self.err_trap_fired_at_dispatch.set(true);
                     if self.errexit_enabled() && self.errexit_is_active() {
                         return Err(self.errexit_exit(1));
                     }
@@ -544,8 +559,36 @@ impl Executor {
         // with the same expand_word_error classification. Expand once here
         // and mark the results so the stdin paths return them verbatim
         // instead of re-running embedded substitutions.
-        self.preexpand_command_stdin(&mut cmd);
+        let heredoc_forked_exit = self.preexpand_command_stdin(&mut cmd);
+        // rubash#2763: take the main-shell latch NOW, before
+        // abort_on_expansion_errors can return early — otherwise a
+        // funsub `exit` latched by a main-shell body would leak into
+        // the next command on the arithmetic-error path.
+        let heredoc_main_shell_exit = self.current_shell_substitution_exit.take();
         self.abort_on_expansion_errors()?;
+        if let Some(code) = heredoc_main_shell_exit {
+            // A `${ ...; exit N; }` inside a heredoc body that expands
+            // in the MAIN shell (builtin/function target,
+            // execute_cmd.c:5606 execute_builtin_or_function) aborts
+            // the enclosing shell with N (GNU probes A/C: `read x` /
+            // `:` print nothing further, rc 42). The latch's consume
+            // point is the command carrying the body, right after its
+            // stdin pre-expansion (the GNU do_redirections point,
+            // redir.c:348) — not the next command.
+            self.exit_code = code;
+            return Err(ExecuteError::ExitCode(code));
+        }
+        if let Some(code) = heredoc_forked_exit {
+            // A `${ ...; exit N; }` inside a heredoc body that expands
+            // in the FORKED child (disk command, execute_cmd.c:5522
+            // execute_disk_command) kills the child during
+            // do_redirections before the command execs (GNU probe G:
+            // `cat` never prints the body's `hello`), so the command
+            // never runs and N is its status; the script continues
+            // (GNU probe B: B2 prints status=42, B3 runs).
+            self.exit_code = code;
+            return Ok(());
+        }
 
         if alias_expansion_changed_words
             && !original_words_had_command_substitution
@@ -1818,18 +1861,35 @@ impl Executor {
     /// command run its do_redirections in a subshell; otherwise they
     /// apply in the current shell (rubash#535's `> $nope` shape: an
     /// fd-1-only null command stays in the shell).
-    fn null_command_redirects_force_fork(cmd: &CommandNode) -> bool {
+    ///
+    /// rubash#3021: the redirector test is GNU's `rd->redirector.dest ==
+    /// 0` (execute_cmd.c:4213) for every instruction, not only the
+    /// input kinds — `0>file`, `0<&1`, `<>file`, `<&-` force the fork
+    /// too. The redirector defaults follow parse.y's make_redirection
+    /// calls: input-side operators default to fd 0, every other operator
+    /// to fd 1 (`&>` / `&>>` are r_err_and_out with redirector 1).
+    pub(in crate::executor) fn null_command_redirects_force_fork(cmd: &CommandNode) -> bool {
         cmd.heredoc.is_some()
             || cmd.here_string.is_some()
             || cmd.redirects.iter().any(|redirect| {
-                redirect.fd_var.is_some()
-                    || (matches!(
-                        redirect.kind,
-                        crate::parser::RedirectKind::HereDoc
-                            | crate::parser::RedirectKind::HereString
-                            | crate::parser::RedirectKind::Input
-                    ) && matches!(redirect.fd, None | Some(0)))
+                if redirect.fd_var.is_some() {
+                    return true;
+                }
+                let default_fd = if redirect.is_input_side() { 0 } else { 1 };
+                let redirector = redirect.fd.unwrap_or_else(|| {
+                    let digits: String = redirect
+                        .operator
+                        .chars()
+                        .take_while(|ch| ch.is_ascii_digit())
+                        .collect();
+                    digits.parse().unwrap_or(default_fd)
+                });
+                redirector == 0
             })
+            || cmd
+                .heredoc_redirects
+                .iter()
+                .any(|redirect| redirect.fd_var.is_some() || redirect.fd == Some(0))
     }
 
     /// rubash#2615: whether THIS command's own do_redirections walk
@@ -2149,7 +2209,15 @@ impl Executor {
         result
     }
 
-    fn preexpand_command_stdin(&mut self, cmd: &mut CommandNode) {
+    /// Returns the exit code a `${ ...; exit N; }` funsub latched while
+    /// a fork-context command's bodies expanded inside the fork
+    /// boundary, if any — the child died with N during do_redirections
+    /// (execute_cmd.c:5522) before the command execed, so N is the
+    /// command's status, not a shell abort. `None` when the bodies
+    /// expanded in the main shell (or no funsub exited): a main-shell
+    /// latch stays on `current_shell_substitution_exit` for the caller
+    /// to consume as a shell abort.
+    fn preexpand_command_stdin(&mut self, cmd: &mut CommandNode) -> Option<i32> {
         // rubash#2681: for a command GNU forks, the bodies expand in
         // the child — run the whole pre-expansion (every body of the
         // command, in redirect order, so later bodies still see
@@ -2158,12 +2226,23 @@ impl Executor {
         let has_bodies =
             cmd.heredoc.is_some() || !cmd.heredoc_redirects.is_empty() || cmd.here_string.is_some();
         if has_bodies && self.heredoc_bodies_expand_in_fork_context(cmd) {
+            // rubash#2763: with_forked_heredoc_expansion restores the
+            // exit code and substitution bookkeeping but NOT
+            // current_shell_substitution_exit, so a funsub `exit` inside
+            // a forked body used to leak the latch into the NEXT
+            // command. Take back only what the child latched and
+            // restore whatever the parent held (normally nothing — the
+            // word-expansion consumer above already took it).
+            let saved_latch = self.current_shell_substitution_exit.take();
             self.with_forked_heredoc_expansion(|executor| {
                 executor.preexpand_command_stdin_bodies(cmd)
             });
-            return;
+            let forked_latch = self.current_shell_substitution_exit.take();
+            self.current_shell_substitution_exit.set(saved_latch);
+            return forked_latch;
         }
         self.preexpand_command_stdin_bodies(cmd);
+        None
     }
 
     fn preexpand_command_stdin_bodies(&mut self, cmd: &mut CommandNode) {

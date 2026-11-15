@@ -1560,33 +1560,40 @@ impl Executor {
         Ok(None)
     }
 
-    /// rubash#3429 (rework): whether THIS brace group's own redirect
-    /// list carries an unbound variable under `set -u`. The compound
-    /// prologue's brace arms (`prepare_brace_group_redirects` /
-    /// `with_command_input_redirects`) expand the target word with no
-    /// nounset gate, so `$nope` silently becomes the empty string and
-    /// the group reports an empty-name diagnostic (`: Is a directory` /
-    /// `: No such file or directory`) and continues — while GNU's
-    /// compound prologue (execute_cmd.c:854 `do_redirections`,
-    /// RX_ACTIVE|RX_UNDOABLE, shared by cm_group, :479-495) fails the
+    /// rubash#3429 (rework) + rubash#3454: whether THIS compound node's
+    /// own redirect list carries an unbound variable under `set -u`.
+    /// The compound prologue arms (`prepare_compound_output_redirects`
+    /// / `prepare_brace_group_redirects` / `prepare_case_command_redirects`
+    /// / `with_command_input_redirects` / the `[[ ]]` bind) expand the
+    /// target word with no nounset gate, so `$nope` silently becomes
+    /// the empty string and the compound reports an empty-name
+    /// diagnostic (`: Is a directory` / `: No such file or directory`)
+    /// and continues — while GNU's compound prologue (execute_cmd.c:854
+    /// `do_redirections`, shared by every compound kind) fails the
     /// expansion with `name: unbound variable` (error.c:447
     /// err_unboundvar) and aborts the script. The scan is the walker's
     /// own nounset arm (reject_invalid_redirects above):
     /// process-substitution spans and single-quoted spans masked,
     /// heredoc / here-string targets skipped, the first hit in list
     /// order reported through the fd-2 bindings in force at its
-    /// position. Only a brace-group node on a main-shell dispatch
-    /// fires: backgrounded (`&`) and pipelined stages keep the first
-    /// fix's fork-first containment (the classifier's guard in
-    /// heredoc_error_command_runs_in_main_shell), and if/while/for/
-    /// case/`[[]]` are rubash#3454's faces, not this gate's — they
-    /// never reach this helper because only
-    /// execute_brace_group_pipeline calls it.
-    pub(in crate::executor) fn brace_group_redirect_nounset_fatal(
+    /// position. Only a main-shell-dispatched compound fires:
+    /// backgrounded (`&`) and pipelined stages keep the fork-first
+    /// containment (the classifier's guard in
+    /// heredoc_error_command_runs_in_main_shell). Subshell `( )` and
+    /// coproc run their redirects in the spawned child — GNU reports
+    /// the unbound name there but lets the parent continue — so they
+    /// are deliberately NOT in this gate's node set.
+    pub(in crate::executor) fn compound_redirect_nounset_fatal(
         &mut self,
         cmd: &CommandNode,
     ) -> Result<bool, ExecuteError> {
-        if cmd.brace_group.is_none()
+        if (cmd.brace_group.is_none()
+            && cmd.if_command.is_none()
+            && cmd.loop_command.is_none()
+            && cmd.for_command.is_none()
+            && cmd.case_command.is_none()
+            && cmd.conditional_command.is_none()
+            && cmd.select_command.is_none())
             || cmd.background
             || cmd.background_command.is_some()
             || cmd.pipe.is_some()
@@ -1594,6 +1601,22 @@ impl Executor {
         {
             return Ok(false);
         }
+        self.redirect_list_nounset_fatal(cmd)
+    }
+
+    /// The list-scan half of `compound_redirect_nounset_fatal` without
+    /// the compound-kind gate — called directly by the word-sequence
+    /// loop/if executors (`execute_simple_loop` /
+    /// `builtins::source::execute_simple_if`), where the redirects live
+    /// on the synthetic `done`/`fi` node rather than a parsed compound.
+    /// rubash#3454 covers those reparsed paths too: GNU aborts
+    /// `time while ... done > $nope` under `set -u` the same way.
+    /// `pub(crate)` rather than `pub(in crate::executor)` because one
+    /// caller lives under `crate::builtins::source`.
+    pub(crate) fn redirect_list_nounset_fatal(
+        &mut self,
+        cmd: &CommandNode,
+    ) -> Result<bool, ExecuteError> {
         if !crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset") {
             return Ok(false);
         }
@@ -1965,6 +1988,14 @@ impl Executor {
                 | RedirectKind::CombinedOutput
                 | RedirectKind::CombinedAppend
                 | RedirectKind::ReadWrite
+                // rubash#3195: a heredoc / here-string limit failure
+                // names its redirector exactly like a file arm
+                // (redir.c:1120's dup2 onto the redirector) — without
+                // this arm the routing walk above ran the FULL list
+                // for such a message and the ordered walk's own limit
+                // gate fired a second time inside the routing pass.
+                | RedirectKind::HereDoc
+                | RedirectKind::HereString
                 | RedirectKind::Input => effective == named,
                 RedirectKind::DuplicateOutput | RedirectKind::DuplicateInput => {
                     let target = self.expand_redirect_target(redirect);
@@ -2227,14 +2258,20 @@ impl Executor {
         state.open_failure_via_error = true;
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
+        // rubash#3453: fd u8::MAX chunks are printf's pass-boundary
+        // markers (printf.def:819's ferror abort is pass-granular);
+        // they carry no stream payload.
+        let has_pass_marks = chunks.iter().any(|(fd, _)| *fd == u8::MAX);
         for (fd, bytes) in chunks {
-            match fd {
+            match *fd {
                 1 => stdout.extend_from_slice(bytes),
+                u8::MAX => {}
                 _ => stderr.extend_from_slice(bytes),
             }
         }
         if !self.apply_ordered_output_redirects(cmd, &mut state)? {
             if !stdout.is_empty()
+                && !has_pass_marks
                 && state
                     .fd_target(1)
                     .is_some_and(|target| *target == OutputTarget::Closed)
@@ -2317,6 +2354,7 @@ impl Executor {
         }
 
         if !stdout.is_empty()
+            && !has_pass_marks
             && state
                 .fd_target(1)
                 .is_some_and(|target| *target == OutputTarget::Closed)
@@ -2339,8 +2377,115 @@ impl Executor {
         // the chunk walk below writes in log order, and the Closed
         // target drops the fd-2 bytes silently and leaves the status
         // untouched.
+        //
+        // rubash#3453 (pass-marked chunks): GNU printf.def:819 checks
+        // `ferror (stdout)` once per rendering pass — an fd-1 write
+        // failure aborts the builtin at the END of the failing pass,
+        // so that pass's diagnostics still reach fd 2 while later
+        // passes' renderings die. `fail` records the failing pass and
+        // the write-error text; the diagnostic lands where GNU emits
+        // it, after the failing pass's last chunk.
+        let mut pass = 0u32;
+        let mut fail: Option<(u32, Vec<u8>)> = None;
+        let mut fail_emitted = false;
+        // write_to_fd swallows a Closed target with Ok — the verdict
+        // must come from the resolved target itself.
+        let fd1_closed = state
+            .fd_target(1)
+            .is_some_and(|target| *target == OutputTarget::Closed);
         for (fd, bytes) in chunks {
+            if *fd == u8::MAX {
+                pass += 1;
+                if let Some((fail_pass, text)) = &fail {
+                    if pass > *fail_pass && !fail_emitted {
+                        let _ = state.write_to_fd(self, 2, text);
+                        fail_emitted = true;
+                    }
+                }
+                continue;
+            }
+            if let Some((fail_pass, _)) = &fail {
+                if pass > *fail_pass {
+                    continue;
+                }
+                if *fd == 1 {
+                    // Same-pass fd-1 writes after the failure: GNU's
+                    // PF macro keeps feeding the dead stream while
+                    // ferror stays set — nothing more is observable.
+                    continue;
+                }
+            }
+            if *fd == 1 && has_pass_marks {
+                if fd1_closed {
+                    // GNU's PF macro: every fd-1 write in the render
+                    // loop hits EBADF — the first one arms the abort.
+                    if !state.foreign_drain
+                        && !builtin_output_write_is_unchecked(cmd)
+                        && fail.is_none()
+                    {
+                        let command = cmd.words.first().map(String::as_str).unwrap_or("command");
+                        let text = format!(
+                            "{}{command}: write error: Bad file descriptor\n",
+                            self.diagnostic_prefix()
+                        )
+                        .into_bytes();
+                        fail = Some((pass, text));
+                        self.exit_code = 1;
+                        self.last_builtin_write_failed.set(true);
+                    }
+                    continue;
+                }
+                match state.write_to_fd(self, 1, bytes) {
+                    Ok(()) => {}
+                    Err(error) if is_closed_output_error(&error) => {
+                        if !state.foreign_drain
+                            && !builtin_output_write_is_unchecked(cmd)
+                            && fail.is_none()
+                        {
+                            let command =
+                                cmd.words.first().map(String::as_str).unwrap_or("command");
+                            let text = format!(
+                                "{}{command}: write error: Bad file descriptor\n",
+                                self.diagnostic_prefix()
+                            )
+                            .into_bytes();
+                            fail = Some((pass, text));
+                            self.exit_code = 1;
+                            self.last_builtin_write_failed.set(true);
+                        }
+                    }
+                    Err(error) => {
+                        if let ExecuteError::IoError(io_error) = &error {
+                            // rubash#1496: the non-closed sh_chkwrite
+                            // arm — reported in the builtin's name at
+                            // the pass boundary, never escaping as a
+                            // bare io error.
+                            if !builtin_output_write_is_unchecked(cmd) && fail.is_none() {
+                                let command =
+                                    cmd.words.first().map(String::as_str).unwrap_or("command");
+                                let text = format!(
+                                    "{}{command}: write error: {}\n",
+                                    self.diagnostic_prefix(),
+                                    crate::posix_errors::message(io_error)
+                                )
+                                .into_bytes();
+                                fail = Some((pass, text));
+                                self.exit_code = 1;
+                                self.last_builtin_write_failed.set(true);
+                            }
+                            continue;
+                        }
+                        return Err(error);
+                    }
+                }
+                continue;
+            }
             self.write_state_output_or_diagnostic(cmd, &state, u32::from(*fd), bytes)?;
+        }
+        if let Some((_, text)) = &fail {
+            if !fail_emitted {
+                let _ = state.write_to_fd(self, 2, text);
+            }
         }
         Ok(true)
     }
@@ -2605,6 +2750,27 @@ impl Executor {
                 | crate::parser::RedirectKind::HereDoc
                 | crate::parser::RedirectKind::HereString => {
                     let fd = redirect_fd_or_default(redirect, 0);
+                    // rubash#3195: GNU materializes the heredoc body
+                    // first (here_document_to_fd, redir.c:1072) and
+                    // the dup2 onto a redirector at/above the
+                    // RLIMIT_NOFILE soft limit then fails EBADF
+                    // (redir.c:1120) — the same limit gate the
+                    // DuplicateInput arm below runs, through this
+                    // walk's failure protocol, naming the redirector
+                    // itself. (The diagnostic-routing passes over
+                    // this walk cannot re-fire it: the fd-number
+                    // matcher in failing_open_redirect_index locates
+                    // a heredoc limit failure's entry, so the routing
+                    // walk resolves only the entries before it.)
+                    if matches!(
+                        redirect.kind,
+                        crate::parser::RedirectKind::HereDoc
+                            | crate::parser::RedirectKind::HereString
+                    ) && self.redirect_fd_over_limit(fd)
+                    {
+                        self.limit_gate_fail(state, fd)?;
+                        return Ok(true);
+                    }
                     state.list_binds.insert(fd, ListBound::ReadOnly);
                     if fd >= 3 {
                         state.fds.remove(&fd);
@@ -3695,6 +3861,36 @@ impl Executor {
         // fd2-to-Stdout merge lands in the post-redirect pipe content.
         let stdout_target = state.fds.get(&1).cloned().unwrap_or(OutputTarget::Stdout);
         let stderr_target = state.fds.get(&2).cloned().unwrap_or(OutputTarget::Stderr);
+        // rubash#3453: GNU printf.def:819 aborts at the end of the
+        // pass whose fd-1 write failed — same-pass diagnostics still
+        // print, later passes' renderings die. The stage's captured
+        // streams only learn the verdict here, at delivery: when
+        // fd 1's resolved target is a write that fails outright,
+        // rebuild the stderr leg from the pass-tagged ordered log so
+        // only chunks at-or-before the first fd-1 pass survive.
+        // Path targets can still fail at write time; those rides are
+        // left to write_stage_stream_to_target.
+        if !stdout.is_empty()
+            && matches!(
+                stdout_target,
+                OutputTarget::Closed | OutputTarget::FullDevice | OutputTarget::ProcContentWrite
+            )
+            && !builtin_output_write_is_unchecked(cmd)
+        {
+            if let Some(chunks) = &ordered_chunks {
+                if let Some(fail_pass) = chunks
+                    .iter()
+                    .find(|(fd, _, _)| *fd == 1)
+                    .map(|(_, _, pass)| *pass)
+                {
+                    *stderr = chunks
+                        .iter()
+                        .filter(|(fd, _, pass)| *fd == 2 && *pass <= fail_pass)
+                        .map(|(_, text, _)| text.clone())
+                        .collect();
+                }
+            }
+        }
         // rubash#3324: when both streams resolve to the SAME sink
         // (`2>&1`, `1>&2`, `>f 2>&1`), the split pair cannot express
         // the production order — GNU forks the element
@@ -3723,7 +3919,7 @@ impl Executor {
         if same_sink {
             if let Some(chunks) = ordered_chunks {
                 let mut merged = String::new();
-                for (_, text) in &chunks {
+                for (_, text, _) in &chunks {
                     merged.push_str(text);
                 }
                 if stderr_target == OutputTarget::Stderr {
@@ -3865,7 +4061,11 @@ impl Executor {
                     OutputTarget::FullDevice => "No space left on device",
                     _ => "Invalid argument",
                 };
-                if !output.is_empty() && !(fd == 1 && builtin_output_write_is_unchecked(cmd)) {
+                // rubash#3453: only fd 1's failed flush earns the
+                // sh_chkwrite diagnostic — a failed fd-2 delivery is
+                // lost silently, like GNU's builtin_error writing to
+                // the descriptor that just failed (rubash#699 R1.3).
+                if fd == 1 && !output.is_empty() && !builtin_output_write_is_unchecked(cmd) {
                     let command = cmd.words.first().map(String::as_str).unwrap_or("command");
                     diag.push_str(&format!(
                         "{}{command}: write error: {write_error_reason}\n",
@@ -3877,7 +4077,11 @@ impl Executor {
                 }
             }
             OutputTarget::Closed => {
-                if !output.is_empty() && !(fd == 1 && builtin_output_write_is_unchecked(cmd)) {
+                // rubash#3453: same fd-1-only rule — a closed fd-2
+                // target drops the stream AND the diagnostic
+                // silently (Shape B: `printf ... 1>&- 2>&-` must
+                // stay quiet end to end).
+                if fd == 1 && !output.is_empty() && !builtin_output_write_is_unchecked(cmd) {
                     let command = cmd.words.first().map(String::as_str).unwrap_or("command");
                     diag.push_str(&format!(
                         "{}{command}: write error: Bad file descriptor\n",
@@ -3916,7 +4120,7 @@ impl Executor {
                 // took that bare channel). Mirror the Closed arm: diag
                 // into the opposite stream, status + write-failed flag.
                 if let Err(error) = crate::fd::write_file_all(&file, &bytes) {
-                    if !bytes.is_empty() {
+                    if fd == 1 && !bytes.is_empty() {
                         let command = cmd.words.first().map(String::as_str).unwrap_or("command");
                         diag.push_str(&format!(
                             "{}{command}: write error: {}\n",

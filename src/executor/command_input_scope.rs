@@ -781,6 +781,10 @@ impl Executor {
         }
         self.note_compound_redirect_failure();
         if self.timed_dispatch_depth.get() > 0 {
+            // rubash#3325: nested lists mask the depth, so a site that
+            // still sees it raised is the timed command itself — the
+            // time branch owns this failure's adjudication.
+            self.timed_root_redirect_failure.set(true);
             return Ok(false);
         }
         self.maybe_run_error_trap(cmd)?;
@@ -952,7 +956,7 @@ impl Executor {
                     // schedule served #1141 before a live pipe could).
                     if let Some(file_fd) = self.spawn_input_process_substitution_child(
                         &source,
-                        super::command_text::procsub_body_seed_line(cmd),
+                        super::command_text::procsub_body_seed_line(cmd, self.ambient_line.get()),
                     ) {
                         let saved_fd0_entry = self.fd_table.entries.get(&0).cloned();
                         let saved_function_stdin =
@@ -1333,6 +1337,27 @@ impl Executor {
             if redirect.fd_var.is_some() {
                 continue;
             }
+            // rubash#3195: a heredoc / here-string entry binds its
+            // redirector at this list position in GNU's walk — the
+            // body is materialized first (here_document_to_fd,
+            // redir.c:1072), then the dup2 onto a redirector at/above
+            // the RLIMIT_NOFILE soft limit fails EBADF (redir.c:1120)
+            // and the command never runs. The entries skip the kind
+            // filter below (their bodies are served textually, not
+            // bound into the table here), so without this gate an
+            // over-limit entry binds silently at any fd. `{var}`
+            // forms already continued above: their allocator stays
+            // below the limit by construction.
+            if matches!(
+                redirect.kind,
+                crate::parser::RedirectKind::HereDoc | crate::parser::RedirectKind::HereString
+            ) && self.redirect_fd_over_limit(fd)
+            {
+                return Err(ExecuteError::IoError(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("{fd}: Bad file descriptor"),
+                )));
+            }
             if !matches!(
                 redirect.kind,
                 crate::parser::RedirectKind::Input
@@ -1479,7 +1504,7 @@ impl Executor {
                 // spawn-failure fallback.
                 if let Some(file_fd) = self.spawn_input_process_substitution_child(
                     source,
-                    super::command_text::procsub_body_seed_line(cmd),
+                    super::command_text::procsub_body_seed_line(cmd, self.ambient_line.get()),
                 ) {
                     self.set_fd_input_file(fd, file_fd, true);
                     if redirect.kind == crate::parser::RedirectKind::ReadWrite {
