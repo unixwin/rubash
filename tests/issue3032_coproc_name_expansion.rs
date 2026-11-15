@@ -101,13 +101,22 @@ fn coproc_invalid_expanded_name_reports_expanded_value() {
 /// Chain: a valid expanded name creates the coproc under that
 /// name — the fd array and the _PID variable land under the
 /// EXPANDED name, and the coprocess's output reads back.
+///
+/// The coproc body ends on a blocking builtin `read` so the
+/// process stays alive across the parent's `read -u`: an
+/// instantly-exiting body (`{ echo hi; }`) makes the `<name>_PID`
+/// check a race — GNU's coproc_reap -> coproc_dispose ->
+/// coproc_unsetvars (execute_cmd.c:2166-2175, :2450-2462) can
+/// unbind MYCP_PID before the parent expands it (WSL bash
+/// 5.3.20: `pid=set` only ~2/20 runs). With the body alive the
+/// binding is deterministic (`pid=set` 20/20 under GNU).
 #[test]
 fn coproc_valid_expanded_name_creates_named_coproc() {
     let (stdout, stderr, rc) = run_driver(
         "valid",
         &[(
             "drv.sh",
-            "nv=MYCP\ncoproc $nv { echo hi; }\nread -u ${MYCP[0]} line\necho \"got=$line pid=${MYCP_PID:+set}\"\n",
+            "nv=MYCP\ncoproc $nv { echo hi; read x; }\nread -u ${MYCP[0]} line\necho \"got=$line pid=${MYCP_PID:+set}\"\n",
         )],
         "drv.sh",
     );

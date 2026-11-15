@@ -19,10 +19,11 @@
 //! pristine faces and the materialization chain, so an
 //! over-correction that hides the variables forever also fails.
 //!
-//! Environment note: the chain cell's `GROUPS=([0]="0")` is this
-//! test environment's process-group shape (egid 0), the same shape
-//! the captain's verification probes recorded; only the first
-//! element is asserted, and the listing faces are shape-free.
+//! Environment note: the materialized GROUPS value is the
+//! process's group set (egid and supplementary gids), which is
+//! environment-dependent, so the chain cell asserts the
+//! materialization SHAPE — array type plus a `[0]` element — not
+//! a specific gid; the listing faces are shape-free.
 
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -100,8 +101,21 @@ fn named_reference_materializes_groups_and_bash_argv0_into_later_listings() {
     );
     assert_eq!(rc, Some(0));
     assert_eq!(stderr, "");
-    assert_eq!(
-        stdout,
-        "declare -a GROUPS=([0]=\"0\")\nGROUPS=([0]=\"0\")\ndeclare -- BASH_ARGV0=\"chain.sh\"\nBASH_ARGV0=chain.sh\n"
+    // The gid values are environment-dependent; pin the
+    // materialization shape (array type + a `[0]` element),
+    // matching `declare -a GROUPS=(...)` / `GROUPS=(...)`.
+    let mut lines = stdout.lines();
+    let decl = lines.next().unwrap_or_default();
+    assert!(
+        decl.starts_with("declare -a GROUPS=([0]=") && decl.ends_with(')'),
+        "declare -p GROUPS should print an array with a [0] element, got {decl:?}"
     );
+    let listed = lines.next().unwrap_or_default();
+    assert!(
+        listed.starts_with("GROUPS=([0]=") && listed.ends_with(')'),
+        "typeset listing should show the materialized GROUPS array, got {listed:?}"
+    );
+    assert_eq!(lines.next(), Some("declare -- BASH_ARGV0=\"chain.sh\""));
+    assert_eq!(lines.next(), Some("BASH_ARGV0=chain.sh"));
+    assert_eq!(lines.next(), None);
 }
