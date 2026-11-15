@@ -12,6 +12,20 @@ use crate::executor::markers::STORAGE_WORD_PREFIX;
 /// definition line instead of the triggering line. `delta` is signed
 /// because the DEBUG action cache reuses one parse across firings at
 /// different lines.
+///
+/// rubash#3327 re-derivation: the parse-error diagnostic VALUES on the
+/// action's nodes carry parse-time line numbers too (the
+/// `__RUBASH_PARSE_ERROR_EOF_COMPOUND__` / `__RUBASH_PARSE_ERROR_EOF_SUBSHELL__`
+/// / `__RUBASH_PARSE_ERROR_NEAR__` / `__RUBASH_PARSE_ERROR_HD_WARN_n__`
+/// assignments) — they are data, not node lines, so the slot rebase
+/// above cannot see them. They are rebased by the same delta, in the
+/// same walk, so the firing-line diagnostic survives while the action
+/// keeps plain tokenize + base 1: tokenize-time start_line breaks the
+/// debugger frame via the stale `first_word_end_line` stamp (the
+/// bisection proved it — REPORT.md), so the line base must live ONLY
+/// in this rebase, never in the tokenize call. Values track ast_base
+/// exactly like node lines, so the DEBUG cache stays consistent
+/// across firings.
 pub(crate) fn shift_trap_action_lines(commands: &mut [CommandNode], delta: i64) {
     if delta == 0 {
         return;
@@ -21,11 +35,66 @@ pub(crate) fn shift_trap_action_lines(commands: &mut [CommandNode], delta: i64) 
             *value = (*value as i64 + delta).max(1) as usize;
         }
     }
+    /// Shift one SEP-separated line field of a parse-error value by
+    /// `delta` (clamped at 1, like shift_slot). Silently leaves the
+    /// value alone when the field is absent or not a number — a
+    /// diagnostic value is never corrupted by a rebase.
+    fn shift_error_field(value: &mut String, index: usize, delta: i64) {
+        let sep = crate::executor::markers::PARSE_ERROR_FIELD_SEP;
+        let parts: Vec<&str> = value.split(sep).collect();
+        let Some(field) = parts.get(index) else {
+            return;
+        };
+        let Ok(line) = field.parse::<usize>() else {
+            return;
+        };
+        let shifted = (line as i64 + delta).max(1) as usize;
+        if shifted == line {
+            return;
+        }
+        let mut out = String::with_capacity(value.len());
+        for (i, part) in parts.iter().enumerate() {
+            if i > 0 {
+                out.push(sep);
+            }
+            if i == index {
+                out.push_str(&shifted.to_string());
+            } else {
+                out.push_str(part);
+            }
+        }
+        *value = out;
+    }
+    /// Rebase the parse-error line fields carried as assignment VALUES
+    /// on one node (see the fn-level note). Formats, all SEP-joined:
+    /// EOF_COMPOUND `{name}{SEP}{name_line}{SEP}{eof_line}`;
+    /// EOF_SUBSHELL `{paren_line}{SEP}{eof_line}`; NEAR
+    /// `{name}{SEP}{line}`; HD_WARN_n
+    /// `{delim}{SEP}{at_line}{SEP}{warn_line}`. The message-only
+    /// shapes (EOF_PAREN, COMPOUND_SYNTAX_ERROR, plain PARSE_ERROR)
+    /// carry no line numbers and need nothing.
+    fn shift_parse_error_lines(node: &mut CommandNode, delta: i64) {
+        for (name, value) in node.assignments.iter_mut() {
+            if name == "__RUBASH_PARSE_ERROR_EOF_COMPOUND__" {
+                shift_error_field(value, 1, delta);
+                shift_error_field(value, 2, delta);
+            } else if name == "__RUBASH_PARSE_ERROR_EOF_SUBSHELL__" {
+                shift_error_field(value, 0, delta);
+                shift_error_field(value, 1, delta);
+            } else if name == "__RUBASH_PARSE_ERROR_NEAR__" {
+                shift_error_field(value, 1, delta);
+            } else if name.starts_with("__RUBASH_PARSE_ERROR_HD_WARN_") && name.ends_with("__") {
+                shift_error_field(value, 1, delta);
+                shift_error_field(value, 2, delta);
+            }
+        }
+    }
     fn shift_node(node: &mut CommandNode, delta: i64) {
         shift_slot(&mut node.line, delta);
         shift_slot(&mut node.logical_line, delta);
         shift_slot(&mut node.end_line, delta);
         shift_slot(&mut node.heredoc_gather_line, delta);
+        shift_parse_error_lines(node, delta);
         if let Some(pipeline) = &mut node.pipeline_command {
             shift_trap_action_lines(&mut pipeline.stages, delta);
         }
