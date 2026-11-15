@@ -426,8 +426,28 @@ impl Executor {
                     name,
                     nesting_limit
                 );
+                // GNU execute_cmd.c:5200-5206 execute_function: on
+                // overflow bash runs the unwind protects, sets
+                // funcnest = 0 and jump_to_top_level(DISCARD) — the
+                // rest of the current command unit is discarded (the
+                // `f; echo rc:$?` list never prints rc:) while the
+                // reader continues with the NEXT unit
+                // (eval.c:111-127: DISCARD keeps a nonzero
+                // last_command_exit_value, disposes the rest of the
+                // current command, and breaks back to the reader).
+                // ExpansionFailure is rubash's DISCARD spelling: it
+                // propagates untouched through the surviving frames —
+                // whose epilogues run the frame unwind (locals,
+                // positional params, function_depth -= 1), the
+                // run_unwind_protects analogue that lands funcnest
+                // back at 0 — is absorbed at an eval string boundary
+                // (the rest of the eval string discarded, the outer
+                // script continues), ends a subshell frame, and the
+                // unit driver settles it as the unit's status so the
+                // reader proceeds. A plain Ok return let the list
+                // continue instead (rubash#2721).
                 self.exit_code = 1;
-                return Ok(());
+                return Err(ExecuteError::ExpansionFailure(1));
             }
         }
         let definition_redirects = self
