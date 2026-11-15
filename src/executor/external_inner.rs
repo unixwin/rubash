@@ -2949,6 +2949,76 @@ impl Executor {
         Some(Ok(stat))
     }
 
+    /// rubash#3286: whether the anchor's fstatat classifies `operand`
+    /// as an existing FIFO. Some(true) / Some(false) when the anchor
+    /// applies and the stat succeeds; None when the anchor does not
+    /// apply or the stat fails (a missing target is not a FIFO — the
+    /// caller's plain path creates it). The guards that must not open
+    /// a FIFO (background defer, procsub decline) key on this; the
+    /// probe below adds the access verdict.
+    #[cfg(unix)]
+    pub(in crate::executor) fn anchor_operand_is_fifo(
+        &self,
+        operand: &std::path::Path,
+    ) -> Option<bool> {
+        match self.fstatat_via_cwd_anchor(operand) {
+            Some(Ok(stat)) => Some(
+                (u32::from(stat.st_mode) & u32::from(libc::S_IFMT)) == u32::from(libc::S_IFIFO),
+            ),
+            _ => None,
+        }
+    }
+
+    /// rubash#3286: faccessat against the cwd anchor — the validation
+    /// half of the output FIFO probe (the write-side twin of the input
+    /// face's inline faccessat in
+    /// [`Self::open_input_redirect_via_anchor`]). Some(verdict) when
+    /// the anchor applies; None otherwise.
+    #[cfg(unix)]
+    pub(in crate::executor) fn faccessat_via_cwd_anchor(
+        &self,
+        operand: &std::path::Path,
+        mode: libc::c_int,
+    ) -> Option<std::io::Result<()>> {
+        let anchor_fd = self.anchor_fd_for_dead_cwd()?;
+        let operand = if operand.as_os_str().is_empty() {
+            std::path::Path::new(".")
+        } else {
+            operand
+        };
+        let c_operand =
+            std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(operand.as_os_str()))
+                .ok()?;
+        // SAFETY: anchor_fd stays alive for the call (see
+        // open_via_cwd_anchor); faccessat only validates, it takes no
+        // descriptor and consumes no rendezvous.
+        let rc = unsafe { libc::faccessat(anchor_fd, c_operand.as_ptr(), mode, 0) };
+        if rc != 0 {
+            return Some(Err(std::io::Error::last_os_error()));
+        }
+        Some(Ok(()))
+    }
+
+    /// rubash#3286: the output-redirect FIFO probe against the cwd
+    /// anchor — the write-side twin of the input face's probe half
+    /// (open_input_redirect_via_anchor with consume == false).
+    /// Some(verdict) only when the anchor applies AND the operand is
+    /// an existing FIFO: the verdict is faccessat(W_OK), which proves
+    /// existence and write access without taking an fd, so no
+    /// rendezvous pairing is consumed (rubash#1820). None otherwise —
+    /// anchor N/A, missing target, non-FIFO — so the caller falls
+    /// through to its joined-path / plain-open path.
+    #[cfg(unix)]
+    pub(in crate::executor) fn output_fifo_probe_via_anchor(
+        &self,
+        operand: &std::path::Path,
+    ) -> Option<std::io::Result<()>> {
+        if self.anchor_operand_is_fifo(operand) == Some(true) {
+            return self.faccessat_via_cwd_anchor(operand, libc::W_OK);
+        }
+        None
+    }
+
     /// rubash#3268: the input-redirect consumer of the cwd anchor.
     /// A probe (consume == false) keeps rubash#1820's rule on this
     /// route too: it must not take a FIFO's rendezvous, so a FIFO

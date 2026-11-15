@@ -2614,30 +2614,28 @@ impl Executor {
                 .open(path)
                 .map_err(|e| crate::posix_errors::path_error(&target, e));
         }
-        // rubash#3268: the plain create is a shell-process redirect
-        // open — same anchor rule as the input face for a relative
-        // operand. An existing FIFO target is classified out through
-        // the anchor's fstatat and keeps the plain open: the probe
-        // faces classify FIFOs by joined-path metadata, which a dead
-        // cwd defeats, and an anchor O_WRONLY open in a probe would
-        // consume the bind's rendezvous (rubash#1820).
+        // rubash#3268/#3286: the plain create is a shell-process
+        // redirect open — same anchor rule as the input face for a
+        // relative operand. This is the BIND open (GNU's single open,
+        // redir.c do_redirection_internal): an existing FIFO takes
+        // the anchor O_WRONLY openat here, blocking for the reader
+        // exactly like GNU's open — O_TRUNC is a no-op on a fifo.
+        // The FIFO carve-out lives only in the PROBE faces
+        // (probe_output_redirect, the prepared phase, the #1868
+        // validation walk), which classify through the anchor's
+        // fstatat and validate by faccessat instead of opening
+        // (rubash#1820: a probe open would consume the bind's
+        // rendezvous).
         #[cfg(unix)]
         {
             let fs_operand = fs_path.clone();
             if fs_operand.is_relative() {
-                let is_fifo = matches!(
-                    self.fstatat_via_cwd_anchor(&fs_operand),
-                    Some(Ok(stat)) if (u32::from(stat.st_mode) & u32::from(libc::S_IFMT))
-                        == u32::from(libc::S_IFIFO)
-                );
-                if !is_fifo {
-                    if let Some(result) = self.open_via_cwd_anchor(
-                        &fs_operand,
-                        libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC,
-                        0o666,
-                    ) {
-                        return result.map_err(|e| crate::posix_errors::path_error(&target, e));
-                    }
+                if let Some(result) = self.open_via_cwd_anchor(
+                    &fs_operand,
+                    libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC,
+                    0o666,
+                ) {
+                    return result.map_err(|e| crate::posix_errors::path_error(&target, e));
                 }
             }
         }
@@ -2711,6 +2709,17 @@ impl Executor {
                     return File::open("/dev/null");
                 }
             }
+        }
+        // rubash#3286: the joined-path FIFO check above misses
+        // from a deleted cwd (the joined spelling is dead by
+        // construction) — the anchor faccessat stands in for the
+        // joined-path access check, and the /dev/null stand-in is the
+        // inert prepared File; the bind performs GNU's single open.
+        if let Some(verdict) = crate::executor::shell_options::output_fifo_validation_via_anchor(
+            self, redirect, target,
+        ) {
+            verdict.map_err(|e| crate::posix_errors::path_error(target, e))?;
+            return File::open("/dev/null");
         }
         let file = self.create_redirect_output_for(redirect, target, clobber)?;
         if !clobber
@@ -2918,28 +2927,23 @@ impl Executor {
                 }
             }
             SpecialPathClass::Filesystem => {
-                // rubash#3268: the append open is a shell-process
+                // rubash#3268/#3286: the append open is a shell-process
                 // redirect open — same anchor rule as the input and
-                // create faces for a relative operand, with the same
-                // FIFO classification carve-out as the create face.
+                // create faces for a relative operand. This is the BIND
+                // open (see the create face above): an existing FIFO
+                // takes the anchor O_WRONLY|O_APPEND openat here and
+                // blocks for the reader like GNU's open; the probe
+                // faces classify FIFOs by faccessat instead.
                 #[cfg(unix)]
                 {
                     let fs_operand = self.redirect_target_filesystem_path(target);
                     if fs_operand.is_relative() {
-                        let is_fifo = matches!(
-                            self.fstatat_via_cwd_anchor(&fs_operand),
-                            Some(Ok(stat))
-                                if (u32::from(stat.st_mode) & u32::from(libc::S_IFMT))
-                                    == u32::from(libc::S_IFIFO)
-                        );
-                        if !is_fifo {
-                            if let Some(result) = self.open_via_cwd_anchor(
-                                &fs_operand,
-                                libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND,
-                                0o666,
-                            ) {
-                                return result;
-                            }
+                        if let Some(result) = self.open_via_cwd_anchor(
+                            &fs_operand,
+                            libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND,
+                            0o666,
+                        ) {
+                            return result;
                         }
                     }
                 }
@@ -5076,6 +5080,43 @@ pub(in crate::executor) fn redirect_fifo_access_error(
     crate::winuxcmd_fifo::marker_access_error(path, write)
 }
 
+/// rubash#3286: anchor-backed FIFO validation for an output
+/// redirect target, shared by the probe faces whose joined-path FIFO
+/// check misses from a deleted cwd (probe_output_redirect and its
+/// append twin, the compound prepared phase, the #1868 validation
+/// walk). Some(verdict) only when the anchor applies and the operand
+/// is an existing FIFO — the verdict is the anchor faccessat(W_OK),
+/// which proves existence and write access without taking an fd, so
+/// no rendezvous pairing is consumed (rubash#1820). None otherwise
+/// (anchor N/A, missing target, non-FIFO, absolute operand), so the
+/// caller falls through to its joined-path / plain-open path. The
+/// verdict already carries the `<target>: <strerror>` path_error
+/// shape. Available on all platforms; off Unix it is always None.
+pub(in crate::executor) fn output_fifo_validation_via_anchor(
+    executor: &Executor,
+    redirect: Option<&crate::parser::Redirect>,
+    target: &str,
+) -> Option<std::io::Result<()>> {
+    #[cfg(unix)]
+    {
+        let fs_operand = match redirect {
+            Some(redirect) => executor.redirect_target_filesystem_path_for(redirect, target),
+            None => executor.redirect_target_filesystem_path(target),
+        };
+        if !fs_operand.is_relative() {
+            return None;
+        }
+        return executor
+            .output_fifo_probe_via_anchor(&fs_operand)
+            .map(|verdict| verdict.map_err(|e| crate::posix_errors::path_error(target, e)));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (executor, redirect, target);
+        None
+    }
+}
+
 /// The setup walk's output probe (create/truncate side effect plus
 /// error surfacing) with the rubash#1820 FIFO carve-out: on a FIFO the
 /// create is a no-op whose blocking open consumes the bind open's
@@ -5110,6 +5151,13 @@ pub(in crate::executor) fn probe_output_redirect(
             return Ok(());
         }
     }
+    // rubash#3286: the joined-path FIFO check above misses from a
+    // deleted cwd (the joined spelling is dead by construction) —
+    // when the anchor applies and names an existing FIFO, the probe's
+    // verdict is the anchor faccessat, never an open (rubash#1820).
+    if let Some(verdict) = output_fifo_validation_via_anchor(executor, None, target) {
+        return verdict;
+    }
     executor.create_redirect_output(target, clobber).map(|_| ())
 }
 
@@ -5141,6 +5189,11 @@ pub(in crate::executor) fn probe_output_redirect_append(
             }
             return Ok(());
         }
+    }
+    // rubash#3286: same deleted-cwd miss as probe_output_redirect —
+    // the anchor faccessat is the probe's verdict here too.
+    if let Some(verdict) = output_fifo_validation_via_anchor(executor, None, target) {
+        return verdict;
     }
     executor
         .open_append_target(target)

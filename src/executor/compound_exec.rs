@@ -2682,7 +2682,21 @@ impl Executor {
     /// never in the parent walk of resolve_background_stdio.
     fn background_redirect_target_is_fifo(&self, target: &str) -> bool {
         let path = self.session_path(shell_path_to_windows(target, &self.shell_state.env_vars));
-        super::shell_options::redirect_path_is_fifo(&path)
+        if super::shell_options::redirect_path_is_fifo(&path) {
+            return true;
+        }
+        // rubash#3286: the joined-path check above misses from a
+        // deleted cwd — the anchor's fstatat classifies there, and a
+        // FIFO still defers its open to the child exactly as above
+        // (rubash#1862: the parent must not take the rendezvous).
+        #[cfg(unix)]
+        {
+            let fs_operand = self.redirect_target_filesystem_path(target);
+            if fs_operand.is_relative() && self.anchor_operand_is_fifo(&fs_operand) == Some(true) {
+                return true;
+            }
+        }
+        false
     }
 
     /// Defer fds to the background child (rubash#1862): mark them
