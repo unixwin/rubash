@@ -401,11 +401,30 @@ impl Executor {
                             }
                             return Err(error);
                         }
+                        // GNU execute_cmd.c:4138 — same post-redirect
+                        // line_number_for_err_trap stamp as the
+                        // with-redirects path (rubash#3553).
+                        if !self.error_trap_running {
+                            self.err_trap_line.set(cmd.line);
+                        }
                         self.exit_code = self.execute_conditional_command(command);
                         // rubash#1177: same `=~` nounset-fatal conversion
                         // as the with-redirects path.
                         if let Some(result) = self.take_conditional_nounset_fatal() {
                             return result;
+                        }
+                        // rubash#3382: same fatal-arith consumption as
+                        // the primary `[[ ]]` wrapper in
+                        // command_prepare.rs — the operands' evalerror
+                        // belongs to THIS command. The nounset check
+                        // above runs first so a FORCE_EOF is never
+                        // downgraded to a DISCARD when both are latched.
+                        if self.take_conditional_arith_evalerror() {
+                            self.exit_code = 1;
+                            // rubash#439: an expansion error, not a
+                            // failed command.
+                            self.command_expansion_failed.set(true);
+                            return Err(ExecuteError::ExpansionFailure(1));
                         }
                         Ok(())
                     }

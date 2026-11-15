@@ -243,11 +243,26 @@ impl Executor {
             // records status 1) and adjudicates ERR / errexit
             // against the final status, exactly as the pre-#2659
             // base did.
+            // rubash#3325: the passthrough is the timed command's own
+            // redirect failure (nested lists mask the depth) — record it
+            // so the time branch keeps the adjudication for it.
+            if self.timed_dispatch_depth.get() > 0
+                && self.compound_redirect_failed.get()
+                && matches!(result, Err(ExecuteError::IoError(_)))
+            {
+                self.timed_root_redirect_failure.set(true);
+            }
             if self.timed_dispatch_depth.get() == 0 && self.compound_redirect_failed.get() {
                 if let Err(ExecuteError::IoError(error)) = &result {
                     self.report_io_error_routed(cmd, error)?;
                     self.exit_code = 1;
                     self.maybe_run_error_trap(cmd)?;
+                    // The comment two paragraphs up promises the
+                    // fired-at-dispatch record for exactly this fire —
+                    // without it the list loop's own adjudication look
+                    // fires the same command's trap a second time
+                    // (`[[ x = x ]] </bad` double-fired; rubash#3553).
+                    self.err_trap_fired_at_dispatch.set(true);
                     if self.errexit_enabled() && self.errexit_is_active() {
                         return Err(self.errexit_exit(1));
                     }
@@ -1818,18 +1833,35 @@ impl Executor {
     /// command run its do_redirections in a subshell; otherwise they
     /// apply in the current shell (rubash#535's `> $nope` shape: an
     /// fd-1-only null command stays in the shell).
-    fn null_command_redirects_force_fork(cmd: &CommandNode) -> bool {
+    ///
+    /// rubash#3021: the redirector test is GNU's `rd->redirector.dest ==
+    /// 0` (execute_cmd.c:4213) for every instruction, not only the
+    /// input kinds — `0>file`, `0<&1`, `<>file`, `<&-` force the fork
+    /// too. The redirector defaults follow parse.y's make_redirection
+    /// calls: input-side operators default to fd 0, every other operator
+    /// to fd 1 (`&>` / `&>>` are r_err_and_out with redirector 1).
+    pub(in crate::executor) fn null_command_redirects_force_fork(cmd: &CommandNode) -> bool {
         cmd.heredoc.is_some()
             || cmd.here_string.is_some()
             || cmd.redirects.iter().any(|redirect| {
-                redirect.fd_var.is_some()
-                    || (matches!(
-                        redirect.kind,
-                        crate::parser::RedirectKind::HereDoc
-                            | crate::parser::RedirectKind::HereString
-                            | crate::parser::RedirectKind::Input
-                    ) && matches!(redirect.fd, None | Some(0)))
+                if redirect.fd_var.is_some() {
+                    return true;
+                }
+                let default_fd = if redirect.is_input_side() { 0 } else { 1 };
+                let redirector = redirect.fd.unwrap_or_else(|| {
+                    let digits: String = redirect
+                        .operator
+                        .chars()
+                        .take_while(|ch| ch.is_ascii_digit())
+                        .collect();
+                    digits.parse().unwrap_or(default_fd)
+                });
+                redirector == 0
             })
+            || cmd
+                .heredoc_redirects
+                .iter()
+                .any(|redirect| redirect.fd_var.is_some() || redirect.fd == Some(0))
     }
 
     /// rubash#2615: whether THIS command's own do_redirections walk

@@ -55,12 +55,17 @@ impl Executor {
         // the diagnostic for a conversion precedes that conversion's
         // own value).
         let log = super::trap_stack_builtins::OrderedOutputLog::new();
+        // rubash#3453: tag each rendering pass boundary into the log —
+        // the chunk route drops the passes GNU's printf.def:819
+        // ferror abort never renders once an fd-1 write fails.
+        let mut pass_boundary = log.pass_boundary_writer();
         let status = crate::builtins::printf::execute_with_io_and_store(
             words.iter().map(String::as_str),
             &mut self.shell_state.env_vars,
             Some(&mut self.shell_state.variables),
             &mut log.stdout_writer(),
             &mut log.stderr_writer(),
+            Some(&mut pass_boundary),
         )?;
         self.write_buffered_builtin_output_chunks(cmd, &log)?;
         // GNU builtins/printf.def printf_builtin returns

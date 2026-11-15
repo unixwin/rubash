@@ -4830,12 +4830,11 @@ impl Executor {
                     let status = self.wait_external_child(&mut child)?;
                     if let Some(signal) = crate::executor::wait_status::exit_status_signal(&status)
                     {
-                        self.note_child_signal_death(
+                        self.print_fg_signal_notice_now(
                             foreground_pid,
                             signal,
                             self.signal_notice_command_text(cmd),
-                            true,
-                        );
+                        )?;
                     }
                     self.run_sigchld_trap_for_reaped_child()?;
                     let merged = drain.join().map_err(|_| {
@@ -4874,12 +4873,11 @@ impl Executor {
                         if let Some(signal) =
                             crate::executor::wait_status::exit_status_signal(&status)
                         {
-                            self.note_child_signal_death(
+                            self.print_fg_signal_notice_now(
                                 foreground_pid,
                                 signal,
                                 self.signal_notice_command_text(cmd),
-                                true,
-                            );
+                            )?;
                         }
                         self.run_sigchld_trap_for_reaped_child()?;
                         // Route the merged stream into the capture the
@@ -4921,12 +4919,11 @@ impl Executor {
                         if let Some(signal) =
                             crate::executor::wait_status::exit_status_signal(&status)
                         {
-                            self.note_child_signal_death(
+                            self.print_fg_signal_notice_now(
                                 foreground_pid,
                                 signal,
                                 self.signal_notice_command_text(cmd),
-                                true,
-                            );
+                            )?;
                         }
                         self.exit_code = crate::executor::wait_status::process_exit_status(&status);
                         // A reaped foreground child delivers SIGCHLD in
@@ -4940,18 +4937,18 @@ impl Executor {
                     match child.wait_with_output() {
                         Ok(output) => {
                             self.exit_code = 0;
-                            // rubash#229: a foreground child killed by a
-                            // signal gets the jobs.c notify_of_job_status
-                            // stderr notice at the reader boundary.
+                            // rubash#229/#2769: a foreground child killed by
+                            // a signal gets the jobs.c notify_of_job_status
+                            // stderr notice synchronously at its wait
+                            // (jobs.c:3385), not at the reader boundary.
                             if let Some(signal) =
                                 crate::executor::wait_status::exit_status_signal(&output.status)
                             {
-                                self.note_child_signal_death(
+                                self.print_fg_signal_notice_now(
                                     foreground_pid,
                                     signal,
                                     self.signal_notice_command_text(cmd),
-                                    true,
-                                );
+                                )?;
                             }
                             // A reaped foreground child delivers SIGCHLD in
                             // GNU bash; a set trap runs once at this
@@ -4995,17 +4992,17 @@ impl Executor {
                     let wait_result = self.wait_external_child(&mut child);
                     match wait_result {
                         Ok(status) => {
-                            // rubash#229: queue the signal-death notice for
-                            // the reader boundary.
+                            // rubash#229/#2769: print the signal-death
+                            // notice synchronously at the wait
+                            // (jobs.c:3385), not at the reader boundary.
                             if let Some(signal) =
                                 crate::executor::wait_status::exit_status_signal(&status)
                             {
-                                self.note_child_signal_death(
+                                self.print_fg_signal_notice_now(
                                     foreground_pid,
                                     signal,
                                     self.signal_notice_command_text(cmd),
-                                    true,
-                                );
+                                )?;
                             }
                             self.exit_code =
                                 crate::executor::wait_status::process_exit_status(&status);
@@ -5410,7 +5407,10 @@ pub(in crate::executor) fn fg_forward_drain(sigint_guard: &ForegroundWaitSigintG
 /// form below: it forwards the recorded terminal SIGINT to the child
 /// instead of aborting the wait outright.
 #[cfg(unix)]
-pub(in crate::executor) fn wait_fg_child_draining(
+/// rubash#3401: widened from `pub(in crate::executor)` — the `exec`
+/// builtin's simulated wait (builtins::exec) is the same draining-wait
+/// shape and now calls this directly instead of a bare `child.wait()`.
+pub(crate) fn wait_fg_child_draining(
     executor: &mut Executor,
     child: &mut std::process::Child,
 ) -> Result<std::process::ExitStatus, ExecuteError> {
@@ -5427,6 +5427,23 @@ pub(in crate::executor) fn wait_fg_child_draining(
         }
         std::thread::sleep(SLICE);
     }
+}
+
+/// rubash#3401: non-unix twin of the draining wait. There is no
+/// termsig/mailbox model off unix (no `observe_signals_while_blocked`,
+/// no SIGTERM deferral), so the wait is the plain blocking wait — the
+/// same shape the fast path's `#[cfg(not(unix))]` arm and the non-unix
+/// branches of `wait_external_child` use. It exists so the
+/// `builtins::exec` call sites (which are not cfg-gated) resolve on
+/// every platform; without it the ungated re-export in `executor/mod.rs`
+/// is E0432 on Windows (CI run 43278490674, both windows-latest legs).
+#[cfg(not(unix))]
+pub(crate) fn wait_fg_child_draining(
+    executor: &mut Executor,
+    child: &mut std::process::Child,
+) -> Result<std::process::ExitStatus, ExecuteError> {
+    let _ = executor;
+    child.wait().map_err(ExecuteError::IoError)
 }
 
 /// rubash#1990: sliced form of the armed foreground wait. GNU never
@@ -6132,10 +6149,20 @@ pub(in crate::executor) fn is_enoexec_candidate(program: &std::path::Path) -> bo
     let Ok(mut file) = std::fs::File::open(program) else {
         return false;
     };
-    let mut head = [0u8; 4];
+    let mut head = [0u8; 8];
     let read = file.read(&mut head).unwrap_or(0);
     let head = &head[..read];
-    !head.starts_with(b"#!") && !head.starts_with(b"\x7fELF")
+    // rubash#3510 rework: a Mach-O image is a native binary the Darwin
+    // kernel execs directly, so on macOS it is not an ENOEXEC candidate.
+    // On Linux the kernel refuses it with ENOEXEC, so it stays a
+    // candidate there and GNU's post-ENOEXEC binary refusal (126) is
+    // preserved — an ungated exclusion would have flipped a Mach-O file
+    // on Linux from GNU's 126 to the glibc /bin/sh fallback's 127.
+    // (MZ stays a candidate here on every platform: on unix the kernel
+    // refuses a PE image with ENOEXEC.)
+    !head.starts_with(b"#!")
+        && !head.starts_with(b"\x7fELF")
+        && !(cfg!(target_os = "macos") && crate::executor::path::is_macho_binary_magic(head))
 }
 
 /// GNU general.c:843 absolute_program: a name containing `/` (or `\` on a

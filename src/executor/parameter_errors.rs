@@ -2173,7 +2173,22 @@ impl Executor {
         if crate::executor::expand_braced_indices::scan_pure_mode() {
             return QuestionOutcome::ProvisionalPending;
         }
+        // rubash#3541: GNU's evalerror (arrayfunc.c:1356 array_expand_index
+        // -> evalexp -> expr.c error jump) abandons parameter_brace_expand
+        // BEFORE subst.c:8216 parameter_brace_expand_error can run, so an
+        // arithmetic failure inside the tested subscript is the whole
+        // verdict — the `:?` report must not follow it. The fetch below
+        // raises the fatal-expansion flags on that path; honor them and
+        // defer instead of layering the `:?` report on top.
+        let pre_fetch_arith_error = self.shell_state.arithmetic_expansion_error.get()
+            || self.shell_state.arithmetic_fatal_error.get();
         let fetched = self.parameter_error_value(name);
+        if !pre_fetch_arith_error
+            && (self.shell_state.arithmetic_expansion_error.get()
+                || self.shell_state.arithmetic_fatal_error.get())
+        {
+            return QuestionOutcome::NoError;
+        }
         // The fetch resolved the subscript (carry map): re-check the
         // simulation by the RESOLVED name — an earlier `:=` may have
         // bound exactly this element, and the fetched (pre-command)
@@ -2818,7 +2833,7 @@ impl Executor {
                             "parameter not set".to_string()
                         };
                         return Some((
-                            name.to_string(),
+                            parameter_error_display_name(name, quote_aware),
                             message,
                             Self::FATAL_PARAMETER_EXPANSION_STATUS,
                         ));
@@ -2842,14 +2857,26 @@ impl Executor {
                                 "parameter not set".to_string()
                             }
                         } else {
-                            self.expand_parameter_word(message)
+                            // rubash#3260: the `:?` message is display text,
+                            // not a value — GNU subst.c:8216
+                            // parameter_brace_expand_error expands the word
+                            // (expand_string, quote removal included) and
+                            // reports the plain text. `expand_parameter_word`
+                            // keeps quoted whitespace behind the IFS_GLUE
+                            // carrier for field splitting, so the message
+                            // must go through the sanctioned visible-text
+                            // decoder before it is reported, or the carrier
+                            // leaks into the diagnostic (`e\x1c f`).
+                            crate::locale::decode_to_visible_text(
+                                &self.expand_parameter_word(message),
+                            )
                         };
                         // GNU subst.c:8221 parameter_brace_expand_error →
                         // expand_wdesc_fatal (FORCE_EOF): `${x?}`/`${x:?}` abort
                         // the whole noninteractive script; subshell, pipeline,
                         // and command-substitution boundaries contain it.
                         return Some((
-                            name.to_string(),
+                            parameter_error_display_name(name, quote_aware),
                             message,
                             Self::FATAL_PARAMETER_EXPANSION_STATUS,
                         ));
@@ -3121,6 +3148,63 @@ impl Executor {
                         index += 1;
                         if name_ch == '}' {
                             break;
+                        }
+                        // rubash#3540: a comsub inside the braced text (an
+                        // array subscript, an operator word) is still
+                        // forked by expand_word_internal's walk before the
+                        // nounset fatal reports — collect its body in
+                        // order so the caller runs it for side effects.
+                        if name_ch == '`' {
+                            name.push(name_ch);
+                            let mut body = String::new();
+                            while index < chars.len() {
+                                let body_ch = chars[index];
+                                index += 1;
+                                name.push(body_ch);
+                                if body_ch == '\\' {
+                                    if index < chars.len() {
+                                        name.push(chars[index]);
+                                        index += 1;
+                                    }
+                                    continue;
+                                }
+                                if body_ch == '`' {
+                                    break;
+                                }
+                                body.push(body_ch);
+                            }
+                            comsubs.push(body);
+                            continue;
+                        }
+                        if name_ch == '$' && chars.get(index).copied() == Some('(') {
+                            name.push(name_ch);
+                            name.push('(');
+                            index += 1;
+                            let mut depth = 1usize;
+                            let mut body = String::new();
+                            while index < chars.len() {
+                                let body_ch = chars[index];
+                                index += 1;
+                                name.push(body_ch);
+                                if body_ch == '\\' {
+                                    if index < chars.len() {
+                                        name.push(chars[index]);
+                                        index += 1;
+                                    }
+                                    continue;
+                                }
+                                if body_ch == '(' {
+                                    depth += 1;
+                                } else if body_ch == ')' {
+                                    depth -= 1;
+                                    if depth == 0 {
+                                        break;
+                                    }
+                                }
+                                body.push(body_ch);
+                            }
+                            comsubs.push(body);
+                            continue;
                         }
                         name.push(name_ch);
                     }
@@ -4085,6 +4169,41 @@ impl Executor {
         }
         let mut chars = subscript.chars().peekable();
         while let Some(ch) = chars.next() {
+            if ch == '`' {
+                // A command substitution inside the subscript is evaluated
+                // by expand_arith_string (subst.c:3981) in a forked child
+                // (subst.c:7143) — its variables are the child's business
+                // and never leak to this scan (rubash#3540).
+                while let Some(body_ch) = chars.next() {
+                    if body_ch == '\\' {
+                        chars.next();
+                        continue;
+                    }
+                    if body_ch == '`' {
+                        break;
+                    }
+                }
+                continue;
+            }
+            if ch == '$' && chars.peek().copied() == Some('(') {
+                chars.next();
+                let mut depth = 1usize;
+                while let Some(body_ch) = chars.next() {
+                    if body_ch == '\\' {
+                        chars.next();
+                        continue;
+                    }
+                    if body_ch == '(' {
+                        depth += 1;
+                    } else if body_ch == ')' {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                }
+                continue;
+            }
             if !is_shell_name_start(ch) {
                 continue;
             }
@@ -4176,5 +4295,23 @@ impl Executor {
                 }
             }
         }
+    }
+}
+
+/// The `:?`/`?` diagnostic names the parameter as the lexer stored it
+/// (subst.c:8216 parameter_brace_expand_error prints `name`, the text
+/// parameter_brace_expand cut from the word). A `$(...)` inside that text
+/// (a subscript) was replaced at read time by its print_comsub
+/// serialization (parse.y:4451 parse_comsub -> parse.y:4632
+/// print_comsub), so `${a[$(cmd >&2)]:?e}` reports `a[$(cmd 1>&2)]: e`
+/// (rubash#3404). `parser_word` is the scan's `quote_aware` context: a
+/// here-document body (the `false` context) is expanded at run time
+/// without ever passing parse_comsub (redir.c:348 heredoc_expand ->
+/// expand_string), so GNU reports its text raw (`q[$(cmd >&2)]: e`).
+fn parameter_error_display_name(name: &str, parser_word: bool) -> String {
+    if parser_word {
+        super::print_comsub::canonicalize_comsub_spans(name)
+    } else {
+        name.to_string()
     }
 }

@@ -64,6 +64,14 @@ impl Executor {
         }
         body_commands.extend(commands[do_index + 1..done_index].iter().cloned());
         let done_command = commands.get(done_index).expect("done index is valid");
+        // rubash#3454: `time while/until ... done > $nope` reparses the
+        // loop as a word sequence whose redirects live on `done` — GNU
+        // still aborts the script on an unbound target (the diagnostic
+        // precedes the timing report), so run the nounset scan before
+        // any expansion side effect and unwind as ExitCode(1).
+        if self.redirect_list_nounset_fatal(done_command)? {
+            return Err(ExecuteError::ExitCode(1));
+        }
         let mut body = Ast {
             commands: body_commands,
         };

@@ -221,6 +221,23 @@ impl Executor {
     }
 
     pub(in crate::executor) fn is_enabled_shell_builtin_name(&self, name: &str) -> bool {
+        // #2642 (completing #2514): the only callers of this predicate
+        // are the two describe faces (codegraph: describe_name_with_io,
+        // describe_name_all_with_io), so gating it here gates exactly
+        // what the describe faces print and nothing else — dispatch,
+        // `enable`, `compgen -b` and `builtin env` keep the unified
+        // projection. `env` is rubash's one extension builtin
+        // (builtin_table::NON_GNU_BUILTIN_NAMES): GNU bash has no env
+        // builtin, so GNU `describe_command` (builtins/type.def:211)
+        // resolves it as a PATH file, and the row exists only because
+        // Windows has no /usr/bin/env. Off Windows the describe faces
+        // must therefore fall through to the PATH branch, exactly as
+        // #2514 ruled for the emulation-registered names; on Windows
+        // the builtin answer stands (pinned by
+        // issue2036_s2_introspection_windows).
+        if !cfg!(windows) && super::builtin_table::NON_GNU_BUILTIN_NAMES.contains(&name) {
+            return false;
+        }
         is_shell_builtin_name(name)
             && !crate::builtins::enable::is_disabled(&self.shell_state.env_vars, name)
     }

@@ -3133,6 +3133,9 @@ impl Executor {
         // rubash#2117: the POSIX special-builtin conversion mark is
         // scoped the same way; the ast_exec time branch takes it.
         self.posix_special_status_converted.set(false);
+        // rubash#3325: the ERR-ownership verdict is recomputed by this
+        // frame after its inner dispatch; never inherit a stale one.
+        self.timed_err_owned_by_body.set(None);
         // rubash#1218: in posix mode a dash word right after `time`
         // means `time` was never a keyword (GNU parse.y), so the
         // reconstructed command (`time`, the prefix words, then the
@@ -3194,6 +3197,10 @@ impl Executor {
         // bypassed.
         self.timed_dispatch_depth
             .set(self.timed_dispatch_depth.get() + 1);
+        // rubash#3325: scoped to this frame's root dispatch (a nested
+        // time frame clears it again for its own root and leaves the
+        // verdict set for this frame to read).
+        self.timed_root_redirect_failure.set(false);
         // rubash#1611: clear the conversion mark immediately before the
         // inner dispatch (the DEBUG-trap call in the simple-command arm
         // below runs its own commands first; their conversions must not
@@ -3274,9 +3281,30 @@ impl Executor {
         };
         self.timed_dispatch_depth
             .set(self.timed_dispatch_depth.get() - 1);
+        // rubash#3325: GNU time_command (execute_cmd.c:1430) only hands
+        // the command to execute_command_internal; whether the ERR trap
+        // runs is decided inside that command's own execution. A
+        // statement compound reaches run_error_trap at its own level
+        // only for its do_redirections failure (execute_cmd.c:854-883);
+        // its body's failing commands fire the trap themselves (nested
+        // lists run with the timed deferral masked). The time branch's
+        // final-status adjudication therefore stands only for the
+        // non-compound roots (simple, pipeline, subshell, (( )), [[ ]],
+        // function call) and a compound root's own redirect failure.
+        let body_owns_err = timed_root_is_statement_compound(&time_command.command)
+            && !self.timed_root_redirect_failure.get();
         // rubash#1611: take the errexit-conversion mark left by the
         // inner dispatch (cleared at entry above).
         let errexit_converted = self.errexit_status_converted.replace(false);
+        // A `time time ...` chain: the nested frame (dispatched through
+        // the execute_command funnel, rubash#1805) already computed the
+        // verdict for the innermost command, with the errexit mark it
+        // consumed — keep it instead of recomputing from this frame's
+        // (already taken) mark.
+        if time_command.command.time_command.is_none() {
+            self.timed_err_owned_by_body
+                .set(body_owns_err.then_some(errexit_converted));
+        }
         // Q6 arm B: a converted ExitCode was adjudicated here, so
         // its unwind mark is consumed with it; the ast_exec time
         // branch's own gate re-marks if it raises the break itself.
@@ -4073,6 +4101,16 @@ impl Executor {
             return self.execute_if_command(if_command);
         }
 
+        // rubash#3454: `if ... fi > $nope` under `set -u` — GNU's
+        // do_redirections (execute_cmd.c:854) fails the target expansion
+        // with `name: unbound variable` and aborts the script; the
+        // prologue arms expand with no nounset gate, so report before
+        // any procsub materialization or create side effect and unwind
+        // as ExitCode(1), the same fatal the brace gate returns.
+        if self.compound_redirect_nounset_fatal(cmd)? {
+            return Err(ExecuteError::ExitCode(1));
+        }
+
         // rubash#2246: GNU walks the stored tree by pointer and binds
         // the redirects once at entry (execute_cmd.c:854-883). The
         // deep clones this wrapper used to take — cmd.clone() plus
@@ -4138,6 +4176,12 @@ impl Executor {
                 self.exit_code = 1;
                 return Ok(());
             }
+        }
+        // rubash#3454: same `set -u` unbound-target gate as `if` —
+        // `while/until ... done > $nope` aborts in GNU's compound
+        // do_redirections before any expansion side effect.
+        if self.compound_redirect_nounset_fatal(cmd)? {
+            return Err(ExecuteError::ExitCode(1));
         }
         // rubash#2246: same borrow conversion as the if wrapper —
         // cmd.clone() + loop_command.clone() existed only for the
@@ -6929,10 +6973,99 @@ impl Executor {
         if case_arm_pattern_is_static_literal(&pattern.text, &pattern.raw_text) {
             return std::borrow::Cow::Borrowed(pattern.text.as_str());
         }
+        // rubash#2764: a case pattern word carrying an UNQUOTED
+        // `<(...)` / `>(...)` executes it — GNU expands every pattern
+        // with the full word pipeline (execute_cmd.c:3712
+        // expand_word_leave_quoted, per pattern attempt) and the
+        // `<`/`>` arms of expand_word_internal (subst.c:11365-11385)
+        // extract the body verbatim (extract_process_subst,
+        // subst.c:1311) and run process_substitute (subst.c:6362),
+        // splicing the `/dev/fd/N` result into the expanding word.
+        // Rubash's word pipeline materializes process substitution
+        // from the parser's quote-aware scan of the RAW word, not
+        // from the cooked text (materialize_for_list_process_substitutions,
+        // rubash#2390: a quoted `"<(...)"` stays literal, a body keeps
+        // its backslashes, and `<(...)` text that only appears in an
+        // expansion result is data). Reuse that exact vehicle here,
+        // BEFORE either expansion branch runs: splicing the fd path
+        // in up front keeps the body out of the pattern expander (a
+        // `$v` / `$(...)` inside the body belongs to the child, not
+        // to the pattern) and keeps body quotes from mis-splitting
+        // the quote-aware walker's segments. Quoted spans are never
+        // in the derived list, so they stay literal; the splice is
+        // per match attempt (this fn runs once per attempt), so a
+        // side-effecting body re-runs per arm like GNU's
+        // re-expansion. The static-literal gate above already
+        // excludes `<`/`>` from the fast path, so this only fires
+        // for patterns that can carry a substitution.
+        let pattern_substitutions = if pattern.raw_text.contains("<(")
+            || pattern.raw_text.contains(">(")
+        {
+            crate::parser::WordMetadata::new(0, pattern.raw_text.clone(), pattern.raw_text.clone())
+                .process_substitutions
+        } else {
+            Vec::new()
+        };
+        // rubash#2764 (F2 rework, F3 fix): materialize ONCE per
+        // attempt, on the branch that consumes it. The two expansion
+        // branches below consume disjoint strings (the quote-free
+        // branch expands `pattern.text`, the quoted branch expands
+        // `pattern.raw_text`). Materializing both strings eagerly
+        // spawned/registered every body twice (input bodies ran
+        // twice — no per-source dedup in
+        // spawn_input_process_substitution_child; output bodies
+        // registered two different fd-words and both finished);
+        // GNU runs each body once per attempt (subst.c:6362
+        // process_substitute, per pattern attempt). The branch
+        // decision is therefore made ONCE, and on quotes OUTSIDE
+        // `<(...)` / `>(...)` bodies: a quote inside a body belongs
+        // to the child, not to the pattern, and disappears with the
+        // `<(...)`→`/dev/fd/N` splice — deciding on the raw text's
+        // body-internal quotes (F3) sent such a pattern down the
+        // quoted arm's materialization while the downstream gate
+        // re-judged the spliced string and took the unquoted arm,
+        // which then consumed the UN-materialized text. Quotes
+        // outside bodies survive the splice, so one outside-quote
+        // decision serves both the materialization choice and the
+        // branch gate below.
+        let quoted = if pattern_substitutions.is_empty() {
+            case_pattern_raw_has_quotes(&pattern.raw_text)
+        } else {
+            case_pattern_raw_has_outside_quotes(&pattern.raw_text)
+        };
+        let materialized_text;
+        let materialized_raw;
+        let pattern_text: &str;
+        let pattern_raw: &str;
+        if pattern_substitutions.is_empty() {
+            pattern_text = &pattern.text;
+            pattern_raw = &pattern.raw_text;
+        } else if quoted {
+            materialized_raw = self
+                .materialize_for_list_process_substitutions(
+                    &pattern.raw_text,
+                    &pattern_substitutions,
+                )
+                .unwrap_or_else(|_| pattern.raw_text.clone());
+            pattern_text = &pattern.text;
+            pattern_raw = &materialized_raw;
+        } else {
+            materialized_text = self
+                .materialize_for_list_process_substitutions(&pattern.text, &pattern_substitutions)
+                .unwrap_or_else(|_| pattern.text.clone());
+            pattern_text = &materialized_text;
+            pattern_raw = &pattern.raw_text;
+        };
         const PROTECTED_CASE_PATTERN_BACKSLASH: char =
             crate::executor::markers::CASE_PATTERN_BACKSLASH_GUARD;
 
-        if !case_pattern_raw_has_quotes(&pattern.raw_text) {
+        // rubash#2764 (F3): the gate reuses the single `quoted`
+        // decision above — it must agree with the materialization
+        // choice, because each branch consumes the string its arm
+        // materialized. Re-judging here on the (sometimes spliced)
+        // `pattern_raw` is what sent body-quoted patterns down the
+        // unquoted arm with the un-materialized text.
+        if !quoted {
             // Backslashes in a case pattern are escape characters, not
             // quote-removal subjects: GNU performs no quote removal on the
             // pattern (execute_cmd.c:3733-3736) because read_token_word
@@ -6968,7 +7101,7 @@ impl Executor {
             // its assignment side effects (bash execute_cmd.c evaluates
             // patterns with the current variable state; case.tests `;&`
             // fall-through).
-            let chars: Vec<char> = pattern.text.chars().collect();
+            let chars: Vec<char> = pattern_text.chars().collect();
             let mut output = String::new();
             let mut run_start = 0usize;
             let mut index = 0usize;
@@ -7061,9 +7194,9 @@ impl Executor {
             return std::borrow::Cow::Owned(restored);
         }
 
-        let array_at = self.case_pattern_array_at_map(&pattern.raw_text);
+        let array_at = self.case_pattern_array_at_map(pattern_raw);
         std::borrow::Cow::Owned(quote_aware_case_pattern(
-            &pattern.raw_text,
+            pattern_raw,
             |word| self.expand_word_mut(word),
             &array_at,
         ))
@@ -7142,9 +7275,26 @@ impl Executor {
         }
         if !has_redirects {
             let case_line = cmd.line;
-            return self.with_ambient_line(case_line, |executor| {
+            let result = self.with_ambient_line(case_line, |executor| {
                 executor.execute_case_command(case_command)
             });
+            // rubash#2764 (rubash#1523 same rule): a case command owns
+            // the `>(...)` bodies its word / patterns materialized —
+            // finish them at the case's own completion (GNU forks them
+            // at materialization, subst.c process_substitute), so a
+            // case that is the last command still runs its output
+            // bodies instead of leaving them for the next simple
+            // command's drain — or never. Input fds already die here
+            // via the per-command wrapper (command_execute.rs).
+            let _ = self.finish_assignment_output_process_substitutions_for_command(cmd);
+            return result;
+        }
+
+        // rubash#3454: same `set -u` unbound-target gate as `if` —
+        // `case ... esac > $nope` aborts in GNU's compound
+        // do_redirections before any expansion side effect.
+        if self.compound_redirect_nounset_fatal(cmd)? {
+            return Err(ExecuteError::ExitCode(1));
         }
 
         // rubash#2246: same borrow conversion as the if wrapper — the
@@ -7189,6 +7339,7 @@ impl Executor {
         });
         let status = self.exit_code;
         let finish_result = self.finish_compound_output_process_substitutions(group_outputs);
+        let _ = self.finish_assignment_output_process_substitutions_for_command(cmd);
         self.exit_code = status;
         result?;
         finish_result?;
@@ -7632,7 +7783,7 @@ fn parameter_expansion_assigns(raw: &str) -> bool {
 /// binary prints `error: Unrecognized option: 'c'` and drops its body
 /// (rubash#2875), so reject env values inside a `deps` dir — or missing
 /// on disk — and let the current-exe helper take over.
-pub(in crate::executor) fn test_rubash_binary_from_env() -> Option<std::path::PathBuf> {
+pub(crate) fn test_rubash_binary_from_env() -> Option<std::path::PathBuf> {
     let candidate = std::path::PathBuf::from(std::env::var_os("CARGO_BIN_EXE_rubash")?);
     let parent = candidate.parent()?;
     if candidate.is_file() && parent.file_name().and_then(|name| name.to_str()) != Some("deps") {
@@ -7642,30 +7793,58 @@ pub(in crate::executor) fn test_rubash_binary_from_env() -> Option<std::path::Pa
     }
 }
 
-pub(in crate::executor) fn test_rubash_binary_from_current_exe() -> Option<std::path::PathBuf> {
+/// rubash#3292: resolve the real rubash binary for a procsub /
+/// background / coproc child spawned from a test binary. Cargo only
+/// builds the bin (and sets `CARGO_BIN_EXE_rubash`) for full `cargo
+/// test` runs; a lib-only run (`cargo test --lib`) on a fresh target
+/// has neither, and the spawn chain would otherwise fall back to the
+/// lib-test binary itself, which rejects `-c` (`Unrecognized option:
+/// 'c'`, issue2875). Search, in order, the profile dir the test
+/// binary lives under, the `CARGO_TARGET_DIR` target dir
+/// (debug/release), the release sibling of the test binary's profile
+/// dir, and the debug/release profile dirs under each ancestor of the
+/// test binary (nested/workspace layouts). Only a file literally
+/// named `rubash[.exe]` counts — a test binary is `rubash-<hash>`
+/// under `deps/` and never matches. Production behaviour is
+/// unchanged: the `deps/` gate still returns `None` outside a test
+/// binary, so a real shell keeps falling back to `current_exe()`.
+pub(crate) fn test_rubash_binary_from_current_exe() -> Option<std::path::PathBuf> {
     let current = std::env::current_exe().ok()?;
     let deps = current.parent()?;
     if deps.file_name().and_then(|name| name.to_str()) != Some("deps") {
         return None;
     }
-    let profile_dir = deps.parent()?;
     let binary_name = if cfg!(windows) {
         "rubash.exe"
     } else {
         "rubash"
     };
-    let candidate = profile_dir.join(binary_name);
-    if candidate.is_file() {
-        return Some(candidate);
+    let mut profile_dirs: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(debug_dir) = deps.parent() {
+        profile_dirs.push(debug_dir.to_path_buf());
+        if let Some(target_dir) = debug_dir.parent() {
+            profile_dirs.push(target_dir.join("release"));
+        }
     }
-    // Non-dev test profiles place the test binary in target/<profile>/deps
-    // while `cargo build` writes the bin to target/debug — e.g. CI runs
-    // `cargo nextest run --profile ci` (deps = target/ci/deps) after
-    // `cargo build --locked` (bin = target/debug/rubash). Fall back to the
-    // sibling debug profile before giving up to current_exe (rubash#2875
-    // under nextest spawned the lib-test binary itself).
-    let debug_candidate = profile_dir.parent()?.join("debug").join(binary_name);
-    debug_candidate.is_file().then_some(debug_candidate)
+    if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR").map(std::path::PathBuf::from) {
+        profile_dirs.push(target_dir.join("debug"));
+        profile_dirs.push(target_dir.join("release"));
+    }
+    let mut ancestor = current.parent();
+    let mut depth = 0usize;
+    while let Some(dir) = ancestor {
+        if depth >= 8 {
+            break;
+        }
+        profile_dirs.push(dir.join("debug"));
+        profile_dirs.push(dir.join("release"));
+        ancestor = dir.parent();
+        depth += 1;
+    }
+    profile_dirs
+        .into_iter()
+        .map(|dir| dir.join(binary_name))
+        .find(|candidate| candidate.is_file())
 }
 
 fn case_pattern_has_extglob(pattern: &str) -> bool {
@@ -7710,6 +7889,49 @@ fn case_pattern_raw_has_quotes(raw: &str) -> bool {
     let chars = raw.chars().collect::<Vec<_>>();
     let mut index = 0usize;
     while index < chars.len() {
+        match chars[index] {
+            '\'' | '"' => return true,
+            '$' if matches!(chars.get(index + 1), Some('\'' | '"')) => return true,
+            '\\' => index += 1,
+            _ => {}
+        }
+        index += 1;
+    }
+    false
+}
+
+/// Twin of `case_pattern_raw_has_quotes` that ignores quotes inside
+/// `<(...)` / `>(...)` bodies (rubash#2764 F3): a quote inside a
+/// process-substitution body belongs to the child command, not to
+/// the pattern — it disappears with the `<(...)`→`/dev/fd/N` splice,
+/// so it must not decide whether the pattern is quoted. Bodies are
+/// skipped with the lexer's parenthesized-unit walker (the same one
+/// the unquoted branch below uses for `$(...)` units); an
+/// unterminated body falls back to char-by-char judging, i.e. the
+/// old behavior for that span. Only the bodies the materializer
+/// splices are skipped — quotes anywhere else, including inside
+/// `$(...)`, are judged exactly as before, so every pattern without
+/// a body-internal quote keeps its old branch. A `<(`/`>(` directly
+/// preceded by the same operator char (`<<(`/`>>(`) is a heredoc /
+/// append redirect, not a substitution, and is not skipped.
+fn case_pattern_raw_has_outside_quotes(raw: &str) -> bool {
+    let chars = raw.chars().collect::<Vec<_>>();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if (chars[index] == '<' || chars[index] == '>')
+            && chars.get(index + 1) == Some(&'(')
+            && index
+                .checked_sub(1)
+                .map_or(true, |prev| chars[prev] != chars[index])
+        {
+            if let Some(close) = crate::lexer::skip_parenthesized_unit_corrected(&chars, index + 1)
+            {
+                index = close.min(chars.len());
+                continue;
+            }
+            // Unterminated body: fall through and judge char by char
+            // (the old behavior for this span).
+        }
         match chars[index] {
             '\'' | '"' => return true,
             '$' if matches!(chars.get(index + 1), Some('\'' | '"')) => return true,
@@ -8652,4 +8874,17 @@ mod expansion_probe_guard_tests {
         }
         assert!(flag.get());
     }
+}
+
+/// rubash#3325: whether the command a `time` runs is a statement compound — the kinds GNU's execute_command_internal
+/// never adjudicates for ERR at their own level beyond their own
+/// do_redirections failure (execute_cmd.c:854-883): brace group, if,
+/// for (both forms), while/until, case, select.
+fn timed_root_is_statement_compound(root: &CommandNode) -> bool {
+    root.brace_group.is_some()
+        || root.if_command.is_some()
+        || root.for_command.is_some()
+        || root.loop_command.is_some()
+        || root.case_command.is_some()
+        || root.select_command.is_some()
 }
