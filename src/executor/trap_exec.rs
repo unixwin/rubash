@@ -2986,9 +2986,14 @@ impl Executor {
     pub(crate) fn sleep_interruptibly(
         &mut self,
         seconds: f64,
+        command_text: &str,
     ) -> Result<Option<i32>, ExecuteError> {
         const SLICE: std::time::Duration = std::time::Duration::from_millis(50);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f64(seconds);
+        // The command text feeds only the non-unix stop arm below
+        // (the unix sleep is a real child since rubash#3488).
+        #[cfg(unix)]
+        let _ = command_text;
         // rubash#1250: the issue's `sleep 30` repro lands here (sleep is a
         // builtin), not in wait_external_child. An interactive shell with
         // untrapped SIGINT must survive Ctrl-C with rc=130 like GNU, which
@@ -3041,7 +3046,18 @@ impl Executor {
                 other => other?,
             }
             #[cfg(not(unix))]
-            self.observe_signals_while_blocked()?;
+            if let Err(error) = self.observe_signals_while_blocked() {
+                // rubash#3467: an untrapped TSTP (128+20) stops the
+                // virtual sleep instead of ending it — the Windows
+                // Stopped arm. Any other untrapped delivery keeps the
+                // pre-existing unwind.
+                if let ExecuteError::ExitCode(code) = error {
+                    if code == 128 + crate::builtins::kill::SIGTSTP_NUMBER {
+                        return self.windows_stop_virtual_sleep(command_text, deadline);
+                    }
+                }
+                return Err(error);
+            }
             // observe_signals_while_blocked re-queued any trapped
             // deliveries; take them back for the virtual-child check
             // and put back whatever does not abort the sleep.
@@ -3088,6 +3104,93 @@ impl Executor {
                 return Ok(Some(signal));
             }
         }
+    }
+
+    /// rubash#3467 (Windows only): the Stopped carrier for the virtual
+    /// sleep. The in-process emulation has no pid and no child handle,
+    /// so there is nothing to suspend or park — the stop MATERIALIZES
+    /// the carrier instead: spawn this binary as a real sleeper child
+    /// (`rubash -c "sleep <remaining>"`, the same self re-exec the
+    /// `&` respawn uses, resolved through the same exe chain), suspend
+    /// it at once, and park it as the stopped job. Everything after
+    /// that reuses the real-child machinery unchanged: fg resumes it
+    /// (per-pid SIGCONT), bg resumes it in the background, `wait`
+    /// waits on the parked handle, `kill %1` terminates it, and the
+    /// sleeper exits 0 when its remainder runs out — so the resumed
+    /// sleep completes with the status GNU reports for it. The spawn
+    /// is lazy (only on ^Z): the common no-^Z path keeps the
+    /// zero-spawn fast path. The child inherits the session PATH so
+    /// its own `sleep` takes the fast path too; its stdio is null
+    /// (a sleeper prints nothing).
+    ///
+    /// Returns `Ok(Some(20))` when the stop materialized (the caller
+    /// records 128+20, like the unix stopped wait), `Ok(None)` when
+    /// the sleeper already ran out the remainder before the suspend
+    /// landed (the sleep completed, not stopped), and
+    /// `Err(ExitCode(148))` when no carrier could be built — the
+    /// pre-existing unwind (sleep ends at 148 with no job), exactly
+    /// the status quo ante for that corner.
+    #[cfg(not(unix))]
+    fn windows_stop_virtual_sleep(
+        &mut self,
+        command: &str,
+        deadline: std::time::Instant,
+    ) -> Result<Option<i32>, ExecuteError> {
+        use crate::builtins::kill::SIGTSTP_NUMBER;
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(ExecuteError::ExitCode(128 + SIGTSTP_NUMBER));
+        }
+        let exe = crate::executor::test_rubash_binary_from_env()
+            .or_else(crate::executor::test_rubash_binary_from_current_exe)
+            .or_else(|| std::env::current_exe().ok())
+            .unwrap_or_else(|| "rubash".into());
+        let mut sleeper = std::process::Command::new(exe);
+        sleeper
+            .arg("-c")
+            .arg(format!("sleep {}", remaining.as_secs_f64()))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        if let Some(path) = self.get_env("PATH") {
+            sleeper.env("PATH", path);
+        }
+        let mut child = match sleeper.spawn() {
+            Ok(child) => child,
+            Err(_) => return Err(ExecuteError::ExitCode(128 + SIGTSTP_NUMBER)),
+        };
+        let pid = child.id();
+        // Suspend promptly. A few retries: the thread snapshot can
+        // race process creation under wine.
+        let mut suspended = false;
+        for _ in 0..3 {
+            if crate::builtins::kill::send_signal(pid, SIGTSTP_NUMBER).is_ok() {
+                suspended = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        if !suspended {
+            // The sleeper may have run out the remainder before the
+            // suspend landed: a finished sleeper means the sleep
+            // completed, not stopped.
+            if let Ok(Some(_)) = child.try_wait() {
+                return Ok(None);
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(ExecuteError::ExitCode(128 + SIGTSTP_NUMBER));
+        }
+        // observe() classified the delivery as a death + (interactive)
+        // discard before returning it; a stop is neither — drop both
+        // records so no death notice prints and the list continues
+        // (GNU jobs.c:3243; see windows_stop_fg_child).
+        let _ = crate::builtins::kill::take_adjudicated_signal_death();
+        self.take_signal_discard_pending();
+        self.windows_mark_fg_stopped(pid, command, SIGTSTP_NUMBER);
+        self.background_children
+            .insert(pid, crate::fd::SpawnedChild::from(child));
+        Ok(Some(SIGTSTP_NUMBER))
     }
 
     /// Run the ERR trap after a command (or pipeline) completes with a
