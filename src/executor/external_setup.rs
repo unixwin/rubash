@@ -2726,6 +2726,7 @@ impl Executor {
                     let handle = crate::fd::into_handle(seeked);
                     let bound = std::rc::Rc::new(crate::executor::fd_table::FileFd {
                         handle,
+                        closed: std::cell::Cell::new(false),
                         path: file.path.clone(),
                     });
                     self.fd_table
@@ -2768,6 +2769,7 @@ impl Executor {
                 if let Ok(dup) = crate::fd::duplicate_handle_inheritable(file.handle) {
                     let bound = std::rc::Rc::new(crate::executor::fd_table::FileFd {
                         handle: dup,
+                        closed: std::cell::Cell::new(false),
                         path: file.path.clone(),
                     });
                     self.fd_table
