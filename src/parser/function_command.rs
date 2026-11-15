@@ -76,9 +76,18 @@ pub(super) fn parse_function_command_with_diagnostic(
     // the ones the code below can answer Some for (GNU parse.y
     // function_def: WORD '(' ')' | `function' WORD ['(' ')']).
     if !keyword_form {
-        let paren_follows = tokens
-            .get(start + 1)
-            .is_some_and(|token| token.value == "(" || token.value == "()");
+        // rubash#3388: a QUOTED '(' / '()' is an ordinary word (GNU
+        // read_token_word never returns '(' for quoted text), never the
+        // function_def '(' operator. The value-only check mistook the
+        // quoted word for a function head and errored at whatever
+        // followed, aborting the whole script (`[ '(' ')'` died at
+        // ';'). `is_keyword` is the operator predicate (kind Keyword);
+        // a lone `()` token can only be an unquoted word, so the raw
+        // text must equal the value (the codebase's unquoted idiom).
+        let paren_follows = is_keyword(tokens, start + 1, "(")
+            || tokens
+                .get(start + 1)
+                .is_some_and(|token| token.value == "()" && token.raw == "()");
         let group_follows = tokens.get(start).is_some_and(|token| {
             (token.kind == TokenKind::RedirectIn && token.value == "<")
                 || (token.kind == TokenKind::Keyword && token.value == "!")
@@ -201,10 +210,12 @@ pub(super) fn parse_function_command_with_diagnostic(
     {
         return None;
     }
-    let compact_parentheses = tokens.get(i).is_some_and(|token| token.value == "()");
-    let separated_parentheses = tokens.get(i).is_some_and(|token| {
-        token.value == "(" && tokens.get(i + 1).is_some_and(|next| next.value == ")")
-    });
+    // rubash#3388: same quoted-paren guard as the admission above —
+    // `'('` / `')'` / `'()'` words must not count as the `()` head.
+    let compact_parentheses = tokens
+        .get(i)
+        .is_some_and(|token| token.value == "()" && token.raw == "()");
+    let separated_parentheses = is_keyword(tokens, i, "(") && is_keyword(tokens, i + 1, ")");
     let has_parentheses = compact_parentheses || separated_parentheses;
     let keyword_metadata = keyword_form.then(|| build_token_metadata(&tokens[start]));
     let (open_paren_metadata, close_paren_metadata) = if compact_parentheses {
@@ -1119,15 +1130,11 @@ fn bang_group_function_name(tokens: &[Token], start: usize) -> Option<(String, S
     {
         return None;
     }
+    // rubash#3388: same quoted-paren guard as the main shapes above.
     let compact = tokens
         .get(start + 2)
-        .is_some_and(|token| token.value == "()");
-    let separated = tokens
-        .get(start + 2)
-        .is_some_and(|token| token.value == "(")
-        && tokens
-            .get(start + 3)
-            .is_some_and(|token| token.value == ")");
+        .is_some_and(|token| token.value == "()" && token.raw == "()");
+    let separated = is_keyword(tokens, start + 2, "(") && is_keyword(tokens, start + 3, ")");
     if !compact && !separated {
         return None;
     }
