@@ -484,6 +484,55 @@ impl Executor {
                     }
                     continue;
                 }
+                if protect_ifs && protect_data {
+                    // rubash#3116 — GNU subst.c:11614-11678
+                    // expand_word_internal's backslash branch, resolved at
+                    // walk time where quote state is still known (the
+                    // `${var:-word}` alternate rhs rides
+                    // expand_string_for_rhs with quoted == 0 →
+                    // parameter_brace_expand_rhs subst.c:7966). An
+                    // unquoted `\` escapes ANY character, and the escaped
+                    // char is CTLESC-quoted data (subst.c:11671-11674) —
+                    // `\$` is a literal `$` that can never re-trigger an
+                    // expansion. The fall-through below would push the
+                    // raw `\` and let the next iteration re-scan `$` as a
+                    // live trigger, so live triggers are emitted as their
+                    // carriers here; pairs GNU also resolves only in the
+                    // trailing pass (`\q`, `\}`, escaped whitespace) keep
+                    // falling through to that pass byte-for-byte.
+                    match chars.peek().copied() {
+                        Some('\n') => {
+                            chars.next();
+                            continue;
+                        }
+                        Some('$') => {
+                            chars.next();
+                            output.push(crate::executor::markers::DATA_DOLLAR);
+                            continue;
+                        }
+                        Some('\\') => {
+                            chars.next();
+                            output.push(crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH);
+                            continue;
+                        }
+                        Some('"') => {
+                            chars.next();
+                            output.push('"');
+                            continue;
+                        }
+                        Some('`') => {
+                            chars.next();
+                            output.push(crate::executor::markers::DATA_BACKTICK);
+                            continue;
+                        }
+                        Some('\'') if !in_double => {
+                            chars.next();
+                            output.push('\'');
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
                 match chars.peek() {
                     Some('\'') if !in_double => {
                         chars.next();
