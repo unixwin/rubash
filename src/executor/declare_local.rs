@@ -702,25 +702,38 @@ impl Executor {
                             return Err(());
                         }
                     } else if nested_readonly {
-                        // rubash#2658: two prolog classes split by builtin.
-                        // declare/typeset/local bind the compound operand
-                        // through the nested declare's builtin_error, whose
-                        // this_command_name is the enclosing function name —
-                        // `f() { local r=(4); }` on readonly r prints
-                        // `f: r: readonly variable`, skips the bind, and the
-                        // outer builtin reports the operand a second time
-                        // with its own name. export/readonly (setattr.def
-                        // family) instead report via err_readonly, which
-                        // prints the bare variable name with no
-                        // this_command_name segment — and their operand's
-                        // expansion-time bind failure is a real DISCARD
+                        // rubash#2658: two prolog classes split by which
+                        // layer refuses the readonly bind. When the operand
+                        // replays attribute letters through a nested
+                        // declare (subst.c:12949 expand_declaration_argument
+                        // -> subst.c:12792 make_internal_declare) the
+                        // refusal is declare's own sh_readonly
+                        // (declare.def:876) -> builtin_error, whose
+                        // this_command_name is the enclosing FUNCTION name
+                        // at expansion time (builtins/common.c:83-105 —
+                        // execute_cmd.c:4800 installs the builtin name only
+                        // after expand_words) — `f() { local r=(4); }` on
+                        // readonly r prints `f: r: readonly variable`. That
+                        // class covers declare/typeset/local always (a
+                        // local-scope declare of a readonly global fails)
+                        // and export/readonly ONLY when -a/-A replay:
+                        // setattr.def:231-251 turns `readonly -a r=(6)` into
+                        // `declare -gra r`, whose attr-set refusal prints
+                        // `f: r:`, while flagless `readonly r=(4)` reduces
+                        // to `declare -g r` — a scope-only no-op that
+                        // succeeds — so its refusal arrives later from the
+                        // bind layer's err_readonly (error.c:453
+                        // report_error), which prints the bare variable
+                        // name with no this_command_name segment. The
+                        // operand's expansion-time bind failure is a real
+                        // DISCARD for the special builtins
                         // (subst.c:13033 exp_jump_to_top_level): inside a
-                        // function the function body is abandoned after the
-                        // single line, before the special builtin runs
+                        // function the body is abandoned after the single
+                        // line, before the builtin runs
                         // (probe: `f() { readonly r=(4); declare -p r; }`
-                        // prints `r: readonly variable` once, f's tail never
-                        // runs, the caller continues at top level).
-                        if declare_family {
+                        // prints `r: readonly variable` once, f's tail
+                        // never runs, the caller continues at top level).
+                        if declare_family || array_hint || assoc_hint {
                             match self.shell_state.function_name_stack.first() {
                                 Some(func) => eprintln!(
                                     "{}{func}: {lhs}: readonly variable",
