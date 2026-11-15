@@ -1512,6 +1512,7 @@ impl Executor {
             pipeline_stdout_stream: None,
             pipeline_stdin_stream: None,
             pipeline_stage_stderr_live: false,
+            pipeline_stage_feed_sigpipe: Cell::new(false),
             external_stdio_outcome: None,
             external_stdio_piped_fallback: false,
             host_external_command_handler: None,

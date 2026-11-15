@@ -2137,7 +2137,19 @@ impl Executor {
                 // the shell process since rubash#1333, so block it here.
                 #[cfg(unix)]
                 crate::builtins::kill::block_sigpipe_on_this_thread();
-                let _ = stdin.write_all(&payload);
+                // rubash#2693: but the EPIPE itself is the verdict GNU's
+                // producer dies on — an upstream element writing the
+                // inter-member pipe gets SIGPIPE when the reader closes
+                // it (execute_cmd.c:2645-2711; the forked element's
+                // reset_signal_handlers at execute_cmd.c:1670 leaves
+                // SIGPIPE at SIG_DFL). Report whether this feed died on
+                // it so the driver can mark the PRODUCING stage 141 —
+                // the emulation's producer finished into a buffer, so
+                // this is the only place the event exists.
+                stdin
+                    .write_all(&payload)
+                    .err()
+                    .is_some_and(|error| super::shell_options::is_broken_pipe_error(&error))
             })
         });
         if let Some(reader) = merged_stage_reader {
@@ -2153,7 +2165,12 @@ impl Executor {
                 super::pipeline_exec::wait_pipeline_stage_merged_output(self, &mut child, reader)?;
             // The child is gone; its stdin pipe is broken, so the payload
             // writer thread (spawned above) has finished or is about to.
-            let _ = stdin_writer.map(|writer| writer.join());
+            if stdin_writer
+                .map(|writer| writer.join().unwrap_or_default())
+                .unwrap_or_default()
+            {
+                self.pipeline_stage_feed_sigpipe.set(true);
+            }
             merged.extend(self.finish_dev_fd_operands(dev_ops));
             if let Some(target) = merged_shared_file {
                 // The merged pipe stood for BOTH fds on one shared file
@@ -2228,7 +2245,12 @@ impl Executor {
         // broke the stdin pipe, the payload writer thread ends on its
         // broken-pipe write, and joining here keeps the thread's lifetime
         // inside the stage call.
-        let _ = stdin_writer.map(|writer| writer.join());
+        if stdin_writer
+            .map(|writer| writer.join().unwrap_or_default())
+            .unwrap_or_default()
+        {
+            self.pipeline_stage_feed_sigpipe.set(true);
+        }
 
         // rubash#2293: stash the dup carriers' payloads for the
         // driver's routing pass — route_pipeline_stage_streams
