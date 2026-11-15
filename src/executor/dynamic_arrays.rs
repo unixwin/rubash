@@ -1278,6 +1278,12 @@ impl Executor {
                 | "BASHOPTS"
                 | "PIPESTATUS"
                 | "HISTCMD"
+                // The owner-table views: an unsevered BASH_ALIASES /
+                // BASH_CMDS is set (GNU materializes even the empty
+                // assoc); `unset` then severs it via UNSET_DYNAMIC_VARS
+                // like every other dynamic name (rubash#3573).
+                | "BASH_ALIASES"
+                | "BASH_CMDS"
         )
     }
 
@@ -1820,11 +1826,19 @@ impl Executor {
         if name == "DIRSTACK" && !self.dirstack_shadowed() {
             return Some(self.dirstack_storage());
         }
-        if name == "BASH_ALIASES" {
-            return Some(self.bash_aliases_storage());
-        }
-        if name == "BASH_CMDS" {
-            return Some(self.bash_cmds_storage());
+        if matches!(name, "BASH_ALIASES" | "BASH_CMDS")
+            && !is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, name)
+        {
+            // Unsevered only: once `unset` (or a direct whole-name bind,
+            // rubash#3573) cut the dynamic link the owner-table view is
+            // gone for good (variables.c:3839) — fall through to the
+            // plain variable read below, which reports the bound value
+            // or unbound exactly like any ordinary name.
+            return Some(if name == "BASH_ALIASES" {
+                self.bash_aliases_storage()
+            } else {
+                self.bash_cmds_storage()
+            });
         }
         self.shell_state.env_vars.get(name).cloned()
     }
@@ -1833,7 +1847,15 @@ impl Executor {
         self.resolved_variable_name(name)
             .as_deref()
             .is_some_and(|name| {
-                is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, name)
+                // A severed dynamic name keeps its stale ASSOC_VARS mark
+                // until rebind; for the unbound variable GNU would see,
+                // the mark does not exist — whole compound assignment to
+                // it builds an INDEXED array (do_compound_assignment
+                // subst.c:3441; rubash#3573). A live typed assoc cell
+                // (e.g. redeclared `declare -A` after the unset) still
+                // counts, exactly like any other bound variable.
+                (is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, name)
+                    && !is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, name))
                     || self
                         .shell_state
                         .variables
@@ -2179,9 +2201,10 @@ impl Executor {
     /// on named access.
     fn publish_dynamic_assoc_var(&mut self, name: &str, storage: &str) {
         // GNU variables.c:3839 unbind_variable: an unset dynamic variable
-        // stays unbound for the shell's lifetime — owner-table mutations
-        // (alias/hash/declare entry) must not resurrect the variable
-        // (rubash#3573). Mirrors the UNSET_DYNAMIC_VARS skip in
+        // stays unbound for the shell's lifetime — the owner-table render
+        // must neither resurrect it after `unset` (declare -p then
+        // reports not found) nor overwrite a user's own whole-name
+        // binding (rubash#3573). Mirrors the UNSET_DYNAMIC_VARS skip in
         // sync_dynamic_assoc_cells.
         if is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, name) {
             return;

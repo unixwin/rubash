@@ -267,7 +267,10 @@ impl Executor {
             // TODO(variables.c/alias.c): BASH_ALIASES is a dynamic
             // associative array backed by the alias table. Keep this narrow
             // bridge here so array assignment does not swallow alias.tests'
-            // invalid-name diagnostic.
+            // invalid-name diagnostic. A severed name (explicit `unset`,
+            // or a whole-name bind — variables.c:3839 makes it an ordinary
+            // variable for the rest of the shell's lifetime, rubash#3573)
+            // falls through to the normal element bind instead.
             let alias_name = index
                 .trim_end_matches(']')
                 .trim_matches('\'')
