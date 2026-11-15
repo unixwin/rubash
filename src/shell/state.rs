@@ -249,6 +249,15 @@ pub struct ShellState {
     /// `$-` changes). Like the invocation fields it rides the
     /// Clone fork boundary: a subshell renders the letter too.
     pub(crate) forced_interactive: bool,
+    /// lib/readline/histexpand.c:94 `history_comment_char`, as armed by
+    /// variables.c:6168-6177 sv_histtimefmt: the first bind that leaves
+    /// HISTTIMEFORMAT existing sets it to '#' and NOTHING ever resets
+    /// it — unsetting HISTTIMEFORMAT only clears
+    /// history_write_timestamps. This latch is that process-global's
+    /// port: once true it stays true for the session (rubash#3535).
+    /// It rides the Clone fork boundary like the invocation fields:
+    /// a forked child inherits the parent's comment char.
+    pub(crate) history_comment_char_armed: bool,
     /// alias.c aliases.
     pub(crate) aliases: HashMap<String, Alias>,
     /// variables.c shell_functions.
@@ -1065,6 +1074,7 @@ impl Clone for ShellState {
             invocation_interactive: self.invocation_interactive,
             invocation_login: self.invocation_login,
             forced_interactive: self.forced_interactive,
+            history_comment_char_armed: self.history_comment_char_armed,
             aliases: self.aliases.clone(),
             functions: self.functions.clone(),
             function_definition_redirects: self.function_definition_redirects.clone(),

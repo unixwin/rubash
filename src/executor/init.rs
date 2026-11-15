@@ -1130,6 +1130,12 @@ impl Executor {
             true
         };
 
+        // variables.c:6168-6177 sv_histtimefmt runs for the variables
+        // imported from the process environment too: a HISTTIMEFORMAT
+        // present at birth has already armed history_comment_char
+        // before the first command runs (rubash#3535).
+        let history_comment_char_armed_seed = env_vars.contains_key("HISTTIMEFORMAT");
+
         let mut executor = Self {
             shell_state: ShellState {
                 variables: VariableStore::from_environment(&env_vars),
@@ -1173,6 +1179,7 @@ impl Executor {
                 // (the host declares the shape after construction);
                 // a respawned child re-derives it there too.
                 forced_interactive: false,
+                history_comment_char_armed: history_comment_char_armed_seed,
                 aliases: HashMap::new(),
                 functions: imported_functions,
                 function_definition_redirects: HashMap::new(),
