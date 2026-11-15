@@ -5288,28 +5288,47 @@ impl Executor {
         cmd: &CommandNode,
         coproc_cmd: &crate::parser::CoprocCommand,
     ) -> Result<(), ExecuteError> {
-        let array_name = coproc_cmd
+        let mut array_name = coproc_cmd
             .name
             .clone()
             .unwrap_or_else(|| "COPROC".to_string());
-        // GNU execute_cmd.c execute_coproc validates an explicit NAME
-        // before anything is spawned: valid_identifier fails ->
-        // err_invalidid (`` `<name>': not a valid identifier ``) and
-        // EXECUTION_FAILURE, and no coprocess is created (rubash#1153:
-        // `coproc "" { echo hi; }` printed the same text but exited 0
-        // after spawning). The default COPROC name never takes this
-        // branch, and a nameref name is a valid identifier itself — its
-        // target is adjudicated at bind time below.
+        // GNU execute_cmd.c:2502-2513 execute_coproc expands the name
+        // BEFORE validating — expand_string_unsplit_to_string
+        // (command->value.Coproc->name, 0) — then valid_identifier on
+        // the EXPANSION, and the expanded text replaces the name so the
+        // coproc's fd array and _PID variable land under it. When the
+        // word expands to zero fields the expansion is NULL (an
+        // unquoted unset/empty `$nv`), and err_invalidid
+        // (error.c:459-462) renders the NULL %s as `(null)`; a quoted
+        // word still yields one field — even an empty one — and
+        // reports `` `': `` (rubash#3032; the `coproc ""` shape is
+        // rubash#1153's). The default COPROC name never takes this
+        // branch, and a nameref name is a valid identifier itself —
+        // its target is adjudicated at bind time below.
         if let Some(name) = &coproc_cmd.name {
-            if !is_shell_name(name) {
+            let raw = coproc_cmd
+                .name_metadata
+                .as_ref()
+                .map(|meta| meta.raw.as_str())
+                .unwrap_or(name.as_str());
+            let expanded = self.expand_word(raw);
+            let expanded_name = if expanded.is_empty() && !raw.contains('"') && !raw.contains('\'')
+            {
+                None
+            } else {
+                Some(expanded)
+            };
+            let name_text = expanded_name.as_deref().unwrap_or("(null)");
+            if !is_shell_name(name_text) {
                 eprintln!(
                     "{}`{}': not a valid identifier",
                     self.diagnostic_prefix(),
-                    name
+                    name_text
                 );
                 self.exit_code = 1;
                 return Ok(());
             }
+            array_name = name_text.to_string();
         }
         use std::process::{Command, Stdio};
         let exe = test_rubash_binary_from_env()
