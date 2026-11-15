@@ -1882,6 +1882,10 @@ impl Executor {
             self.return_trap_running = false;
             return Ok(());
         };
+        // rubash#3327: own the action before inserting
+        // __RUBASH_TRAP_CONTEXT below — the ref borrows env_vars, and
+        // the insert needs it mutably (E0502 on CI run 43672182309).
+        let action = action.to_owned();
         // GNU trap.c:367: the RETURN fire saves the pre-trap $? for a bare
         // `exit`/`return` inside the action (interp 1602).
         let prev_saved_exit =
