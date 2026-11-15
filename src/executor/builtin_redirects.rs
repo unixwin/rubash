@@ -506,7 +506,13 @@ impl Executor {
                 if crate::special_paths::is_net_redirect_target(&target) {
                     match self.open_net_redirect(&target) {
                         Ok(file) => {
-                            self.bind_net_input_fd(&mut saved, 0, &target, file, readwrite);
+                            if let Err(error) =
+                                self.bind_net_input_fd(&mut saved, 0, &target, file, readwrite)
+                            {
+                                self.restore_simple_command_net_inputs(saved);
+                                self.net_input_bind_failure(cmd, &error);
+                                return Err(());
+                            }
                         }
                         Err(error) => {
                             self.restore_simple_command_net_inputs(saved);
@@ -518,7 +524,17 @@ impl Executor {
             }
         }
         for (fd, (file, target, readwrite)) in numbered {
-            self.bind_net_input_fd(&mut saved, fd, &target, file, readwrite);
+            if let Err(error) = self.bind_net_input_fd(&mut saved, fd, &target, file, readwrite) {
+                // rubash#3726: a dup failure unwinds the binds this
+                // call already made (GNU undo_partial_redirects,
+                // execute_cmd.c:855) — their saves are kernel dups,
+                // so the restore replays live entries — then fails the
+                // dispatch like a refused connect (diagnostic + status
+                // 1, body never runs).
+                self.restore_simple_command_net_inputs(std::mem::take(&mut saved));
+                self.net_input_bind_failure(cmd, &error);
+                return Err(());
+            }
         }
         Ok(saved)
     }
@@ -530,9 +546,22 @@ impl Executor {
         target: &str,
         file: std::fs::File,
         readwrite: bool,
-    ) {
+    ) -> Result<(), std::io::Error> {
         if !saved.iter().any(|(saved_fd, _)| *saved_fd == fd) {
-            saved.push((fd, self.fd_table.entries.get(&fd).cloned()));
+            // rubash#3726: the undo save IS a kernel dup (GNU
+            // redir.c:965/1082/1144 `fcntl (fd, F_DUPFD,
+            // SHELL_FD_BASE)`; same hazard as #3706): a bare Rc clone
+            // shares the descriptor the bind's open_input/open_output
+            // retires (retire_read_arm / retire_write_arm,
+            // rubash#3213), so the restore would re-insert a retired
+            // entry and the next spawn's pin pass would dup2 whatever
+            // recycled that kernel number onto the fd. `saved_entry`
+            // duplicates every File-backed endpoint, so the displaced
+            // descriptor stays alive until the restore replays it.
+            // A dup failure fails the whole redirect list (GNU
+            // REDIRECTION_ERROR on a failed F_DUPFD save); the caller
+            // unwinds the binds already made.
+            saved.push((fd, self.fd_table.saved_entry(fd)?));
         }
         let file_fd = FileFd::from_file(file, target.into());
         self.fd_table
@@ -548,6 +577,7 @@ impl Executor {
         if !self.dispatch_net_bound_fds.contains(&fd) {
             self.dispatch_net_bound_fds.push(fd);
         }
+        Ok(())
     }
 
     fn net_input_bind_failure(&mut self, cmd: &CommandNode, error: &std::io::Error) {
