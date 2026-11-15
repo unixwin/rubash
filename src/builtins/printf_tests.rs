@@ -563,4 +563,40 @@ mod numeric_validation_704 {
         assert!(stderr.contains("printf: 5 : invalid number"));
         assert_eq!(env_vars.get("V"), Some(&"5\n".to_string()));
     }
+
+    #[test]
+    fn inline_precision_overflow_wraps_like_host_libc_int_field() {
+        // GNU printf7.sub / rubash#3605: PF() hands `%.<digits>s' to the
+        // host libc printf(3); BSD/Darwin libc accumulates the digit run
+        // into an `int` field (xprintf.c:558-559), so the run wraps mod
+        // 2^32 — 9223372036854775825 becomes precision 17 and `XY'
+        // prints untruncated. The vendored .right expects `XY'.
+        let (status, stdout, stderr, _) = run(&["%.9223372036854775825s\n", "XY"]);
+        assert_eq!(status, EXECUTION_SUCCESS);
+        assert_eq!(stdout, "XY\n");
+        assert!(stderr.is_empty());
+
+        // The same wrap for a numeric conversion: precision 17 pads the
+        // operand to 17 digits.
+        let (status, stdout, stderr, _) = run(&["%.9223372036854775825d\n", "5"]);
+        assert_eq!(status, EXECUTION_SUCCESS);
+        assert_eq!(stdout, "00000000000000005\n");
+        assert!(stderr.is_empty());
+
+        // A wrapped-negative precision is "as if it were missing".
+        let (status, stdout, stderr, _) = run(&["%.4294967295s\n", "XY"]);
+        assert_eq!(status, EXECUTION_SUCCESS);
+        assert_eq!(stdout, "XY\n");
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn inline_width_overflow_still_errors_like_libc_eoverflow() {
+        // BSD/Darwin libc bound-checks the inline field *width* — a
+        // digit run that fits `long` but exceeds INT_MAX fails the whole
+        // builtin with EOVERFLOW.
+        let (status, _stdout, stderr, _) = run(&["%4294967295s\n", "XY"]);
+        assert_eq!(status, EXECUTION_FAILURE);
+        assert!(stderr.contains("Value too large"));
+    }
 }
