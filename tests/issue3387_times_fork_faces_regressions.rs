@@ -62,10 +62,7 @@ fn tagged_millis(stdout: &str, tag: &str) -> u64 {
         .lines()
         .find(|line| line.starts_with(tag))
         .unwrap_or_else(|| panic!("missing {tag} line, stdout: {stdout}"));
-    let field = line
-        .strip_prefix(tag)
-        .expect("tag prefix")
-        .trim_start();
+    let field = line.strip_prefix(tag).expect("tag prefix").trim_start();
     timeval_millis(field)
 }
 
@@ -96,9 +93,7 @@ fn fork_faces_report_near_zero_times() {
         .iter()
         .position(|line| *line == "subshell-begin")
         .expect("subshell-begin marker");
-    let subshell_line = lines
-        .get(subshell_begin + 1)
-        .expect("subshell times line");
+    let subshell_line = lines.get(subshell_begin + 1).expect("subshell times line");
     let subshell = self_user_millis(subshell_line);
     assert!(
         subshell <= 20 && subshell < parent,

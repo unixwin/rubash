@@ -319,12 +319,7 @@ pub(crate) fn process_times() -> (
     let (self_user, self_sys, child_user, child_sys) = raw_process_times();
     let (base_self_user, base_self_sys, base_child_user, base_child_sys) =
         TIMES_BASELINES.with(|stack| match stack.borrow().last() {
-            Some(top) => (
-                top.self_user,
-                top.self_sys,
-                top.child_user,
-                top.child_sys,
-            ),
+            Some(top) => (top.self_user, top.self_sys, top.child_user, top.child_sys),
             None => (
                 std::time::Duration::ZERO,
                 std::time::Duration::ZERO,
