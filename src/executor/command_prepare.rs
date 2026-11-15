@@ -414,6 +414,27 @@ impl Executor {
                 }
             }
         }
+        // rubash#3382: a fatal arithmetic evalerror latched while
+        // expanding this `[[ ]]` command's operands belongs to THIS
+        // command — GNU's evalerror jumps DISCARD for the current
+        // command only (expr.c evalerror -> eval.c:111 reader_loop).
+        // Consume the flags here and abandon the command with the
+        // DISCARD class, so the next command starts clean instead of
+        // being discarded by `abort_on_expansion_errors`. First-error
+        // wins against the #1422 check below: a conditional_error set
+        // means later operands were skipped, so no later arith error
+        // can be latched; an arith error latched means later operands
+        // still ran, so conditional_error may be set later too — the
+        // arith DISCARD takes precedence (the command is already
+        // abandoned either way, and the arith class must arm the
+        // errexit exemption for the list loop).
+        if self.take_conditional_arith_evalerror() {
+            self.exit_code = 1;
+            // rubash#439: an expansion error, not a failed command —
+            // no ERR trap for it.
+            self.command_expansion_failed.set(true);
+            return Err(ExecuteError::ExpansionFailure(1));
+        }
         // rubash#1422: a non-fatal expansion error in a [[ ]] operand
         // (recorded by expand_conditional_word) abandons the current
         // command list with the recorded status — DISCARD, so the next
