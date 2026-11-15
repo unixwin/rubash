@@ -1557,6 +1557,7 @@ impl Executor {
             let read_rc = read_h.map(|handle| {
                 Rc::new(FileFd {
                     handle: restore_handle(handle),
+                    closed: std::cell::Cell::new(false),
                     path: path.clone(),
                 })
             });
@@ -1567,6 +1568,7 @@ impl Executor {
                     Some(rc) if read_h == Some(handle) => Some(rc.clone()),
                     _ => Some(Rc::new(FileFd {
                         handle: restore_handle(handle),
+                        closed: std::cell::Cell::new(false),
                         path: path.clone(),
                     })),
                 },
