@@ -2261,6 +2261,11 @@ impl Executor {
             CatParsed::Options { options, operands } => (options, operands),
         };
         let (options, operands) = parsed;
+        // GNU shell_execve (execute_cmd.c) hands execve the command word
+        // as typed for argv[0], and coreutils' program_name prints it —
+        // `/bin/cat` diagnostics carry `/bin/cat:`, `cat` carries `cat:`
+        // (rubash#3315).
+        let prog = cmd.words.first().map(String::as_str).unwrap_or("cat");
         let filter = |data: &[u8]| -> Vec<u8> { cat_format(data, &options) };
         if let Some(redirect) = &cmd.redirect_in {
             if redirect.fd.unwrap_or(0) == 0 {
@@ -2439,7 +2444,7 @@ impl Executor {
                             // and continues with the next operand
                             // (cat.c).
                             if let Some(message) = self.fd_table.read_error.take() {
-                                writeln!(&mut diagnostics, "cat: -: {message}")?;
+                                writeln!(&mut diagnostics, "{prog}: -: {message}")?;
                                 status = 1;
                             }
                         }
@@ -2501,7 +2506,7 @@ impl Executor {
                             // every cat diagnostic (rubash#1596).
                             writeln!(
                                 &mut diagnostics,
-                                "cat: {}: input file is output file",
+                                "{prog}: {}: input file is output file",
                                 target
                             )?;
                             status = 1;
@@ -2521,7 +2526,7 @@ impl Executor {
                                     Some(error) => crate::posix_errors::message(&error),
                                     None => "No such file or directory".to_string(),
                                 };
-                            writeln!(&mut diagnostics, "cat: {}: {}", target, reason)?;
+                            writeln!(&mut diagnostics, "{prog}: {}: {}", target, reason)?;
                             status = 1;
                         }
                     }
@@ -2554,7 +2559,7 @@ impl Executor {
                             // reserved-name to ENOENT inference).
                             writeln!(
                                 &mut diagnostics,
-                                "cat: {}: {}",
+                                "{prog}: {}: {}",
                                 super::command_substitution::gnu_cat_quoted_operand(&target),
                                 crate::posix_errors::path_strerror(&target, &error)
                             )?;
@@ -2603,7 +2608,7 @@ impl Executor {
                         Err(error) => {
                             writeln!(
                                 &mut diagnostics,
-                                "cat: {}: {}",
+                                "{prog}: {}: {}",
                                 target,
                                 crate::posix_errors::message(&error)
                             )?;
@@ -2644,7 +2649,7 @@ impl Executor {
                         // lookup failure it stands in for.
                         writeln!(
                             &mut diagnostics,
-                            "cat: {}: {}",
+                            "{prog}: {}: {}",
                             super::command_substitution::gnu_cat_quoted_operand(&target),
                             crate::posix_errors::path_strerror(&target, &error)
                         )?;
@@ -2724,7 +2729,7 @@ impl Executor {
                         // exit 0 on the empty read.
                         if let Some(message) = self.fd_table.read_error.take() {
                             let mut stderr = Vec::new();
-                            writeln!(&mut stderr, "cat: -: {message}")?;
+                            writeln!(&mut stderr, "{prog}: -: {message}")?;
                             self.write_buffered_builtin_output(cmd, &filter(&bytes), &stderr)?;
                             self.exit_code = 1;
                             return Ok(true);
@@ -2797,11 +2802,13 @@ impl Executor {
     /// `script: line N:` envelope (rubash#1596; the same convention
     /// rubash#1309 established for cat's operand errors).
     fn report_cat_closed_stdin(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
+        // Same argv[0] rule as external_cat (rubash#3315).
+        let prog = cmd.words.first().map(String::as_str).unwrap_or("cat");
         let mut stderr = Vec::new();
-        writeln!(&mut stderr, "cat: -: Bad file descriptor")?;
+        writeln!(&mut stderr, "{prog}: -: Bad file descriptor")?;
         writeln!(
             &mut stderr,
-            "cat: closing standard input: Bad file descriptor"
+            "{prog}: closing standard input: Bad file descriptor"
         )?;
         self.write_buffered_builtin_output(cmd, &[], &stderr)?;
         Ok(())
