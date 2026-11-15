@@ -8333,12 +8333,19 @@ pub fn shell_pwd_display_path(path: &str) -> String {
         && value.as_bytes()[2] == b'/'
     {
         let drive = (value.as_bytes()[0] as char).to_ascii_lowercase();
-        return format!("/{drive}/{}", &value[3..]);
+        // niubash#993 S2: the drive ROOT renders `/c`, not `/c/` —
+        // GNU's canonpath strips the trailing separator of every
+        // non-`/` root and Git Bash prints `cd /c; pwd` -> `/c`.
+        let tail = &value[3..];
+        if tail.is_empty() {
+            return format!("/{drive}");
+        }
+        return format!("/{drive}/{tail}");
     }
     // unixwin/niubash#481: the bare drive-root display `D:` — produced by
     // the display normalization of a `D:/` operand, which drops the
     // trailing separator — is the same drive root the `D:/` arm above
-    // renders `/d/`; folding it here keeps the canonical persona form
+    // renders `/d`; folding it here keeps the canonical persona form
     // instead of leaking the designator into $PWD.
     if cfg!(windows)
         && value.len() == 2
@@ -8346,7 +8353,7 @@ pub fn shell_pwd_display_path(path: &str) -> String {
         && value.as_bytes()[1] == b':'
     {
         let drive = (value.as_bytes()[0] as char).to_ascii_lowercase();
-        return format!("/{drive}/");
+        return format!("/{drive}");
     }
     if value.is_empty() {
         "/".to_string()
