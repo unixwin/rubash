@@ -781,6 +781,19 @@ impl Executor {
         // expanded shell path) must not leak into child diagnostics
         // (nameref8.sub warnings reported `rubash.exe:` prologs).
         let saved_assignment_command_name = self.assignment_command_name.take();
+        // The EXIT-trap latch and the exec-replacement latch are
+        // per-process too: trap.c:1128 run_exit_trap's once-only flag and
+        // the exec.def replacement unwind both die with the real child
+        // process (shell.c exit_shell). Without this bracket, a child
+        // script's `trap ... EXIT` fire latched the shared Executor — the
+        // next in-process child's `( trap T 0; ... )` subshell found the
+        // latch set and skipped its own EXIT trap (execscript's
+        // exec3.sub `trap 'echo EXIT' EXIT` silenced exec12.sub's
+        // `exit code: 1`), and a child's successful in-process `exec`
+        // leaked exec_replaced into the parent's trap adjudication.
+        // Both latches start clear in the fresh child.
+        let saved_exit_trap_ran = self.exit_trap_ran.replace(false);
+        let saved_exec_replaced = std::mem::replace(&mut self.exec_replaced, false);
 
         // The fd table is a process boundary too: a child's persistent
         // `exec 2>/dev/null` (redir.c do_redirection_internal without undo)
@@ -1318,6 +1331,12 @@ impl Executor {
             .set(saved_parameter_assignment_failure_prev_status);
         self.evalerror_exec_depth.set(saved_evalerror_exec_depth);
         self.assignment_command_name = saved_assignment_command_name;
+        // The child's EXIT-trap fire and exec-replacement unwind latched
+        // the shared Executor — hand the parent's own latches back so a
+        // later child or `( )` subshell adjudicates with the parent's
+        // state, not the dead child's (see the entry saves above).
+        self.exit_trap_ran.set(saved_exit_trap_ran);
+        self.exec_replaced = saved_exec_replaced;
         self.shell_state.cwd = saved_cwd;
         self.exit_code = status;
         // rubash#2236: the child died by an untrapped signal and the
