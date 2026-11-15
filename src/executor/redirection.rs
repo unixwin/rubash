@@ -2235,14 +2235,20 @@ impl Executor {
         state.open_failure_via_error = true;
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
+        // rubash#3453: fd u8::MAX chunks are printf's pass-boundary
+        // markers (printf.def:819's ferror abort is pass-granular);
+        // they carry no stream payload.
+        let has_pass_marks = chunks.iter().any(|(fd, _)| *fd == u8::MAX);
         for (fd, bytes) in chunks {
-            match fd {
+            match *fd {
                 1 => stdout.extend_from_slice(bytes),
+                u8::MAX => {}
                 _ => stderr.extend_from_slice(bytes),
             }
         }
         if !self.apply_ordered_output_redirects(cmd, &mut state)? {
             if !stdout.is_empty()
+                && !has_pass_marks
                 && state
                     .fd_target(1)
                     .is_some_and(|target| *target == OutputTarget::Closed)
@@ -2325,6 +2331,7 @@ impl Executor {
         }
 
         if !stdout.is_empty()
+            && !has_pass_marks
             && state
                 .fd_target(1)
                 .is_some_and(|target| *target == OutputTarget::Closed)
@@ -2347,8 +2354,115 @@ impl Executor {
         // the chunk walk below writes in log order, and the Closed
         // target drops the fd-2 bytes silently and leaves the status
         // untouched.
+        //
+        // rubash#3453 (pass-marked chunks): GNU printf.def:819 checks
+        // `ferror (stdout)` once per rendering pass — an fd-1 write
+        // failure aborts the builtin at the END of the failing pass,
+        // so that pass's diagnostics still reach fd 2 while later
+        // passes' renderings die. `fail` records the failing pass and
+        // the write-error text; the diagnostic lands where GNU emits
+        // it, after the failing pass's last chunk.
+        let mut pass = 0u32;
+        let mut fail: Option<(u32, Vec<u8>)> = None;
+        let mut fail_emitted = false;
+        // write_to_fd swallows a Closed target with Ok — the verdict
+        // must come from the resolved target itself.
+        let fd1_closed = state
+            .fd_target(1)
+            .is_some_and(|target| *target == OutputTarget::Closed);
         for (fd, bytes) in chunks {
+            if *fd == u8::MAX {
+                pass += 1;
+                if let Some((fail_pass, text)) = &fail {
+                    if pass > *fail_pass && !fail_emitted {
+                        let _ = state.write_to_fd(self, 2, text);
+                        fail_emitted = true;
+                    }
+                }
+                continue;
+            }
+            if let Some((fail_pass, _)) = &fail {
+                if pass > *fail_pass {
+                    continue;
+                }
+                if *fd == 1 {
+                    // Same-pass fd-1 writes after the failure: GNU's
+                    // PF macro keeps feeding the dead stream while
+                    // ferror stays set — nothing more is observable.
+                    continue;
+                }
+            }
+            if *fd == 1 && has_pass_marks {
+                if fd1_closed {
+                    // GNU's PF macro: every fd-1 write in the render
+                    // loop hits EBADF — the first one arms the abort.
+                    if !state.foreign_drain
+                        && !builtin_output_write_is_unchecked(cmd)
+                        && fail.is_none()
+                    {
+                        let command = cmd.words.first().map(String::as_str).unwrap_or("command");
+                        let text = format!(
+                            "{}{command}: write error: Bad file descriptor\n",
+                            self.diagnostic_prefix()
+                        )
+                        .into_bytes();
+                        fail = Some((pass, text));
+                        self.exit_code = 1;
+                        self.last_builtin_write_failed.set(true);
+                    }
+                    continue;
+                }
+                match state.write_to_fd(self, 1, bytes) {
+                    Ok(()) => {}
+                    Err(error) if is_closed_output_error(&error) => {
+                        if !state.foreign_drain
+                            && !builtin_output_write_is_unchecked(cmd)
+                            && fail.is_none()
+                        {
+                            let command =
+                                cmd.words.first().map(String::as_str).unwrap_or("command");
+                            let text = format!(
+                                "{}{command}: write error: Bad file descriptor\n",
+                                self.diagnostic_prefix()
+                            )
+                            .into_bytes();
+                            fail = Some((pass, text));
+                            self.exit_code = 1;
+                            self.last_builtin_write_failed.set(true);
+                        }
+                    }
+                    Err(error) => {
+                        if let ExecuteError::IoError(io_error) = &error {
+                            // rubash#1496: the non-closed sh_chkwrite
+                            // arm — reported in the builtin's name at
+                            // the pass boundary, never escaping as a
+                            // bare io error.
+                            if !builtin_output_write_is_unchecked(cmd) && fail.is_none() {
+                                let command =
+                                    cmd.words.first().map(String::as_str).unwrap_or("command");
+                                let text = format!(
+                                    "{}{command}: write error: {}\n",
+                                    self.diagnostic_prefix(),
+                                    crate::posix_errors::message(io_error)
+                                )
+                                .into_bytes();
+                                fail = Some((pass, text));
+                                self.exit_code = 1;
+                                self.last_builtin_write_failed.set(true);
+                            }
+                            continue;
+                        }
+                        return Err(error);
+                    }
+                }
+                continue;
+            }
             self.write_state_output_or_diagnostic(cmd, &state, u32::from(*fd), bytes)?;
+        }
+        if let Some((_, text)) = &fail {
+            if !fail_emitted {
+                let _ = state.write_to_fd(self, 2, text);
+            }
         }
         Ok(true)
     }
@@ -3724,6 +3838,36 @@ impl Executor {
         // fd2-to-Stdout merge lands in the post-redirect pipe content.
         let stdout_target = state.fds.get(&1).cloned().unwrap_or(OutputTarget::Stdout);
         let stderr_target = state.fds.get(&2).cloned().unwrap_or(OutputTarget::Stderr);
+        // rubash#3453: GNU printf.def:819 aborts at the end of the
+        // pass whose fd-1 write failed — same-pass diagnostics still
+        // print, later passes' renderings die. The stage's captured
+        // streams only learn the verdict here, at delivery: when
+        // fd 1's resolved target is a write that fails outright,
+        // rebuild the stderr leg from the pass-tagged ordered log so
+        // only chunks at-or-before the first fd-1 pass survive.
+        // Path targets can still fail at write time; those rides are
+        // left to write_stage_stream_to_target.
+        if !stdout.is_empty()
+            && matches!(
+                stdout_target,
+                OutputTarget::Closed | OutputTarget::FullDevice | OutputTarget::ProcContentWrite
+            )
+            && !builtin_output_write_is_unchecked(cmd)
+        {
+            if let Some(chunks) = &ordered_chunks {
+                if let Some(fail_pass) = chunks
+                    .iter()
+                    .find(|(fd, _, _)| *fd == 1)
+                    .map(|(_, _, pass)| *pass)
+                {
+                    *stderr = chunks
+                        .iter()
+                        .filter(|(fd, _, pass)| *fd == 2 && *pass <= fail_pass)
+                        .map(|(_, text, _)| text.clone())
+                        .collect();
+                }
+            }
+        }
         // rubash#3324: when both streams resolve to the SAME sink
         // (`2>&1`, `1>&2`, `>f 2>&1`), the split pair cannot express
         // the production order — GNU forks the element
@@ -3752,7 +3896,7 @@ impl Executor {
         if same_sink {
             if let Some(chunks) = ordered_chunks {
                 let mut merged = String::new();
-                for (_, text) in &chunks {
+                for (_, text, _) in &chunks {
                     merged.push_str(text);
                 }
                 if stderr_target == OutputTarget::Stderr {
@@ -3894,7 +4038,11 @@ impl Executor {
                     OutputTarget::FullDevice => "No space left on device",
                     _ => "Invalid argument",
                 };
-                if !output.is_empty() && !(fd == 1 && builtin_output_write_is_unchecked(cmd)) {
+                // rubash#3453: only fd 1's failed flush earns the
+                // sh_chkwrite diagnostic — a failed fd-2 delivery is
+                // lost silently, like GNU's builtin_error writing to
+                // the descriptor that just failed (rubash#699 R1.3).
+                if fd == 1 && !output.is_empty() && !builtin_output_write_is_unchecked(cmd) {
                     let command = cmd.words.first().map(String::as_str).unwrap_or("command");
                     diag.push_str(&format!(
                         "{}{command}: write error: {write_error_reason}\n",
@@ -3906,7 +4054,11 @@ impl Executor {
                 }
             }
             OutputTarget::Closed => {
-                if !output.is_empty() && !(fd == 1 && builtin_output_write_is_unchecked(cmd)) {
+                // rubash#3453: same fd-1-only rule — a closed fd-2
+                // target drops the stream AND the diagnostic
+                // silently (Shape B: `printf ... 1>&- 2>&-` must
+                // stay quiet end to end).
+                if fd == 1 && !output.is_empty() && !builtin_output_write_is_unchecked(cmd) {
                     let command = cmd.words.first().map(String::as_str).unwrap_or("command");
                     diag.push_str(&format!(
                         "{}{command}: write error: Bad file descriptor\n",
@@ -3945,7 +4097,7 @@ impl Executor {
                 // took that bare channel). Mirror the Closed arm: diag
                 // into the opposite stream, status + write-failed flag.
                 if let Err(error) = crate::fd::write_file_all(&file, &bytes) {
-                    if !bytes.is_empty() {
+                    if fd == 1 && !bytes.is_empty() {
                         let command = cmd.words.first().map(String::as_str).unwrap_or("command");
                         diag.push_str(&format!(
                             "{}{command}: write error: {}\n",

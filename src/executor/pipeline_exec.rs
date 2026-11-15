@@ -7227,16 +7227,28 @@ impl Executor {
                 // the `bad: invalid number` diagnostic, then 0, 7), and
                 // the two-Vec split loses that order.
                 let log = super::trap_stack_builtins::OrderedOutputLog::new();
-                let status = crate::builtins::printf::execute_with_io(
+                // rubash#3453: tag printf's rendering pass boundaries
+                // into the log — the driver's stream routing drops the
+                // passes GNU's printf.def:819 ferror abort never
+                // renders once an fd-1 write fails.
+                let mut pass_boundary = log.pass_boundary_writer();
+                let status = crate::builtins::printf::execute_with_io_and_store(
                     args.iter().map(String::as_str),
                     &mut env_vars,
+                    None,
                     &mut log.stdout_writer(),
                     &mut log.stderr_writer(),
+                    Some(&mut pass_boundary),
                 )?;
                 let mut output = Vec::new();
                 let mut stderr = Vec::new();
                 let mut chunks = Vec::new();
+                let mut pass = 0u32;
                 for (fd, bytes) in log.chunks().iter() {
+                    if *fd == u8::MAX {
+                        pass += 1;
+                        continue;
+                    }
                     match fd {
                         1 => output.extend_from_slice(bytes),
                         _ => stderr.extend_from_slice(bytes),
@@ -7244,6 +7256,7 @@ impl Executor {
                     chunks.push((
                         *fd,
                         crate::executor::substitution_metadata::bytes_to_shell_text(bytes),
+                        pass,
                     ));
                 }
                 *self.pipeline_stage_ordered_chunks.borrow_mut() = Some(chunks);
@@ -7326,6 +7339,7 @@ impl Executor {
                     chunks.push((
                         *fd,
                         crate::executor::substitution_metadata::bytes_to_shell_text(bytes),
+                        0,
                     ));
                 }
                 *self.pipeline_stage_ordered_chunks.borrow_mut() = Some(chunks);
