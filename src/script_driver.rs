@@ -5351,7 +5351,11 @@ pub fn initialize_interactive_history(executor: &mut Executor) {
         let histsize = SessionHistory::size_limit(executor.get_env("HISTSIZE"));
         let mut shell = session.borrow_mut();
         shell.histfile_loaded = true;
-        let _ = shell.load_file(&path.to_string_lossy(), histsize);
+        // bashhist.c load_history -> read_history: the startup read takes
+        // the same read-time HISTTIMEFORMAT state as `history -r` — it
+        // arms the comment char (variables.c:6168 sv_histtimefmt) and
+        // gates multi-line regrouping (histfile.c:384, rubash#3393).
+        let _ = shell.load_file_with_arming(&path.to_string_lossy(), histsize, write_ts);
     }
 }
 
