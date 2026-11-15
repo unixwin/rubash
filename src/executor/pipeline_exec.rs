@@ -2272,8 +2272,60 @@ impl Executor {
                     &input,
                 );
             }
+            // rubash#2693: did the stage that produced `input` die by
+            // SIGPIPE? In GNU the inter-member bytes are the PREVIOUS
+            // element's own writes: a forked producer writing a pipe
+            // whose reader closed dies by SIGPIPE (its
+            // reset_signal_handlers disposition, execute_cmd.c:1670 /
+            // trap.c:1480) and PIPESTATUS reports 141. The emulation's
+            // producer finished into a capture buffer with status
+            // intact, so the verdict is reconstructed at the CONSUMER's
+            // boundary from two sources:
+            //  * the stdin feed's real EPIPE (a spawned member's
+            //    writer thread reports it through
+            //    `pipeline_stage_feed_sigpipe`), and
+            //  * for an in-process member (inline arm / builtin stage,
+            //    no kernel pipe): the producer had bytes still
+            //    unwritten when the reader went away iff
+            //    written > read + capacity — the pipe holds `capacity`
+            //    unread bytes before a write blocks
+            //    (Linux's 64 KiB pipe(2) default; GNU probe:
+            //    `printf 400KB | head -1` → 141, `printf 60KB | head -1`
+            //    → 0, `printf 100KB | true` → 141, and a consumer that
+            //    read the stream to exhaustion leaves the producer at
+            //    0). `pipeline_stdin_consumed` carries the consumer's
+            //    measured reads — the head inline arm's
+            //    `spec.consumed`, the FUNCTION_STDIN cursor fallback —
+            //    while a spawned member's feed claims the full payload
+            //    so the capacity arm stays quiet for it.
+            let producer_died_sigpipe = self.pipeline_stage_feed_sigpipe.replace(false)
+                || (stage_index > first_stage && statuses.len() == stage_index && {
+                    let consumed = self.pipeline_stdin_consumed.take().unwrap_or(0);
+                    let written =
+                        crate::executor::substitution_metadata::shell_text_to_raw_bytes(&input)
+                            .len();
+                    let read = input
+                        .get(..consumed)
+                        .map(|prefix| {
+                            crate::executor::substitution_metadata::shell_text_to_raw_bytes(prefix)
+                                .len()
+                        })
+                        .unwrap_or_else(|| consumed.min(written));
+                    written > read + PIPE_STAGE_CAPACITY
+                });
             input = next_input;
             statuses.push(next_status);
+            // Stage 0's own feed (heredoc/FUNCTION_STDIN payload)
+            // predates any producer and finds no slot to rewrite.
+            if producer_died_sigpipe {
+                if let Some(previous) = statuses.iter_mut().rev().nth(1) {
+                    // A member that already died by another signal was
+                    // not still writing when the reader went away.
+                    if *previous < 128 {
+                        *previous = 141;
+                    }
+                }
+            }
             // GNU runs a timed pipeline element in a subshell whose fd 2
             // is already bound: when the element dups stderr onto the
             // pipe (`2>&1` / `|&`), the time report is written into the
@@ -9276,6 +9328,15 @@ fn time_pipeline_prefix(command: &CommandNode) -> Option<TimePipelinePrefix> {
 /// GROUP_REDIRECT_INJECTED_MARK a safe carrier). Makes the normalization
 /// idempotent and self-documenting at every consumer.
 const PIPEERR_DESUGAR_MARK: &str = "|&";
+
+/// rubash#2693: the unread bytes a GNU pipe(2) can hold before a
+/// producer's write blocks — Linux's default 64 KiB pipe capacity
+/// (fcntl F_GETPIPE_SZ default, 16 pages). The sequential stage loop
+/// uses it to adjudicate whether a completed producer stage was still
+/// writing when its consumer closed early — the SIGPIPE (141) verdict
+/// GNU's forked element would take (execute_cmd.c:1670
+/// reset_signal_handlers leaves SIGPIPE at SIG_DFL).
+const PIPE_STAGE_CAPACITY: usize = 65536;
 
 /// GNU parse.y:1470-1487 (`pipeline BAR_AND pipeline`): `cmd1 |& cmd2` is
 /// `cmd1 2>&1 | cmd2` — the parser APPENDS a r_duplicating_output redirect

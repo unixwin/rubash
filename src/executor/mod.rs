@@ -2234,6 +2234,18 @@ pub struct Executor {
     /// around the stage call; never set for a stage whose own redirects
     /// claim fd 2, nor while an enclosing stderr capture is armed.
     pipeline_stage_stderr_live: bool,
+    /// rubash#2693: the just-finished stage's stdin feed ended on a
+    /// broken pipe — the consumer closed the inter-member pipe early.
+    /// In GNU the feed's bytes are the PREVIOUS element's own writes:
+    /// a producer whose consumer goes away dies by SIGPIPE
+    /// (execute_cmd.c:1670 reset_signal_handlers leaves it SIG_DFL)
+    /// and reports 141, never the completed status the emulation
+    /// recorded. The stage's writer thread sets the flag; the pipeline
+    /// driver consumes it to rewrite the preceding status. Set only by
+    /// a feed carrying an upstream stage's output (never a stage-0
+    /// heredoc/FUNCTION_STDIN payload — the flag lands on
+    /// `statuses[..]`, which stage 0's feed predates).
+    pipeline_stage_feed_sigpipe: Cell<bool>,
     /// niubash#144: outcome of the external stdio plan from the last
     /// `apply_external_redirects` (ordered-walk shared handles), consumed
     /// by the immediately following `spawn_external_process`. `Some(..)`
