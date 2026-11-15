@@ -3497,7 +3497,10 @@ fn issue2875_require_rubash_binary() {
     let env_arm = crate::executor::test_rubash_binary_from_env();
     let exe_arm = crate::executor::test_rubash_binary_from_current_exe();
     let current = std::env::current_exe().ok();
-    let resolved = env_arm.clone().or(exe_arm.clone()).or_else(|| current.clone());
+    let resolved = env_arm
+        .clone()
+        .or(exe_arm.clone())
+        .or_else(|| current.clone());
     let is_rubash = resolved
         .as_ref()
         .is_some_and(|path| path.file_name().and_then(|name| name.to_str()) == Some(binary_name));
