@@ -372,6 +372,16 @@ pub(super) fn protect_fully_single_quoted_assignment(raw: &str) -> String {
             '`' => out.push(crate::executor::markers::DATA_BACKTICK),
             '"' => out.push(crate::executor::markers::DATA_DQUOTE),
             '\\' => out.push(crate::executor::markers::DATA_BACKSLASH),
+            // rubash#3816: a literal control byte inside the quotes is
+            // user data, not a carrier — tag it as a raw-byte marker pair
+            // (lexer/ansi.rs push_tagged_source_char) so no downstream
+            // decoder can claim it as protocol. The four arms above map
+            // source metacharacters TO carriers deliberately; this arm
+            // keeps source bytes that already ARE carrier bytes from
+            // being read as the carriers they collide with.
+            ch if crate::lexer::ansi::is_assignment_carrier_byte(ch as u32) => {
+                crate::lexer::ansi::push_tagged_source_char(&mut out, ch);
+            }
             _ => out.push(ch),
         }
     }

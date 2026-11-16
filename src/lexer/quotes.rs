@@ -460,7 +460,11 @@ fn remove_shell_quotes_inner_cursor(raw: &str, posix: bool) -> String {
                     while idx < bytes.len() && !matches!(bytes[idx], b'\'' | b'$' | b'`' | b'"') {
                         idx += 1;
                     }
-                    out.push_str(&rest[..idx]);
+                    // rubash#3816: tag literal carrier bytes in the span
+                    // as raw-byte marker pairs (see
+                    // ansi::push_tagged_source_span) so a literal C0 byte
+                    // can never ride bare into transport text.
+                    super::ansi::push_tagged_source_span(&mut out, &rest[..idx]);
                     rest = &rest[idx..];
                     match rest.as_bytes().first() {
                         Some(&b'\'') => {
@@ -563,7 +567,10 @@ fn remove_shell_quotes_inner_cursor(raw: &str, posix: bool) -> String {
                         rest = &rest[2..];
                     }
                     b if b < 0x80 => {
-                        out.push(char::from(b));
+                        // rubash#3816: a backslash-escaped control byte
+                        // is literal data — tag it so it cannot be read
+                        // as the carrier it collides with.
+                        super::ansi::push_tagged_source_char(&mut out, char::from(b));
                         rest = &rest[2..];
                     }
                     _ => {
@@ -599,7 +606,9 @@ fn remove_shell_quotes_inner_cursor(raw: &str, posix: bool) -> String {
                         pending_name = false;
                     }
                 }
-                out.push_str(&rest[..idx]);
+                // rubash#3816: tag literal carrier bytes in the span as
+                // raw-byte marker pairs (see ansi::push_tagged_source_span).
+                super::ansi::push_tagged_source_span(&mut out, &rest[..idx]);
                 rest = &rest[idx..];
             }
         }
@@ -2248,7 +2257,9 @@ pub(crate) fn remove_double_quoted_into_cursor<'a>(
                         pending_name = false;
                     }
                 }
-                out.push_str(&rest[..idx]);
+                // rubash#3816: tag literal carrier bytes in the span as
+                // raw-byte marker pairs (see ansi::push_tagged_source_span).
+                super::ansi::push_tagged_source_span(&mut out, &rest[..idx]);
                 rest = &rest[idx..];
             }
         }
@@ -2321,6 +2332,17 @@ pub(super) fn remove_shell_quotes_outside_backticks(raw: &str) -> String {
                         '$' => out.push(DATA_DOLLAR),
                         '`' => out.push(crate::executor::markers::DATA_BACKTICK),
                         '"' => out.push(crate::executor::markers::DATA_DQUOTE),
+                        // rubash#3816: a literal control byte inside the
+                        // quotes is user data — tag it as a raw-byte
+                        // marker pair so no downstream decoder can claim
+                        // it as the carrier it collides with.
+                        quoted
+                            if crate::lexer::ansi::is_assignment_carrier_byte(
+                                quoted as u32,
+                            ) =>
+                        {
+                            crate::lexer::ansi::push_tagged_source_char(&mut out, quoted);
+                        }
                         _ => out.push(quoted),
                     }
                 }
@@ -2346,7 +2368,9 @@ pub(super) fn remove_shell_quotes_outside_backticks(raw: &str) -> String {
                 } else if escaped == '`' {
                     out.push(crate::executor::markers::DATA_BACKTICK);
                 } else {
-                    out.push(escaped);
+                    // rubash#3816: a backslash-escaped control byte is
+                    // literal data — tag it as a raw-byte marker pair.
+                    super::ansi::push_tagged_source_char(&mut out, escaped);
                 }
             }
             _ => {
@@ -2357,7 +2381,9 @@ pub(super) fn remove_shell_quotes_outside_backticks(raw: &str) -> String {
                 } else if !(pending_name && is_lexer_shell_name_char(ch)) {
                     pending_name = false;
                 }
-                out.push(ch);
+                // rubash#3816: a literal control byte in the unquoted word
+                // is user data — tag it as a raw-byte marker pair.
+                super::ansi::push_tagged_source_char(&mut out, ch);
             }
         }
     }
@@ -2496,7 +2522,11 @@ fn remove_double_quoted_into(
                 } else if !(pending_name && is_lexer_shell_name_char(quoted)) {
                     pending_name = false;
                 }
-                out.push(quoted);
+                // rubash#3816: a literal control byte inside double
+                // quotes is user data — tag it as a raw-byte marker pair
+                // so no downstream decoder can claim it as the carrier
+                // it collides with.
+                super::ansi::push_tagged_source_char(&mut out, quoted);
             }
         }
     }

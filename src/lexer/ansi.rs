@@ -37,6 +37,58 @@ pub(crate) fn is_assignment_carrier_byte(byte: u32) -> bool {
         || (0x14..=0x1f).contains(&byte)
 }
 
+/// Push one literal source character into transport text, owner-tagging
+/// it as a raw-byte marker pair (E000 + E001+byte) when it collides with
+/// an assignment carrier byte (rubash#3816).
+///
+/// A literal C0 byte inside a quoted (or unquoted) word is user data, but
+/// it is byte-identical to one of the C0 carriers (markers.rs), so a bare
+/// copy lets downstream decoders claim it as protocol: the assignment
+/// boundary drops CTLESC pairs and IFS_GLUE, the walker tail restores
+/// DATA_* carriers to the characters they denote, and
+/// decode_to_visible_text decodes the rest — `V='<0x14>'` stored a
+/// backslash, `V='<0x11>'` stored nothing. The ANSI-C decoder already
+/// tags its decoded bytes this way (push_ansi_c_byte); the dequote paths
+/// below are the same entry contract applied to literal source bytes
+/// (the registry's user_reachable rule: the entry point producing
+/// transport text MUST re-encode the byte). The output boundary restores
+/// the pair to the literal byte, so the tagging is behavior-preserving
+/// for bytes no consumer claims (0x15/0x19/0x1e/0x0c included) and
+/// byte-exact for the ones they do.
+///
+/// This is deliberately NOT markers::push_literal_char: that is the E400
+/// escape for literal PUA-zone chars, a different protocol family with
+/// its own entry rules (#735/#840) — this helper only covers the C0
+/// carrier set above.
+pub(crate) fn push_tagged_source_char(out: &mut String, ch: char) {
+    if is_assignment_carrier_byte(ch as u32) {
+        out.push_str(
+            &crate::executor::substitution_metadata::encode_raw_byte_marker(ch as u8),
+        );
+    } else {
+        out.push(ch);
+    }
+}
+
+/// Span form of [`push_tagged_source_char`]: bulk-copy the span when it
+/// holds no carrier byte (the hot path — the overwhelming majority of
+/// spans), otherwise fall back to the per-character tagging walk so a
+/// carrier byte embedded in literal text can never ride bare into
+/// transport. A UTF-8 multi-byte char never triggers the slow path: its
+/// bytes are all >= 0x80, outside the carrier set.
+pub(crate) fn push_tagged_source_span(out: &mut String, span: &str) {
+    if !span
+        .bytes()
+        .any(|b| is_assignment_carrier_byte(b as u32))
+    {
+        out.push_str(span);
+        return;
+    }
+    for ch in span.chars() {
+        push_tagged_source_char(out, ch);
+    }
+}
+
 pub(crate) fn decode_ansi_c_quoted(value: &str) -> String {
     let mut output = String::new();
     let mut chars = value.chars().peekable();
