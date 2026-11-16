@@ -384,6 +384,12 @@ impl Executor {
                 return Ok(());
             }
         }
+        // rubash#3454: same `set -u` unbound-target gate as `if` —
+        // `for ... done > $nope` aborts in GNU's compound
+        // do_redirections before any expansion side effect.
+        if self.compound_redirect_nounset_fatal(cmd)? {
+            return Err(ExecuteError::ExitCode(1));
+        }
         // rubash#2246: same borrow conversion as the if wrapper — the
         // cmd + for_command deep clones existed only for the procsub
         // materialization (gated on a `>(` mirror target) and the

@@ -172,6 +172,14 @@ fn dollar_command_substitution(
     // when the region disarms, and it lets the `)` that follows
     // close the substitution like its glued twin `in)`.
     let mut case_in_completed_empty = false;
+    // rubash#3605: paren depth of a `$(` nested inside the case context
+    // (`$(case $(w) in e) ...`). The `(`/`)` match arms below do not
+    // count parens while `case_depth > 0` (pattern parens belong to the
+    // case machinery), so without this tracker the `)` ending the inner
+    // substitution reaches the truncated-case close arm and the outer
+    // substitution ends early at `$(w` — GNU parse_comsub instead lets
+    // the nested substitution's own reader consume its `)`.
+    let mut nested_case_subst = 0usize;
     // GNU read_token (parse.y:3630-3643): `#` introduces a comment only at
     // a token boundary — after whitespace, a separator (`;&|()<>`), or at
     // the start. `word_boundary`/`word.is_empty()` are wrong: `$`, quotes
@@ -352,6 +360,23 @@ fn dollar_command_substitution(
             &mut case_in_stage,
             &mut case_pattern_region,
         );
+        // `$(` nested inside the case context: its `)` belongs to the
+        // inner substitution, never to the case-close arm below. The
+        // counter is a paren DEPTH inside the nested substitution, so
+        // a subshell group inside it (`$(a (b) c)`) consumes its own
+        // `)` first instead of mis-closing the `$(`.
+        if !single
+            && !double
+            && case_depth > 0
+            && ch == '('
+            && (nested_case_subst > 0 || chars.get(index.wrapping_sub(1)) == Some(&'$'))
+        {
+            nested_case_subst += 1;
+        }
+        let closes_nested_subst = ch == ')' && !single && !double && nested_case_subst > 0;
+        if closes_nested_subst {
+            nested_case_subst -= 1;
+        }
         // rubash#2789: a `)` that cannot close anything inside the
         // case — no pattern content in the armed region (the pattern
         // never started, e.g. right after `in` or after a `;;`), the
@@ -359,9 +384,10 @@ fn dollar_command_substitution(
         // case subject — closes the substitution at the substitution's
         // own depth (parse.y:4519-4521), yielding the truncated body
         // for the body parser's grammar verdict. Pattern closers
-        // (content seen), nested-paren closers and quoted `)` never
-        // reach this arm.
-        let case_close_candidate = ch == ')' && !single && !double && depth == 1 && case_depth > 0;
+        // (content seen), nested-paren closers, nested `$(` closers
+        // and quoted `)` never reach this arm.
+        let case_close_candidate =
+            ch == ')' && !single && !double && depth == 1 && case_depth > 0 && !closes_nested_subst;
         if case_close_candidate
             && ((region_before && !content_before)
                 || (word_before == "in" && stage_before == 2)

@@ -64,6 +64,14 @@ impl Executor {
         }
         body_commands.extend(commands[do_index + 1..done_index].iter().cloned());
         let done_command = commands.get(done_index).expect("done index is valid");
+        // rubash#3454: `time while/until ... done > $nope` reparses the
+        // loop as a word sequence whose redirects live on `done` — GNU
+        // still aborts the script on an unbound target (the diagnostic
+        // precedes the timing report), so run the nounset scan before
+        // any expansion side effect and unwind as ExitCode(1).
+        if self.redirect_list_nounset_fatal(done_command)? {
+            return Err(ExecuteError::ExitCode(1));
+        }
         let mut body = Ast {
             commands: body_commands,
         };
@@ -270,7 +278,13 @@ impl Executor {
                 return Ok(Some(done_index + 1));
             }
         }
-        if words.first().map(String::as_str) != Some("for") {
+        // rubash#3557: literal `for` head (quoted — parser froze it as a
+        // plain word) is a command name, not a loop opener; only an
+        // alias-introduced `for` re-lexes as syntax (parse.y:3249
+        // alias_expand_token -> push_string).
+        if words.first().map(String::as_str) != Some("for")
+            || command.words.first().map(String::as_str) == Some("for")
+        {
             return Ok(None);
         }
         let do_index = scan_do_index(command_index + 1);

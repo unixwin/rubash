@@ -23,21 +23,30 @@
 //! prompt rendering. Seed: the #2879 sweep's PTY cell s4
 //! (`~/workspace/pua-audit/probes/pty_prompts.py`).
 
+#[cfg(unix)]
 use std::io::Write;
+#[cfg(unix)]
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::process::{Command, Stdio};
+#[cfg(unix)]
 use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(unix)]
 use std::time::Duration;
 
 mod common;
+#[cfg(unix)]
 use common::wait_bounded;
 
+#[cfg(unix)]
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// U+E000 in UTF-8 — the raw-byte marker escape. Its presence in the
 /// typescript means a transport pair leaked to the terminal.
+#[cfg(unix)]
 const E000_UTF8: &[u8] = "\u{E000}".as_bytes();
 
+#[cfg(unix)]
 fn scratch(tag: &str) -> PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     let dir = std::env::temp_dir().join(format!("rubash2883-{}-{tag}-{n}", std::process::id()));
@@ -125,6 +134,7 @@ fn run_pty_staged(steps: &[(&[u8], u64)]) -> Vec<u8> {
     outcome.stdout
 }
 
+#[cfg(unix)]
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack
         .windows(needle.len())

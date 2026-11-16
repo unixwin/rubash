@@ -423,6 +423,31 @@ fn apply_posix_mode_transition(
     enabled: bool,
     prior: bool,
 ) {
+    apply_posix_mode_walk(env_vars, enabled, prior);
+    if enabled == prior {
+        return;
+    }
+    // builtins/set.def:413-416: the OPTION side owns the variable
+    // binding — enable binds POSIXLY_CORRECT="y", disable unbinds it.
+    // The variable side (sv_strict_posix) never binds or unbinds; it
+    // only re-derives the mode (sync_posix_mode_from_variable below).
+    if enabled {
+        env_vars.insert("POSIXLY_CORRECT".to_string(), "y".to_string());
+    } else {
+        env_vars.remove("POSIXLY_CORRECT");
+    }
+}
+
+/// The state half of a posix flip, shared by both directions: the
+/// __RUBASH_POSIX_MODE marker (+ its process-env mirror) and, on an
+/// actual transition, the general.c:103-128 posix_initialize walk over
+/// the derived shopt options. Never touches the POSIXLY_CORRECT
+/// binding itself.
+fn apply_posix_mode_walk(
+    env_vars: &mut crate::shell::var_table::VarTable,
+    enabled: bool,
+    prior: bool,
+) {
     env_vars.insert(
         "__RUBASH_POSIX_MODE".to_string(),
         if enabled { "1" } else { "0" }.to_string(),
@@ -447,7 +472,6 @@ fn apply_posix_mode_transition(
         return;
     }
     if enabled {
-        env_vars.insert("POSIXLY_CORRECT".to_string(), "y".to_string());
         for option in [
             "interactive_comments",
             "sourcepath",
@@ -461,7 +485,6 @@ fn apply_posix_mode_transition(
             crate::builtins::shopt::set_option_from_posix_walk(env_vars, option, true);
         }
     } else {
-        env_vars.remove("POSIXLY_CORRECT");
         // general.c:127: expand_aliases = interactive_shell. rubash models
         // the interactive default through __RUBASH_INTERACTIVE.
         let interactive_default =
@@ -473,6 +496,32 @@ fn apply_posix_mode_transition(
         );
         crate::builtins::shopt::set_option_from_posix_walk(env_vars, "shift_verbose", false);
     }
+}
+
+/// GNU variables.c:5820 (the special-variable table entry) +
+/// 6257-6266 sv_strict_posix: ANY bind or unbind of POSIXLY_CORRECT
+/// re-derives posixly_correct from the variable's isset-ness
+/// (`posixly_correct = var && var_isset (var)` — an empty-but-set
+/// value still counts), then runs posix_initialize + set_shellopts.
+/// This is the variable -> mode direction; set_posix_mode
+/// (set_shell_option above) is the mode -> variable direction, and
+/// the two keep the invariant posix == isset(POSIXLY_CORRECT). The
+/// variable's own value is NEVER written here: `POSIXLY_CORRECT=`
+/// keeps its empty value (only `set -o posix` binds "y").
+pub(crate) fn sync_posix_mode_from_variable(
+    env_vars: &mut crate::shell::var_table::VarTable,
+    variable_isset: bool,
+) {
+    let prior = shell_option_enabled(env_vars, "posix");
+    env_vars.insert(
+        shell_option_key("posix"),
+        if variable_isset { "1" } else { "0" }.to_string(),
+    );
+    // set_shellopts (builtins/set.def:531): $SHELLOPTS re-derives from
+    // the option flags, so `posix` enters/leaves it with the flip.
+    let shelopts = shellopts_value(env_vars);
+    env_vars.insert("SHELLOPTS".to_string(), shelopts);
+    apply_posix_mode_walk(env_vars, variable_isset, prior);
 }
 
 fn shellopts_includes_option(name: &str) -> bool {

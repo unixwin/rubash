@@ -781,6 +781,10 @@ impl Executor {
         }
         self.note_compound_redirect_failure();
         if self.timed_dispatch_depth.get() > 0 {
+            // rubash#3325: nested lists mask the depth, so a site that
+            // still sees it raised is the timed command itself — the
+            // time branch owns this failure's adjudication.
+            self.timed_root_redirect_failure.set(true);
             return Ok(false);
         }
         self.maybe_run_error_trap(cmd)?;
@@ -952,7 +956,7 @@ impl Executor {
                     // schedule served #1141 before a live pipe could).
                     if let Some(file_fd) = self.spawn_input_process_substitution_child(
                         &source,
-                        super::command_text::procsub_body_seed_line(cmd),
+                        super::command_text::procsub_body_seed_line(cmd, self.ambient_line.get()),
                     ) {
                         let saved_fd0_entry = self.fd_table.entries.get(&0).cloned();
                         let saved_function_stdin =
@@ -1500,7 +1504,7 @@ impl Executor {
                 // spawn-failure fallback.
                 if let Some(file_fd) = self.spawn_input_process_substitution_child(
                     source,
-                    super::command_text::procsub_body_seed_line(cmd),
+                    super::command_text::procsub_body_seed_line(cmd, self.ambient_line.get()),
                 ) {
                     self.set_fd_input_file(fd, file_fd, true);
                     if redirect.kind == crate::parser::RedirectKind::ReadWrite {
@@ -3040,10 +3044,15 @@ impl Executor {
                 .create(true)
                 .open(&path)
                 .err()
-        } else if super::shell_options::redirect_path_is_fifo(&path) {
-            super::shell_options::probe_input_redirect_gate(&path).err()
         } else {
-            std::fs::File::open(&path).err()
+            // rubash#3777: validate with the same opener the bind uses
+            // (probe_input_redirect_gate, FILE_FLAG_BACKUP_SEMANTICS
+            // retry) — a bare File::open refuses a directory with EACCES
+            // and the compound is abandoned before its reader ever runs.
+            // The gate owns the FIFO carve-out (rubash#1820: access(2)
+            // validation, no rendezvous consumed), so no separate FIFO
+            // arm is needed here.
+            super::shell_options::probe_input_redirect_gate(&path).err()
         };
         match probe_error {
             None => None,

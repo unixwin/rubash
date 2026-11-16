@@ -361,7 +361,7 @@ where
                                 .or_else(|| env_vars.get("PWD").cloned())
                                 .unwrap_or_else(|| "/".to_string())
                         } else {
-                            normalize_stack_dir(&oldpwd, env_vars)
+                            normalize_stack_dir(&oldpwd, env_vars, cwd)
                         };
                         if !logical_dir_exists(&resolved, env_vars) {
                             diag.free(format_args!(
@@ -411,7 +411,7 @@ where
                             }
                             None => dir.clone(),
                         };
-                        let resolved = normalize_stack_dir(&effective, env_vars);
+                        let resolved = normalize_stack_dir(&effective, env_vars, cwd);
                         if !logical_dir_exists(&resolved, env_vars) {
                             diag.free(format_args!(
                                 "{dir}: {}",

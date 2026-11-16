@@ -91,7 +91,7 @@ const LITERAL_DOLLAR: char = crate::executor::markers::DATA_DOLLAR;
 impl Executor {
     /// One `expand_subscript_string` pass over the raw subscript text.
     pub(in crate::executor) fn expand_subscript_string(&self, raw: &str) -> String {
-        self.expand_subscript_string_inner(raw, false)
+        self.expand_subscript_string_inner(raw, false, false)
     }
 
     /// The assignment-word variant (`arrayfunc.c:392-398
@@ -110,10 +110,25 @@ impl Executor {
     /// assignment entries use this variant; readers keep
     /// [`Executor::expand_subscript_string`].
     pub(in crate::executor) fn expand_assignment_subscript_string(&self, raw: &str) -> String {
-        self.expand_subscript_string_inner(raw, true)
+        self.expand_subscript_string_inner(raw, true, false)
     }
 
-    fn expand_subscript_string_inner(&self, raw: &str, preserve_ansi_backslashes: bool) -> String {
+    /// GNU arrayfunc.c:1368 `array_expand_index`'s pass:
+    /// `expand_arith_string` (subst.c:3981) — parameter, command and
+    /// arithmetic expansion but NO tilde expansion, so `unset 'a[~]'` /
+    /// `${a[~]}` reach `evalexp` with the raw `~` and the operand-expected
+    /// diagnostic prints `~` verbatim (rubash#3582; the assoc-grade pass
+    /// above tilde-expands a leading `~` to $HOME).
+    fn expand_subscript_string_arith(&self, raw: &str) -> String {
+        self.expand_subscript_string_inner(raw, false, true)
+    }
+
+    fn expand_subscript_string_inner(
+        &self,
+        raw: &str,
+        preserve_ansi_backslashes: bool,
+        arith_grade: bool,
+    ) -> String {
         // whitelist literal fast lane: a subscript of plain bytes needs no
         // expansion work at all. GNU subst.c:11063 expand_subscript_string
         // -> expand_string runs one word expansion with W_NOSPLIT2 |
@@ -229,7 +244,9 @@ impl Executor {
         };
         // A leading unquoted `~` tilde-expands; `x~` and `a:~` stay literal
         // and `"~"` never reaches here (its first character is the quote).
-        if raw.starts_with('~') {
+        // Skipped on the arith-grade pass: GNU's expand_arith_string
+        // (subst.c:3981) has no tilde arm (rubash#3582).
+        if raw.starts_with('~') && !arith_grade {
             return tilde_expand::expand_word_prefix(&expanded, &self.shell_state.env_vars)
                 .unwrap_or(expanded);
         }
@@ -298,6 +315,40 @@ impl Executor {
         &self,
         source: SubscriptSource<'_>,
     ) -> String {
+        self.resolve_array_subscript_with(source, false)
+    }
+
+    /// The indexed-array entry (`array_expand_index`, arrayfunc.c:1353):
+    /// the subscript resolves through `expand_arith_string`, not the
+    /// assoc-grade `expand_subscript_string` — no tilde expansion
+    /// (rubash#3582).
+    pub(in crate::executor) fn resolve_indexed_subscript(
+        &self,
+        source: SubscriptSource<'_>,
+    ) -> String {
+        self.resolve_array_subscript_with(source, true)
+    }
+
+    fn resolve_array_subscript_with(
+        &self,
+        source: SubscriptSource<'_>,
+        arith_grade: bool,
+    ) -> String {
+        // The cross-pass memo must not serve an assoc-grade resolve to an
+        // arith-grade caller (or back): a leading `~` resolves differently
+        // between the two grades.
+        let grade_tag = if arith_grade {
+            crate::executor::markers::SUBSCRIPT_ARITH_GRADE_TAG
+        } else {
+            ""
+        };
+        let expand = |this: &Self, text: &str| {
+            if arith_grade {
+                this.expand_subscript_string_arith(text)
+            } else {
+                this.expand_subscript_string(text)
+            }
+        };
         match source {
             SubscriptSource::Protected(text) => text.to_string(),
             SubscriptSource::Raw(raw) => {
@@ -305,13 +356,15 @@ impl Executor {
                 // (`$((i++))`, `$(...)`): dedup repeated resolves of the
                 // same `${}` fragment across the validate/pre-scan/real
                 // passes (SUB_RES_XPASS docs).
-                let Some(key) = crate::executor::expand_braced_indices::sub_site_key(raw) else {
-                    return self.expand_subscript_string(raw);
+                let key_text = format!("{grade_tag}{raw}");
+                let Some(key) = crate::executor::expand_braced_indices::sub_site_key(&key_text)
+                else {
+                    return expand(self, raw);
                 };
                 if let Some(hit) = crate::executor::expand_braced_indices::sub_res_lookup(&key) {
                     return hit;
                 }
-                let resolved = self.expand_subscript_string(raw);
+                let resolved = expand(self, raw);
                 crate::executor::expand_braced_indices::sub_res_store(key, resolved.clone());
                 resolved
             }
@@ -332,15 +385,16 @@ impl Executor {
                     // is not re-lexed). Marking the whole operand's quotes
                     // as data here is wrong — it breaks the deferred-quote
                     // semantics the builtin paths rely on.
-                    let Some(key) = crate::executor::expand_braced_indices::sub_site_key(text)
+                    let key_text = format!("{grade_tag}{text}");
+                    let Some(key) = crate::executor::expand_braced_indices::sub_site_key(&key_text)
                     else {
-                        return self.expand_subscript_string(text);
+                        return expand(self, text);
                     };
                     if let Some(hit) = crate::executor::expand_braced_indices::sub_res_lookup(&key)
                     {
                         return hit;
                     }
-                    let resolved = self.expand_subscript_string(text);
+                    let resolved = expand(self, text);
                     crate::executor::expand_braced_indices::sub_res_store(key, resolved.clone());
                     resolved
                 }
@@ -360,7 +414,11 @@ impl Executor {
         &mut self,
         source: SubscriptSource<'_>,
     ) -> IndexedSubscript {
-        let resolved = self.resolve_array_subscript(source);
+        let expand = matches!(source, SubscriptSource::Protected(_));
+        // GNU arrayfunc.c:1368: indexed subscripts resolve through
+        // expand_arith_string (no tilde), not expand_subscript_string
+        // (rubash#3582).
+        let resolved = self.resolve_indexed_subscript(source);
         if resolved.is_empty() {
             return IndexedSubscript::Empty;
         }
@@ -373,7 +431,7 @@ impl Executor {
         {
             return hit;
         }
-        let result = match self.eval_indexed_subscript_expression(&resolved) {
+        let result = match self.eval_indexed_subscript_expression(&resolved, expand) {
             Some(index) => IndexedSubscript::Index(index),
             None => {
                 // Silent on a nounset trap (message already printed once);
@@ -401,7 +459,7 @@ impl Executor {
         &self,
         source: SubscriptSource<'_>,
     ) -> IndexedSubscript {
-        let resolved = self.resolve_array_subscript(source);
+        let resolved = self.resolve_indexed_subscript(source);
         if resolved.is_empty() {
             // GNU arrayfunc.c:1356 array_expand_index -> expr.c:417
             // evalexp -> subexpr: empty expanded text evaluates to 0
@@ -1097,7 +1155,8 @@ impl Executor {
                             let _ = std::io::stderr().flush();
                             return Err(format!("({out})"));
                         }
-                        let Some(index_value) = self.eval_indexed_subscript_expression(&resolved)
+                        let Some(index_value) =
+                            self.eval_indexed_subscript_expression(&resolved, true)
                         else {
                             self.report_indexed_subscript_error_unless_nounset(&resolved);
                             // A nounset trap aborts with the fatal status;
@@ -1272,7 +1331,8 @@ impl Executor {
                     let _ = std::io::stderr().flush();
                     return Err(format!("({})", elements.join(" ")));
                 }
-                let Some(index_value) = self.eval_indexed_subscript_expression(&resolved) else {
+                let Some(index_value) = self.eval_indexed_subscript_expression(&resolved, true)
+                else {
                     self.report_indexed_subscript_error_unless_nounset(&resolved);
                     // Same nounset-abort routing as the rewrite path above
                     // (rubash#639).
@@ -2027,6 +2087,29 @@ fn dequote_compound_subscript(sub: &str) -> String {
             (crate::executor::markers::ANSI_C_QUOTE_MARKER, "'"),
             (crate::executor::markers::ANSI_C_DQUOTE_MARKER, "\""),
             (crate::executor::markers::COMPOUND_EXPANSION_WS_TAG, ""),
+        ],
+    )
+}
+
+/// Pass-1 expansion products (`${x}` -> `$y`, a value's `` ` ``/`\`/quotes)
+/// ride data carriers so earlier passes cannot re-read them as syntax.
+/// GNU's subscript evaluator re-lexes the expanded text wholesale —
+/// arrayfunc.c:1368 `array_expand_index` -> `expand_arith_string`
+/// (subst.c:3981 `param_expand` + `sub_append_string` on the RAW text),
+/// so `$y` produced by the first pass expands again and its value parses
+/// as arithmetic (`y='`echo 1`'` -> error token `` `echo 1` `` —
+/// rubash#3613). Decode the carriers back to plain source bytes between
+/// passes; E400-escaped user literals stay escaped.
+pub(in crate::executor) fn decode_subscript_reparse_markers(text: &str) -> String {
+    crate::executor::markers::restore_bare_sentinels(
+        text,
+        &[
+            (crate::executor::markers::ASSIGN_SQ_DOLLAR, "$"),
+            (crate::executor::markers::ASSIGN_SQ_BACKTICK, "`"),
+            (crate::executor::markers::ASSIGN_SQ_BACKSLASH, "\\"),
+            (crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH, "\\"),
+            (crate::executor::markers::ASSIGN_EXPANSION_DQUOTE, "\""),
+            (crate::executor::markers::ASSIGN_EXPANSION_SQUOTE, "'"),
         ],
     )
 }

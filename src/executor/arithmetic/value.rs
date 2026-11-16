@@ -820,6 +820,17 @@ impl ConditionalArithParser<'_> {
     }
 
     pub(super) fn set_lvalue(&mut self, lvalue: &ArithLValue, value: i128) {
+        // GNU variables.c:5820/6257-6266 sv_strict_posix via
+        // expr.c:352 expr_bind_variable: the post-bind hook is keyed on
+        // the WRITTEN lhs text, so only a scalar lvalue spelled exactly
+        // POSIXLY_CORRECT re-derives the mode once the store below
+        // lands; an element lvalue's written text carries the subscript
+        // and matches no special variable. The diag-only lvalue shapes
+        // store nothing and never fire it (rubash#3661).
+        let posix_bind = matches!(
+            lvalue,
+            ArithLValue::Scalar { written, .. } if written == "POSIXLY_CORRECT"
+        );
         match lvalue {
             ArithLValue::Scalar { name, .. } => self.set_variable(name, value),
             ArithLValue::Indexed {
@@ -850,6 +861,10 @@ impl ConditionalArithParser<'_> {
                 self.record_diag(ArithEvalDiag::BadSubscript(bind_display.clone()));
             }
             ArithLValue::Assoc { name, key } => self.set_assoc_element(name, key, value),
+        }
+        if posix_bind {
+            let isset = self.env_vars.contains_key("POSIXLY_CORRECT");
+            crate::builtins::set::sync_posix_mode_from_variable(self.env_vars, isset);
         }
     }
 
