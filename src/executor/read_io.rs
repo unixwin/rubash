@@ -694,6 +694,24 @@ impl Executor {
                 }
             }
         }
+        // rubash#3774: the command's OWN redirect list may leave the
+        // read descriptor write-only (`read x 0>out2.txt`,
+        // `read -u 3 x 3>file`). GNU applies the list before the
+        // builtin runs (redir.c:237 do_redirections), so the
+        // descriptor IS open — sh_validfd passes — and the read
+        // itself fails EBADF (read.def:911). execute_read never binds
+        // the own list into the fd table (builtin_redirects.rs), so
+        // the ambient entry still shows the readable process stdin
+        // and every transport below reads it to a silent EOF. Judge
+        // the list's winner here, before any serve: an output-class
+        // winner records the hard read error the builtin renders,
+        // and no transport runs.
+        if self.own_list_leaves_fd_write_only(cmd, read_fd.unwrap_or(0)) {
+            if self.fd_table.read_error.is_none() {
+                self.fd_table.read_error = Some("Bad file descriptor".to_string());
+            }
+            return None;
+        }
         // rubash#2339: `read -e`/`-E` with a terminal behind the read
         // descriptor acquires through the line editor instead of the
         // raw scanner (read.def:685-710 edit_line). The gate inside
