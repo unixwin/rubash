@@ -177,9 +177,9 @@ printf "A\x03B" | { IFS= read -r p; [ "$p" = "$(printf "A\x03B")" ] && echo pipe
 #[test]
 fn typed_pua_data_is_not_decoded_as_payload_in_utf8_locale() {
     let script = r#"export LC_ALL=C.UTF-8
-cat <<< $'\uE31941;x'
-v=$'\uE319'; cat <<<"$v""41;x"
-cat <<< $'\uE319'
+IFS= read -r l1 <<< $'\uE31941;x'; printf '%s\n' "$l1"
+v=$'\uE319'; IFS= read -r l2 <<<"$v""41;x"; printf '%s\n' "$l2"
+IFS= read -r l3 <<< $'\uE319'; printf '%s\n' "$l3"
 "#;
     let (stdout, stderr, status) = rubash_file("pua", script);
     assert_eq!(
