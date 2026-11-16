@@ -1392,6 +1392,22 @@ pub(crate) fn restore_bare_sentinels(value: &str, rules: &[(char, &str)]) -> Str
     output
 }
 
+/// Borrowing form of a single-rule [`restore_bare_sentinels`] for hot
+/// paths: borrows `value` when no bare sentinel is present, avoiding an
+/// allocation on the common no-marker path. The absence check cannot
+/// misread an E400 pair — a hit only routes into the pair-aware
+/// [`restore_bare_sentinels`], which treats the escaped member as data.
+pub(crate) fn restore_bare_sentinel_cow<'a>(
+    value: &'a str,
+    sentinel: char,
+    replacement: &str,
+) -> std::borrow::Cow<'a, str> {
+    if !value.contains(sentinel) {
+        return std::borrow::Cow::Borrowed(value);
+    }
+    std::borrow::Cow::Owned(restore_bare_sentinels(value, &[(sentinel, replacement)]))
+}
+
 /// Decode-side sibling of [`restore_bare_sentinels`] for boundaries whose
 /// result is USER-VISIBLE text rather than transport (the array storage
 /// mirror's element render, eval's re-parse source): `E400 + c` emits
