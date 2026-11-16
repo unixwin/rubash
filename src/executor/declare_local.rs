@@ -1025,7 +1025,25 @@ impl Executor {
                     // hard failure; execute_declare's Err(()) arm returns 1
                     // with the reader-level discard already armed.
                     Err(partial) => {
-                        if self.evalerror_failglob_pending.get() {
+                        // rubash#3613: an evalerror from a subscript's
+                        // nested expansion (expr.c evalerror -> DISCARD)
+                        // abandons the whole declaration before the bind —
+                        // the name keeps the flags' attribute mark but
+                        // stays unset (`declare -a b=([${x}]=v)` with
+                        // x='$y', y='`echo 1`' reports `declare -a b`),
+                        // unlike the err_badarraysub break which still
+                        // materializes the array. Same arm as the failglob
+                        // gate above.
+                        if self.evalerror_failglob_pending.get()
+                            || self.evalerror_pending.get()
+                        {
+                            let attr = if assoc { ASSOC_VARS } else { ARRAY_VARS };
+                            mark_env_name(&mut self.shell_state.env_vars, attr, lhs);
+                            mark_env_name(
+                                &mut self.shell_state.env_vars,
+                                DECLARED_UNSET_VARS,
+                                lhs,
+                            );
                             return Err(());
                         }
                         partial
