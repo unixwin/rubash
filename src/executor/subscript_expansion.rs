@@ -337,7 +337,11 @@ impl Executor {
         // The cross-pass memo must not serve an assoc-grade resolve to an
         // arith-grade caller (or back): a leading `~` resolves differently
         // between the two grades.
-        let grade_tag = if arith_grade { "\u{0}" } else { "" };
+        let grade_tag = if arith_grade {
+            crate::executor::markers::SUBSCRIPT_ARITH_GRADE_TAG
+        } else {
+            ""
+        };
         let expand = |this: &Self, text: &str| {
             if arith_grade {
                 this.expand_subscript_string_arith(text)
