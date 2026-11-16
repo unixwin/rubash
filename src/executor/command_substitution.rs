@@ -1859,7 +1859,16 @@ impl Executor {
             let result = if posix_mode || inherit_errexit {
                 subshell.execute_ast(&ast)
             } else {
-                subshell.suppress_errexit = 0;
+                // rubash#3605: GNU does NOT clear the flag model at the
+                // comsub boundary — evalstring.c:496 stamps
+                // CMD_IGNORE_RETURN on every body command while
+                // comsub_ignore_return is held (execute_cmd.c:4616
+                // raised it during the exempt command's expand_words).
+                // Only a comsub spawned outside an exempt expansion
+                // resets the counter.
+                if subshell.comsub_ignore_return == 0 {
+                    subshell.suppress_errexit = 0;
+                }
                 // rubash#1563: subst.c:7356-7360 — the child also clears
                 // builtin_ignoring_errexit (and its own 'e' flag below),
                 // so an inherited CMD_IGNORE_RETURN frame ends at the
@@ -2160,6 +2169,7 @@ impl Executor {
             current_conditional_redirects: None,
             pending_scalar_assignment: false,
             suppress_errexit: self.suppress_errexit,
+            comsub_ignore_return: self.comsub_ignore_return,
             // rubash#1563: a fork copy inherits the parent's GNU frame
             // state verbatim (builtin_ignoring_errexit is process memory);
             // the parse_and_execute frame entries renumber with the
@@ -2456,8 +2466,13 @@ impl Executor {
             } else {
                 // subst.c:7023-7029: without inherit_errexit the funsub
                 // clears the -e flag for the body (same adjustment as
-                // command_substitute's fork).
-                subshell.suppress_errexit = 0;
+                // command_substitute's fork). rubash#3605: but the
+                // CMD_IGNORE_RETURN flag model survives through
+                // comsub_ignore_return (evalstring.c:496), so the
+                // counter resets only outside an exempt expansion.
+                if subshell.comsub_ignore_return == 0 {
+                    subshell.suppress_errexit = 0;
+                }
                 // rubash#1563: subst.c:7356-7360 — the child also clears
                 // builtin_ignoring_errexit (and its own 'e' flag below),
                 // so an inherited CMD_IGNORE_RETURN frame ends at the

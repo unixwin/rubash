@@ -359,7 +359,23 @@ impl Executor {
         let mut expanded = if cmd.arithmetic_command.is_some() {
             cmd.clone()
         } else {
-            match self.expand_command_words(cmd) {
+            // rubash#3605: GNU raises comsub_ignore_return around
+            // expand_words when the command carries CMD_IGNORE_RETURN
+            // (execute_cmd.c:4616; the flag arrives via :655-656 or the
+            // :917 ignore_return||invert arm), so command substitutions
+            // spawned by this expansion stamp CMD_IGNORE_RETURN on
+            // every body command (builtins/evalstring.c:496). Only the
+            // command-word expansion raises it — redirect expansion is
+            // outside the bracket (verified: `! cat < <(set -e; false;
+            // echo x)` stays empty under 5.3.20).
+            if self.suppress_errexit > 0 {
+                self.comsub_ignore_return += 1;
+            }
+            let expansion_result = self.expand_command_words(cmd);
+            if self.comsub_ignore_return > 0 {
+                self.comsub_ignore_return -= 1;
+            }
+            match expansion_result {
                 Ok(expanded) => expanded,
                 // GNU expr.c expr_streval: an unbound variable under `set -u`
                 // raises FORCE_EOF from ANY expansion position — the word

@@ -946,6 +946,18 @@ pub struct Executor {
     current_conditional_redirects: Option<Vec<crate::parser::Redirect>>,
     pending_scalar_assignment: bool,
     suppress_errexit: usize,
+    /// rubash#3605: GNU's `comsub_ignore_return` (execute_cmd.c:252)
+    /// counter — raised while expanding the words of a
+    /// CMD_IGNORE_RETURN-flagged simple command (execute_cmd.c:4616)
+    /// and a flagged `[[ ]]`'s operand words (execute_cmd.c:4012,
+    /// :4060, :4067), so a command substitution spawned inside an
+    /// inverted/exempt expansion stamps CMD_IGNORE_RETURN on every
+    /// command its parse_and_execute loop yields
+    /// (builtins/evalstring.c:496) — `! x=$(set -e; false; echo hi)`
+    /// prints hi. Rubash raises it wherever suppress_errexit covers
+    /// word expansion; the comsub boundary consumes it instead of
+    /// clearing the child's inherited suppression.
+    comsub_ignore_return: usize,
     /// rubash#1563: depth of GNU's CMD_IGNORE_RETURN clearing frame for
     /// eval/source (execute_cmd.c:5004-5016): when the builtin is
     /// dispatched under CMD_IGNORE_RETURN outside a subshell environment,

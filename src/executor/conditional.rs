@@ -416,6 +416,22 @@ impl Executor {
     }
 
     fn expand_conditional_word(&mut self, word: &str) -> String {
+        // rubash#3605: GNU raises comsub_ignore_return around a flagged
+        // `[[ ]]`'s operand expansion (execute_cmd.c:4012, :4060,
+        // :4067 — `ignore` = the cond node's CMD_IGNORE_RETURN), so a
+        // `$( )` inside an exempt conditional stamps CMD_IGNORE_RETURN
+        // on its body commands (builtins/evalstring.c:496).
+        if self.suppress_errexit > 0 {
+            self.comsub_ignore_return += 1;
+        }
+        let result = self.expand_conditional_word_inner(word);
+        if self.comsub_ignore_return > 0 {
+            self.comsub_ignore_return -= 1;
+        }
+        result
+    }
+
+    fn expand_conditional_word_inner(&mut self, word: &str) -> String {
         // rubash#1422: an earlier operand already hit the DISCARD-class
         // error below; GNU abandons the conditional at the first bad
         // word, so later operands are never expanded at all.
