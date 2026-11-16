@@ -2710,7 +2710,12 @@ impl Executor {
                     (Some(read), Some(write)) => {
                         self.fd_table.open_readwrite(
                             fd,
-                            FdReadEndpoint::File(read),
+                            // rubash#3655 fix: the enclosing match binds
+                            // by reference (match ergonomics), so both
+                            // arms need `.clone()` — the write side had
+                            // it, the read side did not (E0308, CI run
+                            // 43824819839).
+                            FdReadEndpoint::File(read.clone()),
                             FdWriteEndpoint::File(write.clone()),
                             false,
                         );
