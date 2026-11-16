@@ -171,6 +171,10 @@ where
                 // (rubash#1361).
                 match phash_search_spelling(&path, env_vars) {
                     Some(target) => {
+                        // niubash#993 S7: Git Bash/MSYS never shows the
+                        // .exe probe suffix — same display rule as the
+                        // describe faces.
+                        let target = crate::executor::path::drop_exe_probe_suffix(name, target);
                         if reusable {
                             writeln!(stdout, "builtin hash -p {target} {name}")?;
                         } else {
@@ -311,6 +315,7 @@ where
                         .then(right.1 .2.cmp(&left.1 .2))
                 });
                 for (name, (path, hits, _)) in entries {
+                    let path = crate::executor::path::drop_exe_probe_suffix(&name, path);
                     writeln!(stdout, "{hits:4}\t{path}")?;
                 }
                 return Ok(EXECUTION_SUCCESS);
@@ -327,6 +332,7 @@ where
                     .then(right.1 .2.cmp(&left.1 .2))
             });
             for (name, (path, _, _)) in entries {
+                let path = crate::executor::path::drop_exe_probe_suffix(&name, path);
                 writeln!(stdout, "builtin hash -p {path} {name}")?;
             }
             return Ok(EXECUTION_SUCCESS);

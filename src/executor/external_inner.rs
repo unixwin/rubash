@@ -1664,6 +1664,9 @@ impl Executor {
             env_vars.remove(&name);
         }
         let raws_aligned = cmd.assignment_raws.len() == cmd.assignments.len();
+        // rubash#3456: snapshot the arithmetic flags so the prefix
+        // composition below can be adjudicated before the handler runs.
+        let prefix_arith_before = self.snapshot_arithmetic_error_flags();
         for (index, (var_name, var_value)) in cmd.assignments.iter().enumerate() {
             let (base_name, append) = assignment_name_and_append(var_name);
             // GNU variables.c:3589 assign_in_env: an ASSIGN_DISALLOWED
@@ -1731,6 +1734,17 @@ impl Executor {
             if is_valid_process_env(&env_name, &expanded_value) {
                 env_vars.insert(env_name, expanded_value);
             }
+        }
+        // rubash#3456: a fatal arithmetic error in the prefix was already
+        // diagnosed once by the composition above; GNU discards the whole
+        // element, so the host child must never run — return the dead
+        // member's empty output with the discard status instead.
+        if let Some(status) = self.take_prefix_arith_failure(&prefix_arith_before) {
+            return Some(HostExternalCommandOutput {
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                status,
+            });
         }
         self.host_external_command_handler
             .as_mut()
@@ -6002,14 +6016,28 @@ pub(crate) fn spawn_error_diagnostic(
     const OS_ERROR_FILE_NOT_FOUND: i32 = 2;
     // E2BIG / ENOMEM (execute_cmd.c:6156): the only errnos the C code
     // routes to file_error before the sample check. The values are the
-    // unix ones and MSVC's CRT agrees on both.
+    // unix ones and MSVC's CRT agrees on both. Windows surfaces the
+    // E2BIG condition as ERROR_FILENAME_EXCED_RANGE (206): an oversize
+    // lpCommandLine fails CreateProcess with that code, and the
+    // generic strerror table renders 206 "File name too long" — right
+    // for path opens, wrong here (niubash#993 S4).
     const OS_ERROR_ARG_LIST_TOO_LONG: i32 = 7;
     const OS_ERROR_NOT_ENOUGH_MEMORY: i32 = 12;
+    const OS_ERROR_FILENAME_EXCED_RANGE: i32 = 206;
     let enoent = error.raw_os_error() == Some(OS_ERROR_FILE_NOT_FOUND);
-    let sample_preempted = matches!(
+    let e2big = matches!(
         error.raw_os_error(),
-        Some(OS_ERROR_ARG_LIST_TOO_LONG) | Some(OS_ERROR_NOT_ENOUGH_MEMORY)
+        Some(OS_ERROR_ARG_LIST_TOO_LONG) | Some(OS_ERROR_FILENAME_EXCED_RANGE)
     );
+    let sample_preempted = e2big || error.raw_os_error() == Some(OS_ERROR_NOT_ENOUGH_MEMORY);
+    // GNU file_error(command) (execute_cmd.c:6159) prints the E2BIG
+    // strerror — "Argument list too long" — where the generic table
+    // would render the Win32 surface of it as "File name too long".
+    let message = if e2big {
+        "Argument list too long".to_string()
+    } else {
+        crate::posix_errors::message(error).to_string()
+    };
     // The probes below must stat the file the CHILD tried to exec:
     // children are born in the session cwd (G-02), so a relative program
     // (a hash-recorded spelling, rubash#2696, or a `hash -p` pathname)
@@ -6071,17 +6099,9 @@ pub(crate) fn spawn_error_diagnostic(
                 false,
             );
         }
-        return (
-            crate::posix_errors::message(error).to_string(),
-            EX_NOEXEC,
-            false,
-        );
+        return (message.clone(), EX_NOEXEC, false);
     }
-    (
-        crate::posix_errors::message(error).to_string(),
-        if enoent { EX_NOTFOUND } else { EX_NOEXEC },
-        false,
-    )
+    (message, if enoent { EX_NOTFOUND } else { EX_NOEXEC }, false)
 }
 
 /// Write byte slices to fd 2, ignoring errors (GNU ignores the failed

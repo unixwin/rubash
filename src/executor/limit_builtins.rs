@@ -538,9 +538,20 @@ impl Executor {
         // applying it synchronously inside the kill.
         if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "monitor") {
             if signal == 18 {
-                self.shell_state
-                    .job_table
-                    .defer_state_mark(pid, crate::jobs::table::DeferredJobState::Running);
+                // GNU jobs.c:4013-4018 kill_pid: `kill -s CONT` on a
+                // job the table already records as stopped emulates
+                // `bg` — set_job_running publishes the Running
+                // transition at DELIVERY time (with J_NOTIFIED), not
+                // at the next notification point. Only the deferred
+                // path covers a CONT aimed at a job still running or
+                // one whose stop has not been recorded yet.
+                if self.shell_state.job_table.job_recorded_stopped(pid) {
+                    self.shell_state.job_table.mark_running(pid);
+                } else {
+                    self.shell_state
+                        .job_table
+                        .defer_state_mark(pid, crate::jobs::table::DeferredJobState::Running);
+                }
             } else if matches!(signal, 19 | 20) {
                 self.shell_state.job_table.defer_state_mark(
                     pid,
@@ -579,15 +590,32 @@ impl Executor {
         }
     }
 
+    /// rubash#3605: whether `ulimit` runs inside a GNU-fork boundary
+    /// modeled in-process — a fork-copy executor (`$( ... )` under the
+    /// !owns_process_image clone), a flat `( )` layer
+    /// (`subshell_depth`), or an emulated child region
+    /// (`emulated_child_depth`: pipeline elements, in-process
+    /// `${THIS_SH}`/script children, shared-executor comsub interiors).
+    /// Inside any of these a real setrlimit hard drop could never be
+    /// restored, so the builtin drives the env-cell emulation instead
+    /// (builtins/ulimit.rs `virtualized`).
+    pub(crate) fn ulimit_virtualized(&self) -> bool {
+        !self.owns_process_image
+            || self.shell_state.subshell_depth.get() > 0
+            || self.emulated_child_depth.get() > 0
+    }
+
     pub(in crate::executor) fn execute_ulimit(
         &mut self,
         cmd: &CommandNode,
     ) -> Result<i32, ExecuteError> {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
+        let virtualized = self.ulimit_virtualized();
         let status = crate::builtins::ulimit::execute_with_io(
             &cmd.words[1..],
             &mut self.shell_state.env_vars,
+            virtualized,
             &mut stdout,
             &mut stderr,
         )?;

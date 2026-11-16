@@ -276,8 +276,13 @@ impl Executor {
                 let args = vec![op.to_string(), w];
                 self.sync_fd_terminal_marks(None);
                 i32::from(
-                    !(crate::builtins::test::execute(&args, false, &self.shell_state.env_vars)
-                        .unwrap_or(1)
+                    !(crate::builtins::test::execute(
+                        &args,
+                        false,
+                        &self.shell_state.env_vars,
+                        self.shell_state.positional_len(),
+                    )
+                    .unwrap_or(1)
                         == 0),
                 )
             }
@@ -291,8 +296,13 @@ impl Executor {
                 let args = vec![op.to_string(), w];
                 self.sync_fd_terminal_marks(None);
                 i32::from(
-                    !(crate::builtins::test::execute(&args, false, &self.shell_state.env_vars)
-                        .unwrap_or(1)
+                    !(crate::builtins::test::execute(
+                        &args,
+                        false,
+                        &self.shell_state.env_vars,
+                        self.shell_state.positional_len(),
+                    )
+                    .unwrap_or(1)
                         == 0),
                 )
             }
@@ -416,6 +426,22 @@ impl Executor {
     }
 
     fn expand_conditional_word(&mut self, word: &str) -> String {
+        // rubash#3605: GNU raises comsub_ignore_return around a flagged
+        // `[[ ]]`'s operand expansion (execute_cmd.c:4012, :4060,
+        // :4067 — `ignore` = the cond node's CMD_IGNORE_RETURN), so a
+        // `$( )` inside an exempt conditional stamps CMD_IGNORE_RETURN
+        // on its body commands (builtins/evalstring.c:496).
+        if self.suppress_errexit > 0 {
+            self.comsub_ignore_return += 1;
+        }
+        let result = self.expand_conditional_word_inner(word);
+        if self.comsub_ignore_return > 0 {
+            self.comsub_ignore_return -= 1;
+        }
+        result
+    }
+
+    fn expand_conditional_word_inner(&mut self, word: &str) -> String {
         // rubash#1422: an earlier operand already hit the DISCARD-class
         // error below; GNU abandons the conditional at the first bad
         // word, so later operands are never expanded at all.
@@ -956,7 +982,11 @@ impl Executor {
         let base = rewritten.split('[').next().unwrap_or(&rewritten);
         let overlaid_env = self.env_with_frame_arrays(&[base]);
         let env_vars = overlaid_env.as_ref().unwrap_or(&self.shell_state.env_vars);
-        Ok(crate::builtins::test::variable_is_set(&rewritten, env_vars))
+        Ok(crate::builtins::test::variable_is_set(
+            &rewritten,
+            env_vars,
+            self.shell_state.positional_len(),
+        ))
     }
 
     pub(super) fn conditional_string_unary(&mut self, op: &str, operand: &str) -> bool {
@@ -1043,7 +1073,14 @@ impl Executor {
             self.sync_fd_alias_facts_scoped(None, redirects.as_deref());
         }
         let args = vec![op.to_string(), value];
-        crate::builtins::test::execute(&args, false, &self.shell_state.env_vars).unwrap_or(1) == 0
+        crate::builtins::test::execute(
+            &args,
+            false,
+            &self.shell_state.env_vars,
+            self.shell_state.positional_len(),
+        )
+        .unwrap_or(1)
+            == 0
     }
 
     /// rubash#545 (cell 3): GNU realizes a `[[ ]]` process-substitution
@@ -1124,7 +1161,14 @@ impl Executor {
             self.sync_fd_alias_facts_scoped(None, redirects.as_deref());
         }
         let args = vec![left_exp, op.to_string(), right_exp];
-        crate::builtins::test::execute(&args, false, &self.shell_state.env_vars).unwrap_or(1) == 0
+        crate::builtins::test::execute(
+            &args,
+            false,
+            &self.shell_state.env_vars,
+            self.shell_state.positional_len(),
+        )
+        .unwrap_or(1)
+            == 0
     }
 
     pub(super) fn conditional_regex_match(&mut self, left: &str, right: &str) -> bool {
@@ -1206,6 +1250,10 @@ impl Executor {
         if !crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset") {
             return false;
         }
+        // niubash#993 §1: the operand walks below record `:=`/`=` binds
+        // as they pass them — start from a fresh table so a previous
+        // command's scan records never adjudicate this `[[ =~ ]]`.
+        crate::executor::expand_braced_indices::scan_ctx_begin();
         let mut prefix_comsubs: Vec<String> = Vec::new();
         for word in [left, right] {
             // rubash#1915: same recorded-span masking as the operand

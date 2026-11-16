@@ -62,6 +62,146 @@ pub(in crate::executor) fn rubash_spawn_inherited_state(key: &str) -> bool {
     key.starts_with("__RUBASH_SETOPT_") || KEYS.contains(&key)
 }
 
+/// rubash#3049: keys that are fork/respawn TRANSPORT — serialized shell
+/// state and per-spawn protocol stamps — not session state. GNU's exec
+/// boundary hands a child exactly the export environment (variables.c
+/// maybe_make_export_env / make_env_array_from_var_list); a forked
+/// subshell needs no environment entries at all because it shares the
+/// parent's table in-process (execute_cmd.c execute_in_subshell). This
+/// family exists only because rubash emulates the fork with a respawned
+/// `rubash -c` process, where the environment IS the state channel —
+/// so once such a process is born, its environ carries the transport
+/// residue of its own birth forever. Two boundary rules follow:
+///
+/// * the residue must never reach a REAL child's environment
+///   (compose_child_environment's process-env mirror arm would
+///   otherwise re-project it — the respawned child's
+///   __RUBASH_*_VARS attribute lists landed in the exec'd
+///   bats-exec-test, where VarTable::from_values applied them and
+///   BATS_TEST_TAGS was born `declare -ar`, deadlocking bats-core
+///   test #71 on its readonly assignment);
+/// * a process NOT born as a validated respawn must not import it
+///   (Executor::new_inner strips the family before from_values reads
+///   the attribute strings).
+///
+/// Deliberately NOT in the family: the binary/host config entries
+/// (COMPATIBLE_SHELL_PATH/SHELL_ROOT/TEMP_PATH — a spawned child keeps
+/// its lineage's install resolution), the ULIMIT_*/UMASK carriers
+/// (kernel resource state persists across GNU's execve; the env keys
+/// are the Windows-side model for real children too), the
+/// orig-ignores carrier (__RUBASH_TRAP_ORIG_IGN — trap.c
+/// original_signals SIG_IGN dispositions DO cross execve), and
+/// arbitrary session-mirrored probe keys (the G-03
+/// mirrored-assignment contract keeps a session's own mirrored
+/// `__RUBASH_*` writes visible to its children).
+pub(in crate::executor) fn fork_respawn_transport_key(key: &str) -> bool {
+    const KEYS: &[&str] = &[
+        // Variable-table serializations (the attribute strings
+        // VarTable::from_values imports, plus the list-only state sets
+        // the protocol importers read at their own sites).
+        "__RUBASH_ARRAY_VARS",
+        "__RUBASH_ASSOC_VARS",
+        "__RUBASH_ASSOC_128_VARS",
+        "__RUBASH_CAPCASE_VARS",
+        "__RUBASH_DECLARED_UNSET_VARS",
+        "__RUBASH_EXPORTED_VARS",
+        "__RUBASH_EXPORTED_FUNCTIONS",
+        "__RUBASH_INTEGER_VARS",
+        "__RUBASH_INVISIBLE_VARS",
+        "__RUBASH_LOWERCASE_VARS",
+        "__RUBASH_NAMEREF_VARS",
+        "__RUBASH_READONLY_VARS",
+        "__RUBASH_READONLY_FUNCTIONS",
+        "__RUBASH_TRACE_VARS",
+        "__RUBASH_UNSET_DYNAMIC_VARS",
+        "__RUBASH_UPPERCASE_VARS",
+        "__RUBASH_FUNC_TRACE_FUNCTIONS",
+        "__RUBASH_UNSTREAMED_FUNCTION_BODIES",
+        // Structural shell state: hash/dirstack/builtin/getopts/
+        // option/clock transports a forked subshell inherits
+        // in-process but an exec'd shell re-derives (SHELLOPTS /
+        // BASHOPTS are the exported carriers for options).
+        "__RUBASH_HASH_TABLE",
+        "__RUBASH_DIR_STACK",
+        "__RUBASH_DISABLED_BUILTINS",
+        "__RUBASH_GETOPTS_OFFSET",
+        "__RUBASH_GETOPTS_OPTIND",
+        "__RUBASH_LOCAL_EXPORT_ENV",
+        "__RUBASH_SECONDS_OFFSET",
+        "__RUBASH_SHELL_START_EPOCH",
+        "__RUBASH_POSIX_MODE",
+        "__RUBASH_ZSH_OPTIONS",
+        "__RUBASH_PHYSICAL_PWD",
+        "__RUBASH_SHOPT_STATE",
+        "__RUBASH_SHOPT_CHECKHASH",
+        // Spawn bookkeeping: the respawn claim/stamps, subshell-depth
+        // and $BASHPID seeds, the positional/fork-context transports
+        // (FORK_TRANSPORT_KEYS covers the __RUBASH_FORK_* prefix),
+        // the virtual-stdin delivery, the command-file and
+        // state-file pointers, and the per-spawn payload prefixes.
+        "__RUBASH_SHELL_PID",
+        "__RUBASH_SPAWNER_PID",
+        "__RUBASH_SUBSHELL_DEPTH",
+        "__RUBASH_BG_DEPTH",
+        "__RUBASH_BG_BASHPID_BASE",
+        "__RUBASH_COPROC_CHILD",
+        "__RUBASH_ASYNC_CHILD",
+        "__RUBASH_BACKGROUND_WRAPPER",
+        crate::invocation::RESPAWN_STATE_FILE_ENV_KEY,
+        "__RUBASH_INHERIT_PROCESS_STDIN",
+        "__RUBASH_CMD_FILE",
+        "__RUBASH_CMD_START_LINE",
+        "__RUBASH_COMSUB_BODY",
+        "__RUBASH_FUNCTION_STDIN",
+        "__RUBASH_FUNCTION_STDIN_OFFSET",
+        "__RUBASH_PIPESTATUS_STATE",
+        "__RUBASH_EVAL_CONTEXT",
+        "__RUBASH_CNF_HANDLER_RUNNING",
+        "__RUBASH_FILE_MODES",
+        // The signal-trap depth/status pair (the only two spellings in
+        // this sub-family).
+        "__RUBASH_SIGNAL_TRAP_DEPTH",
+        "__RUBASH_SIGNAL_TRAP_STATUS",
+        // Diagnostic-frame and invocation-classification transports:
+        // a fresh shell derives all of these from its own argv and
+        // entry state (init.rs strips the same set for non-respawns).
+        "__RUBASH_SCRIPT_NAME",
+        "__RUBASH_TOP_LEVEL_NAME",
+        "__RUBASH_CURRENT_FILE",
+        "__RUBASH_CURRENT_LINE",
+        "__RUBASH_CURRENT_FUNCTION",
+        "__RUBASH_CURRENT_COMMAND",
+        "__RUBASH_LAST_COMMAND",
+        "__RUBASH_IN_SOURCE",
+        "__RUBASH_EXTGLOB_ENABLED_LINE",
+        "__RUBASH_LINE_OFFSET",
+        "__RUBASH_ARGV0_AFTER_UNSET",
+        "__RUBASH_SHELL_NAME",
+        "__RUBASH_SESSION_SCOPE",
+        "__RUBASH_INTERACTIVE",
+        "__RUBASH_INTERACTIVE_FLAG_OFF",
+        "__RUBASH_IS_C",
+        "__RUBASH_LOGIN_SHELL",
+        "__RUBASH_READ_STDIN",
+        "__RUBASH_SOURCED_RC",
+        "__RUBASH_STARTUP_FILES_DONE",
+        "__RUBASH_NO_EDITING",
+        "__RUBASH_NO_PROFILE",
+        "__RUBASH_NO_RC",
+        "__RUBASH_PC_NOHIST",
+        "__RUBASH_DEBUGGER_MODE",
+        "__RUBASH_DEBUGGER_ATTEMPTED",
+    ];
+    KEYS.contains(&key)
+        || key.starts_with("__RUBASH_FORK_")
+        || key.starts_with("__RUBASH_FD_")
+        || key.starts_with("__RUBASH_SETOPT_")
+        || key.starts_with("__RUBASH_ALIAS_")
+        || key.starts_with("__RUBASH_PARSE_")
+        || key.starts_with("__RUBASH_COMPOUND_SYNTAX_ERROR")
+        || (key.starts_with("__RUBASH_TRAP") && key != crate::builtins::trap::TRAP_ORIG_IGNORES)
+}
+
 /// Transport key for the fork-inherited positional parameters. GNU fork
 /// children inherit the parent's dollar_vars verbatim (variables.c), but
 /// a respawned `rubash -c` child re-imports only its process
@@ -74,6 +214,21 @@ pub(in crate::executor) fn rubash_spawn_inherited_state(key: &str) -> bool {
 /// array storage codec (`format_indexed_array_values`/`array_values`),
 /// the same round-trip the array-variable transport uses.
 pub(in crate::executor) const POSITIONAL_PARAMS_TRANSPORT: &str = "__RUBASH_POSITIONAL_PARAMS";
+
+/// Transport key for the parent's live errexit-suppression depth at
+/// spawn. GNU's fork-shaped children that execute the SAME command
+/// node (the async `&` wrapper's execute_in_subshell fork,
+/// execute_cmd.c:1576, and the coproc child's execute_coproc ->
+/// execute_in_subshell, execute_cmd.c:2546) carry the node's
+/// CMD_IGNORE_RETURN — set by `!` (execute_cmd.c:655-656) or an
+/// enclosing ignore_return propagation arm — so `set -e` inside an
+/// inverted coproc/`&` body is ignored (exec16's "reached coproc
+/// body"). A respawned `rubash -c` child has no node; this stamp
+/// seeds its suppress_errexit. process_substitute children are
+/// excluded: GNU re-parses the producer's saved command text
+/// (subst.c:6362), so no flag survives — verified
+/// `! cat < <(set -e; false; echo x)` prints nothing under 5.3.20.
+pub(in crate::executor) const SUPPRESS_ERREXIT_TRANSPORT: &str = "__RUBASH_SUPPRESS_ERREXIT";
 
 /// RAII scope for the executor's `expansion_probe_active` flag
 /// (rubash#2585); restores the prior value on drop, so a nested probe
@@ -1552,6 +1707,13 @@ impl Executor {
         // transport set (see fork_context_transport_entries).
         for (key, value) in self.fork_context_transport_entries() {
             env_map.insert(key, value);
+        }
+        // rubash#3605: the async child is the same execute_in_subshell
+        // fork the flag model travels (execute_cmd.c:1576); an
+        // inverted/exempt `&` body keeps CMD_IGNORE_RETURN
+        // (SUPPRESS_ERREXIT_TRANSPORT).
+        if self.suppress_errexit > 0 {
+            env_map.insert(SUPPRESS_ERREXIT_TRANSPORT.to_string(), "1".to_string());
         }
         // rubash#1074: the wrapper child is one subshell level deeper than
         // this shell (execute_in_subshell's subshell_level++); carry the
@@ -5303,28 +5465,47 @@ impl Executor {
         cmd: &CommandNode,
         coproc_cmd: &crate::parser::CoprocCommand,
     ) -> Result<(), ExecuteError> {
-        let array_name = coproc_cmd
+        let mut array_name = coproc_cmd
             .name
             .clone()
             .unwrap_or_else(|| "COPROC".to_string());
-        // GNU execute_cmd.c execute_coproc validates an explicit NAME
-        // before anything is spawned: valid_identifier fails ->
-        // err_invalidid (`` `<name>': not a valid identifier ``) and
-        // EXECUTION_FAILURE, and no coprocess is created (rubash#1153:
-        // `coproc "" { echo hi; }` printed the same text but exited 0
-        // after spawning). The default COPROC name never takes this
-        // branch, and a nameref name is a valid identifier itself — its
-        // target is adjudicated at bind time below.
+        // GNU execute_cmd.c:2502-2513 execute_coproc expands the name
+        // BEFORE validating — expand_string_unsplit_to_string
+        // (command->value.Coproc->name, 0) — then valid_identifier on
+        // the EXPANSION, and the expanded text replaces the name so the
+        // coproc's fd array and _PID variable land under it. When the
+        // word expands to zero fields the expansion is NULL (an
+        // unquoted unset/empty `$nv`), and err_invalidid
+        // (error.c:459-462) renders the NULL %s as `(null)`; a quoted
+        // word still yields one field — even an empty one — and
+        // reports `` `': `` (rubash#3032; the `coproc ""` shape is
+        // rubash#1153's). The default COPROC name never takes this
+        // branch, and a nameref name is a valid identifier itself —
+        // its target is adjudicated at bind time below.
         if let Some(name) = &coproc_cmd.name {
-            if !is_shell_name(name) {
+            let raw = coproc_cmd
+                .name_metadata
+                .as_ref()
+                .map(|meta| meta.raw.as_str())
+                .unwrap_or(name.as_str());
+            let expanded = self.expand_word(raw);
+            let expanded_name = if expanded.is_empty() && !raw.contains('"') && !raw.contains('\'')
+            {
+                None
+            } else {
+                Some(expanded)
+            };
+            let name_text = expanded_name.as_deref().unwrap_or("(null)");
+            if !is_shell_name(name_text) {
                 eprintln!(
                     "{}`{}': not a valid identifier",
                     self.diagnostic_prefix(),
-                    name
+                    name_text
                 );
                 self.exit_code = 1;
                 return Ok(());
             }
+            array_name = name_text.to_string();
         }
         use std::process::{Command, Stdio};
         let exe = test_rubash_binary_from_env()
@@ -5551,6 +5732,15 @@ impl Executor {
             // fork-shaped respawn (see fork_context_transport_entries).
             for (key, value) in self.fork_context_transport_entries() {
                 env_entries.push((key, value));
+            }
+            // rubash#3605: the coproc child executes the parent's
+            // flagged command node (execute_cmd.c:2546
+            // execute_coproc -> execute_in_subshell), so a `!`- or
+            // condition-suppressed coproc keeps CMD_IGNORE_RETURN
+            // and `set -e` inside is ignored
+            // (SUPPRESS_ERREXIT_TRANSPORT).
+            if self.suppress_errexit > 0 {
+                env_entries.push((SUPPRESS_ERREXIT_TRANSPORT.to_string(), "1".to_string()));
             }
             // rubash#2332: the compound body's line spans, collected
             // over the same list bash_command_sequence_text rendered
@@ -7875,13 +8065,19 @@ pub(crate) fn test_rubash_binary_from_env() -> Option<std::path::PathBuf> {
 /// dir, and the debug/release profile dirs under each ancestor of the
 /// test binary (nested/workspace layouts). Only a file literally
 /// named `rubash[.exe]` counts — a test binary is `rubash-<hash>`
-/// under `deps/` and never matches. Production behaviour is
-/// unchanged: the `deps/` gate still returns `None` outside a test
-/// binary, so a real shell keeps falling back to `current_exe()`.
+/// under `deps/` or `build/<pkg>/<fingerprint>/out/` and never
+/// matches. Production behaviour is unchanged: the test-layout gate
+/// still returns `None` outside a test binary, so a real shell keeps
+/// falling back to `current_exe()`.
 pub(crate) fn test_rubash_binary_from_current_exe() -> Option<std::path::PathBuf> {
     let current = std::env::current_exe().ok()?;
-    let deps = current.parent()?;
-    if deps.file_name().and_then(|name| name.to_str()) != Some("deps") {
+    let dir = current.parent()?;
+    // Test-binary layouts: `deps/` on the classic build dir, and
+    // `build/<pkg>/<fingerprint>/out/` on the current cargo build-dir
+    // layout (the unit-test binary for a package with a build script is
+    // placed inside the package's own out dir).
+    let dir_name = dir.file_name().and_then(|name| name.to_str());
+    if dir_name != Some("deps") && dir_name != Some("out") {
         return None;
     }
     let binary_name = if cfg!(windows) {
@@ -7890,7 +8086,7 @@ pub(crate) fn test_rubash_binary_from_current_exe() -> Option<std::path::PathBuf
         "rubash"
     };
     let mut profile_dirs: Vec<std::path::PathBuf> = Vec::new();
-    if let Some(debug_dir) = deps.parent() {
+    if let Some(debug_dir) = dir.parent() {
         profile_dirs.push(debug_dir.to_path_buf());
         if let Some(target_dir) = debug_dir.parent() {
             profile_dirs.push(target_dir.join("release"));

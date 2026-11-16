@@ -154,7 +154,7 @@ fn test_pwd_redirects_stderr() {
     assert_eq!(fs::read_to_string(status_path).unwrap(), "2\n");
     let error = fs::read_to_string(error_path).unwrap();
     assert!(error.contains("bash: pwd: -x: invalid option"));
-    assert!(error.contains("pwd: usage: pwd [-LP]"));
+    assert!(error.contains("pwd: usage: pwd [-LPW]"));
     let _ = fs::remove_file(error_path);
     let _ = fs::remove_file(status_path);
 }
@@ -178,7 +178,7 @@ fn test_pwd_appends_stderr() {
     let error = fs::read_to_string(error_path).unwrap();
     assert!(error.starts_with("before\n"));
     assert!(error.contains("bash: pwd: -x: invalid option"));
-    assert!(error.contains("pwd: usage: pwd [-LP]"));
+    assert!(error.contains("pwd: usage: pwd [-LPW]"));
     let _ = fs::remove_file(error_path);
 }
 

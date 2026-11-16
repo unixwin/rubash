@@ -689,6 +689,19 @@ pub struct ShellState {
     /// substitution's command list, never the enclosing word's command.
     /// TODO: Move to ShellState::clone() for automatic isolation (requires &mut self API change)
     pub(crate) parameter_bad_substitution: Cell<bool>,
+    /// One-shot print budget for the `bad substitution` diagnostic
+    /// (rubash#3499). GNU subst.c:10277-10288 reports the FIRST
+    /// expansion failure of a word list and abandons the rest, so a
+    /// word (or element) expanded on several paths — the pipeline
+    /// scan plus the dispatch arms, a speculative concurrent attempt
+    /// plus the sequential re-expansion — must print the diagnostic
+    /// exactly once per latch lifetime. The verdict latch above still
+    /// sets at every site; only the print is deduplicated. This cell
+    /// rides every boundary the verdict rides (clone, interior
+    /// snapshot, comsub clears, the verdict consumers) so a spent
+    /// budget can neither suppress a later command's diagnostic nor
+    /// re-print inside one command's expansion.
+    pub(crate) bad_substitution_reported: Cell<bool>,
     /// A redirect-target pathname expansion failed under failglob (GNU
     /// subst.c:12668 report_error + exp_jump_to_top_level(DISCARD) inside
     /// redirection_expand -> expand_words_no_vars). The diagnostic prints
@@ -899,6 +912,7 @@ pub(crate) struct InteriorSnapshot {
     conditional_nounset_error: bool,
     arithmetic_last_error_category: Option<crate::executor::arithmetic::ArithmeticErrorCategory>,
     parameter_bad_substitution: bool,
+    bad_substitution_reported: bool,
     redirect_failglob_error: bool,
     redirect_failglob_seen: bool,
     debug_trap_command: Option<String>,
@@ -970,6 +984,7 @@ impl ShellState {
             conditional_nounset_error: self.conditional_nounset_error.get(),
             arithmetic_last_error_category: self.arithmetic_last_error_category.get(),
             parameter_bad_substitution: self.parameter_bad_substitution.get(),
+            bad_substitution_reported: self.bad_substitution_reported.get(),
             redirect_failglob_error: self.redirect_failglob_error.get(),
             redirect_failglob_seen: self.redirect_failglob_seen.get(),
             debug_trap_command: self.debug_trap_command.borrow().clone(),
@@ -1042,6 +1057,8 @@ impl ShellState {
             .set(snapshot.arithmetic_last_error_category);
         self.parameter_bad_substitution
             .set(snapshot.parameter_bad_substitution);
+        self.bad_substitution_reported
+            .set(snapshot.bad_substitution_reported);
         self.redirect_failglob_error
             .set(snapshot.redirect_failglob_error);
         self.redirect_failglob_seen
@@ -1150,6 +1167,7 @@ impl Clone for ShellState {
             conditional_nounset_error: Cell::new(self.conditional_nounset_error.get()),
             arithmetic_last_error_category: Cell::new(self.arithmetic_last_error_category.get()),
             parameter_bad_substitution: Cell::new(self.parameter_bad_substitution.get()),
+            bad_substitution_reported: Cell::new(self.bad_substitution_reported.get()),
             redirect_failglob_error: Cell::new(self.redirect_failglob_error.get()),
             redirect_failglob_seen: Cell::new(self.redirect_failglob_seen.get()),
             xtrace_fd: Cell::new(self.xtrace_fd.get()),

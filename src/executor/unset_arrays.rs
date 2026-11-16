@@ -361,6 +361,20 @@ impl Executor {
                     || matches!(name, "BASH_ALIASES" | "BASH_CMDS"))
             {
                 mark_env_name(&mut self.shell_state.env_vars, UNSET_DYNAMIC_VARS, &name);
+                // unbind_variable destroys the BASH_ARGV0 cell itself
+                // (variables.c:3839): the value a read stored into it is
+                // gone with the cell, and a later `BASH_ARGV0=` bind
+                // creates an ordinary VISIBLE variable — the INVISIBLE
+                // mark was the dynamic cell's unset-value stand-in and
+                // dies with it (rubash#3026).
+                if name == "BASH_ARGV0" {
+                    self.shell_state
+                        .dynamic_cells
+                        .borrow_mut()
+                        .values
+                        .remove("BASH_ARGV0");
+                    unmark_env_name(&mut self.shell_state.env_vars, INVISIBLE_VARS, &name);
+                }
             }
             pushed[arg_index] = Some(name);
         }
