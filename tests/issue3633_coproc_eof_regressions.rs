@@ -26,6 +26,12 @@ struct Run {
     dir: PathBuf,
 }
 
+impl Drop for Run {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
 fn run_script(body: &str) -> Run {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
