@@ -865,22 +865,22 @@ fn issue2001_env_channel_missing_function_applies_nothing() {
 #[test]
 fn posix_run_expands_aliases_defined_in_the_same_submission() {
     let dir = temp_dir("posix-alias-live-empty-table");
-    let out = dir.join("out.txt");
     let mut session = Session::builder()
         .working_directory(&dir)
         .build()
         .expect("session builds");
     session.options().set("posix", true);
-    let script = format!(
-        concat!(
-            "alias al=\" \"\n",
-            "alias foo=bar\n",
-            "alias for=echo\n",
-            "al for foo in v\n",
-            "do echo foo=$foo bar=$bar\n",
-            "done >{}"
-        ),
-        out.display()
+    // Redirect through a RELATIVE spelling: the session's
+    // working_directory is `dir`, and an absolute Windows path
+    // (`C:\...`) embedded in shell text loses its backslashes to
+    // quote removal — the pin must mean the same thing on every host.
+    let script = concat!(
+        "alias al=\" \"\n",
+        "alias foo=bar\n",
+        "alias for=echo\n",
+        "al for foo in v\n",
+        "do echo foo=$foo bar=$bar\n",
+        "done >out.txt"
     );
     let outcome = session.run(&script, &opts()).expect("run");
     assert_eq!(outcome.status, 0, "{:?}", outcome.classification);
