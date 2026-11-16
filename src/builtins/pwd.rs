@@ -16,6 +16,12 @@ const EX_USAGE: i32 = 2;
 enum Mode {
     Logical,
     Physical,
+    /// niubash#993 §6: the MSYS `-W` extension — the win32 spelling of
+    /// the physical cwd (`C:/tmp`). Git Bash resolves it through the
+    /// same physical resolution as `-P` (`cd` into a junction and
+    /// `pwd -W` prints the resolved target) and shares the option
+    /// slot: a later `-L`/`-P` overrides `-W` and vice versa.
+    Win32,
 }
 
 /// Outcome of a `pwd` execution: the status, plus whether the
@@ -98,6 +104,7 @@ where
             match option {
                 'L' => mode = Mode::Logical,
                 'P' => mode = Mode::Physical,
+                'W' => mode = Mode::Win32,
                 other => {
                     // rubash#705 R7.4: GNU's get_name_for_error shape —
                     // `<script>: line N:` in script mode, the argv[0]
@@ -113,7 +120,7 @@ where
                         env_vars.get(key).cloned()
                     });
                     writeln!(stderr, "{prefix}pwd: -{other}: invalid option")?;
-                    writeln!(stderr, "pwd: usage: pwd [-LP]")?;
+                    writeln!(stderr, "pwd: usage: pwd [-LPW]")?;
                     return Ok(PwdOutcome {
                         status: EX_USAGE,
                         physical_resolution_failed: false,
@@ -176,9 +183,17 @@ fn current_directory<E>(
 where
     E: Write,
 {
-    if mode == Mode::Physical {
+    if matches!(mode, Mode::Physical | Mode::Win32) {
         if let Some(physical) = env_vars.get("__RUBASH_PHYSICAL_PWD") {
-            return Ok((Some(physical.clone()), false));
+            // niubash#993 §6: `-W` renders the bridged name's win32
+            // spelling (`cd /` -> the configured shell root's native
+            // path), not the POSIX `/<drive>/…` persona form.
+            let display = if mode == Mode::Win32 {
+                win32_display_path(physical, env_vars)
+            } else {
+                physical.clone()
+            };
+            return Ok((Some(display), false));
         }
         // GNU builtins/cd.def pwd_builtin: physical mode runs
         // sh_physpath on the_current_working_directory; when that
@@ -290,13 +305,24 @@ where
     // GNU pwd.def (physical mode) prints get_working_directory — one
     // canonical shell-absolute form: the POSIX /<drive>/... spelling
     // (rubash#537), the same form cd's bindpwd and the startup PWD use.
-    let display = crate::executor::path::shell_pwd_display_path(&shell_display_path(&physical));
+    // niubash#993 §6: `-W` renders that same physical resolution in its
+    // win32 spelling (Git Bash's `pwd -W` resolves through junctions
+    // like `-P`, then prints `C:/...` — the MSYS conv-to-win32 form).
+    let posix_display =
+        crate::executor::path::shell_pwd_display_path(&shell_display_path(&physical));
+    let display = if mode == Mode::Win32 {
+        win32_display_path(&posix_display, env_vars)
+    } else {
+        posix_display.clone()
+    };
     // GNU canonicalizes the logical spelling rather than echoing raw
     // getcwd, so an exactly-two-slashes $PWD prefix (POSIX `//`, the UNC
     // root on Windows) survives even in physical mode while getcwd
     // collapses it (rubash#1415). Restore it when $PWD names this very
     // directory.
-    if mode == Mode::Physical && logical_pwd_if_current(&physical, env_vars).is_some() {
+    if matches!(mode, Mode::Physical | Mode::Win32)
+        && logical_pwd_if_current(&physical, env_vars).is_some()
+    {
         if let Some(pwd) = env_vars.get("PWD") {
             if pwd.starts_with("//")
                 && !pwd.starts_with("///")
@@ -308,6 +334,25 @@ where
         }
     }
     Ok((Some(display), false))
+}
+
+/// niubash#993 §6: the `pwd -W` display form — the MSYS conv-to-win32
+/// rendering of a resolved POSIX display path. The mapping is the same
+/// funnel every shell-path consumer uses
+/// (`shell_path_to_windows`: `/<drive>/…` -> `X:\…`, `/` -> the
+/// configured shell root, `//srv/…` -> `\\srv\…`), rendered with
+/// forward slashes like Git Bash (`C:/tmp`, `//srv/share`). Off
+/// Windows there is no win32 spelling: print the resolved POSIX form.
+#[cfg(windows)]
+fn win32_display_path(display: &str, env_vars: &HashMap<String, String>) -> String {
+    crate::executor::path::shell_path_to_windows(display, env_vars)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+#[cfg(not(windows))]
+fn win32_display_path(display: &str, _env_vars: &HashMap<String, String>) -> String {
+    display.to_string()
 }
 
 pub(crate) fn logical_pwd_if_current(

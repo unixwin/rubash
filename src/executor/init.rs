@@ -350,21 +350,56 @@ impl Executor {
         // value channel applies. The process_env_snapshot FIELD keeps
         // the raw values: the Drop-time restore writes them back to
         // the process environment verbatim.
-        let mut env_vars = if process_exit {
-            crate::shell::var_table::VarTable::from_values(
-                crate::executor::env_helpers::entry_encode_imported_env(
-                    crate::executor::env_helpers::process_env_pairs()
-                        .into_iter()
-                        .collect(),
-                ),
-            )
+        // rubash#3049: the respawn provenance must be decided on the RAW
+        // environment, before VarTable::from_values imports any
+        // `__RUBASH_*_VARS` attribute strings — and every other member
+        // of the fork/respawn transport family
+        // (compound_exec::fork_respawn_transport_key). Those keys are
+        // the respawn protocol's state channel: legitimate only in an
+        // env a rubash spawner deliberately minted for a `rubash -c`
+        // fork child. Anywhere else they are foreign pollution — GNU's
+        // exec boundary hands a fresh shell exactly the export
+        // environment (variables.c maybe_make_export_env /
+        // make_env_array_from_var_list), so attribute lists, spawn
+        // stamps and serialized table state must be inert: stripped
+        // from the import below AND removed from the process env so
+        // they cannot ride the compose_child_environment mirror into
+        // this process's own children either. Without this, a
+        // respawned process's transport residue crossed the exec
+        // boundary into bats-exec-test and VarTable::from_values
+        // applied the parent's readonly/array marks to a fresh shell —
+        // BATS_TEST_TAGS was born `declare -ar` and its registration
+        // assignment (`BATS_TEST_TAGS=("${tags[@]+${tags[@]}}")`,
+        // bats-core test_functions.bash) failed "readonly variable",
+        // deadlocking bats-core test #71.
+        let mut raw_env: HashMap<String, String> = if process_exit {
+            crate::executor::env_helpers::process_env_pairs()
+                .into_iter()
+                .collect()
         } else {
-            crate::shell::var_table::VarTable::from_values(
-                crate::executor::env_helpers::entry_encode_imported_env(
-                    process_env_snapshot.clone(),
-                ),
-            )
+            process_env_snapshot.clone()
         };
+        let coproc_child_claimed =
+            raw_env.get("__RUBASH_COPROC_CHILD").map(String::as_str) == Some("1");
+        let provenance_claim = coproc_child_claimed || raw_env.contains_key("__RUBASH_SHELL_PID");
+        let spawner_stamp = raw_env
+            .get(RESPAWN_SPAWNER_PID_KEY)
+            .and_then(|value| parse_spawner_stamp(value));
+        let internal_respawn = respawn_provenance_validated(provenance_claim, spawner_stamp);
+        if !internal_respawn {
+            let foreign: Vec<String> = raw_env
+                .keys()
+                .filter(|key| super::compound_exec::fork_respawn_transport_key(key))
+                .cloned()
+                .collect();
+            for key in foreign {
+                raw_env.remove(&key);
+                mirror_env_remove(&key);
+            }
+        }
+        let mut env_vars = crate::shell::var_table::VarTable::from_values(
+            crate::executor::env_helpers::entry_encode_imported_env(raw_env),
+        );
         // rubash#2356: out-of-band respawn state transport — the
         // spawn side moved every oversized environment entry into a
         // temp file and left only its path under
@@ -381,18 +416,34 @@ impl Executor {
         // can leak into a grandchild or surface as a shell variable,
         // exactly the __RUBASH_CMD_FILE contract; a malformed file
         // applies nothing (decode is all-or-nothing).
-        if let Some(state_path) = env_vars
-            .get(crate::invocation::RESPAWN_STATE_FILE_ENV_KEY)
-            .cloned()
-        {
-            env_vars.remove(crate::invocation::RESPAWN_STATE_FILE_ENV_KEY);
-            mirror_env_remove(crate::invocation::RESPAWN_STATE_FILE_ENV_KEY);
-            if let Ok(bytes) = std::fs::read(&state_path) {
-                let _ = std::fs::remove_file(&state_path);
-                if let Some(entries) = crate::invocation::decode_respawn_state_entries(&bytes) {
-                    for (key, value) in entries {
-                        env_vars.insert(key.clone(), value.clone());
-                        mirror_env_set(&key, &value);
+        // rubash#3049: only a validated respawn may splice — for every
+        // other birth the key was already stripped from raw_env above
+        // (a planted pointer must not make this shell read and delete
+        // a file it was never spawned through).
+        if internal_respawn {
+            if let Some(state_path) = env_vars
+                .get(crate::invocation::RESPAWN_STATE_FILE_ENV_KEY)
+                .cloned()
+            {
+                env_vars.remove(crate::invocation::RESPAWN_STATE_FILE_ENV_KEY);
+                mirror_env_remove(crate::invocation::RESPAWN_STATE_FILE_ENV_KEY);
+                if let Ok(bytes) = std::fs::read(&state_path) {
+                    let _ = std::fs::remove_file(&state_path);
+                    if let Some(entries) = crate::invocation::decode_respawn_state_entries(&bytes) {
+                        for (key, value) in entries {
+                            env_vars.insert(key.clone(), value.clone());
+                            // rubash#3049: restore the execve-shape env
+                            // WITHOUT journaling — the journal records
+                            // session writes, and these entries are
+                            // transport residue of this process's own
+                            // birth, not session state. Journaling them
+                            // would let compose_child_environment's
+                            // session-write gate re-project them into
+                            // this process's real children.
+                            crate::executor::local_helpers::with_process_state_lock(|| {
+                                std::env::set_var(&key, &value);
+                            });
+                        }
                     }
                 }
             }
@@ -650,13 +701,11 @@ impl Executor {
         // door — falls back to the plain top-level defaults, while the
         // keys themselves are still consumed so they never surface as
         // shell variables or ride the process-env mirror into children.
-        let coproc_child_claimed =
-            env_vars.get("__RUBASH_COPROC_CHILD").map(String::as_str) == Some("1");
-        let provenance_claim = coproc_child_claimed || env_vars.contains_key("__RUBASH_SHELL_PID");
-        let spawner_stamp = env_vars
-            .get(RESPAWN_SPAWNER_PID_KEY)
-            .and_then(|value| parse_spawner_stamp(value));
-        let internal_respawn = respawn_provenance_validated(provenance_claim, spawner_stamp);
+        // rubash#3049: provenance was already decided on the raw env
+        // before import (above — the transport family must be stripped
+        // for non-respawns BEFORE from_values reads the attribute
+        // strings). The claim keys are consumed here either way so
+        // they never surface as shell variables.
         env_vars.remove(RESPAWN_SPAWNER_PID_KEY);
         env_vars.remove("__RUBASH_COPROC_CHILD");
         // rubash#2137 (F9): POSIX mode gets ONE source of truth — the
@@ -1513,6 +1562,7 @@ impl Executor {
             pipeline_stdin_stream: None,
             pipeline_stage_stderr_live: false,
             pipeline_stage_feed_sigpipe: Cell::new(false),
+            pipeline_stage_spawn_dead: Cell::new(false),
             external_stdio_outcome: None,
             external_stdio_piped_fallback: false,
             host_external_command_handler: None,
@@ -1786,23 +1836,35 @@ impl Executor {
         // rubash#2058: see the keep_shlvl parameter.
         if !keep_shlvl {
             initialize_shell_level(env_vars);
+            mark_initial_exported_vars(env_vars, process_startup);
+            mark_env_name(env_vars, EXPORTED_VARS, "OLDPWD");
+            // Undo the export mark for the SHELL/PATH fallbacks
+            // fabricated above (see the note at the SHELL bind): GNU
+            // binds both without att_exported, so `env -i` shells must
+            // not export them (rubash#1325). Inherited values keep
+            // their imported mark.
+            if !shell_inherited {
+                unmark_env_name(env_vars, EXPORTED_VARS, "SHELL");
+            }
+            #[cfg(unix)]
+            if !path_inherited {
+                unmark_env_name(env_vars, EXPORTED_VARS, "PATH");
+            }
+            if !this_sh_inherited {
+                unmark_env_name(env_vars, EXPORTED_VARS, "THIS_SH");
+            }
         }
-        mark_initial_exported_vars(env_vars, process_startup);
-        mark_env_name(env_vars, EXPORTED_VARS, "OLDPWD");
-        // Undo the export mark for the SHELL/PATH fallbacks fabricated
-        // above (see the note at the SHELL bind): GNU binds both without
-        // att_exported, so `env -i` shells must not export them
-        // (rubash#1325). Inherited values keep their imported mark.
-        if !shell_inherited {
-            unmark_env_name(env_vars, EXPORTED_VARS, "SHELL");
-        }
-        #[cfg(unix)]
-        if !path_inherited {
-            unmark_env_name(env_vars, EXPORTED_VARS, "PATH");
-        }
-        if !this_sh_inherited {
-            unmark_env_name(env_vars, EXPORTED_VARS, "THIS_SH");
-        }
+        // keep_shlvl (a validated respawn) skips the whole export-set
+        // recompute: GNU's forked child copies the variable table
+        // verbatim (execute_cmd.c execute_in_subshell / make_child;
+        // subst.c process_substitute), so the exported set is exactly
+        // the parent's — already imported into the structured attrs
+        // from the transported __RUBASH_EXPORTED_VARS list.
+        // mark_initial_exported_vars would promote every serialized
+        // env entry — including the parent's UNEXPORTED variables, which
+        // ride the respawn env as the fork channel — to att_exported,
+        // after which compose_child_environment emitted them into real
+        // exec'd children as a snowballing leak (rubash#3049).
         // GNU variables.c initialize_shell_variables only imports TMPDIR from
         // the environment — it never invents a value (WSL probe: `env -i
         // bash -c 'echo ${TMPDIR-UNSET}'` prints UNSET), and a value it never

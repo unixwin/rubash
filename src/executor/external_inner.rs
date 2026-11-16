@@ -6002,14 +6002,28 @@ pub(crate) fn spawn_error_diagnostic(
     const OS_ERROR_FILE_NOT_FOUND: i32 = 2;
     // E2BIG / ENOMEM (execute_cmd.c:6156): the only errnos the C code
     // routes to file_error before the sample check. The values are the
-    // unix ones and MSVC's CRT agrees on both.
+    // unix ones and MSVC's CRT agrees on both. Windows surfaces the
+    // E2BIG condition as ERROR_FILENAME_EXCED_RANGE (206): an oversize
+    // lpCommandLine fails CreateProcess with that code, and the
+    // generic strerror table renders 206 "File name too long" — right
+    // for path opens, wrong here (niubash#993 S4).
     const OS_ERROR_ARG_LIST_TOO_LONG: i32 = 7;
     const OS_ERROR_NOT_ENOUGH_MEMORY: i32 = 12;
+    const OS_ERROR_FILENAME_EXCED_RANGE: i32 = 206;
     let enoent = error.raw_os_error() == Some(OS_ERROR_FILE_NOT_FOUND);
-    let sample_preempted = matches!(
+    let e2big = matches!(
         error.raw_os_error(),
-        Some(OS_ERROR_ARG_LIST_TOO_LONG) | Some(OS_ERROR_NOT_ENOUGH_MEMORY)
+        Some(OS_ERROR_ARG_LIST_TOO_LONG) | Some(OS_ERROR_FILENAME_EXCED_RANGE)
     );
+    let sample_preempted = e2big || error.raw_os_error() == Some(OS_ERROR_NOT_ENOUGH_MEMORY);
+    // GNU file_error(command) (execute_cmd.c:6159) prints the E2BIG
+    // strerror — "Argument list too long" — where the generic table
+    // would render the Win32 surface of it as "File name too long".
+    let message = if e2big {
+        "Argument list too long".to_string()
+    } else {
+        crate::posix_errors::message(error).to_string()
+    };
     // The probes below must stat the file the CHILD tried to exec:
     // children are born in the session cwd (G-02), so a relative program
     // (a hash-recorded spelling, rubash#2696, or a `hash -p` pathname)
@@ -6071,17 +6085,9 @@ pub(crate) fn spawn_error_diagnostic(
                 false,
             );
         }
-        return (
-            crate::posix_errors::message(error).to_string(),
-            EX_NOEXEC,
-            false,
-        );
+        return (message.clone(), EX_NOEXEC, false);
     }
-    (
-        crate::posix_errors::message(error).to_string(),
-        if enoent { EX_NOTFOUND } else { EX_NOEXEC },
-        false,
-    )
+    (message, if enoent { EX_NOTFOUND } else { EX_NOEXEC }, false)
 }
 
 /// Write byte slices to fd 2, ignoring errors (GNU ignores the failed

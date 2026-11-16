@@ -1409,6 +1409,22 @@ impl Executor {
         args
     }
 
+    /// rubash#3091: the pipeline member died without running — GNU's
+    /// forked child reported the shell_execve/lookup verdict on its
+    /// own fd 2 and exited with the status (execute_cmd.c:6126-6159).
+    /// Wrap the stage's (stdout, stderr, status) result and flag the
+    /// death so the driver treats this element's stdin as a dead read
+    /// end when it adjudicates the producer's SIGPIPE verdict.
+    fn dead_member_stage_result(
+        &mut self,
+        stdout: String,
+        stderr: String,
+        status: i32,
+    ) -> Option<(String, String, i32)> {
+        self.pipeline_stage_spawn_dead.set(true);
+        Some((stdout, stderr, status))
+    }
+
     fn execute_external_pipeline_stage_inner(
         &mut self,
         command: &CommandNode,
@@ -1495,7 +1511,7 @@ impl Executor {
             if let Some(redirect) = &command.redirect_err {
                 let target = self.expand_redirect_target(redirect);
                 if redirect_target_fd(&target) == Some(1) {
-                    return Ok(Some((diagnostic, String::new(), 127)));
+                    return Ok(self.dead_member_stage_result(diagnostic, String::new(), 127));
                 }
                 if !is_closed_redirect_target(&target) && redirect_target_fd(&target).is_none() {
                     if let Ok(mut file) =
@@ -1515,7 +1531,7 @@ impl Executor {
                     // below and the function stage's rubash#412 case:
                     // mark it pre-wired so the driver skips routing.
                     self.pipeline_stage_fds_pre_wired.set(true);
-                    return Ok(Some((String::new(), String::new(), 127)));
+                    return Ok(self.dead_member_stage_result(String::new(), String::new(), 127));
                 }
             } else if let Some(redirect) = &command.redirect_err_append {
                 let target = self.expand_redirect_target(redirect);
@@ -1530,10 +1546,10 @@ impl Executor {
                     }
                     // rubash#1571: same direct delivery as above.
                     self.pipeline_stage_fds_pre_wired.set(true);
-                    return Ok(Some((String::new(), String::new(), 127)));
+                    return Ok(self.dead_member_stage_result(String::new(), String::new(), 127));
                 }
             }
-            return Ok(Some((String::new(), diagnostic, 127)));
+            return Ok(self.dead_member_stage_result(String::new(), diagnostic, 127));
         };
 
         let mut args: Vec<String> = args
@@ -1553,7 +1569,11 @@ impl Executor {
         // 126. Plain text falls through to the shell-script execution.
         if crate::executor::path::should_run_with_shell(&program) {
             if let Some((diagnostic, status)) = self.exec_format_refusal(command, &program) {
-                return Ok(Some((String::new(), format!("{diagnostic}\n"), status)));
+                return Ok(self.dead_member_stage_result(
+                    String::new(),
+                    format!("{diagnostic}\n"),
+                    status,
+                ));
             }
         }
 
@@ -2092,7 +2112,38 @@ impl Executor {
             }
             payloads
         };
-        let mut child = spawned?;
+        let mut child = match spawned {
+            Ok(child) => child,
+            Err(error) => {
+                // rubash#3091: a failed stage spawn is the forked
+                // element's shell_execve verdict (execute_cmd.c:
+                // 6126-6159 — EACCES -> 126 "Permission denied",
+                // ENOENT -> 127 "No such file or directory"): the
+                // child reports the classified diagnostic on ITS
+                // fd 2 and exits with that status, and wait_for
+                // records it into PIPESTATUS — the pipeline is not
+                // aborted. Return the diagnostic as this stage's
+                // fd-2 payload: the driver's routing pass places it
+                // at the member's resolved fd-2 target (a `2>f`
+                // file, the stdout channel on `2>&1`, /dev/null).
+                // Two shapes bypass that return: the pre-wired
+                // shared-file arm (`>f 2>&1`) whose routing the
+                // driver skips — release the latch so the walk
+                // places the payload in the file — and a closed
+                // fd 2, where the dead child's fprintf fails
+                // silently and nothing is emitted.
+                let (diagnostic, status) =
+                    self.member_spawn_failure(&program, &expanded_name, &error);
+                let _ = collect_dup_payloads();
+                if merged_shared_file.is_some() {
+                    self.pipeline_stage_fds_pre_wired.set(false);
+                }
+                if matches!(fd2_target, OutputTarget::Closed) {
+                    return Ok(self.dead_member_stage_result(String::new(), String::new(), status));
+                }
+                return Ok(self.dead_member_stage_result(String::new(), diagnostic, status));
+            }
+        };
         // rubash#2602: the child exists — arm the operand record's
         // deferred finish (disarmed across the setup span above). A
         // failed spawn returns just above with the record still

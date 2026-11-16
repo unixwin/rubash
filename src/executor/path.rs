@@ -1419,6 +1419,38 @@ pub(crate) fn recorded_resolution_spelling(
     super::execution_misc::shell_display_path(&program.to_string_lossy().replace('\\', "/"))
 }
 
+/// niubash#993 S7: Git Bash/MSYS describe display drops the `.exe`
+/// probe suffix — `command -v cat` prints `/usr/bin/cat` for the
+/// `cat.exe` body (the POSIX layer resolves `name` -> `name.exe`
+/// transparently, so the as-written `<elem>/<name>` join
+/// findcmd.c:553 sh_makepath builds never carries the suffix).
+/// Applies only when the resolved display literally names
+/// `<elem>/<name>.exe`: a name the user typed with the suffix keeps
+/// it (`command -v cat.exe` -> `.../cat.exe`), and non-.exe bodies
+/// (`foo.bat`) keep their real filename — Git Bash does not probe
+/// them for a bare name at all. Display-only: the stored/executed
+/// resolution keeps the real filename. Unconditional: the unix walk
+/// never produces a `name.exe` hit for a bare `name`, so the helper
+/// is inert off Windows by construction.
+pub(crate) fn drop_exe_probe_suffix(name: &str, display: String) -> String {
+    let name_bytes = name.as_bytes();
+    if name_bytes.len() >= 4 && name_bytes[name_bytes.len() - 4..].eq_ignore_ascii_case(b".exe") {
+        return display;
+    }
+    let tail = format!("{name}.exe");
+    let disp = display.as_bytes();
+    if disp.len() > tail.len()
+        && disp[disp.len() - tail.len()..].eq_ignore_ascii_case(tail.as_bytes())
+        && matches!(disp[disp.len() - tail.len() - 1], b'/' | b'\\')
+    {
+        let mut display = display;
+        display.truncate(display.len() - 4);
+        display
+    } else {
+        display
+    }
+}
+
 /// rubash#2442: the one filename-resolution funnel every external
 /// spawn route passes through. GNU has exactly one resolution point
 /// per disk command — execute_disk_command's `search_for_command`
@@ -8333,12 +8365,19 @@ pub fn shell_pwd_display_path(path: &str) -> String {
         && value.as_bytes()[2] == b'/'
     {
         let drive = (value.as_bytes()[0] as char).to_ascii_lowercase();
-        return format!("/{drive}/{}", &value[3..]);
+        // niubash#993 S2: the drive ROOT renders `/c`, not `/c/` —
+        // GNU's canonpath strips the trailing separator of every
+        // non-`/` root and Git Bash prints `cd /c; pwd` -> `/c`.
+        let tail = &value[3..];
+        if tail.is_empty() {
+            return format!("/{drive}");
+        }
+        return format!("/{drive}/{tail}");
     }
     // unixwin/niubash#481: the bare drive-root display `D:` — produced by
     // the display normalization of a `D:/` operand, which drops the
     // trailing separator — is the same drive root the `D:/` arm above
-    // renders `/d/`; folding it here keeps the canonical persona form
+    // renders `/d`; folding it here keeps the canonical persona form
     // instead of leaking the designator into $PWD.
     if cfg!(windows)
         && value.len() == 2
@@ -8346,7 +8385,7 @@ pub fn shell_pwd_display_path(path: &str) -> String {
         && value.as_bytes()[1] == b':'
     {
         let drive = (value.as_bytes()[0] as char).to_ascii_lowercase();
-        return format!("/{drive}/");
+        return format!("/{drive}");
     }
     if value.is_empty() {
         "/".to_string()
