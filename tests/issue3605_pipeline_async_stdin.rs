@@ -56,9 +56,9 @@ fn element_own_fd0_redirect_wins_over_pipe() {
     // inherits the file, not the staged payload.
     let f = fixture();
     for script in [
-        format!("echo data | {{ cat & wait; }} < {f}"),
-        format!("echo data | {{ ( cat & wait ) < {f}; }}"),
-        format!("echo data | for i in 1; do cat & wait; done < {f}"),
+        format!("echo data | {{ cat & wait; }} < '{f}'"),
+        format!("echo data | {{ ( cat & wait ) < '{f}'; }}"),
+        format!("echo data | for i in 1; do cat & wait; done < '{f}'"),
     ] {
         let (stdout, _, _) = rubash(&script);
         assert_eq!(stdout, "line1\nline2\n", "script: {script}");
@@ -72,9 +72,9 @@ fn nested_subshell_clears_element_flag() {
     // inside gets /dev/null and prints nothing.
     let f = fixture();
     for script in [
-        format!("{{ ( cat & wait ); }} < {f}"),
+        format!("{{ ( cat & wait ); }} < '{f}'"),
         "echo data | { ( cat & wait ); }".to_string(),
-        format!("echo data | {{ ( cat & wait ); }} < {f}"),
+        format!("echo data | {{ ( cat & wait ); }} < '{f}'"),
         format!("echo data | {{ ( cat & wait ); }} > /dev/null"),
     ] {
         let (stdout, _, _) = rubash(&script);
