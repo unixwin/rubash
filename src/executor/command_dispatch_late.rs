@@ -437,6 +437,15 @@ impl Executor {
                 }
             }
             Some(LateSlot::Arithmetic) => {
+                // rubash#3557: a literal `((` head word — quoted, the only
+                // way `((` survives parse as a plain word since the lexer
+                // folds unquoted `(( ... ))` into an arithmetic_command
+                // node — is a command name, not arithmetic syntax
+                // (parse.y:3667 read_token: `((` is read as ARITH_CMD only
+                // unquoted). GNU runs `((: command not found`.
+                if cmd.arithmetic_command.is_none() {
+                    return self.execute_external(cmd);
+                }
                 // rubash#846 (GNU execute_cmd.c:854-883): the `(( ))`
                 // command's OWN redirect failure — mark it for the `!` flip
                 // sites.

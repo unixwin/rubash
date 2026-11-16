@@ -2319,7 +2319,7 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
 
     if command_allows_compound_start(&state.current_cmd)
         && ((token.kind == TokenKind::Keyword && token.value == "(")
-            || token.value.starts_with("(("))
+            || (token.value.starts_with("((") && token.raw == token.value))
     {
         if let Some((arith_cmd, next_i)) = parse_arithmetic_command(tokens, i) {
             push_compound_command(state, arith_cmd);
@@ -2327,7 +2327,11 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
         }
     }
 
-    if command_allows_compound_start(&state.current_cmd) && token.value == "[[" {
+    // rubash#3557: `[[` opens a conditional only unquoted — a `'[['` word
+    // is a command name (parse.y:3667 read_token emits `[[` as COND only
+    // for unquoted text).
+    if command_allows_compound_start(&state.current_cmd) && super::is_unquoted_operator(token, "[[")
+    {
         if let Some((conditional_cmd, next_i)) = parse_conditional_command(
             tokens,
             i,
@@ -2372,7 +2376,7 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
 
     if command_accepts_embedded_arithmetic_command(&state.current_cmd)
         && ((token.kind == TokenKind::Keyword && token.value == "(")
-            || token.value.starts_with("(("))
+            || (token.value.starts_with("((") && token.raw == token.value))
     {
         if let Some((arith_cmd, next_i)) = parse_arithmetic_command(tokens, i) {
             note_command_line(&mut state.current_cmd, token);
@@ -2396,10 +2400,15 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
             push_compound_command(state, brace_cmd);
             return Some(next_i);
         }
-        if token.value == "{"
+        // rubash#3557 (parse.y:3667 read_token): quoted `{` is a WORD —
+        // `{ : command not found`, never a group opener; only unquoted
+        // `{` (Word raw==value or a collapsed `{...;` Keyword) may demand
+        // the `}` closer here.
+        if is_unquoted_operator(token, "{")
             || (token.value.starts_with('{')
                 && token.value.contains(';')
-                && !token.value.contains('}'))
+                && !token.value.contains('}')
+                && (token.kind == TokenKind::Keyword || token.raw == token.value))
         {
             return Some(push_parse_error_until(
                 state,
@@ -3933,7 +3942,12 @@ pub(super) fn parse_time_prefixed_compound_command(
         parse_coproc_command(tokens, i)?
     } else if let Some(parsed) = parse_function_command(tokens, i) {
         parsed
-    } else if tokens.get(i).is_some_and(|token| token.value == "[[") {
+    // rubash#3557: `[[` is syntax only unquoted — a `'[['` word is a
+    // command name (`[[: command not found`).
+    } else if tokens
+        .get(i)
+        .is_some_and(|token| is_unquoted_operator(token, "[["))
+    {
         parse_conditional_command(tokens, i, None, 0)?
     } else if is_keyword(tokens, i, "{")
         || tokens.get(i).is_some_and(|token| {
@@ -4095,11 +4109,14 @@ fn time_prefixed_shell_command_starts_with_compound(tokens: &[Token], index: usi
         return true;
     }
 
+    // rubash#3557: quoted head words (`'for'`, `'[['`, `'((x))'`) are data,
+    // not compound openers — require the unquoted spelling (raw == value).
     if tokens.get(index).is_some_and(|token| {
-        matches!(
-            token.value.as_str(),
-            "for" | "case" | "select" | "coproc" | "if" | "while" | "until" | "[[" | "function"
-        ) || token.value.starts_with("((")
+        token.raw == token.value
+            && (matches!(
+                token.value.as_str(),
+                "for" | "case" | "select" | "coproc" | "if" | "while" | "until" | "[[" | "function"
+            ) || token.value.starts_with("(("))
     }) {
         return true;
     }
