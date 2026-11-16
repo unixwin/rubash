@@ -2648,7 +2648,13 @@ impl Executor {
                 }
             }
             if let Some(values) = self.array_at_word_values(word) {
-                if word_is_unquoted_array_list_expansion(word) {
+                // Same cooked-vs-raw quoting gap as the positional arms
+                // below: `''"${a[@]}"` cooks down to `${a[@]}`, which
+                // looks unquoted, but GNU never field-splits the quoted
+                // expansion — `''"${a[@]}"` with `a=''` is one empty
+                // argument (had_quoted_null, subst.c:12026-12035), not
+                // zero fields.
+                if !raw_word_is_quoted(raw) && word_is_unquoted_array_list_expansion(word) {
                     return field_split_array_values_with_ifs(
                         values,
                         self.shell_state.env_vars.get("IFS").map(String::as_str),
@@ -2739,8 +2745,17 @@ impl Executor {
             {
                 return vec![String::new()];
             }
-            if self.word_is_unquoted_positional_modified_list_expansion(word)
-                || self.word_is_unquoted_positional_list_expansion(word)
+            // The cooked word loses stripped quoting (`''"${@/*}"`
+            // cooks down to `${@/*}`), so the raw word is the quoting
+            // oracle: GNU field-splits the expansion's elements only
+            // when the `${...}` itself is unquoted
+            // (expand_word_internal, subst.c:11229 — the quoted path
+            // sets Q_DOUBLE_QUOTES and never splits). `''"${@/*}"`
+            // with one `X` positional is one empty argument, not
+            // zero words.
+            if !raw_word_is_quoted(raw)
+                && (self.word_is_unquoted_positional_modified_list_expansion(word)
+                    || self.word_is_unquoted_positional_list_expansion(word))
             {
                 return field_split_positional_values_with_ifs(
                     values,
@@ -4921,18 +4936,24 @@ pub(in crate::executor) fn raw_word_is_fully_single_quoted(raw: Option<&str>) ->
     !in_single
 }
 
-/// A quoted `$@`/`$*` word whose expansion is empty still yields one
-/// empty argument when the raw word also contains a quoted-null source:
-/// an empty ''/"" span, or a quoted pure reference that expands empty
-/// (GNU expand_word_internal: the ''/"" cases add CTLNUL and set
-/// had_quoted_null at 11841-11847 / 11940-11944, and the final
-/// 12026-12035 keeps a had_quoted_null word as a QUOTED_NULL argument
-/// even when quoted_dollar_at discarded the "$@" half -- quote4.sub
-/// `n "$@"''` with no positional parameters is 1, not 0).
-fn raw_quoted_at_word_has_quoted_null(raw: &str, executor: &Executor) -> bool {
+/// Does the raw word contain a quoted-null contributor: an empty
+/// `''`/`""`/`$''` span, or a quoted pure reference that expands empty?
+/// GNU retains an all-empty expansion as one empty argument whenever the
+/// word saw one: expand_word_internal's discard branch is
+/// `had_quoted_null || (quoted_dollar_at == 0 && PARTIALLY_QUOTED)`
+/// (subst.c:12026-12035; the ''/"" cases add CTLNUL and set
+/// had_quoted_null at 11841-11847 / 11940-11944). Reaching this check
+/// already means the word carried a positional-`@`-list source whose
+/// expansion came back empty, so no @-recognition is needed here:
+/// `''"${a[@]}"`, `""${@/*}"` and `"$x""${@#p}"` (x unset) all retain
+/// `<>` — quote4.sub `n "$@"''` with no positional parameters is 1,
+/// not 0.
+pub(in crate::executor) fn raw_quoted_at_word_has_quoted_null(
+    raw: &str,
+    executor: &Executor,
+) -> bool {
     let chars: Vec<char> = raw.chars().collect();
     let mut index = 0usize;
-    let mut saw_quoted_at = false;
     let mut saw_quoted_null = false;
     while index < chars.len() {
         match chars[index] {
@@ -4960,26 +4981,12 @@ fn raw_quoted_at_word_has_quoted_null(raw: &str, executor: &Executor) -> bool {
                     content.push(chars[index]);
                     index += 1;
                 }
-                let closed = index < chars.len();
-                if closed {
+                if index < chars.len() {
                     index += 1;
-                }
-                if !closed {
-                    continue;
-                }
-                if content.is_empty() {
-                    saw_quoted_null = true;
-                } else if matches!(content.as_str(), "$@" | "$*" | "${@}" | "${*}") {
-                    saw_quoted_at = true;
-                } else if content.contains("$@") || content.contains("${@}") {
-                    // A double-quoted string containing $@ among other
-                    // content (e.g. "$novar$@$(echo)") still triggers the
-                    // quoted-null retention rule when $@ is empty (exp9.sub
-                    // `''"$novar$@$(echo)"` with no positional params is one
-                    // empty argument).
-                    saw_quoted_at = true;
-                } else if quoted_pure_reference_expands_empty(&content, executor) {
-                    saw_quoted_null = true;
+                    if content.is_empty() || quoted_pure_reference_expands_empty(&content, executor)
+                    {
+                        saw_quoted_null = true;
+                    }
                 }
             }
             '$' if chars.get(index + 1) == Some(&'\'') => {
@@ -4997,7 +5004,7 @@ fn raw_quoted_at_word_has_quoted_null(raw: &str, executor: &Executor) -> bool {
             }
             '$' if chars.get(index + 1) == Some(&'{') => {
                 // The braced body keeps its quotes: scan it verbatim so a
-                // ${x+"$@"''} alternate still exposes its spans.
+                // ${x+"$@"''} alternate still exposes its quoted-null spans.
                 index += 2;
             }
             '`' => {
@@ -5010,24 +5017,10 @@ fn raw_quoted_at_word_has_quoted_null(raw: &str, executor: &Executor) -> bool {
                 }
                 index += 1;
             }
-            '$' if chars.get(index + 1) == Some(&'@') => {
-                // Unquoted $@ also triggers the quoted-null retention rule
-                // when adjacent to a quoted empty string (exp9.sub `''$@`
-                // with no positional params is one empty argument).
-                saw_quoted_at = true;
-                index += 2;
-            }
-            '$' if chars.get(index + 1) == Some(&'{')
-                && chars.get(index + 2) == Some(&'@')
-                && chars.get(index + 3) == Some(&'}') =>
-            {
-                saw_quoted_at = true;
-                index += 4;
-            }
             _ => index += 1,
         }
     }
-    saw_quoted_at && saw_quoted_null
+    saw_quoted_null
 }
 
 /// "$e" / "${e}" with a currently empty (or unset) value is a quoted null

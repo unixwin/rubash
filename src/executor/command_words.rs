@@ -430,6 +430,16 @@ impl Executor {
             }
         }
         if let Some(values) = self.quoted_positional_at_word_values_with_raw(word, raw, None) {
+            // Same quoted-null retention as the argv arm: `for i in
+            // ''"${a[@]}"` iterates once with i='' (had_quoted_null,
+            // subst.c:12026-12035).
+            if values.is_empty()
+                && raw.is_some_and(|raw| {
+                    super::command_prepare::raw_quoted_at_word_has_quoted_null(raw, self)
+                })
+            {
+                return Ok(vec![String::new()]);
+            }
             // The segment expander is shared with the argv path, where
             // pathname expansion runs as a later stage; the for-list path
             // returns final values, so a whole-word UNQUOTED ${a[@]}/${a[*]}
