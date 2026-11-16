@@ -132,3 +132,31 @@ fn assign_operator_stores_verbatim_rhs() {
     assert!(stderr.is_empty(), "stderr not empty: {stderr}");
     assert_eq!(code, Some(0));
 }
+
+/// An empty IFS disables field splitting, but the protection pairs a
+/// running splitter would consume must still be stripped — GNU's final
+/// dequote (subst.c:4807 dequote_string) runs regardless of IFS.
+/// `IFS=''; X='X Y'; recho ${0+ "$X" }` is ` X Y `, never ` X\x1c Y `
+/// (the quoted expansion whitespace inside `"$X"` rides an IFS_GLUE
+/// pair that leaked verbatim when the splitter was skipped).
+#[test]
+fn empty_ifs_still_strips_protection_glue() {
+    let script = concat!(
+        "IFS=''\n",
+        "set -- X Y\n",
+        "X='X Y'\n",
+        "recho() { local i=0; for a; do i=$((i+1)); printf 'argv[%d] = <%s>\\n' \"$i\" \"$a\"; done; }\n",
+        "recho ${0+ \"$X\" }\n",
+        "recho ${v- \"$@\" }\n",
+        "v=$'a b'\n",
+        "recho ${0+ \"$v\" }\n",
+    );
+    let (stdout, stderr, code) = rubash_file(script);
+    // All expectations byte-verified against GNU Bash 5.3.20.
+    assert_eq!(
+        stdout,
+        "argv[1] = < X Y >\nargv[1] = < X>\nargv[2] = <Y >\nargv[1] = < a b >\n"
+    );
+    assert!(stderr.is_empty(), "stderr not empty: {stderr}");
+    assert_eq!(code, Some(0));
+}
