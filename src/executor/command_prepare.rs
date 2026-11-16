@@ -5932,9 +5932,21 @@ fn copy_comsub_body_verbatim_for_ifs_marking(
                 token_boundary = false;
             }
             '$' if next == Some('(') => {
+                // GNU parse.y:4173: a nested `$(` hands its whole span to
+                // parse_comsub — its `)` owns the inner substitution, never
+                // the enclosing case machinery. Skip the body opaquely via
+                // the same verbatim copy; the flat `depth += 1` here fed the
+                // span's interior to the case word machine, so `$(case
+                // $(ls) in *) ... ;; esac)` read `ls` as the subject word,
+                // then `ls`'s `)` never decremented the paren depth and the
+                // copy overran the substitution end. The `\u{1}` placeholder
+                // marks the skipped span as one word unit (the `\\` arm's
+                // convention), letting a `$(...)` case subject still
+                // complete `case WORD` for the `in` arm.
                 simulated.push('(');
                 *index += 1;
-                depth += 1;
+                copy_comsub_body_verbatim_for_ifs_marking(simulated, raw_chars, index);
+                word.push('\u{1}');
                 token_boundary = false;
             }
             '\'' => {
