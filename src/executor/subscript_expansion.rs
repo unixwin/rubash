@@ -360,6 +360,7 @@ impl Executor {
         &mut self,
         source: SubscriptSource<'_>,
     ) -> IndexedSubscript {
+        let expand = matches!(source, SubscriptSource::Protected(_));
         let resolved = self.resolve_array_subscript(source);
         if resolved.is_empty() {
             return IndexedSubscript::Empty;
@@ -373,7 +374,7 @@ impl Executor {
         {
             return hit;
         }
-        let result = match self.eval_indexed_subscript_expression(&resolved) {
+        let result = match self.eval_indexed_subscript_expression(&resolved, expand) {
             Some(index) => IndexedSubscript::Index(index),
             None => {
                 // Silent on a nounset trap (message already printed once);
@@ -1097,7 +1098,8 @@ impl Executor {
                             let _ = std::io::stderr().flush();
                             return Err(format!("({out})"));
                         }
-                        let Some(index_value) = self.eval_indexed_subscript_expression(&resolved)
+                        let Some(index_value) =
+                            self.eval_indexed_subscript_expression(&resolved, true)
                         else {
                             self.report_indexed_subscript_error_unless_nounset(&resolved);
                             // A nounset trap aborts with the fatal status;
@@ -1272,7 +1274,8 @@ impl Executor {
                     let _ = std::io::stderr().flush();
                     return Err(format!("({})", elements.join(" ")));
                 }
-                let Some(index_value) = self.eval_indexed_subscript_expression(&resolved) else {
+                let Some(index_value) = self.eval_indexed_subscript_expression(&resolved, true)
+                else {
                     self.report_indexed_subscript_error_unless_nounset(&resolved);
                     // Same nounset-abort routing as the rewrite path above
                     // (rubash#639).
@@ -2027,6 +2030,29 @@ fn dequote_compound_subscript(sub: &str) -> String {
             (crate::executor::markers::ANSI_C_QUOTE_MARKER, "'"),
             (crate::executor::markers::ANSI_C_DQUOTE_MARKER, "\""),
             (crate::executor::markers::COMPOUND_EXPANSION_WS_TAG, ""),
+        ],
+    )
+}
+
+/// Pass-1 expansion products (`${x}` -> `$y`, a value's `` ` ``/`\`/quotes)
+/// ride data carriers so earlier passes cannot re-read them as syntax.
+/// GNU's subscript evaluator re-lexes the expanded text wholesale —
+/// arrayfunc.c:1368 `array_expand_index` -> `expand_arith_string`
+/// (subst.c:3981 `param_expand` + `sub_append_string` on the RAW text),
+/// so `$y` produced by the first pass expands again and its value parses
+/// as arithmetic (`y='`echo 1`'` -> error token `` `echo 1` `` —
+/// rubash#3613). Decode the carriers back to plain source bytes between
+/// passes; E400-escaped user literals stay escaped.
+pub(in crate::executor) fn decode_subscript_reparse_markers(text: &str) -> String {
+    crate::executor::markers::restore_bare_sentinels(
+        text,
+        &[
+            (crate::executor::markers::ASSIGN_SQ_DOLLAR, "$"),
+            (crate::executor::markers::ASSIGN_SQ_BACKTICK, "`"),
+            (crate::executor::markers::ASSIGN_SQ_BACKSLASH, "\\"),
+            (crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH, "\\"),
+            (crate::executor::markers::ASSIGN_EXPANSION_DQUOTE, "\""),
+            (crate::executor::markers::ASSIGN_EXPANSION_SQUOTE, "'"),
         ],
     )
 }
