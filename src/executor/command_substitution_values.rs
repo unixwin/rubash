@@ -2033,7 +2033,15 @@ fn quoted_body_positional_at_segments(
 
     while index < body.len() {
         match body[index] {
-            '`' | '\\' => return None,
+            '`' => return None,
+            // A `\` inside a double-quoted body only escapes `$`, '`',
+            // `"`, `\`, or newline; `\ ` is literal text (GNU parse.y
+            // read_token_word CBSDQUOTE class). Skip both chars so a
+            // `\$@` never reads as a positional source and a non-escape
+            // backslash stays part of the surrounding literal piece —
+            // declining on ANY backslash collapsed `"123 $@\ 456"` into
+            // one field (run-dollars dollar-at-star3).
+            '\\' => index += 2,
             '$' if body.get(index + 1) == Some(&'{') => {
                 if body.get(index + 2) == Some(&'@') && body.get(index + 3) == Some(&'}') {
                     push_body_piece(&mut segments, &body[piece_start..index])?;
@@ -2254,12 +2262,18 @@ fn push_body_piece(segments: &mut Vec<QuotedPositionalAtSegment>, chars: &[char]
     if chars.is_empty() {
         return Some(());
     }
-    if chars.contains(&'`') || chars.contains(&'\\') {
+    if chars.contains(&'`') {
         return None;
     }
     let raw = chars.iter().collect::<String>();
+    // The piece is the inside of a double-quoted body: cook it with the
+    // dquote escape table (cook_double_quoted_segment) so `\$`/`\"`/`\\`
+    // become their DATA_* carriers and a non-escape `\ ` survives as
+    // literal backslash — remove_shell_quotes would strip it (GNU keeps
+    // `\ ` inside `"..."`, parse.y CBSDQUOTE). Backtick bodies still
+    // decline: their `$@` belongs to the inner parse.
     segments.push(QuotedPositionalAtSegment::Literal {
-        text: crate::lexer::remove_shell_quotes(&raw),
+        text: crate::lexer::quotes::cook_double_quoted_segment(&raw),
         quoted: true,
     });
     Some(())
