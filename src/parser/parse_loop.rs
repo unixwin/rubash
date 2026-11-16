@@ -2930,6 +2930,8 @@ pub(super) fn unclosed_brace_eof_node(
             // rubash#3028: the end line shifts in lockstep (it defaults
             // to the fragment-relative position, like `position`).
             token.end_position = token.end_position + brace_line - 1;
+            // rubash#3605: the heredoc gather end line too.
+            token.heredoc_end_line = token.heredoc_end_line.map(|line| line + brace_line - 1);
         }
         region_owned = inner;
         &region_owned
