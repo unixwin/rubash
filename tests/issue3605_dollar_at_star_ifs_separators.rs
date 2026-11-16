@@ -160,3 +160,34 @@ fn empty_ifs_still_strips_protection_glue() {
     assert!(stderr.is_empty(), "stderr not empty: {stderr}");
     assert_eq!(code, Some(0));
 }
+
+/// A declaration-builtin operand whose raw token is assignment-shaped
+/// (`export`/`readonly`/`declare`/`typeset`/`local` + `name=...`,
+/// general.c:480) expands with PF_ASSIGNRHS: bare `$@`/`${@}` elements
+/// separate with ' ' — never $IFS[0] — because no word splitting runs
+/// (string_list_dollar_at subst.c:2975-3000). `typeset t="x$@y"` under
+/// IFS=, binds `xa,x b yy`, not `xa,x,b yy` (dollar-at-star8 a1/a2).
+/// `$*` is unaffected (string_list_dollar_star joins IFS[0] regardless).
+/// All expectations byte-verified against GNU Bash 5.3.20.
+#[test]
+fn declare_assignment_operand_dollar_at_joins_on_space() {
+    let script = concat!(
+        "IFS=,\n",
+        "set -- a b c\n",
+        "typeset t=\"x$@y\" u=$@ w=\"${*}\" x=$*\n",
+        "printf 't=<%s> u=<%s> w=<%s> x=<%s>\\n' \"$t\" \"$u\" \"$w\" \"$x\"\n",
+        "export e=\"$@\"\n",
+        "readonly r=\"p$@q\"\n",
+        "declare -p e r\n",
+    );
+    let (stdout, stderr, code) = rubash_file(script);
+    assert_eq!(
+        stdout,
+        concat!(
+            "t=<xa b cy> u=<a b c> w=<a,b,c> x=<a,b,c>\n",
+            "declare -x e=\"a b c\"\ndeclare -r r=\"pa b cq\"\n",
+        )
+    );
+    assert!(stderr.is_empty(), "stderr not empty: {stderr}");
+    assert_eq!(code, Some(0));
+}

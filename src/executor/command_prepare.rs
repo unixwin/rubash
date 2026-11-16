@@ -2996,8 +2996,34 @@ impl Executor {
         } else {
             word
         };
+        // GNU expand_word_list_internal marks a declaration-builtin
+        // operand whose raw token is assignment-shaped with W_ASSIGNMENT
+        // (general.c:480 assignment()); such operands expand with
+        // PF_ASSIGNRHS — the same flag an `x=...` statement RHS carries —
+        // which both disables field splitting (command_words.rs keeps
+        // these operands unsplit already) and switches the "$@"/"${@}"
+        // element separator to ' ' (string_list_dollar_at tests
+        // PF_ASSIGNRHS first, subst.c:2975-3000). The matching word in an
+        // `export`/`readonly`/`declare`/`typeset`/`local` operand list
+        // must therefore see inside_assignment_rhs set during expansion:
+        // `typeset t="x$@y"` binds `xa,x b yy` under IFS=,, never
+        // `xa,x,b yy` (dollar-at-star8 a1/a2 family).
+        let decl_assignment_operand = matches!(
+            cmd.words.first().map(String::as_str),
+            Some("export" | "readonly" | "declare" | "typeset" | "local")
+        ) && cmd
+            .word_metadata
+            .get(index)
+            .is_some_and(|metadata| Self::raw_word_is_assignment(&metadata.raw));
+        let saved_assignment_rhs = self.inside_assignment_rhs.get();
+        if decl_assignment_operand {
+            self.inside_assignment_rhs.set(true);
+        }
         let saved_nonfatal = self.shell_state.arithmetic_nonfatal_error.replace(false);
         let expanded = self.expand_word_mut_with_context(word_to_expand, context);
+        if decl_assignment_operand {
+            self.inside_assignment_rhs.set(saved_assignment_rhs);
+        }
         // GNU subst.c:9955-9956: when parameter_brace_expand_length returns
         // a negative number (bad array subscript), the word expansion returns
         // &expand_wdesc_error and the word is dropped entirely (echo produces
