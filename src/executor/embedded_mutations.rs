@@ -240,12 +240,26 @@ impl Executor {
         // (expand_heredoc_body_mut). decode_word_position_carriers alone
         // restores only the quote/dollar carriers, so `<<<"$(<file)"`
         // staged the file's backslashes as raw 0x15 bytes (rubash#1842).
-        let decoded = crate::executor::markers::restore_bare_sentinels(
-            &crate::executor::markers::decode_word_position_carriers(&expanded),
-            &[
-                (crate::executor::markers::DATA_BACKSLASH, "\\"),
-                (crate::executor::markers::PROTECTED_BACKSLASH, "\\"),
-            ],
+        // rubash#3650: the sibling heredoc boundary decodes the
+        // command-substitution payload (U+E319 + hex + `;`) here
+        // (expand_heredoc_body_mut); the here-string boundary never did,
+        // so a comsub byte the walker re-protected (0x01/0x02/0x05/0x10/0x12
+        // — the protect set outside the assignment-carrier set) leaked into
+        // the stdin body as transport text and `read`/`mapfile` stored it
+        // verbatim, comparing unequal under `[` (whose operands decode the
+        // payload). Decode AFTER the carrier restores, like the heredoc: a
+        // decoded byte may equal a carrier codepoint (e.g. 0x15) and must
+        // not be claimed by the restores. Typed U+E319 data stays safe:
+        // the ANSI-C entry E400-escapes it and this decoder skips
+        // E400-escaped sentinels (rubash#840).
+        let decoded = crate::executor::execution_misc::decode_command_substitution_payload(
+            &crate::executor::markers::restore_bare_sentinels(
+                &crate::executor::markers::decode_word_position_carriers(&expanded),
+                &[
+                    (crate::executor::markers::DATA_BACKSLASH, "\\"),
+                    (crate::executor::markers::PROTECTED_BACKSLASH, "\\"),
+                ],
+            ),
         );
         crate::executor::execution_misc::decode_stdin_body_enq(&decoded)
     }
