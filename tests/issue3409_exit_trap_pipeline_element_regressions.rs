@@ -61,10 +61,7 @@ fn issue3409_exit_trap_fires_once_for_builtin_pipeline_element() {
 fn issue3409_exit_trap_fires_once_for_builtin_pipeline_tail() {
     let (stdout, _stderr, code) = rubash("trap 'echo bye' EXIT\necho hi | type cat");
     assert_eq!(bye_lines(&stdout), 1, "stdout: {stdout}");
-    assert!(
-        stdout.contains("cat is /usr/bin/cat"),
-        "stdout: {stdout}"
-    );
+    assert!(stdout.contains("cat is /usr/bin/cat"), "stdout: {stdout}");
     assert_eq!(code, Some(0));
 }
 
@@ -99,9 +96,8 @@ fn issue3409_trap_set_inside_pipeline_element_fires_at_element_exit() {
 
 #[test]
 fn issue3409_exit_trap_fires_once_under_lastpipe() {
-    let (stdout, _stderr, code) = rubash(
-        "shopt -s lastpipe\ntrap 'echo bye' EXIT\ntype echo | cat\necho after",
-    );
+    let (stdout, _stderr, code) =
+        rubash("shopt -s lastpipe\ntrap 'echo bye' EXIT\ntype echo | cat\necho after");
     assert_eq!(bye_lines(&stdout), 1, "stdout: {stdout}");
     assert!(
         stdout.contains("echo is a shell builtin"),
