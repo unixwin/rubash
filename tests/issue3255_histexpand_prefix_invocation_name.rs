@@ -174,6 +174,38 @@ mod interactive {
 
     const FAILED_INPUT: &str = "echo FIRST\n!nosuchcmd123\necho AFTER\n";
 
+    /// No stderr line may start with the literal `bash: ` prefix
+    /// (#3800). A plain `stderr.contains("bash: …")` check is wrong:
+    /// the correct prefix `rubash: ` contains `bash: ` as a substring,
+    /// so the substring matcher fires on correct output too. Match on
+    /// the line boundary instead.
+    fn assert_no_line_starts_with_bash_prefix(stderr: &str) {
+        for line in stderr.lines() {
+            assert!(
+                !line.starts_with("bash: "),
+                "literal bash: prefix must not appear, got stderr: {stderr:?}"
+            );
+        }
+    }
+
+    /// The `!nosuchcmd123` diagnostic line in `stderr`.
+    fn histexpand_failure_line<'a>(stderr: &'a str) -> &'a str {
+        stderr
+            .lines()
+            .find(|line| line.contains("!nosuchcmd123: event not found"))
+            .expect("failure diagnostic must be reported")
+    }
+
+    /// Basename of the test binary (e.g. `rubash`): the prefix an
+    /// interactive failure must carry under a plain argv[0].
+    fn binary_basename() -> String {
+        std::path::Path::new(env!("CARGO_BIN_EXE_rubash"))
+            .file_name()
+            .expect("test binary basename")
+            .to_string_lossy()
+            .into_owned()
+    }
+
     /// GNU (5.3.20, `exec -a myname bash -i`): the failed expansion
     /// reports under the invocation name —
     /// `myname: !nosuchcmd123: event not found` — and the session
@@ -185,10 +217,7 @@ mod interactive {
             stderr.contains("zimsh: !nosuchcmd123: event not found"),
             "renamed interactive failure must carry argv[0], got stderr: {stderr:?}"
         );
-        assert!(
-            !stderr.contains("bash: !nosuchcmd123: event not found"),
-            "literal bash: prefix must not appear under a renamed argv[0], got stderr: {stderr:?}"
-        );
+        assert_no_line_starts_with_bash_prefix(&stderr);
         assert!(
             stdout.contains("FIRST") && stdout.contains("AFTER"),
             "failed line is discarded but the session continues, got stdout: {stdout:?}"
@@ -204,9 +233,11 @@ mod interactive {
             stderr.contains("!nosuchcmd123: event not found"),
             "failure diagnostic must be reported, got stderr: {stderr:?}"
         );
+        assert_no_line_starts_with_bash_prefix(&stderr);
+        let expected_prefix = format!("{}: ", binary_basename());
         assert!(
-            !stderr.contains("bash: !nosuchcmd123: event not found"),
-            "literal bash: prefix must not appear, got stderr: {stderr:?}"
+            histexpand_failure_line(&stderr).starts_with(expected_prefix.as_str()),
+            "diagnostic must carry the binary basename, got stderr: {stderr:?}"
         );
         assert!(
             stdout.contains("FIRST") && stdout.contains("AFTER"),
