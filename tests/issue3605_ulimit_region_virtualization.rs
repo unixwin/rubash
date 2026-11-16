@@ -33,7 +33,8 @@ fn rubash(script: &str) -> (String, String, Option<i32>) {
 /// child's hard drop must die with it.
 #[test]
 fn subshell_hard_drop_does_not_leak() {
-    let (stdout, stderr, _) = rubash("( ulimit -n 6 )\nulimit -n\nexec {v}</dev/null && echo \"fd=$v\"");
+    let (stdout, stderr, _) =
+        rubash("( ulimit -n 6 )\nulimit -n\nexec {v}</dev/null && echo \"fd=$v\"");
     assert!(stderr.is_empty(), "stderr not empty: {stderr}");
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines.len(), 2, "stdout: {stdout}");
@@ -49,7 +50,8 @@ fn subshell_hard_drop_does_not_leak() {
 /// the parent process.
 #[test]
 fn pipeline_element_hard_drop_does_not_leak() {
-    let (stdout, stderr, _) = rubash("ulimit -n 6 | cat\nulimit -n\nexec {v}</dev/null && echo \"fd=$v\"");
+    let (stdout, stderr, _) =
+        rubash("ulimit -n 6 | cat\nulimit -n\nexec {v}</dev/null && echo \"fd=$v\"");
     assert!(stderr.is_empty(), "stderr not empty: {stderr}");
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines.len(), 2, "stdout: {stdout}");
@@ -66,9 +68,8 @@ fn pipeline_element_hard_drop_does_not_leak() {
 /// would see from F_DUPFD.
 #[test]
 fn region_sees_its_own_effective_limit() {
-    let (stdout, stderr, _) = rubash(
-        "( ulimit -n 6; ulimit -n; exec {v}</dev/null 2>/dev/null; echo \"rc=$?\" )",
-    );
+    let (stdout, stderr, _) =
+        rubash("( ulimit -n 6; ulimit -n; exec {v}</dev/null 2>/dev/null; echo \"rc=$?\" )");
     // GNU prints the pair of redirect diagnostics — the `2>/dev/null`
     // entry never applies because the `{v}` entry fails first.
     assert!(

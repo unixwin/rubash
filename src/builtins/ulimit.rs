@@ -328,9 +328,20 @@ mod plat {
             let (cur_soft, cur_hard) = env_vars
                 .get(&key(option))
                 .map(|cell| parse_limit_cell(cell))
-                .map_or_else(|| rlimit_get(resource(option)).unwrap_or((0, 0)), |pair| pair);
-            let soft = if mode & LIMIT_SOFT != 0 { newlim } else { cur_soft };
-            let hard = if mode & LIMIT_HARD != 0 { newlim } else { cur_hard };
+                .map_or_else(
+                    || rlimit_get(resource(option)).unwrap_or((0, 0)),
+                    |pair| pair,
+                );
+            let soft = if mode & LIMIT_SOFT != 0 {
+                newlim
+            } else {
+                cur_soft
+            };
+            let hard = if mode & LIMIT_HARD != 0 {
+                newlim
+            } else {
+                cur_hard
+            };
             // The kernel's own pair check (setrlimit EINVAL): a
             // submitted soft above the effective hard fails, exactly
             // like the oracle.
@@ -340,10 +351,7 @@ mod plat {
             // A hard raise an unprivileged GNU child could not perform
             // fails with its errno; the root case models as a pure cell
             // update (the kernel keeps the parent's higher value).
-            if mode & LIMIT_HARD != 0
-                && newlim > cur_hard
-                && unsafe { libc::geteuid() } != 0
-            {
+            if mode & LIMIT_HARD != 0 && newlim > cur_hard && unsafe { libc::geteuid() } != 0 {
                 return Err(io::Error::from_raw_os_error(libc::EPERM));
             }
             env_vars.insert(key(option), format!("{soft}:{hard}"));

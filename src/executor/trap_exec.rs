@@ -7752,7 +7752,9 @@ impl Executor {
                             // (redir.c:1144-1150 F_DUPFD).
                             if self.fd_table.is_open(source_fd) {
                                 let Some(fd) = self.allocate_dynamic_fd() else {
-                                    return Err(ExecuteError::IoError(self.report_fd_dup_alloc_error(&target)));
+                                    return Err(ExecuteError::IoError(
+                                        self.report_fd_dup_alloc_error(&target),
+                                    ));
                                 };
                                 if write {
                                     self.copy_persistent_output_fd(fd, source_fd);
@@ -8037,7 +8039,9 @@ impl Executor {
                         return Ok(true);
                     }
                     let Some(fd) = self.allocate_dynamic_fd_in_walk(occupied_slots, walk) else {
-                        return Err(ExecuteError::IoError(self.report_fd_dup_alloc_error(&target)));
+                        return Err(ExecuteError::IoError(
+                            self.report_fd_dup_alloc_error(&target),
+                        ));
                     };
                     self.copy_persistent_input_fd(fd, source_fd);
                     if !self.set_dynamic_fd_variable(name, fd) {
@@ -8092,7 +8096,9 @@ impl Executor {
                         return Ok(true);
                     }
                     let Some(fd) = self.allocate_dynamic_fd_in_walk(occupied_slots, walk) else {
-                        return Err(ExecuteError::IoError(self.report_fd_dup_alloc_error(&target)));
+                        return Err(ExecuteError::IoError(
+                            self.report_fd_dup_alloc_error(&target),
+                        ));
                     };
                     self.copy_persistent_output_fd(fd, source_fd);
                     if !self.set_dynamic_fd_variable(name, fd) {
@@ -8144,7 +8150,9 @@ impl Executor {
                         if let Some(input) = self.process_substitution_output(source) {
                             let Some(fd) = self.allocate_dynamic_fd_in_walk(occupied_slots, walk)
                             else {
-                                return Err(ExecuteError::IoError(self.report_fd_dup_alloc_error(&target)));
+                                return Err(ExecuteError::IoError(
+                                    self.report_fd_dup_alloc_error(&target),
+                                ));
                             };
                             self.fd_table.open_input(
                                 fd,
@@ -8212,7 +8220,9 @@ impl Executor {
                                     let Some(fd) =
                                         self.allocate_dynamic_fd_in_walk(occupied_slots, walk)
                                     else {
-                                        return Err(ExecuteError::IoError(self.report_fd_dup_alloc_error(&target)));
+                                        return Err(ExecuteError::IoError(
+                                            self.report_fd_dup_alloc_error(&target),
+                                        ));
                                     };
                                     self.copy_persistent_input_fd(fd, slot);
                                     if !self.set_dynamic_fd_variable(name, fd) {
@@ -8244,7 +8254,9 @@ impl Executor {
                     };
                 let file = read_file;
                 let Some(fd) = self.allocate_dynamic_fd_in_walk(occupied_slots, walk) else {
-                    return Err(ExecuteError::IoError(self.report_fd_dup_alloc_error(&target)));
+                    return Err(ExecuteError::IoError(
+                        self.report_fd_dup_alloc_error(&target),
+                    ));
                 };
                 self.set_fd_input_file(fd, file, true);
                 if redirect.kind == crate::parser::RedirectKind::ReadWrite {
@@ -8269,7 +8281,9 @@ impl Executor {
             | crate::parser::RedirectKind::Append
             | crate::parser::RedirectKind::ClobberOutput => {
                 let Some(fd) = self.allocate_dynamic_fd_in_walk(occupied_slots, walk) else {
-                    return Err(ExecuteError::IoError(self.report_fd_dup_alloc_error(&target)));
+                    return Err(ExecuteError::IoError(
+                        self.report_fd_dup_alloc_error(&target),
+                    ));
                 };
                 if let Some(source) = target
                     .strip_prefix(">(")
