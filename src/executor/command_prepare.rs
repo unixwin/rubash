@@ -2647,16 +2647,22 @@ impl Executor {
         if !declare_assignment_word {
             if !word.starts_with(STORAGE_WORD_PREFIX) {
                 if let Some(values) = self.braced_alternate_word_values(word, raw) {
+                    // rubash#3649: commit deferred substring-offset writes.
+                    self.apply_pending_subscript_writes();
                     return values;
                 }
             }
             if let Some(values) = self.array_at_word_values(word) {
                 if word_is_unquoted_array_list_expansion(word) {
+                    // rubash#3649: commit deferred substring-offset writes.
+                    self.apply_pending_subscript_writes();
                     return field_split_array_values_with_ifs(
                         values,
                         self.shell_state.env_vars.get("IFS").map(String::as_str),
                     );
                 }
+                // rubash#3649: commit deferred substring-offset writes.
+                self.apply_pending_subscript_writes();
                 return values;
             }
         }
@@ -2740,16 +2746,22 @@ impl Executor {
             if values.is_empty()
                 && raw.is_some_and(|raw| raw_quoted_at_word_has_quoted_null(raw, self))
             {
+                // rubash#3649: commit deferred substring-offset writes.
+                self.apply_pending_subscript_writes();
                 return vec![String::new()];
             }
             if self.word_is_unquoted_positional_modified_list_expansion(word)
                 || self.word_is_unquoted_positional_list_expansion(word)
             {
+                // rubash#3649: commit deferred substring-offset writes.
+                self.apply_pending_subscript_writes();
                 return field_split_positional_values_with_ifs(
                     values,
                     self.shell_state.env_vars.get("IFS").map(String::as_str),
                 );
             }
+            // rubash#3649: commit deferred substring-offset writes.
+            self.apply_pending_subscript_writes();
             return values;
         }
         // A fully double-quoted `${op...}` word whose alternate embeds `$@`
@@ -2760,11 +2772,15 @@ impl Executor {
         // param_expand carries `quoted` into the alternate word).
         if word.starts_with(STORAGE_WORD_PREFIX) {
             if let Some(values) = self.quoted_braced_alternate_positional_at_values(word) {
+                // rubash#3649: commit deferred substring-offset writes.
+                self.apply_pending_subscript_writes();
                 return values;
             }
             // A fully double-quoted "${a[@]:-y}" still expands to the
             // element list when the array is set (array22.sub).
             if let Some(values) = self.braced_alternate_word_values(word, raw) {
+                // rubash#3649: commit deferred substring-offset writes.
+                self.apply_pending_subscript_writes();
                 return values;
             }
             // A whole-word ${op...} the lexer marked wholly quoted but whose
@@ -2774,6 +2790,8 @@ impl Executor {
             // two empty args; subst.c list_string:3181-3186).
             if !raw_word_is_quoted(raw) {
                 if let Some(values) = self.unquoted_outer_braced_alternate_values(word) {
+                    // rubash#3649: commit deferred substring-offset writes.
+                    self.apply_pending_subscript_writes();
                     return values;
                 }
             }

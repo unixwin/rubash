@@ -426,6 +426,8 @@ impl Executor {
         // multi-word rhs, subst.c:8023-8027; rubash#315).
         if !word.starts_with(STORAGE_WORD_PREFIX) {
             if let Some(values) = self.braced_alternate_word_values(word, raw) {
+                // rubash#3649: commit deferred substring-offset writes.
+                self.apply_pending_subscript_writes();
                 return Ok(values);
             }
         }
@@ -436,8 +438,12 @@ impl Executor {
             // splice must be globbed here or the loop iterates the literal
             // pattern (rubash#1067: `for i in ${arr[@]}` yielded `*.sh`).
             if !suppress_glob && word_is_unquoted_array_list_expansion(word) {
+                // rubash#3649: commit deferred substring-offset writes.
+                self.apply_pending_subscript_writes();
                 return self.glob_for_list_fields(values);
             }
+            // rubash#3649: commit deferred substring-offset writes.
+            self.apply_pending_subscript_writes();
             return Ok(values);
         }
         // GNU subst.c parameter_brace_expand's `+` arm: the alternative word
@@ -456,14 +462,20 @@ impl Executor {
                     self.shell_state.env_vars.get("IFS").map(String::as_str),
                 );
                 if suppress_glob {
+                    // rubash#3649: commit deferred substring-offset writes.
+                    self.apply_pending_subscript_writes();
                     return Ok(fields);
                 }
                 // GNU subst.c:13219 expand_word_list_internal: an unquoted
                 // ${a[@]}/${a[*]} splice is field-split AND then pathname-
                 // expanded field by field, exactly like a scalar expansion
                 // (rubash#1067).
+                // rubash#3649: commit deferred substring-offset writes.
+                self.apply_pending_subscript_writes();
                 return self.glob_for_list_fields(fields);
             }
+            // rubash#3649: commit deferred substring-offset writes.
+            self.apply_pending_subscript_writes();
             return Ok(values);
         }
         // rubash#1993: a whole-word unquoted `$*`/`${*}` in a for list
@@ -508,9 +520,13 @@ impl Executor {
         // element boundaries (bash_it.sh `for f in "${BASH_IT_LIB[@]:-}"`).
         if word.starts_with(STORAGE_WORD_PREFIX) {
             if let Some(values) = self.quoted_braced_alternate_positional_at_values(word) {
+                // rubash#3649: commit deferred substring-offset writes.
+                self.apply_pending_subscript_writes();
                 return Ok(values);
             }
             if let Some(values) = self.braced_alternate_word_values(word, raw) {
+                // rubash#3649: commit deferred substring-offset writes.
+                self.apply_pending_subscript_writes();
                 return Ok(values);
             }
         }

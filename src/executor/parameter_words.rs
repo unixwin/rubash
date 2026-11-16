@@ -558,7 +558,12 @@ impl Executor {
             }
         }
 
-        if let Some((var_name, offset, length)) = self.parse_parameter_substring(name) {
+        if let Some(((var_name, offset, length), writes)) =
+            self.parse_parameter_substring_with_writes(name)
+        {
+            // rubash#3649: this parse's result is the expansion, so commit
+            // its offset/length arithmetic writes.
+            self.queue_pending_subscript_writes(writes);
             // `${#:offset}` / `${#?:0}` slice the special parameter value,
             // not a length expansion. expand_braced_substring_parameter does
             // not resolve special-parameter names, so fetch the value here.

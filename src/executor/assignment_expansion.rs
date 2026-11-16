@@ -2624,8 +2624,13 @@ impl Executor {
                     }
                 })
             {
-                if let Some((var_name, offset, length)) = self.parse_parameter_substring(name) {
+                if let Some(((var_name, offset, length), writes)) =
+                    self.parse_parameter_substring_with_writes(name)
+                {
                     if var_name == "@" {
+                        // rubash#3649: this parse's result is used as the
+                        // element values, so commit its offset/length writes.
+                        self.queue_pending_subscript_writes(writes);
                         changed = true;
                         values.extend(
                             positional_parameter_substring_with_zero(
@@ -2644,6 +2649,9 @@ impl Executor {
                         .strip_suffix("[@]")
                         .or_else(|| var_name.strip_suffix("[*]"))
                     {
+                        // rubash#3649: this parse's result is used as the
+                        // element values, so commit its offset/length writes.
+                        self.queue_pending_subscript_writes(writes);
                         if let Some(storage) = self.parameter_array_storage(array_name) {
                             changed = true;
                             // A scalar base under [@]/[*] is VT_VARIABLE:
@@ -3707,12 +3715,17 @@ impl Executor {
         };
         // Slice form `${name[@]:off[:len]}` fans out per element
         // (mirror of the direct-token slice arm above).
-        if let Some((var_name, offset, length)) = self.parse_parameter_substring(list_body) {
+        if let Some(((var_name, offset, length), writes)) =
+            self.parse_parameter_substring_with_writes(list_body)
+        {
             let starred = var_name.ends_with("[*]");
             if let Some(array_name) = var_name
                 .strip_suffix("[@]")
                 .or_else(|| var_name.strip_suffix("[*]"))
             {
+                // rubash#3649: this parse's result is used as the element
+                // values, so commit its offset/length arithmetic writes.
+                self.queue_pending_subscript_writes(writes);
                 let storage = self.parameter_array_storage(array_name)?;
                 // Scalar base under [@]/[*]: VT_VARIABLE string slice
                 // with the signed length (subst.c:9083; rubash#1600).
