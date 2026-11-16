@@ -2766,7 +2766,7 @@ fn push_unclosed_paren_error(state: &mut ParseState, tokens: &[Token], start: us
         }
         if token.kind != TokenKind::HereDocBody {
             if index > start {
-                last_line = last_line.max(token.position);
+                last_line = last_line.max(token_last_consumed_line(token));
             }
             continue;
         }
@@ -2941,11 +2941,17 @@ pub(super) fn unclosed_brace_eof_node(
     let last_line = if inner_text.is_empty() {
         region
             .iter()
-            .map(|token| token.position)
+            .map(token_last_consumed_line)
             .max()
             .unwrap_or(brace_line)
     } else {
-        brace_line + inner_text.matches('\n').count()
+        // The swallowed text IS the consumed tail: a final `\n' completes
+        // its line rather than starting a new one.
+        brace_line
+            + inner_text
+                .matches('\n')
+                .count()
+                .saturating_sub(usize::from(inner_text.ends_with('\n')))
     };
     let continuation = if inner_text.is_empty() {
         false
@@ -2982,10 +2988,26 @@ pub(super) fn unclosed_paren_eof_node(
     }
     let last_line = region
         .iter()
-        .map(|token| token.position)
+        .map(token_last_consumed_line)
         .max()
         .unwrap_or(paren_line);
     compound_eof_error_node("(", paren_line, region, last_line, false)
+}
+
+/// The last physical input line a region token consumed. `position` is
+/// only the token's first line: a line-break `;' that swallowed a `\n\n'
+/// tail ends at `end_position` (the physical line of its last byte), and
+/// a heredoc body's gather ran to `heredoc_end_line` even though its
+/// `position` stays at the `<<' line to feed the `at line N' warning
+/// (rubash#3605). GNU's EOF report counts every physical line the reader
+/// consumed before the failed fetch — parse.y:2504's per-line bump plus
+/// the final exhaustion read — so the last consumed line is the max over
+/// all three stamps.
+fn token_last_consumed_line(token: &Token) -> usize {
+    token
+        .position
+        .max(token.end_position)
+        .max(token.heredoc_end_line.unwrap_or(0))
 }
 
 fn eof_line_extra(last_line: usize, continuation: bool) -> usize {
@@ -3172,7 +3194,7 @@ pub(super) fn unclosed_keyword_eof_node(
     }
     let last_line = region
         .iter()
-        .map(|token| token.position)
+        .map(token_last_consumed_line)
         .max()
         .unwrap_or(opener_line);
     compound_eof_error_node(opener, opener_line, region, last_line, false)
