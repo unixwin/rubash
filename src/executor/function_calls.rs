@@ -327,6 +327,9 @@ impl Executor {
         if base_line > 1 {
             for token in &mut tokens {
                 token.position += base_line - 1;
+                // rubash#3605: the gather end line shifts in lockstep
+                // (see script_driver.rs).
+                token.heredoc_end_line = token.heredoc_end_line.map(|line| line + base_line - 1);
             }
         }
         let body = crate::parser::parse_with_options(
@@ -368,7 +371,13 @@ impl Executor {
         // shapes land on the function boundary like GNU's unwind-protected
         // frame restore does. Off path: one relaxed AtomicBool load.
         let _profiler_frame = super::profiler::enter_function(name);
+        // GNU execute_cmd.c:5242 unwind_protect_int(line_number_for_err_trap):
+        // a function body's leaf stamps are per-frame — on return the tracker
+        // restores to the CALL's value, so an enclosing compound's redirect
+        // failure reports the call line (rubash#3553).
+        let saved_err_trap_line = self.err_trap_line.get();
         let result = self.execute_function_dispatch(name, args, call_cmd);
+        self.err_trap_line.set(saved_err_trap_line);
         // rubash#846: a function call is a call boundary (GNU
         // execute_cmd.c:5200 execute_function runs the body as a fresh
         // frame) — an inner compound's own redirect failure arrives here
@@ -420,8 +429,28 @@ impl Executor {
                     name,
                     nesting_limit
                 );
+                // GNU execute_cmd.c:5200-5206 execute_function: on
+                // overflow bash runs the unwind protects, sets
+                // funcnest = 0 and jump_to_top_level(DISCARD) — the
+                // rest of the current command unit is discarded (the
+                // `f; echo rc:$?` list never prints rc:) while the
+                // reader continues with the NEXT unit
+                // (eval.c:111-127: DISCARD keeps a nonzero
+                // last_command_exit_value, disposes the rest of the
+                // current command, and breaks back to the reader).
+                // ExpansionFailure is rubash's DISCARD spelling: it
+                // propagates untouched through the surviving frames —
+                // whose epilogues run the frame unwind (locals,
+                // positional params, function_depth -= 1), the
+                // run_unwind_protects analogue that lands funcnest
+                // back at 0 — is absorbed at an eval string boundary
+                // (the rest of the eval string discarded, the outer
+                // script continues), ends a subshell frame, and the
+                // unit driver settles it as the unit's status so the
+                // reader proceeds. A plain Ok return let the list
+                // continue instead (rubash#2721).
                 self.exit_code = 1;
-                return Ok(());
+                return Err(ExecuteError::ExpansionFailure(1));
             }
         }
         let definition_redirects = self
@@ -1570,7 +1599,8 @@ impl Executor {
                     _ => false,
                 };
                 if call_has_own_stdin_body && fd0_endpoint_shadows_mirror {
-                    let saved = self.fd_table.entries.get(&0).cloned();
+                    // rubash#3727: kernel-dup save, not a bare Rc clone -- the bind below retires fd 0's displaced descriptor (FdTable::saved_entry).
+                    let saved = self.fd_table.saved_entry(0)?;
                     self.fd_table
                         .open_input(0, FdReadEndpoint::text(input), false);
                     return Ok((
@@ -1634,7 +1664,8 @@ impl Executor {
             if self.fd_table.is_open_for_read(source_fd)
                 || self.fd_table.read_endpoint(source_fd).is_some()
             {
-                let saved = self.fd_table.entries.get(&0).cloned();
+                // rubash#3727: kernel-dup save, not a bare Rc clone -- the bind below retires fd 0's displaced descriptor (FdTable::saved_entry).
+                let saved = self.fd_table.saved_entry(0)?;
                 // rubash#2256: a spelling target (`< /dev/fd/N`, not the
                 // `<&N` dup instruction) on a regular-file endpoint
                 // binds a FRESH open of the target for the call's
@@ -1674,18 +1705,27 @@ impl Executor {
         // message (the connect pre-line was emitted by the connect).
         if crate::special_paths::is_net_redirect_target(&target) {
             let file = self.open_net_redirect(&target)?;
-            let saved = self.fd_table.entries.get(&0).cloned();
+            // rubash#3727: kernel-dup save, not a bare Rc clone -- the bind below retires fd 0's displaced descriptor (FdTable::saved_entry).
+            let saved = self.fd_table.saved_entry(0)?;
             // rubash#2249: a connected socket is one descriptor in both
             // directions (redir.c netopen), so a `<>` net call binds
             // the same FileFd as fd 0's write endpoint too.
             let file_fd = FileFd::from_file(file, target.clone().into());
-            self.fd_table
-                .open_input(0, FdReadEndpoint::File(file_fd.clone()), false);
             let env = if readwrite {
-                self.fd_table
-                    .open_output(0, FdWriteEndpoint::File(file_fd), false);
+                // rubash#3655: one O_RDWR description — a single
+                // open_readwrite install, not an input bind followed
+                // by an output bind (the second would retire the
+                // first).
+                self.fd_table.open_readwrite(
+                    0,
+                    FdReadEndpoint::File(file_fd.clone()),
+                    FdWriteEndpoint::File(file_fd),
+                    false,
+                );
                 self.save_and_apply_fd0_readwrite_env(&target)
             } else {
+                self.fd_table
+                    .open_input(0, FdReadEndpoint::File(file_fd), false);
                 Vec::new()
             };
             return Ok((
@@ -1735,11 +1775,15 @@ impl Executor {
                 // fails the pair open just as GNU's O_RDWR open fails.
                 let (read_file, write_file) = FileFd::open_readwrite_pair(path.clone())
                     .map_err(|error| crate::posix_errors::path_error(&target, error))?;
-                let saved = self.fd_table.entries.get(&0).cloned();
-                self.fd_table
-                    .open_input(0, FdReadEndpoint::File(read_file), false);
-                self.fd_table
-                    .open_output(0, FdWriteEndpoint::File(write_file), false);
+                // rubash#3727: kernel-dup save, not a bare Rc clone -- the bind below retires fd 0's displaced descriptor (FdTable::saved_entry).
+                let saved = self.fd_table.saved_entry(0)?;
+                // rubash#3655: one description, one install.
+                self.fd_table.open_readwrite(
+                    0,
+                    FdReadEndpoint::File(read_file),
+                    FdWriteEndpoint::File(write_file),
+                    false,
+                );
                 let env = self.save_and_apply_fd0_readwrite_env(&target);
                 return Ok((
                     None,
@@ -1749,7 +1793,8 @@ impl Executor {
             }
             let file = FileFd::open_read(path.clone())
                 .map_err(|error| crate::posix_errors::path_error(&target, error))?;
-            let saved = self.fd_table.entries.get(&0).cloned();
+            // rubash#3727: kernel-dup save, not a bare Rc clone -- the bind below retires fd 0's displaced descriptor (FdTable::saved_entry).
+            let saved = self.fd_table.saved_entry(0)?;
             self.fd_table
                 .open_input(0, FdReadEndpoint::File(file), false);
             return Ok((
@@ -1782,11 +1827,15 @@ impl Executor {
             // head, then a write lands at offset 2, not at 0).
             let (read_file, write_file) = FileFd::open_readwrite_pair(path)
                 .map_err(|error| crate::posix_errors::path_error(&target, error))?;
-            let saved = self.fd_table.entries.get(&0).cloned();
-            self.fd_table
-                .open_input(0, FdReadEndpoint::File(read_file), false);
-            self.fd_table
-                .open_output(0, FdWriteEndpoint::File(write_file), false);
+            // rubash#3727: kernel-dup save, not a bare Rc clone -- the bind below retires fd 0's displaced descriptor (FdTable::saved_entry).
+            let saved = self.fd_table.saved_entry(0)?;
+            // rubash#3655: one description, one install.
+            self.fd_table.open_readwrite(
+                0,
+                FdReadEndpoint::File(read_file),
+                FdWriteEndpoint::File(write_file),
+                false,
+            );
             let env = self.save_and_apply_fd0_readwrite_env(&target);
             return Ok((
                 None,
@@ -1796,7 +1845,8 @@ impl Executor {
         }
         let file = FileFd::open_read(path)
             .map_err(|error| crate::posix_errors::path_error(&target, error))?;
-        let saved = self.fd_table.entries.get(&0).cloned();
+        // rubash#3727: kernel-dup save, not a bare Rc clone -- the bind below retires fd 0's displaced descriptor (FdTable::saved_entry).
+        let saved = self.fd_table.saved_entry(0)?;
         self.fd_table
             .open_input(0, FdReadEndpoint::File(file), false);
         Ok((

@@ -77,6 +77,18 @@ impl Executor {
             &mut stdout_buf,
             &mut stderr,
         )?;
+        // GNU variables.c:5820/6257-6266 sv_strict_posix: unbinding
+        // POSIXLY_CORRECT takes the `var == 0` arm — posixly_correct
+        // re-derives from the name's CURRENT isset-ness (an outer
+        // binding revealed by unsetting a local counts). Element
+        // unsets (`unset 'POSIXLY_CORRECT[0]'`) leave the variable
+        // itself bound and do not re-derive (rubash#3661).
+        if cmd.words[1..]
+            .iter()
+            .any(|word| crate::builtins::arrayref::take_arrayref_flag(word).1 == "POSIXLY_CORRECT")
+        {
+            self.sync_posix_mode_from_variable();
+        }
         let _ = self.write_buffered_builtin_output(cmd, &stdout_buf, &stderr);
         Ok(status)
     }
@@ -338,9 +350,31 @@ impl Executor {
                     // carrier after the unset (rubash#2434). A live
                     // local/tempenv shadow owns the name: unsetting it
                     // removes the shadow, not the global dynamic var.
-                    || (name == "DIRSTACK" && !self.dirstack_shadowed()))
+                    || (name == "DIRSTACK" && !self.dirstack_shadowed())
+                    // rubash#3573: the two dynamic assoc variables are
+                    // likewise not served by dynamic_parameter_is_set
+                    // (owner-table-backed, not scalar-registry), but
+                    // their unbind is the same variables.c:3839 act:
+                    // without the record the #3220 door never stands
+                    // down for an unset name and declare -p keeps
+                    // serving the owner view for a plain post-unset bind.
+                    || matches!(name, "BASH_ALIASES" | "BASH_CMDS"))
             {
                 mark_env_name(&mut self.shell_state.env_vars, UNSET_DYNAMIC_VARS, &name);
+                // unbind_variable destroys the BASH_ARGV0 cell itself
+                // (variables.c:3839): the value a read stored into it is
+                // gone with the cell, and a later `BASH_ARGV0=` bind
+                // creates an ordinary VISIBLE variable — the INVISIBLE
+                // mark was the dynamic cell's unset-value stand-in and
+                // dies with it (rubash#3026).
+                if name == "BASH_ARGV0" {
+                    self.shell_state
+                        .dynamic_cells
+                        .borrow_mut()
+                        .values
+                        .remove("BASH_ARGV0");
+                    unmark_env_name(&mut self.shell_state.env_vars, INVISIBLE_VARS, &name);
+                }
             }
             pushed[arg_index] = Some(name);
         }
@@ -806,6 +840,14 @@ impl Executor {
         }) else {
             return None;
         };
+        // rubash#3573: GNU variables.c:3839 — an unbound dynamic
+        // variable's element unset is a silent no-op; the owner table
+        // is a separate object and survives.
+        if matches!(array_name, "BASH_ALIASES" | "BASH_CMDS")
+            && is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, array_name)
+        {
+            return Some(0);
+        }
         if array_name == "BASH_ALIASES" {
             let key = subscript.trim_matches('\'').trim_matches('"');
             self.shell_state.aliases.remove(key);

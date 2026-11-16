@@ -9,7 +9,8 @@ mod unset;
 pub(crate) use options::{
     is_flag_only_shell_option, is_shell_option, print_shell_option, print_shell_options,
     print_shell_options_by_state, set_shell_option, shell_option_enabled, shell_option_names,
-    shellopts_value, sync_shell_option_flag, SET_O_PRINT_WIDTH, SHOPT_O_PRINT_WIDTH,
+    shellopts_value, sync_posix_mode_from_variable, sync_shell_option_flag, SET_O_PRINT_WIDTH,
+    SHOPT_O_PRINT_WIDTH,
 };
 pub use unset::unset;
 pub(crate) use unset::unset_with_stderr;
@@ -135,8 +136,13 @@ fn prolog_for_env(env_vars: &crate::shell::var_table::VarTable) -> Prolog {
     // the shell-name carrier VERBATIM as the interactive name —
     // a renamed shell invoked by path reported its full path —
     // and a hard-coded "rubash" as the error name, rubash#3256).
-    let script_file = env_vars.get("__RUBASH_SCRIPT_NAME").cloned();
+    // rubash#3048: the file arm prefers the FRAME file carrier
+    // (__RUBASH_CURRENT_FILE = BASH_SOURCE[0], the definition file
+    // inside a function) over the top-level SCRIPT_NAME —
+    // prefix::error_file_name, the same pairing
+    // Executor::current_error_file_name composes.
     let get = |key: &str| env_vars.get(key).cloned();
+    let script_file = crate::builtins::prefix::error_file_name(&get);
     Prolog {
         interactive: env_vars.get("__RUBASH_INTERACTIVE").is_some(),
         shell_basename: crate::builtins::prefix::shell_basename(&get),
@@ -430,6 +436,11 @@ where
 pub(crate) struct DynamicSetView {
     pub name: String,
     pub storage: String,
+    /// True for a scalar cell (BASH_ARGV0): its storage text renders
+    /// through print_var_value's scalar quoting, not array_to_assign
+    /// — the visible registry class was uniformly array-valued until
+    /// rubash#3026.
+    pub scalar: bool,
 }
 
 /// GNU `set` with no arguments: print_var_list (variables.c) — assignment
@@ -488,8 +499,14 @@ where
         // GNU att_invisible (variables.c print_var_list skips
         // invisible_p): COMP_WORDBREAKS is bound invisible at startup, so
         // `set` never lists it even though the variable exists
-        // (rubash#1325).
-        if unset::is_marked_variable(env_vars, INVISIBLE_VARS, name) {
+        // (rubash#1325). A dynamic-set view supersedes the mark: the
+        // mark stands for the dynamic variable's unset cell, and a
+        // supplied view means a by-name read already stored a value
+        // into it — the GNU cell was never att_invisible and now lists
+        // (BASH_ARGV0's materialization, rubash#3026).
+        if unset::is_marked_variable(env_vars, INVISIBLE_VARS, name)
+            && !entry_storage.contains_key(name)
+        {
             continue;
         }
         // GNU variables.c:511-526 (initialize_shell_variables): environment
@@ -540,15 +557,26 @@ where
         }
         // A dynamic registry entry supersedes the mirror cell: the
         // composition is the live value (rubash#2700). The visible
-        // registry class is array-valued, so it renders through the
-        // same array_to_assign form as an array cell.
-        if let Some(storage) = entry_storage.get(name) {
-            writeln!(
-                stdout,
-                "{}={}",
-                name,
-                crate::builtins::declare::format_array_for_output(storage)
-            )?;
+        // registry class is array-valued and renders through the same
+        // array_to_assign form as an array cell; a scalar cell (the
+        // materialized BASH_ARGV0, rubash#3026) takes print_var_value's
+        // scalar quoting like a table entry.
+        if let Some(view) = dynamic.iter().find(|entry| entry.name.as_str() == name) {
+            if view.scalar {
+                writeln!(
+                    stdout,
+                    "{}={}",
+                    name,
+                    shell_quote(&view.storage, posix_mode)
+                )?;
+            } else {
+                writeln!(
+                    stdout,
+                    "{}={}",
+                    name,
+                    crate::builtins::declare::format_array_for_output(&view.storage)
+                )?;
+            }
             continue;
         }
         let Some(value) = value else {
@@ -592,7 +620,7 @@ where
     Ok(())
 }
 
-fn shell_quote(value: &str, posix_mode: bool) -> String {
+pub(crate) fn shell_quote(value: &str, posix_mode: bool) -> String {
     // GNU variables.c print_var_value: dollar-quote for values containing
     // non-printing characters (ansic_shouldquote), sh_single_quote for
     // values containing shell metacharacters (sh_contains_shell_metas),

@@ -38,7 +38,10 @@ fn diag_prolog() -> Prolog {
     // shell_basename keeps the shared basename derivation (the
     // verbatim carrier printed a renamed shell's full path).
     let get = |key: &str| std::env::var(key).ok();
-    let script_file = std::env::var("__RUBASH_SCRIPT_NAME").ok();
+    // rubash#3048: the FRAME file carrier (BASH_SOURCE[0], mirrored to
+    // the process env by the executor's per-command stamp) first, the
+    // top-level SCRIPT_NAME only as the fallback.
+    let script_file = crate::builtins::prefix::error_file_name(&get);
     let error_name = match script_file.as_deref().filter(|name| !name.is_empty()) {
         Some(name) => name.to_string(),
         None => crate::builtins::prefix::fallback_error_name(&get),

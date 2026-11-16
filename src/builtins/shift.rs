@@ -52,7 +52,9 @@ pub fn execute(args: &[String]) -> io::Result<ShiftAction> {
             interactive: false,
             shell_basename: crate::builtins::prefix::shell_basename(&get),
             error_name: crate::builtins::prefix::fallback_error_name(&get),
-            script_file: std::env::var("__RUBASH_SCRIPT_NAME").ok(),
+            // rubash#3048: the FRAME file carrier (BASH_SOURCE[0])
+            // first, the top-level SCRIPT_NAME only as the fallback.
+            script_file: crate::builtins::prefix::error_file_name(&get),
             line: std::env::var("__RUBASH_CURRENT_LINE").ok(),
         }
     });
