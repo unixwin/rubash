@@ -51,6 +51,8 @@
 //! pgrp probe) lands with it. Until fix #2 merges, bats #8 still
 //! fails on the fixed tip even though the leak itself is gone.
 
+#![cfg(unix)]
+
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::Command;
