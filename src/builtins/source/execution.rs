@@ -284,6 +284,9 @@ fn run_source_groups(
                 // rubash#1186: keep logical_line in the same (absolute)
                 // line space as position; see script_driver.rs.
                 token.logical_line += line_offset;
+                // rubash#3605: heredoc_end_line shares that space — see
+                // script_driver.rs.
+                token.heredoc_end_line = token.heredoc_end_line.map(|line| line + line_offset);
             }
         }
         // GNU builtins/evalfile.c:296: a sourced file runs through
