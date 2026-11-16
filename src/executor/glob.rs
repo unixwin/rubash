@@ -1679,11 +1679,10 @@ fn ignore_pattern_matches(pattern: &str, word: &str, extglob: bool, nocase: bool
 ///   advances past `/` (sm_loop.c: the star's retry positions stop
 ///   before the next slash, so a following bracket or extglob group
 ///   is never tried at the slash).
-/// - `[...]` CAN match `/` — but only as GNU BRACKMATCH does: while
-///   scanning members, a member followed by `/` voids the whole
-///   bracket (`[a/]`, `[c/d]` match nothing; `[/]`, `[/a]`, `[!a]`,
-///   `[.-0]` match `/`; a range matched before the slash, as in
-///   `[a-c/]`, still matches).
+/// - `[...]` never matches `/` (sm_loop.c:341), and a class body
+///   containing an unescaped `/` in member position is voided
+///   entirely by BRACKMATCH (`[a/]`, `[c/d]`, `[a-c/]` match
+///   nothing).
 /// - Extglob groups use the same FNM_PATHNAME rules (sm_loop.c
 ///   EXTMATCH): an alternative may match a literal `/`
 ///   (`@(ab/cd)`, `@(/)`), but a `*` before a group cannot carry the
@@ -1748,10 +1747,9 @@ fn strmatch_pathname(pattern: &[char], name: &[char], extglob: bool) -> bool {
             '[' => match parse_bracket_match(p) {
                 Some(class) => {
                     match sc {
-                        // No blanket `/` bar: GNU BRACKMATCH lets a
-                        // bracket match `/`; the FNM_PATHNAME slash
-                        // rule lives in bracket_class_matches.
-                        None => return false,
+                        // sm_loop.c:341 — under FNM_PATHNAME a bracket
+                        // expression can never match `/`, full stop.
+                        None | Some('/') => return false,
                         Some(ch) => {
                             if !bracket_class_matches(&class.body, ch) {
                                 return false;
@@ -1982,71 +1980,99 @@ fn parse_bracket_match(pattern: &[char]) -> Option<BracketMatch> {
 
 /// Test one character against a bracket class body (the text between
 /// `[` and `]`, including any leading `!`/`^` negation and any POSIX
-/// `[:class:]` items).
-/// This is GNU BRACKMATCH (lib/glob/sm_loop.c)
-/// under FNM_PATHNAME, and its slash rule is NOT a blanket bar: members
-/// are tested in order and the scan returns on the first match, but it
-/// aborts (no match at all) as soon as a member is followed by `/`
-/// (sm_loop.c: `if ((flags & FNM_PATHNAME) && c == '/') return 0`).
-/// So `[/]`, `[/a]`, `[!a]` and `[.-0]` match `/`, a range matched
-/// before the slash still matches (`[a-c/]` matches `a`), and `[a/]`
-/// or `[c/d]` — a plain member followed by `/` — match nothing.
-/// A POSIX `[:class:]` is one opaque member (no slash check on the
-/// character after it); `[=...=]` / `[....]` constructs keep their
-/// historical literal-member treatment here.
+/// `[:class:]` items). Slash handling lives in the caller (GMATCH
+/// bars `sc == '/'`) and in `bracket_body_has_slash` (BRACKMATCH's
+/// member-scan poison); member matching itself is the historical
+/// rubash port. `[=...=]` / `[....]` constructs keep their literal-
+/// member treatment here.
 fn bracket_class_matches(class: &[char], ch: char) -> bool {
     let (negate, body) = match class.first() {
         Some('!') | Some('^') => (true, &class[1..]),
         _ => (false, class),
     };
+    // BRACKMATCH under FNM_PATHNAME (sm_loop.c): an unescaped `/` in
+    // member position — member char, range endpoint, or after a
+    // backslash — voids the whole bracket for EVERY test char
+    // (sm_loop.c:450/506/531/575 and the matched-skip loop ~:620 all
+    // `return 0`). So `[a/]`, `[c/d]`, `[a-c/]` match nothing, while
+    // `[:class:]` spans are consumed atomically and cannot smuggle a
+    // slash through.
+    if bracket_body_has_slash(body) {
+        return false;
+    }
     let mut i = 0;
+    let mut matched = false;
     while i < body.len() {
-        // POSIX character class [:alpha:] etc.: one opaque member.
+        // POSIX character class [:alpha:] etc.
         if body[i] == '[' && i + 1 < body.len() && body[i + 1] == ':' {
             if let Some(end) = (i + 2..body.len().saturating_sub(1))
                 .find(|&j| body[j] == ':' && body[j + 1] == ']')
             {
                 let name: String = body[i + 2..end].iter().collect();
                 if posix_class_matches(&name, ch) {
-                    return !negate;
+                    matched = true;
                 }
                 i = end + 2;
                 continue;
             }
         }
-        // One member character (possibly backslash-escaped).
-        let (lo, after_first) = if body[i] == '\\' && i + 1 < body.len() {
-            (body[i + 1], i + 2)
+        let lo = if body[i] == '\\' && i + 1 < body.len() {
+            i += 1;
+            body[i]
         } else {
-            (body[i], i + 1)
+            body[i]
         };
-        // BRACKMATCH slash veto: the character after this member is `/`.
-        if after_first < body.len() && body[after_first] == '/' {
-            return false;
-        }
-        // Range member (a `-` that is not the last class character).
-        if after_first < body.len()
-            && body[after_first] == '-'
-            && after_first + 1 < body.len()
-            && body[after_first + 1] != ']'
-        {
-            let (hi, next_i) = if body[after_first + 1] == '\\' && after_first + 2 < body.len() {
-                (body[after_first + 2], after_first + 3)
+        if i + 2 < body.len() && body[i + 1] == '-' && body[i + 2] != ']' {
+            let hi = if body[i + 2] == '\\' && i + 3 < body.len() {
+                body[i + 3]
             } else {
-                (body[after_first + 1], after_first + 2)
+                body[i + 2]
             };
             if lo <= ch && ch <= hi {
-                return !negate;
+                matched = true;
             }
-            i = next_i;
+            i += if body[i + 2] == '\\' && i + 3 < body.len() {
+                4
+            } else {
+                3
+            };
             continue;
         }
         if lo == ch {
-            return !negate;
+            matched = true;
         }
-        i = after_first;
+        i += 1;
     }
-    negate
+    matched != negate
+}
+
+/// Whether a bracket class body contains an unescaped `/` in member
+/// position — the BRACKMATCH poison that voids the whole bracket under
+/// FNM_PATHNAME. `[:name:]` spans are skipped atomically.
+fn bracket_body_has_slash(body: &[char]) -> bool {
+    let mut i = 0;
+    while i < body.len() {
+        match body[i] {
+            '[' if i + 1 < body.len() && body[i + 1] == ':' => {
+                if let Some(end) = (i + 2..body.len().saturating_sub(1))
+                    .find(|&j| body[j] == ':' && body[j + 1] == ']')
+                {
+                    i = end + 2;
+                    continue;
+                }
+                i += 1;
+            }
+            '\\' if i + 1 < body.len() => {
+                if body[i + 1] == '/' {
+                    return true;
+                }
+                i += 2;
+            }
+            '/' => return true,
+            _ => i += 1,
+        }
+    }
+    false
 }
 
 fn posix_class_matches(name: &str, ch: char) -> bool {
