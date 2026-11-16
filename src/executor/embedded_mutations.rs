@@ -1537,16 +1537,24 @@ impl Executor {
                         // the command while the script continues (braces.tests
                         // "${a+'$('\'}"). parser_error (error.c:300) uses
                         // yy_input_name()=="command substitution" and the
-                        // inherited line_number (evalstring.c push_stream(0))
-                        // — the current command line plus the newlines the
-                        // comsub text consumed.
+                        // inherited line_number — command_substitute re-parses
+                        // the extracted body through parse_and_execute
+                        // (subst.c:7413) with no SEVAL_RESETLINE, so the base
+                        // is the script's line_number at expansion minus one
+                        // (evalstring.c:345 line_number--); the body's own
+                        // lines plus its EOF read then push it to
+                        // current + body_lines + 1. Measured on GNU 5.3.20:
+                        // "${a+'$('\'}" at line N reports N+2 for a one-line
+                        // body, N+3 for a two-line body (rubash#3605 class B,
+                        // run-braces).
                         let eof_line = self
                             .shell_state
                             .env_vars
                             .get("__RUBASH_CURRENT_LINE")
                             .and_then(|line| line.parse::<usize>().ok())
                             .unwrap_or(1)
-                            + source.lines().count().saturating_sub(1);
+                            + source.lines().count()
+                            + 1;
                         eprintln!(
                             "{}unexpected EOF while looking for matching `)'",
                             self.comsub_eof_error_diagnostic(eof_line)
