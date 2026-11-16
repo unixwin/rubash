@@ -1112,6 +1112,26 @@ impl Executor {
                     // opens the window here. The heredoc route reaches the
                     // typed funnel's unclosed-body pre-check through this
                     // dispatch (context HereDocument).
+                    //
+                    // rubash#3816: the scanned body can carry bare DATA_*
+                    // carriers produced upstream (prepare_unquoted_heredoc_expansion
+                    // turns `\``/`\$` into DATA_BACKTICK/DATA_DOLLAR so the
+                    // walker scan does not read them as syntax). The whole-word
+                    // backtick entry restores those carriers before the re-parse
+                    // (decode_backtick_substitution_source); this embedded arm
+                    // must do the same. Without the restore the re-parse's
+                    // dequote tags a bare carrier byte as a literal source byte
+                    // (lexer tagging, #3816), and the argv materialization
+                    // restore (which only handles bare carriers) misses it —
+                    // a literal backtick then leaks as raw 0x1a (heredoc test).
+                    // The walker's scan above already consumed `\` escapes, so
+                    // only the carrier restores apply here (no
+                    // decode_old_style_backtick_source re-pass).
+                    let source = source
+                        .replace(crate::executor::markers::DATA_BACKTICK, "`")
+                        .replace(crate::executor::markers::CTLESC, "")
+                        .replace(crate::executor::markers::DATA_DOLLAR, "$")
+                        .replace(crate::executor::markers::PROTECTED_BACKSLASH, "\\");
                     let saved_backtick_context = self.backtick_body_diagnostic.replace(true);
                     let substitution_output =
                         self.expand_command_substitution_mut_typed_with_context(&source, context);
