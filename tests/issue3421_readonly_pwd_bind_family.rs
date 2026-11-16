@@ -466,9 +466,9 @@ cd ../b; echo "cd2-rc=$? PWD=$PWD"; pwd -L
     assert_eq!(
         stderr,
         format!(
-            "{path}: line 5: PWD: readonly variable\n\
-             {path}: line 6: PWD: readonly variable\n\
-             {path}: line 7: PWD: readonly variable\n"
+            "{path}: line 4: PWD: readonly variable\n\
+             {path}: line 5: PWD: readonly variable\n\
+             {path}: line 6: PWD: readonly variable\n"
         )
     );
 }
