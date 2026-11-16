@@ -15,16 +15,23 @@
 //! so a future "helpful" fallback (or hardcoded table) cannot pass
 //! silently.
 
+#[cfg(unix)]
 use std::fs;
+#[cfg(unix)]
 use std::io::Read;
+#[cfg(unix)]
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::process::{Child, Command, Stdio};
+#[cfg(unix)]
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
 struct Scratch {
     dir: PathBuf,
 }
 
+#[cfg(unix)]
 impl Scratch {
     fn new(tag: &str) -> Self {
         let nanos = SystemTime::now()
@@ -81,6 +88,7 @@ impl Scratch {
     }
 }
 
+#[cfg(unix)]
 impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.dir);
@@ -89,6 +97,7 @@ impl Drop for Scratch {
 
 /// The home directory recorded for `name` in the system passwd
 /// database, read the same way getpwnam sees it on this machine.
+#[cfg(unix)]
 fn passwd_home(name: &str) -> Option<String> {
     let data = fs::read_to_string("/etc/passwd").ok()?;
     for line in data.lines() {

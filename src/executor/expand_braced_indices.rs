@@ -426,6 +426,32 @@ pub(in crate::executor) fn scan_sim_lookup(name: &str) -> Option<ScanSimValue> {
     SCAN_SIM_BINDINGS.with(|map| map.borrow().get(name).cloned())
 }
 
+/// Clear only the simulated bindings (niubash#993 §1): the simple-
+/// command pre-scan's nounset pass records each `:=`/`=` fragment it
+/// passes for its own in-order adjudication, and the per-word `${...}`
+/// error walk that follows must re-record them as IT reaches them — a
+/// `:?` earlier in the list than a `:=` still fires first. The
+/// subscript carry is untouched: its entries remain the real
+/// expansion's single-evaluation contract.
+pub(in crate::executor) fn scan_sim_clear() {
+    SCAN_SIM_BINDINGS.with(|map| map.borrow_mut().clear());
+}
+
+/// Snapshot the simulated bindings (niubash#993 §1). The nounset walk
+/// inside `parameter_expansion_error_in_word_context` records `:=`/`=`
+/// binds for its own left-to-right adjudication; restoring the
+/// snapshot after it returns keeps those records private to that pass
+/// while binds recorded by earlier fragments of the enclosing walk
+/// stay visible.
+pub(in crate::executor) fn scan_sim_snapshot() -> HashMap<String, ScanSimValue> {
+    SCAN_SIM_BINDINGS.with(|map| map.borrow().clone())
+}
+
+/// Restore a `scan_sim_snapshot` result.
+pub(in crate::executor) fn scan_sim_restore(snapshot: HashMap<String, ScanSimValue>) {
+    SCAN_SIM_BINDINGS.with(|map| *map.borrow_mut() = snapshot);
+}
+
 /// Whether the current scan walk is the pipeline-admission predicate's
 /// pure probe.
 pub(in crate::executor) fn scan_pure_mode() -> bool {

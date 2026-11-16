@@ -298,6 +298,20 @@ where
             }
         };
     for name in names_to_print {
+        // rubash#3408: a `not found` diagnostic is only RECORDED by
+        // `diag.free` and rendered when the dispatcher flushes after
+        // the call, while listings go straight to stdout — so on a
+        // merged stream (`2>&1 | cat`) every listing overtook every
+        // diagnostic, against GNU's per-name sequential emission
+        // (builtins/setattr.def `set_or_show_attributes`: each
+        // operand is printed or reported as it is walked). Flush the
+        // pending diagnostics before this name's listing so the byte
+        // stream keeps operand order — the same
+        // flush-before-immediate-write rule `bare_diag_line`
+        // (setattr.rs) follows. The prolog is built only when
+        // something is pending (E4: a diagnostic-free call pays one
+        // `is_empty` check per name).
+        diag.flush_with(|| prolog.build(variables));
         let attrs = DeclarationAttrs {
             exported: underlay_attr(&name, EXPORTED_VARS, |a| a.exported),
             readonly: underlay_attr(&name, READONLY_VARS, |a| a.readonly),

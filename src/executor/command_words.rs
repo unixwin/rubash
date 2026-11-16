@@ -183,6 +183,18 @@ impl Executor {
         {
             return false;
         }
+        // GNU subst.c:12026-12048 expand_word_internal end-of-word: when
+        // the whole expansion is NULL, the word is dropped only for
+        // UNQUOTED state or a quoted `"$@"` (quoted_dollar_at); a
+        // partially/fully quoted word keeps one empty field
+        // (had_quoted_null || PARTIALLY_QUOTED). The remove/keep decision
+        // already ran in removes_unquoted_null_word, so a surviving empty
+        // word must not field-split — the splitter below collapses ""
+        // into zero fields (e.g. `"$*"$x` with `$*` expanding to `''`
+        // and `$x` unset keeps one empty argument).
+        if expanded.is_empty() {
+            return false;
+        }
         // Every remaining term of the result below is conjoined with
         // `field_split_would_change_word`, so a word that does not split at
         // all (the common case: a plain `$i` or `$((...))` loop word whose
