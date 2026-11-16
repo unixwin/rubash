@@ -1451,6 +1451,13 @@ impl Executor {
         // differently (nested `?`, empty-minimum intervals): rewrite
         // to the nested form before compiling (rubash#1058).
         let pattern = translate_posix_ere_quantifiers(&pattern);
+        // Byte mode (rubash#3791): expand non-ASCII chars to their
+        // `\xHH` byte escapes — see expand_non_ascii_to_byte_escapes.
+        let pattern = if byte_mode {
+            Self::expand_non_ascii_to_byte_escapes(&pattern)
+        } else {
+            pattern
+        };
         // GNU regcomp is called WITHOUT REG_NEWLINE (lib/sh/shmatch.c
         // sh_regmatch), so `.` matches a newline (rubash#1058).
         // Granularity follows the locale model (rubash#1061): glibc
@@ -1472,6 +1479,66 @@ impl Executor {
                 .dot_matches_new_line(true)
                 .build()
                 .map(CompiledConditionalRegex::Text)
+        }
+    }
+
+    /// Byte-mode only (rubash#3791): glibc regcomp in the C locale
+    /// reads the pattern as bytes — a non-ASCII char inside a bracket
+    /// expression is the set of its UTF-8 bytes (`[é]` is {0xC3,
+    /// 0xA9}, `[é-ÿ]` is the byte range 0xA9-0xC3 plus 0xC3/0xBF;
+    /// lib/sh/shmatch.c:79-86 sh_regmatch regcomps with REG_EXTENDED
+    /// and no multibyte decoding). The regex crate in bytes mode
+    /// (unicode(false)) rejects every non-ASCII char inside a class
+    /// with "Unicode not allowed here", so expand each one to its
+    /// `\xHH` byte escapes before compiling: ranges then resolve on
+    /// bytes exactly as glibc resolves them, and a literal non-ASCII
+    /// char outside brackets keeps the byte-sequence meaning it
+    /// already had. A backslash before a non-ASCII char is dropped —
+    /// glibc reads `\` + byte as the literal byte, while the crate
+    /// rejects `\é` as an unrecognized escape. Runs after the bracket
+    /// translation (which doubles bare backslashes inside brackets,
+    /// so a `\` + non-ASCII pair can only be an outside-bracket
+    /// escape here) and after the quantifier rewrite (which copies
+    /// bracket spans verbatim). Raw-byte marker pairs (U+E000…)
+    /// expand the same way; pattern and subject stay in the same
+    /// marker encoding, so their consistency is preserved.
+    fn expand_non_ascii_to_byte_escapes(pattern: &str) -> String {
+        let chars: Vec<char> = pattern.chars().collect();
+        let mut out = String::with_capacity(pattern.len());
+        let mut index = 0usize;
+        while index < chars.len() {
+            let c = chars[index];
+            if c == '\\' && index + 1 < chars.len() {
+                let next = chars[index + 1];
+                if next == '\\' {
+                    out.push('\\');
+                    out.push('\\');
+                    index += 2;
+                    continue;
+                }
+                if !next.is_ascii() {
+                    Self::push_char_as_byte_escapes(&mut out, next);
+                    index += 2;
+                    continue;
+                }
+                out.push('\\');
+                index += 1;
+                continue;
+            }
+            if c.is_ascii() {
+                out.push(c);
+            } else {
+                Self::push_char_as_byte_escapes(&mut out, c);
+            }
+            index += 1;
+        }
+        out
+    }
+
+    fn push_char_as_byte_escapes(out: &mut String, c: char) {
+        let mut buf = [0u8; 4];
+        for byte in c.encode_utf8(&mut buf).as_bytes() {
+            out.push_str(&format!("\\x{byte:02X}"));
         }
     }
 
