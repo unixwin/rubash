@@ -344,6 +344,12 @@ impl Executor {
         }
         let raws_aligned = command.assignment_raws.len() == command.assignments.len();
         for (index, (name, value)) in command.assignments.iter().enumerate() {
+            // rubash#3499: GNU abandons the list at the first expansion
+            // failure (subst.c:4288-4296) — a later assignment RHS is
+            // never expanded (its command substitutions never run).
+            if subshell.shell_state.parameter_bad_substitution.get() {
+                break;
+            }
             let (base_name, _) = assignment_name_and_append(name);
             let raw = raws_aligned
                 .then(|| command.assignment_raws.get(index))
@@ -1067,6 +1073,24 @@ impl Executor {
         // stays in the element's `$-`, and a `set -m` inside the
         // element re-arms the variable through flags.c:257.
         subshell.shell_state.job_control.set(false);
+        // A pipeline member runs in a subshell: caught signal traps reset to
+        // the inherited disposition (execute_cmd.c subshell trap reset), so
+        // only traps the member itself installs run at its exit. The
+        // compound and function stages already reset at entry; this
+        // builtin stage missed it, so the parent's live EXIT action
+        // fired at the element's teardown (run_exit_trap_for_status
+        // below) and again at shell exit (rubash#3409: `trap 'echo
+        // bye' EXIT; type ls | cat` printed `bye` twice). GNU
+        // disarms the EXIT trap in the forked element child:
+        // execute_cmd.c:4833 reset_signal_handlers() in the
+        // already-forked simple-command child, via trap.c:1433
+        // reset_or_restore_signal_handlers (SIG_TRAPPED cleared for
+        // EXIT_TRAP, trap string kept); the element still runs its
+        // exit trap (shell.c:1054 subshell_exit calls run_exit_trap
+        // only if signal_is_trapped(0)), so a trap set INSIDE the
+        // element re-arms and fires, exactly as the compound and
+        // function stages already behave.
+        crate::builtins::trap::reset_for_subshell_child(&mut subshell.shell_state.env_vars);
         // GNU execute_cmd.c:6373 do_piping: EVERY element is forked with
         // its fd 1 bound to the pipeline — the pipe for a non-rightmost
         // element, the pipeline's own stdout for the rightmost — never to
@@ -1354,6 +1378,14 @@ impl Executor {
         // while `ls -1 | wc -c` was correct).
         let mut args: Vec<String> = Vec::new();
         for (offset, word) in command.words[1..].iter().enumerate() {
+            // rubash#3499: GNU abandons the word list at the first
+            // expansion failure (subst.c:4288-4296) — later words are
+            // never expanded (same guard as #3019 in
+            // expand_command_words; the sequential stage's twin is
+            // expand_pipeline_stage_arg_words).
+            if self.shell_state.parameter_bad_substitution.get() {
+                break;
+            }
             let index = offset + 1;
             let raw = command
                 .word_metadata
@@ -1405,6 +1437,17 @@ impl Executor {
                     }
                 }
             }
+            // rubash#3499: this word's expansion raised the
+            // bad-substitution verdict — the element is discarded, so
+            // drop every argument gathered so far (a pre-failure
+            // `file` in `rm file ${-x}` must not reach the command;
+            // the concurrent spec's fields are the failure's empty
+            // product, not runnable argv). The loop-top guard above
+            // guarantees the verdict was clear when this word started,
+            // so a set value here is this word's own.
+            if self.shell_state.parameter_bad_substitution.get() {
+                return Vec::new();
+            }
         }
         args
     }
@@ -1451,6 +1494,20 @@ impl Executor {
         // script 'a`q`c' reached the host sed as "a\x1aq\x1ac" and its output
         // lost the literal backticks (rubash#177).
         let (expanded_name, args) = self.expand_stage_argv(command);
+        // rubash#3499: a bad substitution raised while expanding this
+        // element's argv (subst.c:10277-10288 expand_word_error ->
+        // DISCARD) — the element never execs. Its words' empty product
+        // must not reach a child: a `""` argv reached cat as a
+        // filename, and a live-piped producer's bytes escaped the
+        // wrapper's string harvest through the real pipe (the
+        // shell-writer path binds the producer's fd 1 to pipe[0]).
+        // The wrapper harvest owns the status-1 verdict; return the
+        // discarded shape here, before any spawn or redirect. The
+        // wrapper cleared the verdict at entry, so a set value here
+        // is this stage's own failure.
+        if self.shell_state.parameter_bad_substitution.get() {
+            return Ok(Some((String::new(), String::new(), 1)));
+        }
         let mut host_cmd = command.clone();
         host_cmd.words = std::iter::once(expanded_name.clone())
             .chain(args.iter().cloned())
@@ -1679,6 +1736,11 @@ impl Executor {
         );
 
         self.apply_child_environment(&mut process);
+        // rubash#3456: snapshot the arithmetic flags so the prefix
+        // composition below can be adjudicated before the spawn (the
+        // absolute variant below reads them — the host channel already
+        // expanded this prefix once, so a delta would miss it).
+        let prefix_arith_before = self.snapshot_arithmetic_error_flags();
         let raws_aligned = command.assignment_raws.len() == command.assignments.len();
         for (index, (var_name, var_value)) in command.assignments.iter().enumerate() {
             let (base_name, append) = assignment_name_and_append(var_name);
@@ -1711,6 +1773,16 @@ impl Executor {
             if is_valid_process_env(base_name, expanded_value) {
                 process.env(base_name, expanded_value);
             }
+        }
+        // rubash#3456: a fatal arithmetic error in the prefix was already
+        // diagnosed once by the composition above (and the stage status
+        // folds to 1); GNU discards the whole element, so the child must
+        // never spawn — return the dead member now, before any stdio
+        // wiring or spawn. Dropping `process` here releases the pipe
+        // ends it took, so the downstream reads EOF exactly as when
+        // GNU's dead child closed them.
+        if let Some(status) = self.take_prefix_arith_failure_absolute(&prefix_arith_before) {
+            return Ok(self.dead_member_stage_result(String::new(), String::new(), status));
         }
         if fd0_redirect_wins {
             self.apply_external_stdin_redirect(command, &mut process)?;

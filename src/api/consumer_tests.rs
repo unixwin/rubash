@@ -3494,15 +3494,25 @@ fn issue2875_require_rubash_binary() {
     } else {
         "rubash"
     };
-    let resolved = crate::executor::test_rubash_binary_from_env()
-        .or_else(crate::executor::test_rubash_binary_from_current_exe)
-        .or_else(|| std::env::current_exe().ok());
+    let env_arm = crate::executor::test_rubash_binary_from_env();
+    let exe_arm = crate::executor::test_rubash_binary_from_current_exe();
+    let current = std::env::current_exe().ok();
+    let resolved = env_arm
+        .clone()
+        .or(exe_arm.clone())
+        .or_else(|| current.clone());
     let is_rubash = resolved
         .as_ref()
         .is_some_and(|path| path.file_name().and_then(|name| name.to_str()) == Some(binary_name));
     assert!(
         is_rubash,
-        "issue2875 precondition (rubash#3292): no rubash binary found — on a fresh target run `cargo build --locked --bin rubash` first, or run the full `cargo test` so cargo builds the bin; otherwise the `<(` child falls back to the lib-test binary, which rejects `-c`"
+        "issue2875 precondition (rubash#3292): no rubash binary found — on a fresh target run `cargo build --locked --bin rubash` first, or run the full `cargo test` so cargo builds the bin; otherwise the `<(` child falls back to the lib-test binary, which rejects `-c`.\n\
+         diagnostics: CARGO_BIN_EXE_rubash={:?} env_arm={:?} exe_arm={:?} current_exe={:?} resolved={:?}",
+        std::env::var_os("CARGO_BIN_EXE_rubash"),
+        env_arm,
+        exe_arm,
+        current,
+        resolved,
     );
 }
 

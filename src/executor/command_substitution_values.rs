@@ -514,7 +514,7 @@ impl Executor {
             // absent or empty (rubash#3501). The gate reads the JOINED
             // word: one "" positional joins to "" and is silent only
             // unquoted — quoted, GNU diagnoses (follow-up #3581).
-            if self.pattern_word_is_silent(var_name, !quoted) {
+            if self.pattern_word_is_silent(var_name, true, quoted) {
                 return Some(vec![]);
             }
             let pattern = self.expand_parameter_pattern_word(pattern);
@@ -529,7 +529,7 @@ impl Executor {
             }
             // GNU subst.c:9362-9367 parameter_brace_patsub: absent value
             // returns NULL before getpattern (rubash#3501).
-            if self.pattern_word_is_silent(var_name, false) {
+            if self.pattern_word_is_silent(var_name, false, false) {
                 return Some(vec![]);
             }
             let pattern = self.expand_parameter_pattern_word(pattern);
@@ -545,7 +545,7 @@ impl Executor {
             }
             // GNU subst.c:9604-9608 parameter_brace_casemod: same
             // absent-value gate as patsub (rubash#3501).
-            if self.pattern_word_is_silent(var_name, false) {
+            if self.pattern_word_is_silent(var_name, false, false) {
                 return Some(vec![]);
             }
             let pattern = self.expand_embedded_parameters(pattern);
@@ -620,14 +620,16 @@ impl Executor {
 
     /// Per-element values of an `AtModified` segment (rubash#1456): the
     /// segment body is `<target><op>` where the admission gate already
-    /// proved the target is `@` or `name[@]` and the operator is one of
-    /// the pattern/replacement/case forms. Resolution reuses the exact
-    /// helpers the whole-word forms use — `positional_modified_word_values`
-    /// for `@` (quoted `@` semantics: the operator applies per parameter)
-    /// and `array_pattern_word_values` for `name[@]` — so the per-element
-    /// results are identical to the standalone `"${...}"` expansion; only
-    /// the enclosing word's affix attachment differs (handled by the
-    /// segment expander).
+    /// proved the target is `@`, `*`, `name[@]` or `name[*]` (star forms
+    /// rubash#3581) and the operator is one of the pattern/replacement/
+    /// case forms. Resolution reuses the exact helpers the whole-word
+    /// forms use — `positional_modified_word_values` for `@` and `*`
+    /// (quoted `@`/` *` semantics: the operator applies per parameter,
+    /// then the `*` results join with IFS[0]) and
+    /// `array_pattern_word_values` for `name[@]` / `name[*]` — so the
+    /// per-element results are identical to the standalone `"${...}"`
+    /// expansion; only the enclosing word's affix attachment differs
+    /// (handled by the segment expander).
     pub(in crate::executor) fn at_modified_segment_values(
         &self,
         inner: &str,
@@ -639,7 +641,13 @@ impl Executor {
         // joined word as silent for a one-"" list — the previous
         // hardcoded `true` diagnosed it (rubash#3501). Quoted segments
         // keep `true` (a quoted one-"" list diagnoses, #3581).
-        if inner.starts_with('@') {
+        //
+        // The admission gate proved the target is one of `@`, `*`,
+        // `name[@]`, `name[*]`; a leading `*` can only be the positional
+        // star target (array names never start with `*`, indirect `!`
+        // targets are not admitted), so it routes to the positional
+        // helper exactly like `@` (rubash#3581).
+        if inner.starts_with('@') || inner.starts_with('*') {
             return self
                 .positional_modified_word_values(inner, quoted)
                 .unwrap_or_default();
@@ -715,6 +723,7 @@ impl Executor {
                             alternate_fields.get(slot).cloned().unwrap_or_default()
                         }
                         QuotedPositionalAtSegment::Literal { .. }
+                        | QuotedPositionalAtSegment::LiteralInAtSpan { .. }
                         | QuotedPositionalAtSegment::VerbatimQuoted(_) => Vec::new(),
                     },
                     |literal| self.expand_embedded_parameters(literal),
@@ -1409,6 +1418,20 @@ enum QuotedPositionalAtSegment {
     /// expansion introducer). For `$'...'` the stored text is the
     /// ansicstr-decoded body; for `'...'` it is the verbatim body.
     VerbatimQuoted(String),
+    /// A literal piece carved out of a quoted span that CONTAINS a
+    /// word-list source (`"x$@"` -> piece `x`, `"$(t)$e$@"` -> piece
+    /// `$(t)$e`). GNU's `"` arm expands the whole span in one inner
+    /// expand_word_internal call (subst.c:11686-11713): when the inner
+    /// expansion comes back NULL because the span's only producer was an
+    /// empty $@-list, the span contributes quoted_dollar_at++, NOT
+    /// had_quoted_null (subst.c:11744-11749) — `"$(true)$@"` vanishes
+    /// where `"$(true)""$@"` keeps one empty field. The flag differs
+    /// from `Literal{quoted}` precisely in the empty-expansion verdict.
+    /// The stored text is cooked by the double-quote walker
+    /// (remove_double_quoted_into_cursor), so a literal `''` inside the
+    /// span survives as data (`"''$@"` -> `''a`) and `\` keeps the
+    /// dquote escape rules.
+    LiteralInAtSpan { text: String },
     /// `quoted` distinguishes a `"$@"`/`"${@}"` span from a bare unquoted
     /// `$@`/`${@}`: quoted elements' IFS characters are quote-protected data
     /// (GNU CTLESC, subst.c:12273+ word splitting skips them); unquoted
@@ -1540,32 +1563,45 @@ fn at_slice_segment_body(inner: &str) -> Option<AtSliceTarget> {
 
 /// Validate an `${...}` inner body as a per-element-operator word-list
 /// source for the segment scanners (`name[@]%pat`, `name[@]/pat/repl`,
-/// `name[@]^^`, `@%pat`, ...; rubash#1456).
+/// `name[@]^^`, `@%pat`, `name[*]%pat`, `*%pat`, ...; rubash#1456,
+/// star forms rubash#3581).
 ///
 /// GNU anchor — subst.c:10119-10128 parameter_brace_expand calls
 /// chk_atstar (subst.c:7635-7639) BEFORE the operator switch, so a quoted
 /// `[@]`/`@` target keeps quoted_dollar_at and the operator is applied
 /// per element (subst.c:9777 parameter_brace_expand's array loop), never
-/// to the space-joined string the generic path produces.
+/// to the space-joined string the generic path produces. The same
+/// chk_atstar call covers the `*` targets: GNU applies the operator per
+/// element for `[*]`/` *` exactly as for `[@]`/`@` and joins the results
+/// afterwards (oracle-verified: `a=(xx hyy); "${a[*]#h}"` is `xx yy`).
 ///
 /// Admission is a whitelist (rubash#117 discipline), mirroring
 /// `at_slice_segment_body`: the body must parse through one of the three
 /// pure text operator parsers the whole-word helpers themselves use, and
-/// its target must be exactly `@` or `name[@]`. Declined: `[*]` targets
-/// (GNU joins those into one word — the String path already does),
-/// `:-`-family operators (no per-element loop in GNU; the word stays a
-/// single value on the braced-alternate path), `${name[@]@Q}`-style
-/// transforms (different resolver), `!`-indirect targets, and bodies
-/// containing `$(` or a backtick anywhere (the `&self` segment resolver
-/// cannot execute command substitutions; those stay on the generic path).
+/// its target must be exactly `@`, `*`, `name[@]` or `name[*]`. The `*`
+/// forms were declined by #1456 on the grounds that GNU joins them into
+/// one word and "the String path already does" the join — but that
+/// rationale only holds for the VALUE: the scalar path's removal gate
+/// hardcodes `empty_is_silent = true` (`expand_parameter_pattern_removal`),
+/// so a quoted one-`""` `[*]`/` *` list stays silent where GNU diagnoses
+/// (subst.c:10320 reads the QUOTED_NULL-marked joined word, 10133-10140).
+/// The star forms therefore belong on this path too (rubash#3581).
+/// Declined: `:-`-family operators (no per-element loop in GNU; the word
+/// stays a single value on the braced-alternate path),
+/// `${name[@]@Q}`-style transforms (different resolver), `!`-indirect
+/// targets, and bodies containing `$(` or a backtick anywhere (the `&self`
+/// segment resolver cannot execute command substitutions; those stay on
+/// the generic path).
 fn at_modified_segment_body(inner: &str) -> bool {
     if inner.contains("$(") || inner.contains('`') {
         return false;
     }
     let target_ok = |var_name: &str| {
         var_name == "@"
+            || var_name == "*"
             || var_name
                 .strip_suffix("[@]")
+                .or_else(|| var_name.strip_suffix("[*]"))
                 .is_some_and(|name| is_shell_name(name))
     };
     if let Some((var_name, _, _)) = parse_indirect_pattern_removal(inner) {
@@ -2049,10 +2085,19 @@ fn quoted_body_positional_at_segments(
 
     while index < body.len() {
         match body[index] {
-            '`' | '\\' => return None,
+            '`' => return None,
+            // GNU parse.y skip_double_quoted: inside `"..."` a backslash
+            // only escapes `$`, `"`, `\`, `` ` `` and newline — a `\$` must
+            // not be read as an expansion start; before any other
+            // character the backslash is literal data and the next byte is
+            // scanned normally.
+            '\\' => match body.get(index + 1) {
+                Some('$' | '"' | '\\' | '`' | '\n') => index += 2,
+                _ => index += 1,
+            },
             '$' if body.get(index + 1) == Some(&'{') => {
                 if body.get(index + 2) == Some(&'@') && body.get(index + 3) == Some(&'}') {
-                    push_body_piece(&mut segments, &body[piece_start..index])?;
+                    push_body_piece(&mut segments, &body[piece_start..index], true)?;
                     segments.push(QuotedPositionalAtSegment::PositionalAt(true));
                     saw_positional_at = true;
                     index += 4;
@@ -2065,7 +2110,7 @@ fn quoted_body_positional_at_segments(
                     if token.first() == Some(&'!') {
                         let ind_name: String = token[1..].iter().collect();
                         if let Some((base, star)) = indirect_array_target(env_vars, &ind_name) {
-                            push_body_piece(&mut segments, &body[piece_start..index])?;
+                            push_body_piece(&mut segments, &body[piece_start..index], true)?;
                             segments.push(if star {
                                 QuotedPositionalAtSegment::ArrayStar(base, true)
                             } else {
@@ -2080,7 +2125,7 @@ fn quoted_body_positional_at_segments(
                     if token.len() > 3 && token[token.len() - 3..] == ['[', '@', ']'] {
                         let name: String = token[..token.len() - 3].iter().collect();
                         if is_shell_name(&name) {
-                            push_body_piece(&mut segments, &body[piece_start..index])?;
+                            push_body_piece(&mut segments, &body[piece_start..index], true)?;
                             segments.push(QuotedPositionalAtSegment::ArrayAt(name, true));
 
                             saw_positional_at = true;
@@ -2115,7 +2160,7 @@ fn quoted_body_positional_at_segments(
                             // the shape gate below runs on the true span.
                             let true_inner = &rest[..end_byte];
                             if let Some(target) = at_slice_segment_body(true_inner) {
-                                push_body_piece(&mut segments, &body[piece_start..index])?;
+                                push_body_piece(&mut segments, &body[piece_start..index], true)?;
                                 segments.push(match target {
                                     AtSliceTarget::Array => {
                                         QuotedPositionalAtSegment::ArrayAtSlice(
@@ -2141,7 +2186,7 @@ fn quoted_body_positional_at_segments(
                             // brace-aware true inner, same chk_atstar
                             // anchor as the slice gate above.
                             if at_modified_segment_body(true_inner) {
-                                push_body_piece(&mut segments, &body[piece_start..index])?;
+                                push_body_piece(&mut segments, &body[piece_start..index], true)?;
                                 segments.push(QuotedPositionalAtSegment::AtModified(
                                     true_inner.to_string(),
                                     true,
@@ -2196,7 +2241,7 @@ fn quoted_body_positional_at_segments(
                 }
                 let name: String = body[index + 1..end].iter().collect();
                 if let Some((base, star)) = nameref_array_target(nameref_target, &name) {
-                    push_body_piece(&mut segments, &body[piece_start..index])?;
+                    push_body_piece(&mut segments, &body[piece_start..index], true)?;
                     segments.push(if star {
                         QuotedPositionalAtSegment::ArrayStar(base, true)
                     } else {
@@ -2210,7 +2255,7 @@ fn quoted_body_positional_at_segments(
                 index += 1;
             }
             '$' if body.get(index + 1) == Some(&'@') => {
-                push_body_piece(&mut segments, &body[piece_start..index])?;
+                push_body_piece(&mut segments, &body[piece_start..index], true)?;
                 segments.push(QuotedPositionalAtSegment::PositionalAt(true));
                 saw_positional_at = true;
                 index += 2;
@@ -2223,7 +2268,7 @@ fn quoted_body_positional_at_segments(
     if !saw_positional_at {
         return None;
     }
-    push_body_piece(&mut segments, &body[piece_start..])?;
+    push_body_piece(&mut segments, &body[piece_start..], true)?;
     Some(segments)
 }
 
@@ -2249,7 +2294,7 @@ fn push_quoted_span_segment(
     if push_quoted_positional_literal_segment(segments, run, false).is_none() {
         return false;
     }
-    if push_body_piece(segments, body).is_none() {
+    if push_body_piece(segments, body, false).is_none() {
         return false;
     }
     true
@@ -2283,18 +2328,39 @@ fn push_verbatim_quoted_span_segment(
     true
 }
 
-fn push_body_piece(segments: &mut Vec<QuotedPositionalAtSegment>, chars: &[char]) -> Option<()> {
+fn push_body_piece(
+    segments: &mut Vec<QuotedPositionalAtSegment>,
+    chars: &[char],
+    in_at_span: bool,
+) -> Option<()> {
     if chars.is_empty() {
         return Some(());
     }
-    if chars.contains(&'`') || chars.contains(&'\\') {
+    if chars.contains(&'`') {
         return None;
     }
     let raw = chars.iter().collect::<String>();
-    segments.push(QuotedPositionalAtSegment::Literal {
-        text: crate::lexer::remove_shell_quotes(&raw),
-        quoted: true,
-    });
+    if in_at_span {
+        // The piece sits inside a `"..."` body, so cook it with the same
+        // double-quote walker the lexer runs on that context
+        // (remove_double_quoted_into_cursor): `\` escapes only before
+        // `$"/`` ` ``\`/newline and stays literal otherwise, `'` travels
+        // as DATA_SQUOTE, and `$(`/`${`/`$name` keep their expansion
+        // spelling for the expander. remove_shell_quotes would wrongly
+        // strip literal `''` pairs (`"''$@"` -> `''a`, not `a`).
+        let mut text = String::with_capacity(raw.len());
+        let (rest, segment_cut) =
+            crate::lexer::remove_double_quoted_into_cursor(&mut text, &raw, false, false);
+        if segment_cut || !rest.is_empty() {
+            return None;
+        }
+        segments.push(QuotedPositionalAtSegment::LiteralInAtSpan { text });
+    } else {
+        segments.push(QuotedPositionalAtSegment::Literal {
+            text: crate::lexer::remove_shell_quotes(&raw),
+            quoted: true,
+        });
+    }
     Some(())
 }
 
@@ -2443,6 +2509,22 @@ where
                 }
                 current_present = true;
             }
+            QuotedPositionalAtSegment::LiteralInAtSpan { text } => {
+                // The piece sits inside a span that also carries a
+                // word-list source: GNU expands the whole span in one
+                // inner pass (subst.c:11686-11713). A non-empty piece
+                // affixes like any quoted literal (literal `''`/`\` data
+                // survives via the double-quote cooked spelling); an
+                // empty one is folded into the span's NULL-with-dollar_at
+                // verdict (subst.c:11744-11749) and contributes nothing.
+                let expanded = expand_literal(text);
+                if !expanded.is_empty() {
+                    saw_non_empty_expansion = true;
+                    current_has_quoted = true;
+                    current.push_str(&protect_ifs_field_chars(&expanded, ifs));
+                    current_present = true;
+                }
+            }
             QuotedPositionalAtSegment::PositionalAt(quoted)
             | QuotedPositionalAtSegment::ArrayAt(_, quoted)
             | QuotedPositionalAtSegment::ArrayAtSlice(_, quoted)
@@ -2506,11 +2588,18 @@ where
     }
 
     if current_present {
-        // GNU expand_word_internal (subst.c 12026-12052): a word containing a
-        // quoted $@ whose every part expands empty produces NO word at all
-        // (quoted_dollar_at beats the quoted-null retention). Only when some
-        // part actually expanded (or positional params exist) is the word kept.
-        if saw_positional_at && !saw_non_empty_expansion {
+        // GNU expand_word_internal (subst.c:12026-12048): when the whole
+        // expansion is empty the had_quoted_null check runs FIRST — "the
+        // exception appears to be that quoted null strings result in null
+        // arguments" — so a quoted segment that expanded empty ("$(true)",
+        // `""`, `"$e"`) keeps ONE empty word even when quoted_dollar_at is
+        // set (`"$(true)""$@"` is one arg, not zero). The quoted_dollar_at
+        // discard (subst.c:12045-12046) only fires when nothing quoted
+        // contributed a null: a bare `"$@"` still vanishes, but here that
+        // means no quoted segment participated at all (a PositionalAt
+        // segment's own `quoted` flag sets current_has_quoted only after a
+        // non-empty resolve, so it cannot keep the word by itself).
+        if saw_positional_at && !saw_non_empty_expansion && !current_has_quoted {
             return Vec::new();
         }
         words.push((current, current_has_quoted));
