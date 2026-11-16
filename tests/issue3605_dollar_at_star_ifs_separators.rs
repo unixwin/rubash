@@ -223,3 +223,33 @@ fn assign_operator_stores_dequoted_empty_rhs() {
     assert!(stderr.is_empty(), "stderr not empty: {stderr}");
     assert_eq!(code, Some(0));
 }
+
+#[test]
+fn star_modified_forms_join_on_ifs_first_char() {
+    // GNU string_list_pos_params (subst.c:3030-3057): every modified `*`
+    // form — transform `${*@Q}`/`${*@a}`, pattern removal `${*/1/X}` and
+    // case mod `${*,,}` — joins elements with ifs_firstchar, which is the
+    // empty string when IFS is set empty. The Posix-888 dollar_at ' '
+    // fallback applies only to the UNQUOTED expansion. Byte-verified
+    // against GNU Bash 5.3.20 (probe /tmp/s9_q2.sh 2026-11-16).
+    let (stdout, stderr, code) = rubash_file(
+        "recho() { local i=0; for a; do i=$((i+1)); printf 'argv[%d] = <%s>\\n' \"$i\" \"$a\"; done; }\n\
+         set -- 1 2\n\
+         IFS=\n\
+         recho \"${*@Q}\"\n\
+         recho \"${var-${*@Q}}\"\n\
+         unset var; recho \"${var-x${*@Q}y}\"\n\
+         recho \"${*/1/X}\"\n\
+         recho \"${*,,}\"\n",
+    );
+    assert_eq!(
+        stdout,
+        "argv[1] = <'1''2'>\n\
+         argv[1] = <'1''2'>\n\
+         argv[1] = <x'1''2'y>\n\
+         argv[1] = <X2>\n\
+         argv[1] = <12>\n"
+    );
+    assert!(stderr.is_empty(), "stderr not empty: {stderr}");
+    assert_eq!(code, Some(0));
+}

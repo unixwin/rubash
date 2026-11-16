@@ -3407,15 +3407,20 @@ impl Executor {
         if outer_double_quoted
             && !fragment_quoted
             && (alternate.contains("$@")
-                || alternate.contains("${@}")
+                || alternate.contains("${@")
                 // rubash#1993: `$*` in the alternate of a double-quoted
                 // ${param+word} carries the same quoted context — GNU
                 // joins it with IFS[0] into the ONE field the affixes
                 // glue to (`"${1+  $*  }"` is `  a b  c  ` for
                 // `set -- "a b" '' c` with IFS unset), it does not
-                // field-split into one word per parameter.
+                // field-split into one word per parameter. The prefix
+                // (not the exact `${*}`) admits modified forms too:
+                // `"${var-${*:1}}"` / `"${var-${*#}}"` are `$*`-family
+                // words whose quoted result joins on IFS[0]
+                // (param_expand passes `quoted` into the alternate,
+                // subst.c:7840-7860; star9 L45).
                 || alternate.contains("$*")
-                || alternate.contains("${*}"))
+                || alternate.contains("${*"))
         {
             // GNU subst.c:12026-12035 (expand_word_internal): the enclosing
             // double-quoted ${...} retains one empty field when the used
