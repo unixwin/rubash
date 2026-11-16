@@ -58,9 +58,18 @@ cat marks 2>/dev/null
 echo tail
 "#;
     let (stdout, _, _) = rubash_script(script);
-    assert!(stdout.contains("invert-body"), "invert coproc body suppressed: {stdout:?}");
-    assert!(stdout.contains("if-body"), "if-test coproc body suppressed: {stdout:?}");
-    assert!(stdout.contains("tail"), "top-level errexit wrongly suppressed: {stdout:?}");
+    assert!(
+        stdout.contains("invert-body"),
+        "invert coproc body suppressed: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("if-body"),
+        "if-test coproc body suppressed: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("tail"),
+        "top-level errexit wrongly suppressed: {stdout:?}"
+    );
 }
 
 #[test]
@@ -72,7 +81,10 @@ echo tail
 "#;
     let (stdout, _, _) = rubash_script(script);
     assert!(stdout.contains("tail"), "script died: {stdout:?}");
-    assert!(!stdout.contains("dead"), "plain coproc wrongly exempted: {stdout:?}");
+    assert!(
+        !stdout.contains("dead"),
+        "plain coproc wrongly exempted: {stdout:?}"
+    );
 }
 
 #[test]
@@ -107,7 +119,13 @@ fn non_exempt_comsub_and_procsub_stay_dead() {
 "#;
     let (stdout, _, _) = rubash_script(script);
     assert!(stdout.contains("x:"), "x line missing: {stdout:?}");
-    assert!(!stdout.contains("x:top"), "plain comsub wrongly exempted: {stdout:?}");
-    assert!(!stdout.contains("px"), "procsub wrongly exempted: {stdout:?}");
+    assert!(
+        !stdout.contains("x:top"),
+        "plain comsub wrongly exempted: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("px"),
+        "procsub wrongly exempted: {stdout:?}"
+    );
     assert!(stdout.contains("e:"), "e line missing: {stdout:?}");
 }
