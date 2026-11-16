@@ -25,12 +25,14 @@
 //! cell below therefore binds the substitution to fd 3 and closes it
 //! explicitly (`exec 3>&-`), which runs the deferred body
 //! synchronously (close_persistent_output_fd) before the post-close
-//! reads. Eight regression cells are fail-first on the unfixed base
-//! (primitive, body-reads, cat, compound, twice, readwrite, loop,
-//! nested — post-close read rc=1, empty line). The devnull cell
-//! passes on base either way (EOF rc=1 on /dev/null vs EBADF rc=1
-//! on the retired entry — same observed rc), and the no-procsub
-//! control and the implicit-close documentation cell pass too.
+//! reads. Nine cells are fail-first on the unfixed base (measured
+//! on Linux, base f56716b5: 2 passed / 9 failed): eight regression
+//! cells (primitive, body-reads, cat, compound, twice, readwrite,
+//! loop, nested — post-close read rc=1, empty line) plus devnull,
+//! which fails on the EBADF diagnostic itself (`read: 0: read error:
+//! Bad file descriptor` on stderr) even though its rc and stdout
+//! match. The no-procsub control and the implicit-close documentation
+//! cell pass on base too.
 //! Unix-only hazard: the bind-time retire (retire_read_arm /
 //! retire_write_arm) is `#[cfg(unix)]` — a no-op on Windows — so
 //! the fail-first leg MUST run on Linux; on Windows the pin passes
