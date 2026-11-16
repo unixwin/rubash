@@ -287,6 +287,45 @@ fn fragment_references_var(inner: &str, var: &str) -> bool {
     false
 }
 
+/// Whether a `${...}` body's expansion consults IFS even though it does
+/// not textually name it: positional/array list expansions. GNU evaluates
+/// a word's fragments strictly left-to-right, so a mid-word `${IFS=}` /
+/// `${IFS:=-}` bind only affects fragments AFTER it (subst.c:9777
+/// parameter_brace_expand → `case '='`); the assignment pre-scan hoists
+/// the bind ahead of the whole word, and the rubash#1169 freeze must
+/// cover these fragments exactly like a textual `$IFS` read
+/// (dollar-star7.sub: `${*}${IFS=}${*}${IFS:=-}"${*}"` — the first `${*}`
+/// renders under the unset IFS, the second under the set-null IFS).
+fn fragment_depends_on_ifs(inner: &str) -> bool {
+    // `${*}`/`${@}` subjects (after a `!` indirection prefix) join and
+    // protect elements on the live IFS. `${#*}`/`${#@}` are COUNTS — the
+    // `#` subject arm does not consult IFS.
+    let mut subject = inner;
+    if let Some(rest) = subject.strip_prefix('!') {
+        subject = rest;
+    }
+    if matches!(subject.chars().next(), Some('*' | '@')) {
+        return true;
+    }
+    // `name[@]`/`name[*]` array-list subscripts anywhere in the body
+    // (subject or nested expansion word) expand per IFS join/split.
+    if inner.contains("[@]") || inner.contains("[*]") {
+        return true;
+    }
+    // Nested bare `$*`/`$@`/`${*}`/`${@}` inside the body.
+    let bytes = inner.as_bytes();
+    for i in 0..bytes.len().saturating_sub(1) {
+        if bytes[i] == b'$' {
+            match bytes[i + 1] {
+                b'*' | b'@' => return true,
+                b'{' if matches!(bytes.get(i + 2), Some(b'*' | b'@')) => return true,
+                _ => {}
+            }
+        }
+    }
+    false
+}
+
 impl Executor {
     pub(in crate::executor) fn expand_parameter_word(&self, word: &str) -> String {
         // TODO(subst.c/parse.y): The `word` half of ${parameter:-word},
@@ -1537,7 +1576,8 @@ impl Executor {
                 for target in &freeze_targets {
                     for (prev_inner, prev_index) in &earlier_fragments {
                         if !fragment_is_pure(prev_inner)
-                            || !fragment_references_var(prev_inner, target)
+                            || !(fragment_references_var(prev_inner, target)
+                                || (target == "IFS" && fragment_depends_on_ifs(prev_inner)))
                         {
                             continue;
                         }
