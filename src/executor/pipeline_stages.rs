@@ -344,6 +344,12 @@ impl Executor {
         }
         let raws_aligned = command.assignment_raws.len() == command.assignments.len();
         for (index, (name, value)) in command.assignments.iter().enumerate() {
+            // rubash#3499: GNU abandons the list at the first expansion
+            // failure (subst.c:4288-4296) — a later assignment RHS is
+            // never expanded (its command substitutions never run).
+            if subshell.shell_state.parameter_bad_substitution.get() {
+                break;
+            }
             let (base_name, _) = assignment_name_and_append(name);
             let raw = raws_aligned
                 .then(|| command.assignment_raws.get(index))
@@ -1354,6 +1360,14 @@ impl Executor {
         // while `ls -1 | wc -c` was correct).
         let mut args: Vec<String> = Vec::new();
         for (offset, word) in command.words[1..].iter().enumerate() {
+            // rubash#3499: GNU abandons the word list at the first
+            // expansion failure (subst.c:4288-4296) — later words are
+            // never expanded (same guard as #3019 in
+            // expand_command_words; the sequential stage's twin is
+            // expand_pipeline_stage_arg_words).
+            if self.shell_state.parameter_bad_substitution.get() {
+                break;
+            }
             let index = offset + 1;
             let raw = command
                 .word_metadata
@@ -1405,6 +1419,17 @@ impl Executor {
                     }
                 }
             }
+            // rubash#3499: this word's expansion raised the
+            // bad-substitution verdict — the element is discarded, so
+            // drop every argument gathered so far (a pre-failure
+            // `file` in `rm file ${-x}` must not reach the command;
+            // the concurrent spec's fields are the failure's empty
+            // product, not runnable argv). The loop-top guard above
+            // guarantees the verdict was clear when this word started,
+            // so a set value here is this word's own.
+            if self.shell_state.parameter_bad_substitution.get() {
+                return Vec::new();
+            }
         }
         args
     }
@@ -1451,6 +1476,20 @@ impl Executor {
         // script 'a`q`c' reached the host sed as "a\x1aq\x1ac" and its output
         // lost the literal backticks (rubash#177).
         let (expanded_name, args) = self.expand_stage_argv(command);
+        // rubash#3499: a bad substitution raised while expanding this
+        // element's argv (subst.c:10277-10288 expand_word_error ->
+        // DISCARD) — the element never execs. Its words' empty product
+        // must not reach a child: a `""` argv reached cat as a
+        // filename, and a live-piped producer's bytes escaped the
+        // wrapper's string harvest through the real pipe (the
+        // shell-writer path binds the producer's fd 1 to pipe[0]).
+        // The wrapper harvest owns the status-1 verdict; return the
+        // discarded shape here, before any spawn or redirect. The
+        // wrapper cleared the verdict at entry, so a set value here
+        // is this stage's own failure.
+        if self.shell_state.parameter_bad_substitution.get() {
+            return Ok(Some((String::new(), String::new(), 1)));
+        }
         let mut host_cmd = command.clone();
         host_cmd.words = std::iter::once(expanded_name.clone())
             .chain(args.iter().cloned())

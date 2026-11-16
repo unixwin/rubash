@@ -18,7 +18,8 @@ use crate::executor::{ExecuteError, Executor};
 use crate::history::SessionHistory;
 use crate::history_expand::{HistChars, HistCtx};
 use crate::lexer::{
-    expand_aliases_in_source, tokenize, tokenize_with_initial_posix, AliasLookup, Token, TokenKind,
+    expand_aliases_in_source_marked, tokenize, tokenize_with_initial_posix,
+    tokenize_with_initial_posix_marked, AliasLookup, Token, TokenKind,
 };
 use crate::parser::CommandNode;
 
@@ -371,8 +372,21 @@ pub fn script_uses_runtime_parse_gates(contents: &str) -> bool {
 /// (parse.y:5751-5769): posix keeps reserved words as keywords, default
 /// mode lets an alias replace them (rubash#414).
 pub(crate) fn expand_group_aliases(executor: &Executor, source: &str) -> String {
+    expand_group_aliases_marked(executor, source).0
+}
+
+/// `expand_group_aliases` plus the byte offsets of newlines the
+/// expansion itself introduced — GNU consumes pushed alias text through
+/// shell_getc without the yy_readline_get line_number bump
+/// (parse.y:2504), so those newlines must not advance the token line
+/// stamps (rubash#3605 run-nquote: `alias foo=$'echo foo\\n\\nquux\\n'`
+/// + `foo` on line N reports `quux` at line N, not N+2).
+pub(crate) fn expand_group_aliases_marked(
+    executor: &Executor,
+    source: &str,
+) -> (String, Vec<usize>) {
     if !executor.alias_expansion_enabled() || executor.shell_state.aliases.is_empty() {
-        return source.to_string();
+        return (source.to_string(), Vec::new());
     }
     let posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
     let lookup = move |word: &str| {
@@ -385,7 +399,7 @@ pub(crate) fn expand_group_aliases(executor: &Executor, source: &str) -> String 
             )
         })
     };
-    expand_aliases_in_source(source, &lookup as &AliasLookup<'_>, posix)
+    expand_aliases_in_source_marked(source, &lookup as &AliasLookup<'_>, posix)
 }
 
 /// shell.c run_pending_command style driver for scripts with history on:
@@ -2311,7 +2325,13 @@ fn run_history_group(
             .join("\n")
     };
     let pre_alias_text = exec_text.clone();
-    let exec_text = expand_group_aliases(executor, &exec_text);
+    // GNU pushes the alias text onto the input (parse.y:2055 push_string)
+    // and consumes it through shell_getc — the yy_readline_get
+    // line_number bump (parse.y:2504) only fires on REAL input fetches,
+    // so newlines inside the expansion are line separators but not line
+    // advances (run-nquote: `quux` inside `foo`'s value reports the
+    // `foo` line, not the pushed line's own index).
+    let (exec_text, expansion_newlines) = expand_group_aliases_marked(executor, &exec_text);
     if exec_text.trim().is_empty() {
         return executor.last_exit_code();
     }
@@ -2378,7 +2398,7 @@ fn run_history_group(
                 crate::lexer::set_parse_extended_glob(entry);
                 saved
             });
-            let status = run_source_with_line_offset(
+            let status = run_source_with_line_offset_marked(
                 executor,
                 &exec_text,
                 interactive,
@@ -2389,6 +2409,7 @@ fn run_history_group(
                 } else {
                     Some(pre_alias_text.as_str())
                 },
+                &expansion_newlines,
             );
             if let Some(saved) = saved_extended_glob {
                 crate::lexer::set_parse_extended_glob(saved);
@@ -3586,6 +3607,7 @@ pub(crate) fn run_source_pre_lexed_with_line_offset(
         diagnostic_text,
         Some(pre_lexed),
         false,
+        &[],
     )
 }
 
@@ -4033,6 +4055,32 @@ pub fn run_source_with_line_offset(
     redirect_cmd: Option<&CommandNode>,
     diagnostic_text: Option<&str>,
 ) -> i32 {
+    run_source_with_line_offset_marked(
+        executor,
+        input,
+        interactive,
+        line_offset,
+        redirect_cmd,
+        diagnostic_text,
+        &[],
+    )
+}
+
+/// `run_source_with_line_offset` plus `noncounting_newlines`: ascending
+/// byte offsets of `\n` characters in `input` that alias expansion
+/// introduced — line separators that must not advance the physical line
+/// counter (GNU: pushed text goes through shell_getc without the
+/// yy_readline_get line_number bump, parse.y:2504 — rubash#3605
+/// run-nquote).
+pub fn run_source_with_line_offset_marked(
+    executor: &mut Executor,
+    input: &str,
+    interactive: bool,
+    line_offset: usize,
+    redirect_cmd: Option<&CommandNode>,
+    diagnostic_text: Option<&str>,
+    noncounting_newlines: &[usize],
+) -> i32 {
     run_source_impl(
         executor,
         input,
@@ -4042,6 +4090,7 @@ pub fn run_source_with_line_offset(
         diagnostic_text,
         None,
         false,
+        noncounting_newlines,
     )
 }
 
@@ -4069,6 +4118,7 @@ fn run_source_prefix_diagnostic_owned(
         diagnostic_text,
         None,
         true,
+        &[],
     )
 }
 
@@ -4205,6 +4255,7 @@ fn run_source_impl(
     diagnostic_text: Option<&str>,
     pre_lexed: Option<Vec<Token>>,
     suppress_unclosed_diagnostic: bool,
+    noncounting_newlines: &[usize],
 ) -> i32 {
     // rubash#2332: mark the call active for its whole duration so the
     // root-span re-seed inside run_source_impl_inner fires only for
@@ -4232,6 +4283,7 @@ fn run_source_impl(
         pre_lexed,
         suppress_unclosed_diagnostic,
         !source_run_prior,
+        noncounting_newlines,
     );
     // rubash#2680: a unit that ended in a parse error has that error's
     // status as its own $? — GNU's reader abandons the unit with the
@@ -4273,6 +4325,7 @@ fn run_source_impl_inner(
     pre_lexed: Option<Vec<Token>>,
     suppress_unclosed_diagnostic: bool,
     root_span_outermost: bool,
+    noncounting_newlines: &[usize],
 ) -> i32 {
     let saved_unit_source = executor
         .shell_state
@@ -4288,6 +4341,7 @@ fn run_source_impl_inner(
         pre_lexed,
         suppress_unclosed_diagnostic,
         root_span_outermost,
+        noncounting_newlines,
     );
     executor
         .shell_state
@@ -4306,6 +4360,7 @@ fn run_source_impl_inner_body(
     pre_lexed: Option<Vec<Token>>,
     suppress_unclosed_diagnostic: bool,
     root_span_outermost: bool,
+    noncounting_newlines: &[usize],
 ) -> i32 {
     // WP-8 (debugger design 5.1): take the file identity the
     // calling group driver set for this unit, if any (see
@@ -4884,7 +4939,7 @@ fn run_source_impl_inner_body(
     // `input` again would re-read every byte the feeder already scanned.
     let mut tokens = match pre_lexed {
         Some(tokens) => tokens,
-        None => tokenize_with_initial_posix(input, parse_posix),
+        None => tokenize_with_initial_posix_marked(input, parse_posix, noncounting_newlines),
     };
     // A command with more than HEREDOC_MAX (16) here-documents is fatal in
     // GNU (parse.y push_heredoc -> report_syntax_error + exit_shell with
@@ -4918,6 +4973,13 @@ fn run_source_impl_inner_body(
             // compound boundaries (`{ set -- /no/such/*.zzz; }; echo rc`
             // printed rc in the REPL only).
             token.logical_line += line_offset;
+            // rubash#3605 run-heredoc: the gather end line lives in the
+            // same line space as position — the `here-document delimited
+            // by end-of-file` warning and the unclosed-compound EOF error
+            // report it (make_cmd.c:626 internal_warning at the post-gather
+            // line_number; parse.y:6899). Unshifted, a group's EOF-heredoc
+            // diagnostics stamped the fragment-local line.
+            token.heredoc_end_line = token.heredoc_end_line.map(|line| line + line_offset);
         }
     }
     // GNU parse.y: a `)` or case-clause terminator at command position is
@@ -5083,6 +5145,15 @@ fn run_source_impl_inner_body(
         // startup file run by run_init_file (rubash#1161). Printing it
         // via the catch-all below leaked a bare `return N` line.
         Err(ExecuteError::Return(code)) => code,
+        // A respawned fork-child whose own write met a dead pipe is
+        // GNU's SIGPIPE death (trap.c:1480 reset_signal_handlers leaves
+        // the fork SIG_DFL): the process ends at the verdict with no
+        // diagnostic — status 141, matching child_process_exit_status's
+        // BrokenPipe arm for in-process child scripts. Pipeline-stage
+        // producers absorb their own BrokenPipe as a 141 element status
+        // long before this arm, so what reaches here is the run's own
+        // death.
+        Err(ExecuteError::BrokenPipe) => 141,
         Err(e) => {
             if interactive {
                 eprintln!("Error: {}", e);

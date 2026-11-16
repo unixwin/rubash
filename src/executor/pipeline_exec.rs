@@ -1492,9 +1492,15 @@ impl Executor {
     /// with snapshot/restore; the arithmetic flag family has its own
     /// long-standing bracket (snapshot_arithmetic_error_flags) whose
     /// deliberate latch-held handoff this one must not disturb.
+    /// rubash#3499: the bad-substitution verdict rides the family too
+    /// (a speculative attempt's raise is rolled back before the
+    /// sequential stage loop re-expands the words). The print budget
+    /// (`bad_substitution_reported`) deliberately does NOT: it is held
+    /// across the decline like the arithmetic print latch, so the
+    /// re-expansion cannot print the diagnostic a second time.
     pub(in crate::executor) fn snapshot_discard_latches(
         &self,
-    ) -> (bool, Option<i32>, bool, bool, bool, bool, bool) {
+    ) -> (bool, Option<i32>, bool, bool, bool, bool, bool, bool) {
         (
             self.parameter_assignment_failure.get(),
             self.parameter_assignment_failure_prev_status.get(),
@@ -1503,12 +1509,13 @@ impl Executor {
             self.evalerror_exit_toomany_pending.get(),
             self.evalerror_subscript_pending.get(),
             self.command_expansion_failed.get(),
+            self.shell_state.parameter_bad_substitution.get(),
         )
     }
 
     pub(in crate::executor) fn restore_discard_latches(
         &self,
-        saved: &(bool, Option<i32>, bool, bool, bool, bool, bool),
+        saved: &(bool, Option<i32>, bool, bool, bool, bool, bool, bool),
     ) {
         self.parameter_assignment_failure.set(saved.0);
         self.parameter_assignment_failure_prev_status.set(saved.1);
@@ -1517,6 +1524,7 @@ impl Executor {
         self.evalerror_exit_toomany_pending.set(saved.4);
         self.evalerror_subscript_pending.set(saved.5);
         self.command_expansion_failed.set(saved.6);
+        self.shell_state.parameter_bad_substitution.set(saved.7);
     }
 
     /// rubash#1564: could expanding this element's words (or its
@@ -2198,8 +2206,16 @@ impl Executor {
             // do_redirections, so `echo hi >& f | cat` never creates `f`
             // (the refusal already rides `next_stderr`/`next_status`).
             let stage_restricted_refused = self.pipeline_stage_restricted_refused.replace(false);
+            // rubash#3499: a bad-substitution discard must not have
+            // its write redirects materialized by the routing walk —
+            // GNU expands the element's words before do_redirections,
+            // so `echo a=${-x} > f | cat` never creates `f`.
+            let stage_bad_sub_discarded = self
+                .pipeline_stage_bad_substitution_discarded
+                .replace(false);
             if !stage_fds_pre_wired
                 && !stage_restricted_refused
+                && !stage_bad_sub_discarded
                 && !command_is_compound_pipeline_stage(command)
                 && !in_shell_stage
             {
@@ -3450,8 +3466,14 @@ impl Executor {
         if producer_error.is_none() {
             let stage_fds_pre_wired = self.pipeline_stage_fds_pre_wired.replace(false);
             let stage_restricted_refused = self.pipeline_stage_restricted_refused.replace(false);
+            // rubash#3499: same discard-before-redirects skip as the
+            // sequential driver above, for the shell-writer producer.
+            let stage_bad_sub_discarded = self
+                .pipeline_stage_bad_substitution_discarded
+                .replace(false);
             if !stage_fds_pre_wired
                 && !stage_restricted_refused
+                && !stage_bad_sub_discarded
                 && !command_is_compound_pipeline_stage(commands[0])
             {
                 if let Err(error) = self.route_pipeline_stage_streams(
@@ -3780,10 +3802,18 @@ impl Executor {
         // rubash#1540: the latch net described at the snapshot above —
         // a DISCARD-class failure raised anywhere in this member's
         // speculative expansion voids the spec.
+        // rubash#3499: a bad substitution is the same class — without
+        // this term the spec kept the failure's empty product as argv
+        // and ran the member (`cat ${-x} | cat` spawned cat with no
+        // argument). The verdict is restored with the family on
+        // decline; the print budget stays held (it is not in the
+        // family), so the sequential re-expansion cannot print the
+        // diagnostic a second time.
         let spec_expansion_failed = (self.parameter_assignment_failure.get()
             && !spec_saved_discard.0)
             || (self.evalerror_failglob_pending.get() && !spec_saved_discard.2)
             || (self.no_closing_brace_failure.get() && !spec_saved_no_closing_brace)
+            || (self.shell_state.parameter_bad_substitution.get() && !spec_saved_discard.7)
             || (self.shell_state.arithmetic_fatal_error.get() && !spec_saved_arith.2)
             || (self.shell_state.arithmetic_nonfatal_error.get() && !spec_saved_arith.1)
             || (self.shell_state.arithmetic_nounset_error.get() && !spec_saved_arith.3);
@@ -5793,10 +5823,14 @@ impl Executor {
         // bracket restores the remaining latch state); keep only the
         // arithmetic print latch as the expansions left it, so the
         // stage's re-expansion does not print the diagnostic twice.
+        // rubash#3499: a bad substitution voids the run the same way
+        // (same empty-product hazard); its print budget is likewise
+        // held, not restored, so the re-expansion stays silent.
         let spec_expansion_failed = (self.parameter_assignment_failure.get()
             && !spec_saved_discard.0)
             || (self.evalerror_failglob_pending.get() && !spec_saved_discard.2)
             || (self.no_closing_brace_failure.get() && !spec_saved_no_closing_brace)
+            || (self.shell_state.parameter_bad_substitution.get() && !spec_saved_discard.7)
             || (self.shell_state.arithmetic_fatal_error.get() && !spec_saved_arith.2)
             || (self.shell_state.arithmetic_nonfatal_error.get() && !spec_saved_arith.1)
             || (self.shell_state.arithmetic_nounset_error.get() && !spec_saved_arith.3);
@@ -6489,6 +6523,14 @@ impl Executor {
     ) -> Vec<String> {
         let mut out = Vec::new();
         for (offset, word) in command.words[first_index..].iter().enumerate() {
+            // rubash#3499: GNU abandons the word list at the first
+            // expansion failure (subst.c:4288-4296) — later words are
+            // never expanded, so their command substitutions never run
+            // and their diagnostics never print (same guard as #3019
+            // in expand_command_words).
+            if self.shell_state.parameter_bad_substitution.get() {
+                break;
+            }
             let index = offset + first_index;
             let raw = command
                 .word_metadata
@@ -6547,6 +6589,16 @@ impl Executor {
                         out.push(expanded.replace(crate::executor::markers::CTLESC, ""))
                     }
                 }
+            }
+            // rubash#3499: this word's expansion raised the
+            // bad-substitution verdict — the element is discarded, so
+            // drop every argument gathered so far: a pre-failure
+            // `file` in `rm file ${-x}` must not reach the command
+            // (its side effect survives no harvest). The loop-top
+            // guard above guarantees the verdict was clear when this
+            // word started, so a set value here is this word's own.
+            if self.shell_state.parameter_bad_substitution.get() {
+                return Vec::new();
             }
         }
         out
@@ -6663,6 +6715,15 @@ impl Executor {
         // setrlimit on unix); GNU's element child takes its limit
         // changes to its grave. Bracket the set like the mask above.
         let saved_process_rlimits = crate::builtins::ulimit::snapshot_process_rlimits();
+        // rubash#3605: the element is one more in-process GNU fork
+        // child — its `ulimit` sets must virtualize (env cells) instead
+        // of setrlimit, where a hard drop could never be restored. The
+        // env cells die with the element; an enclosing virtualized
+        // region's own cells are preserved.
+        let saved_ulimit_cells =
+            crate::builtins::ulimit::emulated_cells_snapshot(&self.shell_state.env_vars);
+        self.emulated_child_depth
+            .set(self.emulated_child_depth.get() + 1);
         // rubash#1349: GNU forks every pipeline element, and
         // execute_cmd.c's execute_subshell_builtin_or_function calls
         // without_job_control() (jobs.c: delete_all_jobs) in the child —
@@ -6709,6 +6770,13 @@ impl Executor {
         self.evalerror_failglob_pending.set(false);
         self.evalerror_pending.set(false);
         self.evalerror_exit_toomany_pending.set(false);
+        // rubash#3499: the bad-substitution verdict is cleared with the
+        // rest of the family (the element starts clean, like GNU's
+        // forked child). The print budget is NOT cleared: a speculative
+        // attempt may already have printed this element's diagnostic,
+        // and the re-expansion below must not print it again.
+        let stage_bad_sub_reported_before = self.shell_state.bad_substitution_reported.get();
+        self.shell_state.parameter_bad_substitution.set(false);
         // rubash#1564: the same fork containment for the VARIABLE
         // state — the one piece of child state the brackets above do
         // not cover. The stage's word expansions, classification
@@ -6969,6 +7037,12 @@ impl Executor {
         if let Some(rlimits) = &saved_process_rlimits {
             crate::builtins::ulimit::apply_process_rlimits(rlimits);
         }
+        self.emulated_child_depth
+            .set(self.emulated_child_depth.get() - 1);
+        crate::builtins::ulimit::emulated_cells_restore(
+            &mut self.shell_state.env_vars,
+            &saved_ulimit_cells,
+        );
         // rubash#2126: the stage's dispatches stay inside the element.
         self.shell_state.last_dispatch_was_eval_or_source = saved_dispatch_tracker;
         self.shell_state.this_builtin_class = saved_builtin_classes.0;
@@ -6984,7 +7058,37 @@ impl Executor {
         let stage_toomany_raised = self.evalerror_exit_toomany_pending.get();
         let stage_arith_failed = (self.shell_state.arithmetic_fatal_error.get() && !saved.2)
             || (self.shell_state.arithmetic_nonfatal_error.get() && !saved.1);
+        // rubash#3499: a bad substitution raised while expanding this
+        // element's words (GNU subst.c:10277-10288 expand_word_error ->
+        // DISCARD, pre-set status 1, no output). Read before the
+        // restore below: the verdict was cleared at entry, so a set
+        // value here is this element's own failure — including one a
+        // speculative attempt raised and the sequential re-expansion
+        // re-raised silently under the held print budget. Unlike the
+        // arithmetic delta above this is set-at-exit, not a delta:
+        // the re-raised verdict is indistinguishable from the held
+        // one, and a held verdict always belongs to this element's
+        // own words (the driver restores the family before the loop,
+        // so no earlier element's verdict can be standing here).
+        let stage_bad_sub = self.shell_state.parameter_bad_substitution.get();
         self.restore_discard_latches(&saved_discard);
+        if stage_bad_sub {
+            // The harvest below consumes the verdict, so the print
+            // budget for this diagnostic is spent with it (the
+            // restore above put the entry verdict back; a raised
+            // verdict must not leak to the parent).
+            self.shell_state.parameter_bad_substitution.set(false);
+            self.shell_state.bad_substitution_reported.set(false);
+        } else if saved_discard.7 {
+            // The inner consumed a verdict it inherited: the
+            // diagnostic that verdict carried is spent, so the print
+            // budget dies with it instead of being restored.
+            self.shell_state.bad_substitution_reported.set(false);
+        } else {
+            self.shell_state
+                .bad_substitution_reported
+                .set(stage_bad_sub_reported_before);
+        }
         let nounset_hit = self.restore_arithmetic_error_flags(&saved);
         match result {
             Ok(Some((output, stderr, _status))) if nounset_hit => {
@@ -7021,6 +7125,25 @@ impl Executor {
             Ok(Some((_, stderr, _))) if stage_failglob_failed => {
                 Ok(Some((String::new(), stderr, 1)))
             }
+            // rubash#3499: a bad substitution in the element's words —
+            // subst.c:10277-10288 expand_word_error (DISCARD) with the
+            // pre-set status 1, no output. The diagnostic already
+            // printed once during the element's expansion (through the
+            // ambient fd 2, never the stage's captured stderr), so the
+            // captured stderr here holds only the doomed run's own
+            // noise — a `""` argv's filename error, a usage error on
+            // the dropped argv — and is discarded with the output. A
+            // pipeline element is a forked child, so even POSIX mode
+            // contains the jump at execute_cmd.c:1811 and exits 1 —
+            // the plain 1 here, not the top-level fatal mapping.
+            // GNU runs expand_words before do_redirections, so the
+            // element's redirects never apply: flag the discard so
+            // the driver's routing walk does not materialize them
+            // (a `>file` would otherwise be created).
+            Ok(Some((_, _, _))) if stage_bad_sub => {
+                self.pipeline_stage_bad_substitution_discarded.set(true);
+                Ok(Some((String::new(), String::new(), 1)))
+            }
             // rubash#1540: a no_args DISCARD (break/continue/exit/
             // return with too many arguments) raised by an inline stage
             // arm on this executor — inside the forked element the
@@ -7054,6 +7177,9 @@ impl Executor {
         // restore side).
         let inner_saved_arith = self.snapshot_arithmetic_error_flags();
         let inner_saved_no_closing_brace = self.no_closing_brace_failure.get();
+        // rubash#3499: entry value for the delta adjudication below
+        // (same shape as the no-closing-brace latch).
+        let inner_saved_bad_substitution = self.shell_state.parameter_bad_substitution.get();
         if let Some(time_command) = &command.time_command {
             let started = time_command_started();
             let Some((output, stderr, status)) =
@@ -7374,15 +7500,30 @@ impl Executor {
         // $TMPDIR/null-redir-e` reports `0 -- 3 0`, not 127). A quoted
         // empty word ("") survives as one empty field and keeps the
         // command-not-found path below.
-        let stage_expands_to_no_fields = !command.words.is_empty()
-            && command.words.iter().enumerate().all(|(index, word)| {
-                let raw = command
-                    .word_metadata
-                    .get(index)
-                    .map(|metadata| metadata.raw.as_str());
-                self.expand_command_word(command, index, word, raw)
-                    .is_empty()
-            });
+        // rubash#3499: GNU subst.c:4288-4296 abandons the word list at
+        // the FIRST expansion failure — later words are never expanded
+        // (their command substitutions never run). The scan expands
+        // every word to test the no-fields shape, so stop it at the
+        // first bad substitution instead of expanding the rest (the
+        // loop mirrors the #3019 guard in expand_command_words).
+        let mut stage_expands_to_no_fields = !command.words.is_empty();
+        for (index, word) in command.words.iter().enumerate() {
+            if self.shell_state.parameter_bad_substitution.get() {
+                stage_expands_to_no_fields = false;
+                break;
+            }
+            let raw = command
+                .word_metadata
+                .get(index)
+                .map(|metadata| metadata.raw.as_str());
+            if !self
+                .expand_command_word(command, index, word, raw)
+                .is_empty()
+            {
+                stage_expands_to_no_fields = false;
+                break;
+            }
+        }
         if stage_expands_to_no_fields {
             return Ok(Some((String::new(), String::new(), 0)));
         }
@@ -7437,6 +7578,17 @@ impl Executor {
             || (self.shell_state.arithmetic_nonfatal_error.get() && !inner_saved_arith.1)
             || (self.no_closing_brace_failure.get() && !inner_saved_no_closing_brace)
         {
+            return Ok(Some((String::new(), String::new(), 1)));
+        }
+        // rubash#3499: a bad substitution raised while expanding this
+        // element's words (subst.c:10277-10288 expand_word_error ->
+        // DISCARD, status 1, no output). Delta-checked like the
+        // no-closing-brace arm: the wrapper clears the verdict at
+        // entry, so in practice the saved value is false and any raise
+        // during this element's expansion adjudicates here. The verdict
+        // is deliberately NOT consumed here — the wrapper owns the
+        // harvest and the print-budget settle, so leave both for it.
+        if self.shell_state.parameter_bad_substitution.get() && !inner_saved_bad_substitution {
             return Ok(Some((String::new(), String::new(), 1)));
         }
         if self.evalerror_failglob_pending.get() {

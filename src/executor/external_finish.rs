@@ -851,7 +851,6 @@ impl Executor {
             FileFd::open_read(path).ok().map(|file| (file, None))
         });
         if let Some((file, write_end)) = file_stdin {
-            self.set_fd_input_file(0, file, false);
             if let Some((write_file, target)) = write_end {
                 // rubash#2261: the write half of the `<>` pair plus
                 // the fd-0 output env bookkeeping set_fd_readwrite_file
@@ -862,12 +861,27 @@ impl Executor {
                 // and are restored after the child runs — the same
                 // save/restore contract the function face spells out
                 // per binding (FunctionCallStdinBinding).
-                self.fd_table
-                    .open_output(0, FdWriteEndpoint::File(write_file), false);
+                // rubash#3655: one O_RDWR description — a single
+                // open_readwrite install, not an input bind followed
+                // by an output bind (the second would retire the
+                // first). The mirror lines are the set_fd_input_file
+                // lines the pair replaces, plus the output ledger.
+                self.fd_table.open_readwrite(
+                    0,
+                    FdReadEndpoint::File(file),
+                    FdWriteEndpoint::File(write_file),
+                    false,
+                );
+                self.shell_state.env_vars.remove(&fd_closed_key(0));
+                self.shell_state.env_vars.remove(&fd_stdin_key(0));
+                self.shell_state.env_vars.remove(&fd_stdin_offset_key(0));
+                self.shell_state.env_vars.remove(&fd_dynamic_input_key(0));
                 self.shell_state
                     .env_vars
                     .remove(&fd_output_process_substitution_key(0));
                 self.shell_state.env_vars.insert(fd_output_key(0), target);
+            } else {
+                self.set_fd_input_file(0, file, false);
             }
             self.shell_state.env_vars.remove(FUNCTION_STDIN);
             self.shell_state.env_vars.remove(FUNCTION_STDIN_OFFSET);
@@ -1111,6 +1125,13 @@ impl Executor {
         // (rubash#2393). An `exit` in the env file ends the child
         // here, before the body; the EXIT-trap arm below still runs,
         // as exit_shell's would.
+        // rubash#3605: the whole child run — its env file, its body,
+        // and its EXIT trap — is one in-process GNU fork child; mark
+        // the depth so `ulimit` inside virtualizes instead of moving
+        // this process's real rlimits (a child's hard drop could not
+        // be restored below).
+        self.emulated_child_depth
+            .set(self.emulated_child_depth.get() + 1);
         let startup_exit = if fresh_shell {
             self.run_fresh_child_startup_env_file(cmd)
         } else {
@@ -1230,6 +1251,10 @@ impl Executor {
                 crate::builtins::ulimit::apply_process_rlimits(rlimits);
             }
         }
+        // rubash#3605: the in-process child's mark ends here — its
+        // env cells already died with the env restore above.
+        self.emulated_child_depth
+            .set(self.emulated_child_depth.get() - 1);
         self.shell_state.coproc_names = saved_coproc_names;
         self.shell_state.last_background_pid = saved_last_background_pid;
         self.shell_state.job_table = saved_job_table;

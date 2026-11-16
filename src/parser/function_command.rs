@@ -366,6 +366,9 @@ pub(super) fn parse_function_command_with_diagnostic(
             let base = group_token.position + raw[..open + lead].matches('\n').count();
             for token in &mut body_tokens {
                 token.position += base - 1;
+                // rubash#3605: the gather end line shifts in lockstep
+                // (see script_driver.rs).
+                token.heredoc_end_line = token.heredoc_end_line.map(|line| line + base - 1);
             }
         }
         let mut body = parse_function_body(&body_tokens, diagnostic_text, source_line_offset);

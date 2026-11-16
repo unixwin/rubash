@@ -869,6 +869,28 @@ impl Executor {
         }
     }
 
+    /// One-shot gate for the `bad substitution` diagnostic (rubash#3499):
+    /// returns true only for the first report in the current latch
+    /// lifetime. GNU subst.c:10277-10288 reports the FIRST expansion
+    /// failure of a word list and abandons the rest, so a word (or
+    /// pipeline element) expanded on several paths — the stage scan
+    /// plus the dispatch arms, a speculative concurrent attempt plus
+    /// the sequential re-expansion, the compound stage's assignment
+    /// pre-pass plus its subshell execution — must print the
+    /// diagnostic exactly once. The verdict latch
+    /// (`parameter_bad_substitution`) still sets at every site; only
+    /// the print is deduplicated. The budget clears wherever the
+    /// verdict is consumed (abort_on_expansion_errors, the assignment
+    /// loop, the pipeline stage harvest, command-substitution
+    /// boundaries) and rides the save/restore brackets that keep a
+    /// read-side walk transparent, so a spent budget can neither
+    /// suppress a later command's diagnostic nor re-print inside one
+    /// command's expansion. Same shape as the arithmetic print latch
+    /// (`arithmetic_expansion_error.replace(true)`).
+    pub(in crate::executor) fn bad_substitution_report_first(&self) -> bool {
+        !self.shell_state.bad_substitution_reported.replace(true)
+    }
+
     pub(crate) fn expand_word(&self, word: &str) -> String {
         let _xpass = crate::executor::expand_braced_indices::SubXpassFrame::new();
         let _wctx = crate::executor::expand_braced_indices::WordCtxGuard::new_if_absent();
@@ -1051,14 +1073,19 @@ impl Executor {
         // alternate word reaches expansion only when that word is actually
         // evaluated (`${x-${'x1'%'t'}}` with x set is silent in GNU).
         if braced_name_ends_on_quote(name) {
-            self.write_diagnostic_fd2(
-                format!(
-                    "{}{}: bad substitution\n",
-                    self.diagnostic_prefix(),
-                    bad_substitution_display(&diagnostic_word)
-                )
-                .as_bytes(),
-            );
+            // rubash#3499: one diagnostic per latch lifetime — a word
+            // re-expanded on the stage scan, the dispatch arms, or a
+            // speculative attempt must not print again.
+            if self.bad_substitution_report_first() {
+                self.write_diagnostic_fd2(
+                    format!(
+                        "{}{}: bad substitution\n",
+                        self.diagnostic_prefix(),
+                        bad_substitution_display(&diagnostic_word)
+                    )
+                    .as_bytes(),
+                );
+            }
             self.shell_state.parameter_bad_substitution.set(true);
             return String::new();
         }
@@ -1070,14 +1097,18 @@ impl Executor {
         // a bad name nested in an unevaluated word (`${x:-${(M)y}}` with x
         // set) stays silent, matching GNU's lazy expansion.
         if braced_name_is_bad_substitution(name) {
-            self.write_diagnostic_fd2(
-                format!(
-                    "{}{}: bad substitution\n",
-                    self.diagnostic_prefix(),
-                    bad_substitution_display(&diagnostic_word)
-                )
-                .as_bytes(),
-            );
+            // rubash#3499: one diagnostic per latch lifetime (see
+            // bad_substitution_report_first).
+            if self.bad_substitution_report_first() {
+                self.write_diagnostic_fd2(
+                    format!(
+                        "{}{}: bad substitution\n",
+                        self.diagnostic_prefix(),
+                        bad_substitution_display(&diagnostic_word)
+                    )
+                    .as_bytes(),
+                );
+            }
             self.shell_state.parameter_bad_substitution.set(true);
             return String::new();
         }

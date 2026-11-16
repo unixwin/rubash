@@ -557,15 +557,23 @@ impl Executor {
             saved.push((fd, self.fd_table.saved_entry(fd)?));
         }
         let file_fd = FileFd::from_file(file, target.into());
-        self.fd_table
-            .open_input(fd, FdReadEndpoint::File(file_fd.clone()), false);
         if readwrite {
             // redir.c r_input_output: ONE open file description
             // serves both directions of the slot — the same FileFd
             // backs the write endpoint too (the shape
             // set_fd_readwrite_file's net arm installs).
+            // rubash#3655: one description, one install — the
+            // sequential pair would end write-only (the output bind
+            // retires the read arm).
+            self.fd_table.open_readwrite(
+                fd,
+                FdReadEndpoint::File(file_fd.clone()),
+                FdWriteEndpoint::File(file_fd),
+                false,
+            );
+        } else {
             self.fd_table
-                .open_output(fd, FdWriteEndpoint::File(file_fd), false);
+                .open_input(fd, FdReadEndpoint::File(file_fd), false);
         }
         if !self.dispatch_net_bound_fds.contains(&fd) {
             self.dispatch_net_bound_fds.push(fd);

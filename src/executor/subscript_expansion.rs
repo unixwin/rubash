@@ -360,6 +360,7 @@ impl Executor {
         &mut self,
         source: SubscriptSource<'_>,
     ) -> IndexedSubscript {
+        let expand = matches!(source, SubscriptSource::Protected(_));
         let resolved = self.resolve_array_subscript(source);
         if resolved.is_empty() {
             return IndexedSubscript::Empty;
@@ -373,7 +374,7 @@ impl Executor {
         {
             return hit;
         }
-        let result = match self.eval_indexed_subscript_expression(&resolved) {
+        let result = match self.eval_indexed_subscript_expression(&resolved, expand) {
             Some(index) => IndexedSubscript::Index(index),
             None => {
                 // Silent on a nounset trap (message already printed once);
@@ -1097,7 +1098,8 @@ impl Executor {
                             let _ = std::io::stderr().flush();
                             return Err(format!("({out})"));
                         }
-                        let Some(index_value) = self.eval_indexed_subscript_expression(&resolved)
+                        let Some(index_value) =
+                            self.eval_indexed_subscript_expression(&resolved, true)
                         else {
                             self.report_indexed_subscript_error_unless_nounset(&resolved);
                             // A nounset trap aborts with the fatal status;
@@ -1272,7 +1274,8 @@ impl Executor {
                     let _ = std::io::stderr().flush();
                     return Err(format!("({})", elements.join(" ")));
                 }
-                let Some(index_value) = self.eval_indexed_subscript_expression(&resolved) else {
+                let Some(index_value) = self.eval_indexed_subscript_expression(&resolved, true)
+                else {
                     self.report_indexed_subscript_error_unless_nounset(&resolved);
                     // Same nounset-abort routing as the rewrite path above
                     // (rubash#639).

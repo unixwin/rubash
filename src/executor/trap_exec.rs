@@ -1,5 +1,4 @@
 use super::*;
-use crate::executor::markers::STORAGE_WORD_PREFIX;
 
 /// rubash#1166: rebase a trap action's parsed line numbers onto the line
 /// the trap fired at. GNU parses the action string with line_number
@@ -288,6 +287,27 @@ impl Executor {
             self.shell_state.env_vars.remove(&fd_dynamic_input_key(fd));
         }
         self.shell_state.env_vars.remove(&fd_closed_key(fd));
+        // rubash#3655: the input bind retires the fd's write arm
+        // (dup2 wholesale) — drop its output ledger with it.
+        self.clear_output_fd_mirrors(fd);
+    }
+
+    /// rubash#3655: an input bind retires the fd's write arm, so the
+    /// output ledger must go with it (or a later dup would copy a
+    /// target the descriptor no longer has).
+    fn clear_output_fd_mirrors(&mut self, fd: u32) {
+        self.shell_state.env_vars.remove(&fd_output_key(fd));
+        self.shell_state
+            .env_vars
+            .remove(&fd_output_process_substitution_key(fd));
+    }
+
+    /// rubash#3655: an output bind retires the fd's read arm, so the
+    /// input ledger must go with it.
+    fn clear_input_fd_mirrors(&mut self, fd: u32) {
+        self.shell_state.env_vars.remove(&fd_stdin_key(fd));
+        self.shell_state.env_vars.remove(&fd_stdin_offset_key(fd));
+        self.shell_state.env_vars.remove(&fd_dynamic_input_key(fd));
     }
 
     /// `exec N<file` — install a real kernel handle in the slot instead of
@@ -313,6 +333,8 @@ impl Executor {
         } else {
             self.shell_state.env_vars.remove(&fd_dynamic_input_key(fd));
         }
+        // rubash#3655: the input bind retires the fd's write arm.
+        self.clear_output_fd_mirrors(fd);
     }
 
     /// `exec N<directory` reached through a synthetic link
@@ -335,10 +357,36 @@ impl Executor {
         } else {
             self.shell_state.env_vars.remove(&fd_dynamic_input_key(fd));
         }
+        // rubash#3655: the input bind retires the fd's write arm.
+        self.clear_output_fd_mirrors(fd);
     }
 
     /// `[N]<>file` — one O_RDWR handle feeding both directions of the slot
     /// (GNU redir.c r_input_output opens a single descriptor).
+    /// Mirror bookkeeping for a `<>` install whose input side is a
+    /// real file endpoint (rubash#3655): the set_fd_input_file lines
+    /// (drop the stdin text/offset + dynamic flag) plus the output
+    /// ledger. The table pair lands through open_readwrite, so this
+    /// is mirrors only.
+    fn apply_readwrite_file_mirrors(&mut self, fd: u32, target: &str, dynamic: bool) {
+        self.shell_state.env_vars.remove(&fd_closed_key(fd));
+        self.shell_state.env_vars.remove(&fd_stdin_key(fd));
+        self.shell_state.env_vars.remove(&fd_stdin_offset_key(fd));
+        if dynamic {
+            self.shell_state
+                .env_vars
+                .insert(fd_dynamic_input_key(fd), "1".to_string());
+        } else {
+            self.shell_state.env_vars.remove(&fd_dynamic_input_key(fd));
+        }
+        self.shell_state
+            .env_vars
+            .remove(&fd_output_process_substitution_key(fd));
+        self.shell_state
+            .env_vars
+            .insert(fd_output_key(fd), target.to_string());
+    }
+
     pub(in crate::executor) fn set_fd_readwrite_file(
         &mut self,
         fd: u32,
@@ -352,16 +400,16 @@ impl Executor {
             // posix_errors::path_error itself.
             let file = self.open_net_redirect_raw(target)?;
             let file_fd = FileFd::from_file(file, target.into());
-            self.set_fd_input_file(fd, file_fd.clone(), dynamic);
-            self.fd_table
-                .open_output(fd, FdWriteEndpoint::File(file_fd), dynamic);
-            self.shell_state.env_vars.remove(&fd_closed_key(fd));
-            self.shell_state
-                .env_vars
-                .remove(&fd_output_process_substitution_key(fd));
-            self.shell_state
-                .env_vars
-                .insert(fd_output_key(fd), target.to_string());
+            // rubash#3655: one O_RDWR description — a single
+            // open_readwrite install, not an input bind followed by
+            // an output bind (the second would retire the first).
+            self.fd_table.open_readwrite(
+                fd,
+                FdReadEndpoint::File(file_fd.clone()),
+                FdWriteEndpoint::File(file_fd),
+                dynamic,
+            );
+            self.apply_readwrite_file_mirrors(fd, target, dynamic);
             return Ok(());
         }
         // rubash#1898: the zero/full devices bind directly — reads
@@ -382,23 +430,16 @@ impl Executor {
                 Self::zero_device_file(&target)?
             };
             let read_fd = FileFd::from_file(read_file, target.into());
-            self.set_fd_input_file(fd, read_fd, dynamic);
-            if full {
-                self.fd_table
-                    .open_output(fd, FdWriteEndpoint::FullDevice, dynamic);
+            // rubash#3655: one description, one install (see above).
+            let write = if full {
+                FdWriteEndpoint::FullDevice
             } else {
                 let write_file = self.create_redirect_output("/dev/null", true)?;
-                let write_fd = FileFd::from_file(write_file, target.into());
-                self.fd_table
-                    .open_output(fd, FdWriteEndpoint::File(write_fd), dynamic);
-            }
-            self.shell_state.env_vars.remove(&fd_closed_key(fd));
-            self.shell_state
-                .env_vars
-                .remove(&fd_output_process_substitution_key(fd));
-            self.shell_state
-                .env_vars
-                .insert(fd_output_key(fd), target.to_string());
+                FdWriteEndpoint::File(FileFd::from_file(write_file, target.into()))
+            };
+            self.fd_table
+                .open_readwrite(fd, FdReadEndpoint::File(read_fd), write, dynamic);
+            self.apply_readwrite_file_mirrors(fd, target, dynamic);
             return Ok(());
         }
         // rubash#1935: synthetic /proc content — the entry's write
@@ -418,9 +459,30 @@ impl Executor {
                 ));
             }
             let bytes = crate::special_paths::synthetic_proc_content(target).unwrap_or_default();
-            self.set_fd_input_bytes(fd, bytes, dynamic);
-            self.fd_table
-                .open_output(fd, FdWriteEndpoint::ProcContentWrite, dynamic);
+            // rubash#3655: one description, one install — the byte
+            // channel is the read arm, ProcContentWrite the write arm
+            // (the set_fd_input_bytes mirror lines are kept verbatim:
+            // the read arm survives, so its ledger does too).
+            self.fd_table.open_readwrite(
+                fd,
+                FdReadEndpoint::bytes(bytes.clone()),
+                FdWriteEndpoint::ProcContentWrite,
+                dynamic,
+            );
+            self.shell_state.env_vars.insert(
+                fd_stdin_key(fd),
+                crate::executor::substitution_metadata::bytes_to_shell_text(&bytes),
+            );
+            self.shell_state
+                .env_vars
+                .insert(fd_stdin_offset_key(fd), "0".to_string());
+            if dynamic {
+                self.shell_state
+                    .env_vars
+                    .insert(fd_dynamic_input_key(fd), "1".to_string());
+            } else {
+                self.shell_state.env_vars.remove(&fd_dynamic_input_key(fd));
+            }
             self.shell_state.env_vars.remove(&fd_closed_key(fd));
             self.shell_state
                 .env_vars
@@ -457,16 +519,14 @@ impl Executor {
                 // directions (the open_readwrite_pair contract); the
                 // source fd's offset does not move.
                 let (read_file, write_file) = FileFd::open_readwrite_pair(path)?;
-                self.set_fd_input_file(fd, read_file, dynamic);
-                self.fd_table
-                    .open_output(fd, FdWriteEndpoint::File(write_file), dynamic);
-                self.shell_state.env_vars.remove(&fd_closed_key(fd));
-                self.shell_state
-                    .env_vars
-                    .remove(&fd_output_process_substitution_key(fd));
-                self.shell_state
-                    .env_vars
-                    .insert(fd_output_key(fd), target.to_string());
+                // rubash#3655: one description, one install.
+                self.fd_table.open_readwrite(
+                    fd,
+                    FdReadEndpoint::File(read_file),
+                    FdWriteEndpoint::File(write_file),
+                    dynamic,
+                );
+                self.apply_readwrite_file_mirrors(fd, target, dynamic);
                 return Ok(());
             }
             let _ = self.fd_table.dup_input(fd, alias_fd);
@@ -480,7 +540,16 @@ impl Executor {
             // write direction.
             if self.fd_table.output_endpoint(fd).is_none() {
                 if let Some(endpoint) = self.fd_alias_complementary_write_endpoint(alias_fd) {
-                    self.fd_table.open_output(fd, endpoint, dynamic);
+                    // rubash#3655: the complementary write endpoint
+                    // joins the dup'd read arm on ONE description —
+                    // install the pair, or the output bind would
+                    // retire the read arm (dup2 wholesale).
+                    match self.fd_table.read_endpoint(fd) {
+                        Some(read) => {
+                            self.fd_table.open_readwrite(fd, read, endpoint, dynamic);
+                        }
+                        None => self.fd_table.open_output(fd, endpoint, dynamic),
+                    }
                 }
             }
             self.shell_state.env_vars.remove(&fd_closed_key(fd));
@@ -502,16 +571,14 @@ impl Executor {
         } {
             let (read_file, write_file) =
                 FileFd::open_readwrite_pair(std::path::PathBuf::from(&link.native))?;
-            self.set_fd_input_file(fd, read_file, dynamic);
-            self.fd_table
-                .open_output(fd, FdWriteEndpoint::File(write_file), dynamic);
-            self.shell_state.env_vars.remove(&fd_closed_key(fd));
-            self.shell_state
-                .env_vars
-                .remove(&fd_output_process_substitution_key(fd));
-            self.shell_state
-                .env_vars
-                .insert(fd_output_key(fd), target.to_string());
+            // rubash#3655: one description, one install.
+            self.fd_table.open_readwrite(
+                fd,
+                FdReadEndpoint::File(read_file),
+                FdWriteEndpoint::File(write_file),
+                dynamic,
+            );
+            self.apply_readwrite_file_mirrors(fd, target, dynamic);
             return Ok(());
         }
         // G-02 session-cwd anchor (rubash#1887): GNU redir.c:725
@@ -524,16 +591,14 @@ impl Executor {
         // open_readwrite_pair splits `<>CON` into its CONIN$/CONOUT$
         // halves (niubash#519: CON rejects a read+write handle).
         let (read_file, write_file) = FileFd::open_readwrite_pair(path)?;
-        self.set_fd_input_file(fd, read_file, dynamic);
-        self.fd_table
-            .open_output(fd, FdWriteEndpoint::File(write_file), dynamic);
-        self.shell_state.env_vars.remove(&fd_closed_key(fd));
-        self.shell_state
-            .env_vars
-            .remove(&fd_output_process_substitution_key(fd));
-        self.shell_state
-            .env_vars
-            .insert(fd_output_key(fd), target.to_string());
+        // rubash#3655: one description, one install.
+        self.fd_table.open_readwrite(
+            fd,
+            FdReadEndpoint::File(read_file),
+            FdWriteEndpoint::File(write_file),
+            dynamic,
+        );
+        self.apply_readwrite_file_mirrors(fd, target, dynamic);
         Ok(())
     }
 
@@ -559,6 +624,8 @@ impl Executor {
                 .env_vars
                 .remove(&fd_output_process_substitution_key(fd));
             self.shell_state.env_vars.insert(fd_output_key(fd), target);
+            // rubash#3655: the output bind retires the fd's read arm.
+            self.clear_input_fd_mirrors(fd);
             return Ok(());
         }
         // rubash#1898: device write binds — /dev/zero discards
@@ -584,6 +651,8 @@ impl Executor {
                 .env_vars
                 .remove(&fd_output_process_substitution_key(fd));
             self.shell_state.env_vars.insert(fd_output_key(fd), target);
+            // rubash#3655: the output bind retires the fd's read arm.
+            self.clear_input_fd_mirrors(fd);
             return Ok(());
         }
         // rubash#1935 + rubash#2042: synthetic /proc content — the
@@ -606,6 +675,8 @@ impl Executor {
                 .env_vars
                 .remove(&fd_output_process_substitution_key(fd));
             self.shell_state.env_vars.insert(fd_output_key(fd), target);
+            // rubash#3655: the output bind retires the fd's read arm.
+            self.clear_input_fd_mirrors(fd);
             return Ok(());
         }
         // G-02 session-cwd anchor (rubash#1887): see set_fd_readwrite_file.
@@ -619,6 +690,8 @@ impl Executor {
             .env_vars
             .remove(&fd_output_process_substitution_key(fd));
         self.shell_state.env_vars.insert(fd_output_key(fd), target);
+        // rubash#3655: the output bind retires the fd's read arm.
+        self.clear_input_fd_mirrors(fd);
         Ok(())
     }
 
@@ -646,6 +719,8 @@ impl Executor {
         self.shell_state
             .env_vars
             .insert(fd_output_key(fd), target.to_string());
+        // rubash#3655: the dup2 retires the target's read arm.
+        self.clear_input_fd_mirrors(fd);
     }
 
     pub(in crate::executor) fn execute_eval(
@@ -1178,6 +1253,9 @@ impl Executor {
         if caller_line > 1 {
             for token in tokens.iter_mut() {
                 token.position += caller_line - 1;
+                // rubash#3605: the gather end line shifts in lockstep
+                // (see script_driver.rs).
+                token.heredoc_end_line = token.heredoc_end_line.map(|line| line + caller_line - 1);
             }
         }
         let mut ast = crate::parser::parse_with_options(
@@ -5484,6 +5562,13 @@ impl Executor {
         // `{ exec 10>&1; } >file` must not leave fd 1 pointing at file).
         let mut ambient: std::collections::BTreeMap<u32, String> =
             std::collections::BTreeMap::new();
+        // rubash#3578: the parser mirrors every heredoc / numbered
+        // here-string into BOTH `redirects` (its list position) and
+        // `heredoc_redirects` (its body) in the same order — only an
+        // unnumbered here-string has no twin (its fd-0 bind is the
+        // `here_string` field below). Pair them in the walk so each
+        // entry binds its body at its GNU do_redirections position.
+        let mut heredoc_twins = cmd.heredoc_redirects.iter();
         for redirect in &cmd.redirects {
             if let Some(fd) = redirect.fd {
                 occupied_slots.insert(fd);
@@ -5516,6 +5601,15 @@ impl Executor {
             // (exec redirections are never undone). A failed redirect stops
             // the list — do_redirections returns on the first error.
             if redirect.fd_var.is_some() {
+                // A `{var}<<` entry still consumes its heredoc_redirects
+                // twin to keep the pairing aligned — the fd_var heredoc
+                // loop below owns its bind (vredir1.sub).
+                if matches!(
+                    redirect.kind,
+                    crate::parser::RedirectKind::HereDoc | crate::parser::RedirectKind::HereString
+                ) {
+                    let _ = heredoc_twins.next();
+                }
                 match self.execute_dynamic_fd_var_redirect(
                     redirect,
                     false,
@@ -6025,7 +6119,16 @@ impl Executor {
                                     self.fd_alias_complementary_write_endpoint(source_fd)
                                 {
                                     self.copy_persistent_input_fd(fd, source_fd);
-                                    self.fd_table.open_output(fd, endpoint, fd >= 10);
+                                    // rubash#3655: the complementary write
+                                    // endpoint joins the copied read arm on
+                                    // ONE O_RDWR description — install the
+                                    // pair, or the output bind would retire
+                                    // the read arm (dup2 wholesale).
+                                    if let Some(read) = self.fd_table.read_endpoint(fd) {
+                                        self.fd_table.open_readwrite(fd, read, endpoint, fd >= 10);
+                                    } else {
+                                        self.fd_table.open_output(fd, endpoint, fd >= 10);
+                                    }
                                     self.shell_state.env_vars.remove(&fd_closed_key(fd));
                                     self.record_output_fd_ledger(fd);
                                     continue;
@@ -6281,6 +6384,28 @@ impl Executor {
                         }
                     }
                 }
+                crate::parser::RedirectKind::HereDoc | crate::parser::RedirectKind::HereString => {
+                    // GNU redir.c here_document_to_fd (redir.c:423 +
+                    // :1065-1072): the body materializes at this list
+                    // position and dup2's onto the redirector — under a
+                    // redirect-only exec the bind is persistent, and
+                    // EVERY entry binds (rubash#3578: `exec 14<<A 15<<B`
+                    // kept only fd 15). An unnumbered here-string has no
+                    // heredoc_redirects twin; its fd-0 bind is the
+                    // `here_string` path below.
+                    let unnumbered_here_string =
+                        matches!(redirect.kind, crate::parser::RedirectKind::HereString)
+                            && redirect.fd.is_none();
+                    if !unnumbered_here_string {
+                        if let Some(info) = heredoc_twins.next() {
+                            if info.body.is_some() || info.body_carrier.is_some() {
+                                let fd = redirect.fd.unwrap_or(0);
+                                let input = self.expand_heredoc_redirect_text(info);
+                                self.set_fd_input_text(fd, input, fd != 0);
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
             handled = true;
@@ -6338,9 +6463,16 @@ impl Executor {
             return Ok(Some(0));
         }
 
-        if let Some((fd, input)) = self.exec_heredoc_fd_input(cmd) {
-            self.set_fd_input_text(fd, input, fd != 0);
-            return Ok(Some(0));
+        // Any heredoc entry the walk did not pair (a store with no
+        // `redirects` twin) still binds at its tail position, the same
+        // persistent-descriptor semantics the paired entries got.
+        for info in heredoc_twins {
+            if info.fd_var.is_none() && (info.body.is_some() || info.body_carrier.is_some()) {
+                let fd = info.fd.unwrap_or(0);
+                let input = self.expand_heredoc_redirect_text(info);
+                self.set_fd_input_text(fd, input, fd != 0);
+                handled = true;
+            }
         }
 
         if handled {
@@ -6350,65 +6482,6 @@ impl Executor {
             return Ok(Some(0));
         }
         Ok(None)
-    }
-
-    fn exec_heredoc_fd_input(&self, cmd: &CommandNode) -> Option<(u32, String)> {
-        let redirect = cmd
-            .heredoc_redirects
-            .iter()
-            .rev()
-            // `{var}` heredocs are bound by the fd_var loop above; every
-            // other heredoc/here-string with a body belongs to its explicit
-            // fd, or to fd 0 when the redirect names no fd. The old
-            // `fd.is_some()` gate silently dropped `exec <<EOF` and
-            // `exec <<<word`, whose persistence is the whole point of the
-            // no-operand exec form (GNU redir.c: a redirect-only exec makes
-            // the redirection permanent; rubash#1413).
-            .find(|redirect| redirect.fd_var.is_none() && redirect.body.is_some())?;
-        let fd = redirect.fd.unwrap_or(0);
-        let body = redirect.body.as_deref()?;
-        let input = if let Some(carrier) = &redirect.body_carrier {
-            if let crate::parser::StdinBody::Preexpanded(text) = carrier {
-                text.clone()
-            } else {
-                // NeedsExpansion case: fall through to legacy checks
-                if let Some(word) = body.strip_prefix(STORAGE_WORD_PREFIX) {
-                    let mut input =
-                        decode_ansi_c_quoted_word(word).unwrap_or_else(|| self.expand_word(word));
-                    input.push('\n');
-                    input
-                } else {
-                    strip_unterminated_heredoc_marker(strip_quoted_heredoc_marker(body)).to_string()
-                }
-            }
-        } else if let Some(word) = body.strip_prefix(STORAGE_WORD_PREFIX) {
-            let mut input =
-                decode_ansi_c_quoted_word(word).unwrap_or_else(|| self.expand_word(word));
-            input.push('\n');
-            input
-        } else if let Some(pre) = preexpanded_stdin_body(body) {
-            pre.to_string()
-        } else {
-            strip_unterminated_heredoc_marker(strip_quoted_heredoc_marker(body)).to_string()
-        };
-        // A here-string's stored word is the lexer's transport text:
-        // `$'p\nq\n'` carries ANSI_C_IFS_GUARD pairs around every decoded
-        // blank (lexer/quotes.rs — field-split transport, GNU's CTLESC-
-        // quoted bytes) and the DATA_* carriers hold its literal
-        // quote/dollar bytes. Once the text crosses into the fd byte
-        // channel there is no later strip boundary, so the guards leak
-        // into every consumer of the descriptor (rubash#1208: `exec
-        // 3<<<$'p\nq\n'` + `mapfile -u 3` stored "p<U+E401>" elements).
-        // Resolve them at the entry boundary like the fd-0 here-string
-        // path does (expand_here_string_mut's decode tail).
-        let input = if redirect.here_string {
-            crate::executor::markers::strip_ansi_c_ifs_guard(
-                &crate::executor::markers::decode_word_position_carriers(&input),
-            )
-        } else {
-            input
-        };
-        Some((fd, input))
     }
 
     /// `exec fd>&src` inside a redirected compound must resolve `src`
@@ -7844,10 +7917,7 @@ impl Executor {
             // carry the identical errno-aware payload; GNU's own line-2
             // target word for heredocs is the internal doc pointer, the
             // variable name is the honest stand-in.
-            return Err(ExecuteError::IoError(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                self.fd_dup_error_payload(name),
-            )));
+            return Err(ExecuteError::IoError(self.report_fd_dup_alloc_error(name)));
         };
         self.fd_table
             .open_input(fd, FdReadEndpoint::text(&body), true);
@@ -8217,10 +8287,9 @@ impl Executor {
                             // (redir.c:1144-1150 F_DUPFD).
                             if self.fd_table.is_open(source_fd) {
                                 let Some(fd) = self.allocate_dynamic_fd() else {
-                                    return Err(ExecuteError::IoError(std::io::Error::new(
-                                        std::io::ErrorKind::Other,
-                                        self.fd_dup_error_payload(&target),
-                                    )));
+                                    return Err(ExecuteError::IoError(
+                                        self.report_fd_dup_alloc_error(&target),
+                                    ));
                                 };
                                 if write {
                                     self.copy_persistent_output_fd(fd, source_fd);
@@ -8505,10 +8574,9 @@ impl Executor {
                         return Ok(true);
                     }
                     let Some(fd) = self.allocate_dynamic_fd_in_walk(occupied_slots, walk) else {
-                        return Err(ExecuteError::IoError(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            self.fd_dup_error_payload(&target),
-                        )));
+                        return Err(ExecuteError::IoError(
+                            self.report_fd_dup_alloc_error(&target),
+                        ));
                     };
                     self.copy_persistent_input_fd(fd, source_fd);
                     if !self.set_dynamic_fd_variable(name, fd) {
@@ -8563,10 +8631,9 @@ impl Executor {
                         return Ok(true);
                     }
                     let Some(fd) = self.allocate_dynamic_fd_in_walk(occupied_slots, walk) else {
-                        return Err(ExecuteError::IoError(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            self.fd_dup_error_payload(&target),
-                        )));
+                        return Err(ExecuteError::IoError(
+                            self.report_fd_dup_alloc_error(&target),
+                        ));
                     };
                     self.copy_persistent_output_fd(fd, source_fd);
                     if !self.set_dynamic_fd_variable(name, fd) {
@@ -8618,10 +8685,9 @@ impl Executor {
                         if let Some(input) = self.process_substitution_output(source) {
                             let Some(fd) = self.allocate_dynamic_fd_in_walk(occupied_slots, walk)
                             else {
-                                return Err(ExecuteError::IoError(std::io::Error::new(
-                                    std::io::ErrorKind::Other,
-                                    self.fd_dup_error_payload(&target),
-                                )));
+                                return Err(ExecuteError::IoError(
+                                    self.report_fd_dup_alloc_error(&target),
+                                ));
                             };
                             self.fd_table.open_input(
                                 fd,
@@ -8635,8 +8701,19 @@ impl Executor {
                     if let Some(fd) = bound_fd {
                         if redirect.kind == crate::parser::RedirectKind::ReadWrite {
                             // `<(...)` has no openable path; ledger-only
-                            // companion is best-effort.
+                            // companion is best-effort. rubash#3655: the
+                            // output bind retires the procsub read arm
+                            // (dup2 wholesale), so re-install the pair
+                            // when the companion lands — the `{var}<>
+                            // <(...)` slot keeps both directions.
+                            let read = self.fd_table.read_endpoint(fd);
                             let _ = self.set_fd_output_file(fd, target.clone(), true, true);
+                            if let (Some(read), Some(write)) =
+                                (read, self.fd_table.write_endpoint(fd))
+                            {
+                                self.fd_table.open_readwrite(fd, read, write, true);
+                                self.record_input_fd_ledger(fd);
+                            }
                         }
                         if !self.set_dynamic_fd_variable(name, fd) {
                             self.close_persistent_fd(fd)?;
@@ -8689,10 +8766,9 @@ impl Executor {
                                     let Some(fd) =
                                         self.allocate_dynamic_fd_in_walk(occupied_slots, walk)
                                     else {
-                                        return Err(ExecuteError::IoError(std::io::Error::new(
-                                            std::io::ErrorKind::Other,
-                                            self.fd_dup_error_payload(&target),
-                                        )));
+                                        return Err(ExecuteError::IoError(
+                                            self.report_fd_dup_alloc_error(&target),
+                                        ));
                                     };
                                     self.copy_persistent_input_fd(fd, slot);
                                     if !self.set_dynamic_fd_variable(name, fd) {
@@ -8724,19 +8800,34 @@ impl Executor {
                     };
                 let file = read_file;
                 let Some(fd) = self.allocate_dynamic_fd_in_walk(occupied_slots, walk) else {
-                    return Err(ExecuteError::IoError(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        self.fd_dup_error_payload(&target),
-                    )));
+                    return Err(ExecuteError::IoError(
+                        self.report_fd_dup_alloc_error(&target),
+                    ));
                 };
-                self.set_fd_input_file(fd, file, true);
                 if redirect.kind == crate::parser::RedirectKind::ReadWrite {
-                    self.fd_table
-                        .open_output(fd, FdWriteEndpoint::File(write_file), true);
+                    // rubash#3655: one O_RDWR description — a single
+                    // open_readwrite install, not an input bind
+                    // followed by an output bind (the second would
+                    // retire the first). Non-ReadWrite must NOT
+                    // install a write arm — read_file/write_file share
+                    // the same Rc there.
+                    self.fd_table.open_readwrite(
+                        fd,
+                        FdReadEndpoint::File(file),
+                        FdWriteEndpoint::File(write_file),
+                        true,
+                    );
                     self.shell_state.env_vars.remove(&fd_closed_key(fd));
+                    self.shell_state.env_vars.remove(&fd_stdin_key(fd));
+                    self.shell_state.env_vars.remove(&fd_stdin_offset_key(fd));
+                    self.shell_state
+                        .env_vars
+                        .insert(fd_dynamic_input_key(fd), "1".to_string());
                     self.shell_state
                         .env_vars
                         .insert(fd_output_key(fd), target.clone());
+                } else {
+                    self.set_fd_input_file(fd, file, true);
                 }
                 if !self.set_dynamic_fd_variable(name, fd) {
                     self.close_persistent_fd(fd)?;
@@ -8752,10 +8843,9 @@ impl Executor {
             | crate::parser::RedirectKind::Append
             | crate::parser::RedirectKind::ClobberOutput => {
                 let Some(fd) = self.allocate_dynamic_fd_in_walk(occupied_slots, walk) else {
-                    return Err(ExecuteError::IoError(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        self.fd_dup_error_payload(&target),
-                    )));
+                    return Err(ExecuteError::IoError(
+                        self.report_fd_dup_alloc_error(&target),
+                    ));
                 };
                 if let Some(source) = target
                     .strip_prefix(">(")
@@ -9030,15 +9120,28 @@ impl Executor {
     /// limit (`ulimit -Sn 6`). rubash#773: report the same split instead of
     /// the hardcoded EINVAL text, which sent EMFILE scripts debugging the
     /// wrong layer.
-    fn fd_dup_error_payload(&self, target: &str) -> String {
+    /// rubash#3605: emit the REDIR_VARASSIGN failure as GNU's TWO
+    /// reporters emit it — the `sys_error` line goes to fd 2 NOW with
+    /// the script-name-only prolog (error.c error_prolog(0): no line
+    /// segment), and only the `file_error` line returns for the
+    /// caller's line-stamped prefix. The old single-payload shape let
+    /// the caller's `line N:` prefix leak onto the sys_error line —
+    /// GNU prints `./vredir6.sub: redirection error: ...` with no line
+    /// on line 1 and `./vredir6.sub: line 13: /dev/null: ...` on
+    /// line 2.
+    fn report_fd_dup_alloc_error(&mut self, target: &str) -> std::io::Error {
         let errno = match self.open_files_limit() {
             Some(limit) if limit <= 10 => "Invalid argument",
             _ => "Too many open files",
         };
-        format!(
-            "redirection error: cannot duplicate fd: {errno}\n{}{target}: {errno}",
-            self.diagnostic_prefix()
-        )
+        let line1 = format!(
+            "{}redirection error: cannot duplicate fd: {errno}\n",
+            self.script_name_prefix()
+        );
+        // A routed write that itself fails (closed fd 2) is lost like
+        // GNU's fprintf(stderr) — never a second diagnostic.
+        let _ = self.write_default_stderr(line1.as_bytes());
+        std::io::Error::new(std::io::ErrorKind::Other, format!("{target}: {errno}"))
     }
 
     /// rubash#2272: record the descriptor a `{var}<&-` / `{var}>&-`
@@ -10416,6 +10519,11 @@ impl Executor {
         if line_offset > 0 {
             for token in tokens.iter_mut() {
                 token.position += line_offset as usize;
+                // rubash#3605: the gather end line shifts in lockstep
+                // (see script_driver.rs).
+                token.heredoc_end_line = token
+                    .heredoc_end_line
+                    .map(|line| line + line_offset as usize);
             }
         }
         let ast = crate::parser::parse_with_options(

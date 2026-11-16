@@ -2123,6 +2123,10 @@ impl Executor {
             return Err(ExecuteError::ExpansionFailure(1));
         }
         if self.shell_state.parameter_bad_substitution.replace(false) {
+            // rubash#3499: consuming the verdict spends the print
+            // budget with it, so the next command reports its own
+            // failure.
+            self.shell_state.bad_substitution_reported.set(false);
             if self.posix_mode_enabled()
                 && !self.invocation_interactive()
                 && crate::builtins::shopt::compatibility_level(&self.shell_state.env_vars) > 43
