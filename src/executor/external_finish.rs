@@ -455,7 +455,45 @@ impl Executor {
         } else {
             String::new()
         };
-        let source = fs::read_to_string(script_path)?;
+        let script_bytes = fs::read(script_path)?;
+        // GNU general.c:739 check_binary_file is the only image gate:
+        // an 80-byte sample (shell.c:1659-1692 open_shell_script;
+        // execute_cmd.c:6237-6260 shell_execve's ENOEXEC tail) refuses
+        // ELF magic or a NUL in the first line (two under `#!`) with
+        // exit(EX_BINARY_FILE = 126). The diagnostic differs by entry
+        // face, verified against GNU 5.3.20:
+        //   - same-shell script child (`bash file` shape): $0 is
+        //     already bound to the filename, so internal_error's
+        //     "%s: %s" prints it twice —
+        //     `/bin/sh: /bin/sh: cannot execute binary file`.
+        //   - ENOEXEC fallback (`./x` a corrupt binary): $0 is still
+        //     the invoking shell —
+        //     `bash: line 1: ./x: cannot execute binary file: Exec
+        //     format error` (execute_cmd.c:6228 appends
+        //     strerror(ENOEXEC)).
+        // Refusing here keeps the parent's reader alive with status
+        // 126, where the raw UTF-8 read failure below would misreport
+        // the binary as a text decode error. Bytes that pass the gate
+        // decode as script text (raw-byte markers for invalid UTF-8
+        // sequences, rubash#132), never read_to_string's refusal.
+        if crate::script_driver::check_binary_file(&script_bytes[..script_bytes.len().min(80)]) {
+            let mut stderr = Vec::new();
+            if contain_child_signals {
+                let _ = writeln!(
+                    &mut stderr,
+                    "{script}: {script}: cannot execute binary file"
+                );
+            } else {
+                let _ = writeln!(
+                    &mut stderr,
+                    "{}{script}: cannot execute binary file: Exec format error",
+                    self.error_prefix_for_line(cmd.line.unwrap_or(1)),
+                );
+            }
+            self.finish_external_error(cmd, &stderr, 126)?;
+            return Ok(());
+        }
+        let source = crate::script_driver::bytes_to_script_text(&script_bytes);
         // bashhist.c pre_process_line: a fresh `bash script` child expands
         // history per input line, so an in-process THIS_SH child whose
         // script enables history must run the grouped history driver rather
