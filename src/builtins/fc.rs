@@ -36,6 +36,28 @@ enum SpecErr {
     Erange,
 }
 
+/// GNU `strsub` (bash stringlib.c:145) with global=1, as called by fc.def
+/// `fc_dosubs` for every `fc -s` substitution. Rust's `str::replace` is
+/// identical for a non-empty pattern (non-overlapping, left-to-right, all
+/// occurrences), but differs for an empty pattern: `replace("", rep)`
+/// inserts `rep` at every char boundary, while strsub consumes one byte
+/// per match (`i += patlen ? patlen : 1`), so each byte of the command is
+/// replaced by one copy of `rep` -- `fc -s =x` turns `true` into `xxxx`.
+/// And when `rep` is empty too, nothing is ever appended (`temp` stays
+/// NULL) and strsub returns a copy of the original string, so `fc -s =`
+/// is the identity (rubash#3645).
+fn fc_strsub(string: &str, pat: &str, rep: &str) -> String {
+    if pat.is_empty() {
+        if rep.is_empty() {
+            return string.to_string();
+        }
+        // One copy of `rep` per byte consumed, matching strsub's byte
+        // walk (verified against GNU: multibyte e-acute becomes `xx`).
+        return rep.repeat(string.len());
+    }
+    string.replace(pat, rep)
+}
+
 /// Returns true if arg looks like a history number (possibly negative),
 /// matching bash's fc_number() so that e.g. "-1" is not misread as an option.
 fn is_number_arg(arg: &str) -> bool {
@@ -260,11 +282,13 @@ where
         let mut spec_index: Option<usize> = None;
         for (position, a) in pos.iter().enumerate() {
             if spec.is_none() {
+                // fc.def (execute form): any argument containing `=` is a
+                // substitution -- including `=x`, whose pattern is empty
+                // (rubash#3645). The old `eq > 0` gate read `=x` as a
+                // command specification and reported "no command found".
                 if let Some(eq) = a.find('=') {
-                    if eq > 0 {
-                        subs.push((a[..eq].to_string(), a[eq + 1..].to_string()));
-                        continue;
-                    }
+                    subs.push((a[..eq].to_string(), a[eq + 1..].to_string()));
+                    continue;
                 }
                 spec = Some(a);
                 spec_index = Some(position);
@@ -303,7 +327,7 @@ where
         let idx = idx.min(count - 1);
         let mut command = entries[idx].clone();
         for (pat, rep) in &subs {
-            command = command.replace(pat.as_str(), rep.as_str());
+            command = fc_strsub(&command, pat, rep);
         }
         // fc.def:308: the substituted command is echoed to stderr.
         writeln!(stderr, "{command}")?;
@@ -711,6 +735,74 @@ mod tests {
             ),
         }
         assert_eq!(stderr, "echo xx xb xc\n");
+    }
+
+    // --- fc -s with an empty pattern (rubash#3645) ---
+
+    #[test]
+    fn test_fc_s_empty_pattern_substitution() {
+        // GNU treats any argument containing `=` as a substitution
+        // (fc.def execute form), so the pattern is empty and strsub
+        // replaces every byte with `x`: `true` becomes `xxxx`.
+        let (_, stderr, result) = run_fc(&["-s", "=x"], &["true", "fc"]);
+        match result {
+            FcResult::Reexec { command } => assert_eq!(command, "xxxx"),
+            _ => panic!("expected Reexec"),
+        }
+        assert_eq!(stderr.lines().collect::<Vec<_>>(), ["xxxx"]);
+    }
+
+    #[test]
+    fn test_fc_s_empty_pattern_multi_char_rep() {
+        let (_, _, result) = run_fc(&["-s", "=xy"], &["true", "fc"]);
+        match result {
+            FcResult::Reexec { command } => assert_eq!(command, "xyxyxyxy"),
+            _ => panic!("expected Reexec"),
+        }
+    }
+
+    #[test]
+    fn test_fc_s_empty_pattern_empty_rep_is_identity() {
+        // GNU stringlib.c strsub: with an empty pattern and an empty
+        // replacement nothing is ever appended, so the command is
+        // returned unchanged.
+        let (_, stderr, result) = run_fc(&["-s", "="], &["true", "fc"]);
+        match result {
+            FcResult::Reexec { command } => assert_eq!(command, "true"),
+            _ => panic!("expected Reexec"),
+        }
+        assert_eq!(stderr.lines().collect::<Vec<_>>(), ["true"]);
+    }
+
+    #[test]
+    fn test_fc_s_empty_pattern_multibyte_is_per_byte() {
+        // strsub walks bytes: the two-byte e-acute becomes `xx`.
+        let (_, _, result) = run_fc(&["-s", "=x"], &["é", "fc"]);
+        match result {
+            FcResult::Reexec { command } => assert_eq!(command, "xx"),
+            _ => panic!("expected Reexec"),
+        }
+    }
+
+    #[test]
+    fn test_fc_s_empty_pattern_with_spec() {
+        // `fc -s =x true` resolves the `true` entry, then substitutes.
+        let (_, _, result) = run_fc(&["-s", "=x", "true"], &["true", "echo hi", "fc"]);
+        match result {
+            FcResult::Reexec { command } => assert_eq!(command, "xxxx"),
+            _ => panic!("expected Reexec"),
+        }
+    }
+
+    #[test]
+    fn test_fc_s_empty_pattern_two_subs_apply_in_order() {
+        // Each substitution runs on the previous result: `echo ab`
+        // becomes seven `x`, then seven `y`.
+        let (_, _, result) = run_fc(&["-s", "=x", "=y"], &["echo ab", "fc"]);
+        match result {
+            FcResult::Reexec { command } => assert_eq!(command, "yyyyyyy"),
+            _ => panic!("expected Reexec"),
+        }
     }
 
     #[test]
