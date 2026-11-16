@@ -998,6 +998,15 @@ impl Executor {
                             .cloned();
                         self.fd_table
                             .open_input(0, FdReadEndpoint::File(file_fd), false);
+                        // rubash#3605: a real fd-0 endpoint bound by the
+                        // compound's own redirect supersedes the staged
+                        // FUNCTION_STDIN mirror — GNU's do_redirections
+                        // replaces the pipe/heredoc fd 0 (redir.c
+                        // do_redirection_internal after do_piping), so an
+                        // async child inherits the file, not the staged
+                        // payload. The guard restores the pair at scope end.
+                        self.shell_state.env_vars.remove(FUNCTION_STDIN);
+                        self.shell_state.env_vars.remove(FUNCTION_STDIN_OFFSET);
                         return Ok(Some(CommandFd0InputGuard {
                             saved_fd0_entry,
                             saved_function_stdin,
@@ -1027,6 +1036,8 @@ impl Executor {
                             FdReadEndpoint::process_substitution_bytes(output),
                             false,
                         );
+                        self.shell_state.env_vars.remove(FUNCTION_STDIN);
+                        self.shell_state.env_vars.remove(FUNCTION_STDIN_OFFSET);
                         self.fd_table.set_input_offset(0, 0);
                         if let Some(timing) = body_timing {
                             self.fd_table.set_input_timing(0, timing);
@@ -1079,6 +1090,8 @@ impl Executor {
                         FdReadEndpoint::process_substitution_bytes(data),
                         false,
                     );
+                    self.shell_state.env_vars.remove(FUNCTION_STDIN);
+                    self.shell_state.env_vars.remove(FUNCTION_STDIN_OFFSET);
                     self.fd_table.set_input_offset(0, offset);
                     if let Some(timing) = timing {
                         self.fd_table.set_input_timing(0, timing);
@@ -1127,6 +1140,8 @@ impl Executor {
                     let file_fd = FileFd::from_file(file, target.into());
                     self.fd_table
                         .open_input(0, FdReadEndpoint::File(file_fd), false);
+                    self.shell_state.env_vars.remove(FUNCTION_STDIN);
+                    self.shell_state.env_vars.remove(FUNCTION_STDIN_OFFSET);
                     return Ok(Some(CommandFd0InputGuard {
                         saved_fd0_entry,
                         saved_function_stdin,
@@ -1156,6 +1171,10 @@ impl Executor {
                 .cloned();
             self.fd_table
                 .open_input(0, FdReadEndpoint::File(file), false);
+            // rubash#3605: same real-endpoint supersedes-mirror rule as
+            // the arms above (GNU do_redirections after do_piping).
+            self.shell_state.env_vars.remove(FUNCTION_STDIN);
+            self.shell_state.env_vars.remove(FUNCTION_STDIN_OFFSET);
             return Ok(Some(CommandFd0InputGuard {
                 saved_fd0_entry,
                 saved_function_stdin,

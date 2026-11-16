@@ -593,6 +593,22 @@ pub struct ShellState {
     /// off or inside a subshell, a cleared flag sends the child's stdin to
     /// /dev/null; a set flag inherits the redirected stream instead.
     pub(crate) stdin_redir: Cell<bool>,
+    /// rubash#3605: one-shot `pipe_in != NO_PIPE` marker for a pipeline
+    /// element's own compound dispatch. GNU's element grandchild
+    /// (execute_cmd.c:4570 `stdin_redir |= pipe_in != NO_PIPE`, and the
+    /// execute_in_subshell re-dispatch at :1731-1739/:1759-1764 that
+    /// consumes `command->redirects` before the inner
+    /// execute_command_internal sees them) decides stdin_redir at two
+    /// sites that need this bit: the `( )` assign at :1733
+    /// (`stdin_redirects(own) || pipe_in`) and the :826 control-structure
+    /// assign, which GNU skips for pipe-connected elements because the
+    /// redirects are already NULL there. Set on the compound stage
+    /// clone; consumed (replace(false)) at the element's own compound
+    /// dispatch so nested `( )`/control structures never see it — a
+    /// nested `( )` assigns `own redirects || NO_PIPE` and clears the
+    /// inherited flag, exactly like GNU (`{ ( cat & wait ); } <file`
+    /// feeds the async cat /dev/null, not the file).
+    pub(crate) element_pipe_stdin: Cell<bool>,
     /// jobs.c bookkeeping — the job registry (jobs.c `jobs` array /
     /// `job_table`): bash-observable job identity, pipeline pids, states,
     /// and notification bits. Process handles are Executor resources and
@@ -1142,6 +1158,7 @@ impl Clone for ShellState {
             xtrace_suspended: Cell::new(self.xtrace_suspended.get()),
             in_command_substitution: Cell::new(self.in_command_substitution.get()),
             stdin_redir: Cell::new(self.stdin_redir.get()),
+            element_pipe_stdin: Cell::new(self.element_pipe_stdin.get()),
             job_table: self.job_table.clone(),
             last_background_pid: self.last_background_pid,
             last_procsub_pid: self.last_procsub_pid,
