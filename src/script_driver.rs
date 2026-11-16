@@ -2250,6 +2250,12 @@ fn run_history_group(
     }
 
     // Record the entry (bashhist.c history_delimiting_chars join).
+    // readline/history.c hist_inittime: the stamp an entry takes is
+    // armed by the first HISTTIMEFORMAT bind (rubash#3392) — the sticky
+    // latch, or the variable existing right now (its bind arms the
+    // latch at the latest by the per-command boundary).
+    let comment_char_armed = executor.shell_state.history_comment_char_armed
+        || executor.get_env("HISTTIMEFORMAT").is_some();
     if history_on {
         if cmdhist {
             let mut record = build_recorded_entry(&record_texts, group, lithist);
@@ -2263,9 +2269,13 @@ fn run_history_group(
             let was_recorded = if record.trim().is_empty() {
                 false
             } else {
-                session
-                    .borrow_mut()
-                    .record(&record, &control, &ignore, histsize)
+                session.borrow_mut().record(
+                    &record,
+                    &control,
+                    &ignore,
+                    histsize,
+                    comment_char_armed,
+                )
             };
 
             // bashhist.c:961 really_add_history: recording the line resets
@@ -2287,9 +2297,13 @@ fn run_history_group(
                 if text.is_empty() {
                     continue;
                 }
-                let was_recorded = session
-                    .borrow_mut()
-                    .record(text, &control, &ignore, histsize);
+                let was_recorded = session.borrow_mut().record(
+                    text,
+                    &control,
+                    &ignore,
+                    histsize,
+                    comment_char_armed,
+                );
                 let mut shell = session.borrow_mut();
                 shell.last_line_added = was_recorded;
                 if was_recorded {
@@ -8007,9 +8021,13 @@ fn record_stdin_group_if_armed(executor: &mut Executor, pending: &str) {
     let control = executor.get_env("HISTCONTROL").unwrap_or_default();
     let ignore = executor.get_env("HISTIGNORE").unwrap_or_default();
     let histsize = SessionHistory::size_limit(executor.get_env("HISTSIZE"));
+    // readline/history.c hist_inittime: the stamp an entry takes is
+    // armed by the first HISTTIMEFORMAT bind (rubash#3392).
+    let comment_char_armed = executor.shell_state.history_comment_char_armed
+        || executor.get_env("HISTTIMEFORMAT").is_some();
     session
         .borrow_mut()
-        .record(trimmed, &control, &ignore, histsize);
+        .record(trimmed, &control, &ignore, histsize, comment_char_armed);
 }
 
 /// Whether a finish pass's stream-end duties write the engine

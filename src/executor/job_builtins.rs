@@ -4902,6 +4902,11 @@ impl Executor {
                     let ignore = self.get_env("HISTIGNORE").unwrap_or_default();
                     let histsize =
                         crate::history::SessionHistory::size_limit(self.get_env("HISTSIZE"));
+                    // readline/history.c hist_inittime: the stamp an
+                    // entry takes is armed by the first HISTTIMEFORMAT
+                    // bind (rubash#3392).
+                    let comment_char_armed = self.shell_state.history_comment_char_armed
+                        || self.get_env("HISTTIMEFORMAT").is_some();
                     let mut shell = session.borrow_mut();
                     // The fc-line entry was already deleted above
                     // (fc.def:403-421); the executed text is remembered
@@ -4914,7 +4919,7 @@ impl Executor {
                     let was_recorded = if edited.is_empty() {
                         false
                     } else {
-                        shell.record(&edited, &control, &ignore, histsize)
+                        shell.record(&edited, &control, &ignore, histsize, comment_char_armed)
                     };
                     shell.last_line_added = was_recorded;
                 }
@@ -4948,6 +4953,11 @@ impl Executor {
                     let ignore = self.get_env("HISTIGNORE").unwrap_or_default();
                     let histsize =
                         crate::history::SessionHistory::size_limit(self.get_env("HISTSIZE"));
+                    // readline/history.c hist_inittime: the stamp an
+                    // entry takes is armed by the first HISTTIMEFORMAT
+                    // bind (rubash#3392).
+                    let comment_char_armed = self.shell_state.history_comment_char_armed
+                        || self.get_env("HISTTIMEFORMAT").is_some();
                     let mut shell = session.borrow_mut();
                     // fc.def fc_replhist: the executed command REPLACES
                     // the last entry (bash_delete_last_history +
@@ -4967,7 +4977,7 @@ impl Executor {
                             shell.entries.pop();
                             shell.timestamps.pop();
                         }
-                        shell.record(&command, &control, &ignore, histsize)
+                        shell.record(&command, &control, &ignore, histsize, comment_char_armed)
                     };
                     shell.last_line_added = was_recorded;
                 }
