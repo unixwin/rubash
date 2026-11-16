@@ -20,35 +20,52 @@
 //!
 //! GNU anchors: trap.c:1128 run_exit_trap, builtins/exec.def ->
 //! execute_cmd.c:6126 shell_execve, shell.c exit_shell.
+//!
+//! Pin mechanics: the leak only exists on a SHARED Executor, so the
+//! children must run in-process. The rubash binary opts into real
+//! shell children (main.rs enable_real_shell_children), which makes
+//! `${THIS_SH} x.sh` spawn a fresh process per child — a pin driven
+//! through `Command::new(rubash)` can never observe the latch. This
+//! pin therefore drives `Executor` directly through the library:
+//! `real_shell_children_enabled()` stays false, `execute_same_shell_script`
+//! takes the in-process `execute_direct_shell_script` branch
+//! (external_finish.rs), and both children share one Executor. Child
+//! output is asserted through an events file because `execute_ast`
+//! writes to the real process stdout, which a test cannot capture.
 
+use rubash::executor::Executor;
+use rubash::lexer::tokenize;
+use rubash::parser::parse;
 use std::fs;
-use std::path::PathBuf;
-use std::process::Command;
-
-const RUBASH: &str = env!("CARGO_BIN_EXE_rubash");
+use std::path::{Path, PathBuf};
 
 fn scratch(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("rubash-3605latch-{tag}-{}", std::process::id()));
+    let dir =
+        PathBuf::from("target").join(format!("rubash-3605latch-{tag}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create scratch dir");
     dir
 }
 
-fn write(dir: &std::path::Path, name: &str, text: &str) {
+/// Forward-slash relative spelling for shell source: Rust's `Path`
+/// display emits `\` on Windows, which the shell lexer would read as
+/// escapes.
+fn shell_path(dir: &Path, name: &str) -> String {
+    dir.join(name).to_string_lossy().replace('\\', "/")
+}
+
+fn write(dir: &Path, name: &str, text: &str) {
     fs::write(dir.join(name), text).expect("write script");
 }
 
-fn run_c(dir: &std::path::Path, script: &str) -> (String, String, i32) {
-    let output = Command::new(RUBASH)
-        .args(["-c", script])
-        .current_dir(dir)
-        .output()
-        .expect("spawn rubash");
-    (
-        String::from_utf8_lossy(&output.stdout).into_owned(),
-        String::from_utf8_lossy(&output.stderr).into_owned(),
-        output.status.code().unwrap_or(-1),
-    )
+fn run_source(executor: &mut Executor, source: &str) {
+    let tokens = tokenize(source);
+    let ast = parse(&tokens);
+    let _ = executor.execute_ast(&ast);
+}
+
+fn read_events(dir: &Path) -> String {
+    fs::read_to_string(dir.join("events.log")).unwrap_or_default()
 }
 
 /// A child's EXIT-trap fire must not suppress the next in-process
@@ -56,24 +73,43 @@ fn run_c(dir: &std::path::Path, script: &str) -> (String, String, i32) {
 #[test]
 fn child_exit_trap_fire_does_not_latch_parent_executor() {
     let dir = scratch("exittrap");
+    let events_path = shell_path(&dir, "events.log");
     write(
         &dir,
         "p1.sh",
-        "trap 'echo E-EXIT' EXIT\necho p1-ran\nexit 0\n",
+        &format!(
+            "trap 'echo P1-EXIT >> {events_path}' EXIT\n\
+             echo P1-RAN >> {events_path}\n\
+             exit 0\n"
+        ),
     );
     write(
         &dir,
         "e12.sh",
-        "set -e\nf() { ! :; }\nmain() {( trap 'echo TRAP-FIRED' 0; \"$@\" >>/dev/null 2>&1 )}\nmain f\n",
+        &format!(
+            "set -e\n\
+             f() {{ ! :; }}\n\
+             main() {{( trap 'echo TRAP-FIRED >> {events_path}' 0; \"$@\" >>/dev/null 2>&1 )}}\n\
+             main f\n"
+        ),
     );
-    let (stdout, _stderr, _rc) = run_c(&dir, "${THIS_SH} p1.sh; ${THIS_SH} e12.sh");
+    let mut executor = Executor::new();
+    run_source(
+        &mut executor,
+        &format!(
+            "${{THIS_SH}} {} ; ${{THIS_SH}} {}",
+            shell_path(&dir, "p1.sh"),
+            shell_path(&dir, "e12.sh")
+        ),
+    );
+    let log = read_events(&dir);
     assert!(
-        stdout.contains("p1-ran") && stdout.contains("E-EXIT"),
-        "first child should run its EXIT trap, got {stdout:?}"
+        log.contains("P1-RAN") && log.contains("P1-EXIT"),
+        "first child should run its EXIT trap, got {log:?}"
     );
     assert!(
-        stdout.contains("TRAP-FIRED"),
-        "second child's subshell EXIT trap must fire — leaked exit_trap_ran suppressed it, got {stdout:?}"
+        log.contains("TRAP-FIRED"),
+        "second child's subshell EXIT trap must fire — leaked exit_trap_ran suppressed it, got {log:?}"
     );
 }
 
@@ -83,21 +119,28 @@ fn child_exit_trap_fire_does_not_latch_parent_executor() {
 #[test]
 fn subshell_exit_traps_survive_across_script_children() {
     let dir = scratch("subtrap");
+    let events_path = shell_path(&dir, "events.log");
     write(
         &dir,
         "a.sh",
-        "( trap 'echo A-SUB' 0; true )\nexit 0\n",
+        &format!("( trap 'echo A-SUB >> {events_path}' 0; true )\nexit 0\n"),
     );
     write(
         &dir,
         "b.sh",
-        "( trap 'echo B-SUB' 0; true )\nexit 0\n",
+        &format!("( trap 'echo B-SUB >> {events_path}' 0; true )\nexit 0\n"),
     );
-    let (stdout, _stderr, _rc) = run_c(
-        &dir,
-        "${THIS_SH} a.sh; ${THIS_SH} b.sh; ( trap 'echo PARENT-SUB' 0; true )",
+    let mut executor = Executor::new();
+    run_source(
+        &mut executor,
+        &format!(
+            "${{THIS_SH}} {} ; ${{THIS_SH}} {} ; ( trap 'echo PARENT-SUB >> {events_path}' 0; true )",
+            shell_path(&dir, "a.sh"),
+            shell_path(&dir, "b.sh")
+        ),
     );
+    let log = read_events(&dir);
     for want in ["A-SUB", "B-SUB", "PARENT-SUB"] {
-        assert!(stdout.contains(want), "missing {want} in {stdout:?}");
+        assert!(log.contains(want), "missing {want} in {log:?}");
     }
 }
