@@ -9,7 +9,9 @@
 //! Pin surface is the union of PR #3603's pins and PR #3580's wider
 //! grid (three heredocs, same-fd last-wins, fd-0+numbered,
 //! `{var}`+numbered, and the brace-group control), plus an
-//! interleave pin for the in-walk binding position itself; every
+//! interleave pin for the in-walk binding position itself, plus
+//! rubash#3654's reverse-order pair (unnumbered here-string first
+//! with a numbered heredoc after, and its mirror); every
 //! expectation byte-verified against WSL GNU bash 5.3.x script-file
 //! probes. The `ulimit -n 16` preludes mirror the issue3195 pin's
 //! harness so fds 13-15 stay below the soft limit.
@@ -219,6 +221,40 @@ fn issue_script_exec_heredoc_binds_at_list_position() {
     );
     assert_eq!(code, Some(0), "stderr={stderr:?}");
     assert_eq!(stdout, "aaa\n", "stdout={stdout:?}");
+}
+
+#[test]
+fn issue_script_exec_unnumbered_here_string_first_numbered_heredoc_binds() {
+    // rubash#3654: the reverse order of the #3578 grid — an
+    // unnumbered here-string FIRST, a numbered heredoc AFTER.
+    // The here-string binds fd 0; the heredoc still binds fd 14
+    // at its own list position (GNU redir.c:1065-1072 ordered walk).
+    let (stdout, stderr, code, _dir) = run_script(
+        "hs-first",
+        "ulimit -n 16\n\
+         exec <<<w 14<<A\n\
+         word\n\
+         A\n\
+         read -u 14 x; echo \"x=$x\"\n",
+    );
+    assert_eq!(code, Some(0), "stderr={stderr:?}");
+    assert_eq!(stdout, "x=word\n", "stdout={stdout:?}");
+}
+
+#[test]
+fn issue_script_exec_numbered_heredoc_first_here_string_control() {
+    // Reverse-order control for #3654: the same two bodies with the
+    // numbered heredoc first — GNU binds fd 14 identically either way.
+    let (stdout, stderr, code, _dir) = run_script(
+        "hd-first",
+        "ulimit -n 16\n\
+         exec 14<<A <<<w\n\
+         word\n\
+         A\n\
+         read -u 14 x; echo \"x=$x\"\n",
+    );
+    assert_eq!(code, Some(0), "stderr={stderr:?}");
+    assert_eq!(stdout, "x=word\n", "stdout={stdout:?}");
 }
 
 #[test]

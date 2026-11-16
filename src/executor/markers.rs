@@ -174,6 +174,17 @@ pub(crate) const CASE_PATTERN_MAY_OPEN: &str = "\u{0}case-pattern-may-open";
 /// these into the pattern word in GNU; rubash's tokenizer emits them).
 pub(crate) const CASE_PATTERN_PAREN: &str = "\u{0}case-pattern-paren";
 
+/// Memo-key grade tag for the subscript resolve cache
+/// (subscript_expansion.rs `resolve_array_subscript_with`): indexed
+/// subscripts resolve through expand_arith_string (arrayfunc.c:1368 —
+/// no tilde arm, rubash#3582) while associative subscripts keep
+/// expand_subscript_string's tilde expansion, and a leading `~`
+/// resolves differently per grade, so the two grades must not share
+/// SUB_RES_XPASS entries. NUL prefix cannot collide with subscript
+/// text — NUL cannot appear in transport text (same argument as
+/// CASE_PATTERN_*).
+pub(crate) const SUBSCRIPT_ARITH_GRADE_TAG: &str = "\u{0}subscript-arith-grade";
+
 /// Data `$` — dollar that must not re-trigger expansion.
 pub(crate) const DATA_DOLLAR: char = '\u{1f}';
 
@@ -697,6 +708,7 @@ pub(crate) const HASH_ENV_FIELD_SEP: char = SUBSCRIPT_CARRIER;
 // EXACT __RUBASH_STARTUP_FILES_DONE - state key (startup files done) - serialized across the respawn/subshell boundary; see the owning subsystem
 // EXACT __RUBASH_STATE_FILE - state key (state file) - serialized across the respawn/subshell boundary; see the owning subsystem
 // EXACT __RUBASH_SUBSHELL_DEPTH - state key (subshell depth) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_SUPPRESS_ERREXIT - state key (suppress errexit) - serialized across the respawn/subshell boundary; see the owning subsystem
 // EXACT __RUBASH_TEMP_PATH - state key (temp path) - serialized across the respawn/subshell boundary; see the owning subsystem
 // EXACT __RUBASH_TOP_LEVEL_NAME - state key (top level name) - serialized across the respawn/subshell boundary; see the owning subsystem
 // EXACT __RUBASH_TRACE_VARS - serialized variable-name set (trace) for child/subshell state transfer
@@ -1111,6 +1123,12 @@ pub(crate) const MARKERS: &[MarkerInfo] = &[
         boundaries: &[],
         user_reachable: false,
     },
+    MarkerInfo {
+        name: "SUBSCRIPT_ARITH_GRADE_TAG",
+        code: 0x00,
+        boundaries: &[],
+        user_reachable: false,
+    },
 ];
 
 // ==========================================================================
@@ -1390,6 +1408,22 @@ pub(crate) fn restore_bare_sentinels(value: &str, rules: &[(char, &str)]) -> Str
         }
     }
     output
+}
+
+/// Borrowing form of a single-rule [`restore_bare_sentinels`] for hot
+/// paths: borrows `value` when no bare sentinel is present, avoiding an
+/// allocation on the common no-marker path. The absence check cannot
+/// misread an E400 pair — a hit only routes into the pair-aware
+/// [`restore_bare_sentinels`], which treats the escaped member as data.
+pub(crate) fn restore_bare_sentinel_cow<'a>(
+    value: &'a str,
+    sentinel: char,
+    replacement: &str,
+) -> std::borrow::Cow<'a, str> {
+    if !value.contains(sentinel) {
+        return std::borrow::Cow::Borrowed(value);
+    }
+    std::borrow::Cow::Owned(restore_bare_sentinels(value, &[(sentinel, replacement)]))
 }
 
 /// Decode-side sibling of [`restore_bare_sentinels`] for boundaries whose
@@ -1698,7 +1732,7 @@ mod tests {
     /// A new marker below U+0100 that fits neither fails here.
     #[test]
     fn word_marker_byte_predicate_scope_is_enforced() {
-        const OUT_OF_SCOPE_DOMAINS: [&str; 8] = [
+        const OUT_OF_SCOPE_DOMAINS: [&str; 9] = [
             // readline prompt-ignore layer
             "PROMPT_IGNORE_START",
             "PROMPT_IGNORE_END",
@@ -1710,6 +1744,8 @@ mod tests {
             "CASE_PATTERN_EXPECT",
             "CASE_PATTERN_MAY_OPEN",
             "CASE_PATTERN_PAREN",
+            // executor memo-key grade tag (NUL prefix)
+            "SUBSCRIPT_ARITH_GRADE_TAG",
         ];
         for m in MARKERS {
             // Only C0 codepoints are in the predicate's byte domain; a
@@ -1764,7 +1800,7 @@ mod tests {
     /// must be removed (the staleness assert below enforces it).
     #[test]
     fn every_row_claims_boundaries_or_is_listed_internal() {
-        const INTERNAL_ONLY_ROWS: [&str; 5] = [
+        const INTERNAL_ONLY_ROWS: [&str; 6] = [
             // Parse-time site marker for ${...} quoting decisions;
             // consumed during parse, never enters stored/output text.
             "QUOTED_EXPANSION_SITE",
@@ -1778,6 +1814,10 @@ mod tests {
             "CASE_PATTERN_EXPECT",
             "CASE_PATTERN_MAY_OPEN",
             "CASE_PATTERN_PAREN",
+            // executor memo-key grade tag (NUL-prefixed string); it
+            // prefixes SUB_RES_XPASS key text and never enters stored
+            // or output text.
+            "SUBSCRIPT_ARITH_GRADE_TAG",
         ];
         for m in MARKERS {
             if m.boundaries.is_empty() {

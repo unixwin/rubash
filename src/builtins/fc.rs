@@ -36,26 +36,43 @@ enum SpecErr {
     Erange,
 }
 
-/// GNU `strsub` (bash stringlib.c:145) with global=1, as called by fc.def
-/// `fc_dosubs` for every `fc -s` substitution. Rust's `str::replace` is
-/// identical for a non-empty pattern (non-overlapping, left-to-right, all
-/// occurrences), but differs for an empty pattern: `replace("", rep)`
-/// inserts `rep` at every char boundary, while strsub consumes one byte
-/// per match (`i += patlen ? patlen : 1`), so each byte of the command is
-/// replaced by one copy of `rep` -- `fc -s =x` turns `true` into `xxxx`.
-/// And when `rep` is empty too, nothing is ever appended (`temp` stays
-/// NULL) and strsub returns a copy of the original string, so `fc -s =`
-/// is the identity (rubash#3645).
-fn fc_strsub(string: &str, pat: &str, rep: &str) -> String {
+/// GNU `strsub` (bash stringlib.c:136-173) with global=1, as called by
+/// fc.def `fc_dosubs` (fc.def:754) for every `fc -s` substitution.
+///
+/// Two deviations from a plain `str::replace`, both from the same C
+/// function:
+///
+/// 1. Empty pattern (rubash#3645): `str::replace("", rep)` inserts `rep`
+///    at every char boundary, while strsub consumes one byte per match
+///    (`i += patlen ? patlen : 1`, stringlib.c:159), so each byte of the
+///    command is replaced by one copy of `rep` -- `fc -s =x` turns
+///    `true` into `xxxx`.
+/// 2. `temp` stays NULL -> return the ORIGINAL string (rubash#3391):
+///    strsub only allocates `temp` when it appends replacement bytes
+///    (`if (replen)`, stringlib.c:148-149) or copies a non-matching
+///    character (stringlib.c:164-165). When the pattern eats the WHOLE
+///    string with an empty replacement nothing is ever appended, so
+///    `fc -s true=` on `true` re-executes `true`. With `rep` empty, an
+///    empty `str::replace` result on a non-empty command is exactly that
+///    case; a partial eat (`echo xtruex` -> `echo xx`) still copies a
+///    character, so `temp` is non-NULL and the substituted string stands.
+fn fc_strsub(command: &str, pat: &str, rep: &str) -> String {
     if pat.is_empty() {
         if rep.is_empty() {
-            return string.to_string();
+            // Every byte matches and appends nothing: temp stays NULL,
+            // strsub returns savestring(string) -- the identity.
+            return command.to_string();
         }
         // One copy of `rep` per byte consumed, matching strsub's byte
         // walk (verified against GNU: multibyte e-acute becomes `xx`).
-        return rep.repeat(string.len());
+        return rep.repeat(command.len());
     }
-    string.replace(pat, rep)
+    let replaced = command.replace(pat, rep);
+    if replaced.is_empty() && !command.is_empty() {
+        command.to_string()
+    } else {
+        replaced
+    }
 }
 
 /// Returns true if arg looks like a history number (possibly negative),
@@ -803,6 +820,31 @@ mod tests {
             FcResult::Reexec { command } => assert_eq!(command, "yyyyyyy"),
             _ => panic!("expected Reexec"),
         }
+    }
+
+    #[test]
+    fn test_fc_s_empty_replacement_of_whole_command_returns_original() {
+        // rubash#3391 face 1: GNU strsub (stringlib.c:136-171) returns the
+        // ORIGINAL string when the pattern eats the whole command with an
+        // empty replacement, so `fc -s true=` on `true` re-executes `true`.
+        let (_, stderr, result) = run_fc(&["-s", "true="], &["true", "fc"]);
+        match result {
+            FcResult::Reexec { command } => assert_eq!(command, "true"),
+            _ => panic!("expected Reexec"),
+        }
+        assert_eq!(stderr, "true\n");
+    }
+
+    #[test]
+    fn test_fc_s_chained_subs_empty_result_returns_original() {
+        // rubash#3391: the quirk applies per strsub call (fc_dosubs):
+        // `truex` -x-> `true` -true=-> `true`, not "".
+        let (_, stderr, result) = run_fc(&["-s", "x=", "true="], &["truex", "fc"]);
+        match result {
+            FcResult::Reexec { command } => assert_eq!(command, "true"),
+            _ => panic!("expected Reexec"),
+        }
+        assert_eq!(stderr, "true\n");
     }
 
     #[test]

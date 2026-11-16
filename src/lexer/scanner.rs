@@ -791,10 +791,18 @@ impl<'a> Lexer<'a> {
         // and the parser's brace-end fallback mis-sliced a later
         // definition — an ordinary `f() { ...; }` followed by a
         // function definition inside a subshell died with a spurious
-        // syntax error. Structural tokens (`{`, `}`, `(`, `)`, `!`,
-        // folded groups) are produced by dedicated scan branches whose
-        // kind never depends on the word-position check, so their
-        // history kind is recorded verbatim.
+        // syntax error. Structural tokens (`{`, `}`, `(`, `)`, folded
+        // groups) are produced by dedicated scan branches whose kind
+        // never depends on the word-position check, so their history
+        // kind is recorded verbatim. `!` is the one exception
+        // (rubash#3639): it is a dedicated-branch token too, but GNU
+        // produces it through read_token_word + CHECK_FOR_RESERVED_WORD
+        // exactly like the word-path keywords (word_token_alist
+        // parse.y:2378 `{"!", BANG}`) — BANG only where
+        // reserved_word_acceptable holds — so an argument `!` is a
+        // WORD in GNU's reader history and must be recorded as one
+        // here, or the `{` after it folds into one word
+        // (`printf '! { }'` reports one `{ }` word).
         // GNU's TIME exception rides on the same classification:
         // time_command_acceptable (parse.y:3286) has no `|' case, so
         // a `time' read where a pipe connector opened this command
@@ -829,6 +837,16 @@ impl<'a> Lexer<'a> {
             && is_keyword(&token.value)
             && (!read_time_reserved_position || time_after_pipe)
         {
+            TokenKind::Word
+        } else if token.kind == TokenKind::Keyword
+            && token.value == "!"
+            && !read_time_reserved_position
+        {
+            // rubash#3639: the `!` exception to the verbatim-history
+            // rule above (parse.y:3168 + :2378). A genuine BANG —
+            // command position, after `time`, after `(`/`;`/etc. —
+            // keeps its Keyword history, so the fold for a negated
+            // group (`! { ...; }`) still fires.
             TokenKind::Word
         } else if token_is_word_element(&token.kind)
             && read_time_assignment_position
