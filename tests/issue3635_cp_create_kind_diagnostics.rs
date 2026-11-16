@@ -18,12 +18,11 @@
 
 #![cfg(unix)]
 
-use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-fn run_rubash(script: &str) -> (String, String, Option<i32>) {
-    let dir = std::env::temp_dir().join(format!("rubash-3635-{}", std::process::id()));
+fn run_rubash(tag: &str, script: &str) -> (String, String, Option<i32>) {
+    let dir = std::env::temp_dir().join(format!("rubash-3635-{tag}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("create scratch dir");
     let script_path = dir.join("script.sh");
     std::fs::write(&script_path, script).expect("write script");
@@ -55,7 +54,7 @@ fn run_rubash(script: &str) -> (String, String, Option<i32>) {
 
 #[test]
 fn cp_regular_file_create_failure_names_regular_file() {
-    let (stdout, stderr, rc) = run_rubash("cp /dev/null /zero-length-file-x3635\n");
+    let (stdout, stderr, rc) = run_rubash("regular-file", "cp /dev/null /zero-length-file-x3635\n");
     assert_eq!(stdout, "");
     assert_eq!(rc, Some(1));
     assert_eq!(
@@ -66,8 +65,10 @@ fn cp_regular_file_create_failure_names_regular_file() {
 
 #[test]
 fn cp_directory_create_failure_names_directory() {
-    let (stdout, stderr, rc) =
-        run_rubash("mkdir -p /tmp/rb3635-src/a\ncp -r /tmp/rb3635-src/a /zero-dir-x3635\n");
+    let (stdout, stderr, rc) = run_rubash(
+        "directory",
+        "mkdir -p /tmp/rb3635-src/a\ncp -r /tmp/rb3635-src/a /zero-dir-x3635\n",
+    );
     assert_eq!(stdout, "");
     assert_eq!(rc, Some(1));
     assert_eq!(
