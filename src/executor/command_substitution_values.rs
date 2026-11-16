@@ -2203,7 +2203,7 @@ fn quoted_body_positional_at_segments(
                             if super::command_prepare::embedded_braced_alternate_parts(true_inner)
                                 .is_some()
                             {
-                                push_body_piece(&mut segments, &body[piece_start..index])?;
+                                push_body_piece(&mut segments, &body[piece_start..index], true)?;
                                 segments.push(QuotedPositionalAtSegment::BracedAlternate(
                                     true_inner.to_string(),
                                     true,
