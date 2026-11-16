@@ -5,9 +5,11 @@
 //!
 //! Expected outputs verified against GNU bash 5.3.20.
 
+#[cfg(unix)]
 use std::io::Write;
 use std::process::Command;
 
+#[cfg(unix)]
 fn run_script(source: &str) -> (String, String, Option<i32>) {
     let dir = std::env::temp_dir().join(format!("rubash-k7sig-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");

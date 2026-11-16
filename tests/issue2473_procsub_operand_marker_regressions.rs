@@ -26,7 +26,6 @@
 
 #![cfg(windows)]
 
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 

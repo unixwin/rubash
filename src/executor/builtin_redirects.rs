@@ -286,7 +286,11 @@ impl Executor {
                     if !plain_file_target {
                         continue;
                     }
-                    crate::executor::shell_options::probe_output_redirect_append(self, &target)
+                    crate::executor::shell_options::probe_output_redirect_append(
+                        self,
+                        Some(redirect),
+                        &target,
+                    )
                 }
                 RedirectKind::Input => {
                     if !plain_file_target {
@@ -506,7 +510,17 @@ impl Executor {
                 if crate::special_paths::is_net_redirect_target(&target) {
                     match self.open_net_redirect(&target) {
                         Ok(file) => {
-                            self.bind_net_input_fd(&mut saved, 0, &target, file, readwrite);
+                            // rubash#3728: a dup failure while saving
+                            // the displaced fd unwinds like a connect
+                            // failure (GNU REDIRECTION_ERROR on a
+                            // failed F_DUPFD save, redir.c:965).
+                            if let Err(error) =
+                                self.bind_net_input_fd(&mut saved, 0, &target, file, readwrite)
+                            {
+                                self.restore_simple_command_net_inputs(saved);
+                                self.net_input_bind_failure(cmd, &error);
+                                return Err(());
+                            }
                         }
                         Err(error) => {
                             self.restore_simple_command_net_inputs(saved);
@@ -518,7 +532,11 @@ impl Executor {
             }
         }
         for (fd, (file, target, readwrite)) in numbered {
-            self.bind_net_input_fd(&mut saved, fd, &target, file, readwrite);
+            if let Err(error) = self.bind_net_input_fd(&mut saved, fd, &target, file, readwrite) {
+                self.restore_simple_command_net_inputs(saved);
+                self.net_input_bind_failure(cmd, &error);
+                return Err(());
+            }
         }
         Ok(saved)
     }
@@ -530,24 +548,41 @@ impl Executor {
         target: &str,
         file: std::fs::File,
         readwrite: bool,
-    ) {
+    ) -> Result<(), std::io::Error> {
         if !saved.iter().any(|(saved_fd, _)| *saved_fd == fd) {
-            saved.push((fd, self.fd_table.entries.get(&fd).cloned()));
+            // rubash#3728: snapshot the displaced fd with a kernel
+            // dup (saved_entry), not a bare Rc clone — the bind below
+            // retires the displaced descriptor (rubash#3213), so a
+            // cloned save would restore a dead entry (same hazard as
+            // #3706). This is the live path for `read x < /dev/tcp/...`:
+            // every in-process builtin dispatch binds its net inputs
+            // here before the body runs, and the read builtin then
+            // serves the already-bound endpoint.
+            saved.push((fd, self.fd_table.saved_entry(fd)?));
         }
         let file_fd = FileFd::from_file(file, target.into());
-        self.fd_table
-            .open_input(fd, FdReadEndpoint::File(file_fd.clone()), false);
         if readwrite {
             // redir.c r_input_output: ONE open file description
             // serves both directions of the slot — the same FileFd
             // backs the write endpoint too (the shape
             // set_fd_readwrite_file's net arm installs).
+            // rubash#3655: one description, one install — the
+            // sequential pair would end write-only (the output bind
+            // retires the read arm).
+            self.fd_table.open_readwrite(
+                fd,
+                FdReadEndpoint::File(file_fd.clone()),
+                FdWriteEndpoint::File(file_fd),
+                false,
+            );
+        } else {
             self.fd_table
-                .open_output(fd, FdWriteEndpoint::File(file_fd), false);
+                .open_input(fd, FdReadEndpoint::File(file_fd), false);
         }
         if !self.dispatch_net_bound_fds.contains(&fd) {
             self.dispatch_net_bound_fds.push(fd);
         }
+        Ok(())
     }
 
     fn net_input_bind_failure(&mut self, cmd: &CommandNode, error: &std::io::Error) {
@@ -734,7 +769,7 @@ impl Executor {
                 // open, or the renderer's message-only text drops the word
                 // (issue #518 background/append repro). The open itself
                 // classifies through the registry (rubash#1964).
-                self.open_append_target(&target)
+                self.open_append_target_for(Some(redirect), &target)
                     .map_err(|e| crate::posix_errors::path_error(&target, e))?;
             }
         }
@@ -768,7 +803,7 @@ impl Executor {
             } else if !is_closed_redirect_target(&target) && redirect_target_fd(&target).is_none() {
                 // Classified append open (rubash#1964), same
                 // path_error shaping as the fd-1 arm above.
-                self.open_append_target(&target)
+                self.open_append_target_for(Some(redirect), &target)
                     .map_err(|e| crate::posix_errors::path_error(&target, e))?;
             }
         }
@@ -821,7 +856,7 @@ impl Executor {
                         // session_path anchoring the fd-1 arm always
                         // had applies here too — the previous raw
                         // fallback opened against the process cwd.
-                        self.open_append_target(&target)
+                        self.open_append_target_for(Some(redirect), &target)
                             .map_err(|e| crate::posix_errors::path_error(&target, e))?;
                     }
                 }

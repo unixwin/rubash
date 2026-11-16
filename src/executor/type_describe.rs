@@ -110,7 +110,7 @@ impl Executor {
             let display: &str = if name.contains('/') { name } else { &path };
             match mode {
                 TypeDescribeMode::Verbose => {
-                    if crate::builtins::hash::hashed_path(&self.shell_state.env_vars, name)
+                    if crate::builtins::hash::phash_search(&self.shell_state.env_vars, name)
                         .is_some()
                     {
                         writeln!(stdout, "{name} is hashed ({path})")?;
@@ -293,6 +293,15 @@ impl Executor {
     /// unchanged on every platform — the claim already stood down.
     /// Dispatch routing is untouched: this gates only what the
     /// describe faces print.
+    ///
+    /// niubash#993 §4 (2026-11-16): the disclosure is retired on the
+    /// Windows face too. Git Bash reports the resolved file
+    /// (`type -t cat` -> `file`, `command -v cat` -> the real path,
+    /// `type -p cat` -> the real path, `type`/`command -V` ->
+    /// `cat is <path>`); `emulation` is a type word GNU does not have
+    /// and a bare name is a function/alias answer, never a file
+    /// answer. Every describe face now takes the ordinary PATH branch
+    /// below; the registry projection stays for the other consumers.
     fn describe_emulated_claim_with_io<W>(
         &self,
         name: &str,
@@ -302,40 +311,7 @@ impl Executor {
     where
         W: Write,
     {
-        use super::command_registry::{CfgGate, ClaimClass, Introspection};
-        if !cfg!(windows) {
-            return Ok(false);
-        }
-        let Some(row) = super::command_registry::registry_row(name) else {
-            return Ok(false);
-        };
-        if row.introspection != Introspection::Emulated {
-            return Ok(false);
-        }
-        if row.cfg == CfgGate::WindowsOnly && !cfg!(windows) {
-            return Ok(false);
-        }
-        let live = match row.class {
-            ClaimClass::EmulatedExternal => {
-                self.external_file_builtins_enabled && !self.emulated_external_stands_down(name)
-            }
-            ClaimClass::HiddenFastpath | ClaimClass::Fastpath => {
-                !self.emulated_external_stands_down(name)
-            }
-            _ => false,
-        };
-        if !live {
-            return Ok(false);
-        }
-        let Some(path) = self.command_path_without_bridge(name, false) else {
-            return Ok(false);
-        };
-        match mode {
-            TypeDescribeMode::Verbose => writeln!(stdout, "{name} is a shell emulation of {path}")?,
-            TypeDescribeMode::Reusable => writeln!(stdout, "{name}")?,
-            TypeDescribeMode::TypeOnly => writeln!(stdout, "emulation")?,
-            TypeDescribeMode::PathOnly => {}
-        }
-        Ok(true)
+        let _ = (name, mode, stdout);
+        Ok(false)
     }
 }

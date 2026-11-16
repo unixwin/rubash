@@ -62,6 +62,13 @@ struct FormatSpec {
 enum PrintfSegment {
     Text(String),
     Error(String),
+    /// GNU printf.def:819 checks `ferror (stdout)` once per rendering
+    /// pass, so a failed fd-1 write aborts the builtin at a PASS
+    /// boundary: the failing pass's diagnostics still print while
+    /// later passes' renderings die. The ordered-output route needs
+    /// those boundaries to fold the same verdict into a buffered
+    /// stream (rubash#3453) — one marker per pass after the first.
+    PassBoundary,
 }
 
 #[derive(Debug, Clone)]
@@ -104,7 +111,7 @@ impl RenderedPrintf {
             .iter()
             .filter_map(|segment| match segment {
                 PrintfSegment::Error(body) => Some(body.clone()),
-                PrintfSegment::Text(_) => None,
+                PrintfSegment::Text(_) | PrintfSegment::PassBoundary => None,
             })
             .collect()
     }
@@ -173,7 +180,7 @@ where
     W: Write,
     E: Write,
 {
-    execute_with_io_and_store(args, env_vars, None, stdout, stderr)
+    execute_with_io_and_store(args, env_vars, None, stdout, stderr, None)
 }
 
 pub(crate) fn execute_with_io_and_store<'a, I, W, E>(
@@ -182,6 +189,7 @@ pub(crate) fn execute_with_io_and_store<'a, I, W, E>(
     mut variables: Option<&mut VariableStore>,
     stdout: &mut W,
     stderr: &mut E,
+    pass_boundary: Option<&mut dyn Write>,
 ) -> io::Result<i32>
 where
     I: IntoIterator<Item = &'a str>,
@@ -316,6 +324,7 @@ where
             stderr,
         )?;
     } else {
+        let mut pass_boundary = pass_boundary;
         for segment in &rendered.segments {
             match segment {
                 PrintfSegment::Text(text) => {
@@ -323,6 +332,14 @@ where
                 }
                 PrintfSegment::Error(body) => {
                     writeln!(stderr, "{body}")?;
+                }
+                PrintfSegment::PassBoundary => {
+                    // A one-byte marker on the boundary channel becomes
+                    // a pass-boundary chunk in the ordered log
+                    // (rubash#3453); no boundary sink means no markers.
+                    if let Some(boundary) = pass_boundary.as_mut() {
+                        let _ = boundary.write_all(&[0]);
+                    }
                 }
             }
         }
@@ -891,12 +908,19 @@ fn render(
     let mut arg_index = 0;
     let mut conversion_error = false;
 
+    // printf.def:819's ferror abort is pass-granular — one PassBoundary
+    // segment per pass so the ordered-output route can both locate the
+    // failing pass and tell a printf log from an unmarked builtin's
+    // (rubash#3453). The marker precedes each pass's own segments, so
+    // even a single-pass render carries it.
     if args.is_empty() {
+        segments.push(PrintfSegment::PassBoundary);
         return render_one_pass(format, args, &mut arg_index, segments, env_vars);
     }
 
     while arg_index < args.len() {
         let before_arg = arg_index;
+        segments.push(PrintfSegment::PassBoundary);
         let rendered = render_one_pass(format, args, &mut arg_index, segments, env_vars);
         segments = rendered.segments;
         conversion_error |= rendered.conversion_error;
@@ -1079,19 +1103,10 @@ fn render_one_pass(
 
                 // Inline (non-`*') width/precision overflow splits along
                 // GNU's two output engines:
-                //   * the PF macro hands the whole directive verbatim to
-                //     the host libc's printf(3), which parses the digit
-                //     run itself. BSD/Darwin libc (xprintf.c) accumulates
-                //     an inline field width into a bound-checked value —
-                //     > INT_MAX fails with EOVERFLOW — but precision
-                //     digits land straight in an `int` field
-                //     (xprintf.c:558-559 `pi->prec *= 10; pi->prec +=
-                //     digit`), so the run wraps mod 2^32 and the
-                //     directive renders normally:
-                //     `%.9223372036854775825s' becomes `%.17s' and prints
-                //     `XY' (printf7.sub, vendored .right). A
-                //     wrapped-negative precision is "as if it were
-                //     missing".
+                //   * the PF macro hands the directive to the C library,
+                //     whose printf fails with EOVERFLOW: builtin_error
+                //     prints strerror(errno), the directive's output is
+                //     lost, and PRETURN stops the whole builtin (rc 1);
                 //   * printstr/printwidestr re-parse the digit run with
                 //     decodeint(diagnose=1): report_erange names the
                 //     digits, conversion_error is set (rc 1), and the
@@ -1112,7 +1127,7 @@ fn render_one_pass(
                             format!("{prefix}printf: {digits}: Numerical result out of range"),
                         );
                         conversion_error = true;
-                    } else if spec.inline_width_overflow {
+                    } else {
                         push_printf_error(
                             &mut segments,
                             format!("{prefix}printf: Value too large for defined data type"),
@@ -1123,12 +1138,6 @@ fn render_one_pass(
                             stop_output: true,
                             conversion_error: true,
                         };
-                    } else if let Some(digits) = spec.precision_digits.take() {
-                        spec.precision = match wrap_digit_run_i32(&digits) {
-                            p if p >= 0 => Some(p as usize),
-                            _ => None,
-                        };
-                        spec.inline_precision_overflow = false;
                     }
                 }
 
@@ -1144,7 +1153,7 @@ fn render_one_pass(
                             .iter()
                             .filter_map(|segment| match segment {
                                 PrintfSegment::Text(text) => Some(text.chars().count()),
-                                PrintfSegment::Error(_) => None,
+                                PrintfSegment::Error(_) | PrintfSegment::PassBoundary => None,
                             })
                             .sum();
                         env_vars.insert(name.to_string(), written.to_string());
@@ -1225,15 +1234,6 @@ fn render_one_pass(
         stop_output: false,
         conversion_error,
     }
-}
-
-// Two's-complement i32 accumulation of a format-string digit run — the
-// BSD/Darwin libc printf model, where `n *= 10; n += digit` runs on `int`
-// fields (xprintf.c:558-559, 604-625) and overflows wrap mod 2^32.
-fn wrap_digit_run_i32(digits: &str) -> i32 {
-    digits.bytes().fold(0i32, |acc, b| {
-        acc.wrapping_mul(10).wrapping_add((b - b'0') as i32)
-    })
 }
 
 fn next_arg<'a>(args: &'a [&str], arg_index: &mut usize) -> &'a str {
