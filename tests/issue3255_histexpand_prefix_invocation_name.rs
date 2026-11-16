@@ -114,7 +114,6 @@ fn invocation_c_with_explicit_name_keeps_operand() {
 
 #[cfg(unix)]
 mod interactive {
-    use super::*;
     use std::io::Write as _;
     use std::os::unix::process::CommandExt as _;
     use std::process::{Command, Stdio};

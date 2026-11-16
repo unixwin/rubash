@@ -276,8 +276,13 @@ impl Executor {
                 let args = vec![op.to_string(), w];
                 self.sync_fd_terminal_marks(None);
                 i32::from(
-                    !(crate::builtins::test::execute(&args, false, &self.shell_state.env_vars)
-                        .unwrap_or(1)
+                    !(crate::builtins::test::execute(
+                        &args,
+                        false,
+                        &self.shell_state.env_vars,
+                        self.shell_state.positional_len(),
+                    )
+                    .unwrap_or(1)
                         == 0),
                 )
             }
@@ -291,8 +296,13 @@ impl Executor {
                 let args = vec![op.to_string(), w];
                 self.sync_fd_terminal_marks(None);
                 i32::from(
-                    !(crate::builtins::test::execute(&args, false, &self.shell_state.env_vars)
-                        .unwrap_or(1)
+                    !(crate::builtins::test::execute(
+                        &args,
+                        false,
+                        &self.shell_state.env_vars,
+                        self.shell_state.positional_len(),
+                    )
+                    .unwrap_or(1)
                         == 0),
                 )
             }
@@ -972,7 +982,11 @@ impl Executor {
         let base = rewritten.split('[').next().unwrap_or(&rewritten);
         let overlaid_env = self.env_with_frame_arrays(&[base]);
         let env_vars = overlaid_env.as_ref().unwrap_or(&self.shell_state.env_vars);
-        Ok(crate::builtins::test::variable_is_set(&rewritten, env_vars))
+        Ok(crate::builtins::test::variable_is_set(
+            &rewritten,
+            env_vars,
+            self.shell_state.positional_len(),
+        ))
     }
 
     pub(super) fn conditional_string_unary(&mut self, op: &str, operand: &str) -> bool {
@@ -1059,7 +1073,14 @@ impl Executor {
             self.sync_fd_alias_facts_scoped(None, redirects.as_deref());
         }
         let args = vec![op.to_string(), value];
-        crate::builtins::test::execute(&args, false, &self.shell_state.env_vars).unwrap_or(1) == 0
+        crate::builtins::test::execute(
+            &args,
+            false,
+            &self.shell_state.env_vars,
+            self.shell_state.positional_len(),
+        )
+        .unwrap_or(1)
+            == 0
     }
 
     /// rubash#545 (cell 3): GNU realizes a `[[ ]]` process-substitution
@@ -1140,7 +1161,14 @@ impl Executor {
             self.sync_fd_alias_facts_scoped(None, redirects.as_deref());
         }
         let args = vec![left_exp, op.to_string(), right_exp];
-        crate::builtins::test::execute(&args, false, &self.shell_state.env_vars).unwrap_or(1) == 0
+        crate::builtins::test::execute(
+            &args,
+            false,
+            &self.shell_state.env_vars,
+            self.shell_state.positional_len(),
+        )
+        .unwrap_or(1)
+            == 0
     }
 
     pub(super) fn conditional_regex_match(&mut self, left: &str, right: &str) -> bool {
