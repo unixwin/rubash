@@ -1073,6 +1073,24 @@ impl Executor {
         // stays in the element's `$-`, and a `set -m` inside the
         // element re-arms the variable through flags.c:257.
         subshell.shell_state.job_control.set(false);
+        // A pipeline member runs in a subshell: caught signal traps reset to
+        // the inherited disposition (execute_cmd.c subshell trap reset), so
+        // only traps the member itself installs run at its exit. The
+        // compound and function stages already reset at entry; this
+        // builtin stage missed it, so the parent's live EXIT action
+        // fired at the element's teardown (run_exit_trap_for_status
+        // below) and again at shell exit (rubash#3409: `trap 'echo
+        // bye' EXIT; type ls | cat` printed `bye` twice). GNU
+        // disarms the EXIT trap in the forked element child:
+        // execute_cmd.c:4833 reset_signal_handlers() in the
+        // already-forked simple-command child, via trap.c:1433
+        // reset_or_restore_signal_handlers (SIG_TRAPPED cleared for
+        // EXIT_TRAP, trap string kept); the element still runs its
+        // exit trap (shell.c:1054 subshell_exit calls run_exit_trap
+        // only if signal_is_trapped(0)), so a trap set INSIDE the
+        // element re-arms and fires, exactly as the compound and
+        // function stages already behave.
+        crate::builtins::trap::reset_for_subshell_child(&mut subshell.shell_state.env_vars);
         // GNU execute_cmd.c:6373 do_piping: EVERY element is forked with
         // its fd 1 bound to the pipeline — the pipe for a non-rightmost
         // element, the pipeline's own stdout for the rightmost — never to
@@ -1718,6 +1736,11 @@ impl Executor {
         );
 
         self.apply_child_environment(&mut process);
+        // rubash#3456: snapshot the arithmetic flags so the prefix
+        // composition below can be adjudicated before the spawn (the
+        // absolute variant below reads them — the host channel already
+        // expanded this prefix once, so a delta would miss it).
+        let prefix_arith_before = self.snapshot_arithmetic_error_flags();
         let raws_aligned = command.assignment_raws.len() == command.assignments.len();
         for (index, (var_name, var_value)) in command.assignments.iter().enumerate() {
             let (base_name, append) = assignment_name_and_append(var_name);
@@ -1750,6 +1773,16 @@ impl Executor {
             if is_valid_process_env(base_name, expanded_value) {
                 process.env(base_name, expanded_value);
             }
+        }
+        // rubash#3456: a fatal arithmetic error in the prefix was already
+        // diagnosed once by the composition above (and the stage status
+        // folds to 1); GNU discards the whole element, so the child must
+        // never spawn — return the dead member now, before any stdio
+        // wiring or spawn. Dropping `process` here releases the pipe
+        // ends it took, so the downstream reads EOF exactly as when
+        // GNU's dead child closed them.
+        if let Some(status) = self.take_prefix_arith_failure_absolute(&prefix_arith_before) {
+            return Ok(self.dead_member_stage_result(String::new(), String::new(), status));
         }
         if fd0_redirect_wins {
             self.apply_external_stdin_redirect(command, &mut process)?;

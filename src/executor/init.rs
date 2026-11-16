@@ -995,6 +995,21 @@ impl Executor {
         env_vars.remove(super::compound_exec::POSITIONAL_PARAMS_TRANSPORT);
         mirror_env_remove(super::compound_exec::POSITIONAL_PARAMS_TRANSPORT);
 
+        // rubash#3605: the fork-shaped children that execute the
+        // parent's flagged command node (the async `&` wrapper and
+        // the coproc respawn — execute_cmd.c:1576/:2546 through
+        // execute_in_subshell) stamp the live CMD_IGNORE_RETURN
+        // depth under SUPPRESS_ERREXIT_TRANSPORT; seed it only for
+        // internal respawns and strip it either way so it never
+        // surfaces as a shell variable. A nonzero seed suppresses
+        // `set -e` inside the body, matching GNU's node-flag model —
+        // exec16's `! coproc C { set -e; false; echo reached coproc
+        // body; }`.
+        let respawn_suppress_errexit = internal_respawn
+            && env_vars.contains_key(super::compound_exec::SUPPRESS_ERREXIT_TRANSPORT);
+        env_vars.remove(super::compound_exec::SUPPRESS_ERREXIT_TRANSPORT);
+        mirror_env_remove(super::compound_exec::SUPPRESS_ERREXIT_TRANSPORT);
+
         // rubash#2058: the fork-context stamp (see
         // Executor::fork_context_transport_entries) — the parent's
         // effective call-stack views, its PIPESTATUS cell, and the
@@ -1405,7 +1420,8 @@ impl Executor {
             conditional_output_procsubs: Vec::new(),
             current_conditional_redirects: None,
             pending_scalar_assignment: false,
-            suppress_errexit: 0,
+            suppress_errexit: if respawn_suppress_errexit { 1 } else { 0 },
+            comsub_ignore_return: 0,
             errexit_ignore_frame: 0,
             parse_and_execute_frames: Vec::new(),
             command_builtin_depth: 0,
@@ -1435,6 +1451,7 @@ impl Executor {
             // rubash#1175: a process root IS its process's shell; the
             // image-replacement gates live at the exec dispatcher.
             owns_process_image: true,
+            emulated_child_depth: std::cell::Cell::new(0),
             source_nest_depth: 0,
             sigchld_notifications_pending: std::cell::Cell::new(0),
             pending_signal_notices: std::cell::RefCell::new(Vec::new()),
@@ -1640,15 +1657,31 @@ impl Executor {
                 },
                 None => None,
             };
-            if let Some(rc) = read_rc {
-                executor
-                    .fd_table
-                    .open_input(fd, FdReadEndpoint::File(rc), false);
-            }
-            if let Some(rc) = write_rc {
-                executor
-                    .fd_table
-                    .open_output(fd, FdWriteEndpoint::File(rc), false);
+            // rubash#3655: when both arms restore, they are ONE
+            // description — a single open_readwrite install, or the
+            // output restore would retire the read arm (dup2
+            // wholesale). Either arm alone keeps its
+            // single-direction install.
+            match (read_rc, write_rc) {
+                (Some(read), Some(write)) => {
+                    executor.fd_table.open_readwrite(
+                        fd,
+                        FdReadEndpoint::File(read),
+                        FdWriteEndpoint::File(write),
+                        false,
+                    );
+                }
+                (Some(rc), None) => {
+                    executor
+                        .fd_table
+                        .open_input(fd, FdReadEndpoint::File(rc), false);
+                }
+                (None, Some(rc)) => {
+                    executor
+                        .fd_table
+                        .open_output(fd, FdWriteEndpoint::File(rc), false);
+                }
+                (None, None) => {}
             }
         }
         // rubash#1557: adopt whatever descriptors the process itself

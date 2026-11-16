@@ -764,14 +764,25 @@ impl Executor {
     /// walker's quote toggling disabled and the data carriers restored to
     /// the literal characters evalexp would see.
     pub(crate) fn expand_arithmetic_subscript_mut(&mut self, expression: &str) -> String {
+        // rubash#3613: the resolved subscript text reaches here straight
+        // from a word-expansion pass, so expansion-produced `$`/`` ` ``/`\`/
+        // quotes still ride the E30x data carriers. GNU's array_expand_index
+        // feeds expand_arith_string the plain re-lexed text
+        // (arrayfunc.c:1368) — a produced `$` expands again (`${x}` -> `$y`
+        // -> `` `echo 1` `` triple expansion) and a produced `` ` `` runs.
+        // Decode the carriers so this pass sees the same plain text; the
+        // expanded result re-marks produced bytes itself.
+        let expression =
+            crate::executor::subscript_expansion::decode_subscript_reparse_markers(expression);
         // rubash#2701 — `arr[${x:?w}]`: the subscript's parameter
         // expansion hits the same fatal class (subst.c:10347 case '?',
         // 10414/10418) before evalexp ever runs; latch it like the
-        // `$((` arms.
+        // `$((` arms. The latch reads the same decoded text
+        // expand_arith_string re-lexes (rubash#3613 decode above).
         if expression.contains("${") {
-            self.apply_parameter_assignment_expansions_in_word(expression);
+            self.apply_parameter_assignment_expansions_in_word(&expression);
             if let Some((name, message, _)) =
-                self.parameter_expansion_error_in_word_isolated(expression)
+                self.parameter_expansion_error_in_word_isolated(&expression)
             {
                 if !self.shell_state.arithmetic_expansion_error.replace(true) {
                     self.write_diagnostic_fd2(
@@ -782,7 +793,7 @@ impl Executor {
                 return String::new();
             }
         }
-        let routed = self.route_current_shell_substitutions(expression);
+        let routed = self.route_current_shell_substitutions(&expression);
         // The same $#/$- special-parameter substitutions
         // expand_arithmetic_special_parameters performs.
         let routed = routed
@@ -1445,7 +1456,10 @@ impl Executor {
         let reexpanded = if expand && !array_expand_once {
             self.expand_arithmetic_subscript_mut(resolved)
         } else if array_expand_once {
-            resolved
+            // AV_NOEXPAND: the resolved text is verbatim for evalexp —
+            // decode the same carriers so the error-token echo shows
+            // plain bytes (`$y`), not the PUA data form (rubash#3613).
+            crate::executor::subscript_expansion::decode_subscript_reparse_markers(resolved)
                 .replace(DATA_DOLLAR, "$")
                 .replace(crate::executor::markers::DATA_BACKTICK, "`")
                 .replace(crate::executor::markers::DATA_BACKSLASH, "\\")

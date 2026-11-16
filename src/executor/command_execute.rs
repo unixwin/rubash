@@ -359,7 +359,23 @@ impl Executor {
         let mut expanded = if cmd.arithmetic_command.is_some() {
             cmd.clone()
         } else {
-            match self.expand_command_words(cmd) {
+            // rubash#3605: GNU raises comsub_ignore_return around
+            // expand_words when the command carries CMD_IGNORE_RETURN
+            // (execute_cmd.c:4616; the flag arrives via :655-656 or the
+            // :917 ignore_return||invert arm), so command substitutions
+            // spawned by this expansion stamp CMD_IGNORE_RETURN on
+            // every body command (builtins/evalstring.c:496). Only the
+            // command-word expansion raises it — redirect expansion is
+            // outside the bracket (verified: `! cat < <(set -e; false;
+            // echo x)` stays empty under 5.3.20).
+            if self.suppress_errexit > 0 {
+                self.comsub_ignore_return += 1;
+            }
+            let expansion_result = self.expand_command_words(cmd);
+            if self.comsub_ignore_return > 0 {
+                self.comsub_ignore_return -= 1;
+            }
+            match expansion_result {
                 Ok(expanded) => expanded,
                 // GNU expr.c expr_streval: an unbound variable under `set -u`
                 // raises FORCE_EOF from ANY expansion position — the word
@@ -2249,6 +2265,12 @@ impl Executor {
         let arithmetic_error = self.shell_state.arithmetic_expansion_error.get();
         let arithmetic_fatal = self.shell_state.arithmetic_fatal_error.get();
         let arithmetic_nounset = self.shell_state.arithmetic_nounset_error.get();
+        // rubash#3581: same crossing for the `bad substitution` latch —
+        // GNU's do_redirections runs in the child too, and a parameter
+        // error inside a heredoc body (`"${a[*]#${-y}}"`) is an
+        // expand_word_error the parent must observe to abandon the
+        // command (execute_cmd.c:5522 -> redir.c do_redirections).
+        let parameter_bad_substitution = self.shell_state.parameter_bad_substitution.get();
         self.restore_flat_subshell(saved_state);
         self.shell_state
             .arithmetic_expansion_error
@@ -2259,6 +2281,9 @@ impl Executor {
         self.shell_state
             .arithmetic_nounset_error
             .set(arithmetic_nounset);
+        self.shell_state
+            .parameter_bad_substitution
+            .set(parameter_bad_substitution);
         self.exit_code = saved_exit_code;
         self.last_command_substitution_status
             .set(saved_substitution_status);

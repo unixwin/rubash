@@ -90,6 +90,14 @@ impl Executor {
     /// them after its final unescape pass (rubash#218 — `v=${1-U}` with
     /// `\\` data collapsed the pair). Source-word escapes still resolve
     /// exactly as before; only expansion-result data is protected.
+    ///
+    /// rubash#3663: the literal DATA_BACKSLASH carrier the lexer emitted
+    /// for a source `\\` is deferred the same way (rubash#3088 pattern):
+    /// restoring it in the walker tail handed the assignment path's final
+    /// `unescape_remaining_shell_escapes` pass a raw `\` it folded as
+    /// source escape syntax, so `x=a\\*e` stored `a*e`. The caller
+    /// (`expand_assignment_value_inner`) restores the carrier after its
+    /// unescape pass.
     pub(in crate::executor) fn expand_embedded_parameters_assignment_rhs_mut(
         &mut self,
         word: &str,
@@ -104,7 +112,7 @@ impl Executor {
             false,
             false,
             false,
-            false,
+            true,
         )
     }
 
@@ -1147,6 +1155,10 @@ impl Executor {
                 continue;
             }
 
+            // Mirror of the &self walker: QUOTED_EXPANSION_SITE before a
+            // `${}` fragment means the lexer saw it inside quotes — GNU's
+            // `quoted` bit for the fragment dispatch (rubash#3581).
+            let fragment_site_quoted = quoted_site;
             if quoted_site {
                 quoted_span_start = Some(output.len());
                 quoted_site = false;
@@ -1278,11 +1290,18 @@ impl Executor {
                             if let Some(start) = frag_start {
                                 self.apply_fragment_assignment_in_order(&name, word, start);
                             }
+                            let fragment_context = if (fragment_site_quoted || in_double)
+                                && matches!(context, SubstitutionQuoteContext::Unquoted)
+                            {
+                                SubstitutionQuoteContext::DoubleQuoted
+                            } else {
+                                context
+                            };
                             let value =
                                 self.expand_with_parameter_env(saved_parameter_state, |executor| {
                                     executor.expand_word_mut_with_context(
                                         &format!("${{{name}}}"),
-                                        context,
+                                        fragment_context,
                                     )
                                 });
                             let value = protect_rhs_value(
@@ -1312,11 +1331,18 @@ impl Executor {
                             if let Some(start) = frag_start {
                                 self.apply_fragment_assignment_in_order(&name, word, start);
                             }
+                            let fragment_context = if (fragment_site_quoted || in_double)
+                                && matches!(context, SubstitutionQuoteContext::Unquoted)
+                            {
+                                SubstitutionQuoteContext::DoubleQuoted
+                            } else {
+                                context
+                            };
                             let value =
                                 self.expand_with_parameter_env(saved_parameter_state, |executor| {
                                     executor.expand_word_mut_with_context(
                                         &format!("${{{name}}}"),
-                                        context,
+                                        fragment_context,
                                     )
                                 });
                             let value = protect_rhs_value(
@@ -1347,6 +1373,19 @@ impl Executor {
                         if let Some(start) = frag_start {
                             self.apply_fragment_assignment_in_order(&name, word, start);
                         }
+                        // rubash#3581: a `${}` fragment inside a `"..."`
+                        // span (walker's own in_double, or the lexer's
+                        // QUOTED_EXPANSION_SITE marker) is double-quoted
+                        // context for the fragment dispatch — without it a
+                        // quoted `"${a[*]#...}"` would read the removal
+                        // gate's silent branch as if unquoted.
+                        let fragment_context = if (fragment_site_quoted || in_double)
+                            && matches!(context, SubstitutionQuoteContext::Unquoted)
+                        {
+                            SubstitutionQuoteContext::DoubleQuoted
+                        } else {
+                            context
+                        };
                         let value =
                             self.expand_with_parameter_env(saved_parameter_state, |executor| {
                                 // Propagate the outer quote context so a
@@ -1357,7 +1396,10 @@ impl Executor {
                                 // subst.c:11229 expand_word_internal is a
                                 // single pass; its `${` arm runs
                                 // parameter_brace_expand inline).
-                                executor.expand_braced_parameter_fragment_in_word(&name, context)
+                                executor.expand_braced_parameter_fragment_in_word(
+                                    &name,
+                                    fragment_context,
+                                )
                             });
                         let value = protect_rhs_value(
                             &value,
@@ -1537,16 +1579,24 @@ impl Executor {
                         // the command while the script continues (braces.tests
                         // "${a+'$('\'}"). parser_error (error.c:300) uses
                         // yy_input_name()=="command substitution" and the
-                        // inherited line_number (evalstring.c push_stream(0))
-                        // — the current command line plus the newlines the
-                        // comsub text consumed.
+                        // inherited line_number — command_substitute re-parses
+                        // the extracted body through parse_and_execute
+                        // (subst.c:7413) with no SEVAL_RESETLINE, so the base
+                        // is the script's line_number at expansion minus one
+                        // (evalstring.c:345 line_number--); the body's own
+                        // lines plus its EOF read then push it to
+                        // current + body_lines + 1. Measured on GNU 5.3.20:
+                        // "${a+'$('\'}" at line N reports N+2 for a one-line
+                        // body, N+3 for a two-line body (rubash#3605 class B,
+                        // run-braces).
                         let eof_line = self
                             .shell_state
                             .env_vars
                             .get("__RUBASH_CURRENT_LINE")
                             .and_then(|line| line.parse::<usize>().ok())
                             .unwrap_or(1)
-                            + source.lines().count().saturating_sub(1);
+                            + source.lines().count()
+                            + 1;
                         eprintln!(
                             "{}unexpected EOF while looking for matching `)'",
                             self.comsub_eof_error_diagnostic(eof_line)
@@ -3758,6 +3808,9 @@ pub(in crate::executor) fn collect_command_substitution_source_ex(
                     closed = true;
                     break;
                 }
+                source.push(source_ch);
+            }
+            ')' if !single && !double => {
                 source.push(source_ch);
             }
             _ => source.push(source_ch),

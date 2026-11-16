@@ -215,6 +215,21 @@ pub(in crate::executor) fn fork_respawn_transport_key(key: &str) -> bool {
 /// the same round-trip the array-variable transport uses.
 pub(in crate::executor) const POSITIONAL_PARAMS_TRANSPORT: &str = "__RUBASH_POSITIONAL_PARAMS";
 
+/// Transport key for the parent's live errexit-suppression depth at
+/// spawn. GNU's fork-shaped children that execute the SAME command
+/// node (the async `&` wrapper's execute_in_subshell fork,
+/// execute_cmd.c:1576, and the coproc child's execute_coproc ->
+/// execute_in_subshell, execute_cmd.c:2546) carry the node's
+/// CMD_IGNORE_RETURN — set by `!` (execute_cmd.c:655-656) or an
+/// enclosing ignore_return propagation arm — so `set -e` inside an
+/// inverted coproc/`&` body is ignored (exec16's "reached coproc
+/// body"). A respawned `rubash -c` child has no node; this stamp
+/// seeds its suppress_errexit. process_substitute children are
+/// excluded: GNU re-parses the producer's saved command text
+/// (subst.c:6362), so no flag survives — verified
+/// `! cat < <(set -e; false; echo x)` prints nothing under 5.3.20.
+pub(in crate::executor) const SUPPRESS_ERREXIT_TRANSPORT: &str = "__RUBASH_SUPPRESS_ERREXIT";
+
 /// RAII scope for the executor's `expansion_probe_active` flag
 /// (rubash#2585); restores the prior value on drop, so a nested probe
 /// scope cannot disarm an outer one and early returns are covered —
@@ -1692,6 +1707,13 @@ impl Executor {
         // transport set (see fork_context_transport_entries).
         for (key, value) in self.fork_context_transport_entries() {
             env_map.insert(key, value);
+        }
+        // rubash#3605: the async child is the same execute_in_subshell
+        // fork the flag model travels (execute_cmd.c:1576); an
+        // inverted/exempt `&` body keeps CMD_IGNORE_RETURN
+        // (SUPPRESS_ERREXIT_TRANSPORT).
+        if self.suppress_errexit > 0 {
+            env_map.insert(SUPPRESS_ERREXIT_TRANSPORT.to_string(), "1".to_string());
         }
         // rubash#1074: the wrapper child is one subshell level deeper than
         // this shell (execute_in_subshell's subshell_level++); carry the
@@ -5696,6 +5718,15 @@ impl Executor {
             for (key, value) in self.fork_context_transport_entries() {
                 env_entries.push((key, value));
             }
+            // rubash#3605: the coproc child executes the parent's
+            // flagged command node (execute_cmd.c:2546
+            // execute_coproc -> execute_in_subshell), so a `!`- or
+            // condition-suppressed coproc keeps CMD_IGNORE_RETURN
+            // and `set -e` inside is ignored
+            // (SUPPRESS_ERREXIT_TRANSPORT).
+            if self.suppress_errexit > 0 {
+                env_entries.push((SUPPRESS_ERREXIT_TRANSPORT.to_string(), "1".to_string()));
+            }
             // rubash#2332: the compound body's line spans, collected
             // over the same list bash_command_sequence_text rendered
             // into the child's `-c` source above; prelude count 0 —
@@ -8019,13 +8050,19 @@ pub(crate) fn test_rubash_binary_from_env() -> Option<std::path::PathBuf> {
 /// dir, and the debug/release profile dirs under each ancestor of the
 /// test binary (nested/workspace layouts). Only a file literally
 /// named `rubash[.exe]` counts — a test binary is `rubash-<hash>`
-/// under `deps/` and never matches. Production behaviour is
-/// unchanged: the `deps/` gate still returns `None` outside a test
-/// binary, so a real shell keeps falling back to `current_exe()`.
+/// under `deps/` or `build/<pkg>/<fingerprint>/out/` and never
+/// matches. Production behaviour is unchanged: the test-layout gate
+/// still returns `None` outside a test binary, so a real shell keeps
+/// falling back to `current_exe()`.
 pub(crate) fn test_rubash_binary_from_current_exe() -> Option<std::path::PathBuf> {
     let current = std::env::current_exe().ok()?;
-    let deps = current.parent()?;
-    if deps.file_name().and_then(|name| name.to_str()) != Some("deps") {
+    let dir = current.parent()?;
+    // Test-binary layouts: `deps/` on the classic build dir, and
+    // `build/<pkg>/<fingerprint>/out/` on the current cargo build-dir
+    // layout (the unit-test binary for a package with a build script is
+    // placed inside the package's own out dir).
+    let dir_name = dir.file_name().and_then(|name| name.to_str());
+    if dir_name != Some("deps") && dir_name != Some("out") {
         return None;
     }
     let binary_name = if cfg!(windows) {
@@ -8034,7 +8071,7 @@ pub(crate) fn test_rubash_binary_from_current_exe() -> Option<std::path::PathBuf
         "rubash"
     };
     let mut profile_dirs: Vec<std::path::PathBuf> = Vec::new();
-    if let Some(debug_dir) = deps.parent() {
+    if let Some(debug_dir) = dir.parent() {
         profile_dirs.push(debug_dir.to_path_buf());
         if let Some(target_dir) = debug_dir.parent() {
             profile_dirs.push(target_dir.join("release"));

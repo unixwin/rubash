@@ -7,8 +7,10 @@
 //! '~root' (probed on GNU bash 5.3.20; the plain 'ro' control
 //! yields 'root' on both shells).
 
+#[cfg(unix)]
 use std::process::Command;
 
+#[cfg(unix)]
 fn run(script: &str) -> (Vec<String>, Option<i32>) {
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("-c")

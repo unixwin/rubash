@@ -946,6 +946,18 @@ pub struct Executor {
     current_conditional_redirects: Option<Vec<crate::parser::Redirect>>,
     pending_scalar_assignment: bool,
     suppress_errexit: usize,
+    /// rubash#3605: GNU's `comsub_ignore_return` (execute_cmd.c:252)
+    /// counter — raised while expanding the words of a
+    /// CMD_IGNORE_RETURN-flagged simple command (execute_cmd.c:4616)
+    /// and a flagged `[[ ]]`'s operand words (execute_cmd.c:4012,
+    /// :4060, :4067), so a command substitution spawned inside an
+    /// inverted/exempt expansion stamps CMD_IGNORE_RETURN on every
+    /// command its parse_and_execute loop yields
+    /// (builtins/evalstring.c:496) — `! x=$(set -e; false; echo hi)`
+    /// prints hi. Rubash raises it wherever suppress_errexit covers
+    /// word expansion; the comsub boundary consumes it instead of
+    /// clearing the child's inherited suppression.
+    comsub_ignore_return: usize,
     /// rubash#1563: depth of GNU's CMD_IGNORE_RETURN clearing frame for
     /// eval/source (execute_cmd.c:5004-5016): when the builtin is
     /// dispatched under CMD_IGNORE_RETURN outside a subshell environment,
@@ -1201,6 +1213,20 @@ pub struct Executor {
     /// opted in (builtins::exec::enable_process_replacement) and the
     /// live context passes the dispatcher's gates.
     owns_process_image: bool,
+    /// rubash#3605: depth of in-process GNU-fork regions enclosing this
+    /// dispatch — pipeline elements (pipeline_exec.rs), in-process
+    /// `${THIS_SH}`/script children (external_finish.rs), and
+    /// shared-executor command-substitution interiors
+    /// (command_substitution.rs). While nonzero — or on a fork-copy
+    /// executor (`!owns_process_image`) or a flat `( )` layer
+    /// (`subshell_depth > 0`) — the ulimit builtin must not move the
+    /// real rlimits: a child's hard-limit drop is irreversible without
+    /// CAP_SYS_RESOURCE and would leak into the parent, where GNU's
+    /// real child takes it to the grave. ulimit_virtualized() is the
+    /// predicate; the virtualized set applies only the SOFT side to the
+    /// kernel (always restorable) and records the effective pair in
+    /// `__RUBASH_ULIMIT_*` env cells (builtins/ulimit.rs).
+    pub(crate) emulated_child_depth: std::cell::Cell<u32>,
     /// GNU execute_cmd.c:330 sourcenest — active `.`/source frames.
     source_nest_depth: usize,
     /// Child-death notifications that arrived while the SIGCHLD trap action
@@ -2009,12 +2035,14 @@ pub struct Executor {
     /// byte char (e.g. U+009C for byte 0x9C) is indistinguishable from
     /// a genuine char of the same code point in the folded literal,
     /// so the spelling cannot be re-derived at open time
-    /// (rubash#3218). Keyed by the folded literal; every later
-    /// literal outcome for the same string in the same command span
-    /// replaces the record — and a no-transport outcome clears it —
-    /// because the redirect walks expand and open in list order, so
-    /// an open must see its OWN redirect's verdict, never an earlier
-    /// same-spelling target's (rubash#3218 face 2). Cleared at each
+    /// (rubash#3218). Keyed by the folded literal; a later
+    /// transport-carrying outcome for the same string in the same
+    /// command span overwrites the record, but a no-transport outcome
+    /// does NOT remove it (note_redirect_target_transport returns
+    /// early) — so this map can hand one redirect another same-string
+    /// redirect's verdict, and every consumer that holds the node must
+    /// read `redirect_target_node_spellings` instead (rubash#3218 face
+    /// 2, rubash#3372). Cleared at each
     /// execute_command entry like redirect_target_memo. Only the
     /// literal arms of expand_redirect_operand_fields record it;
     /// glob matches, procsub carriers and heredoc delimiters never

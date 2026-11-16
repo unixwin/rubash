@@ -649,7 +649,7 @@ impl Executor {
             }
         }
 
-        if let Some(value) = self.expand_braced_pattern_or_transform_parameter(name) {
+        if let Some(value) = self.expand_braced_pattern_or_transform_parameter(name, true) {
             return value;
         }
 
@@ -1308,7 +1308,14 @@ impl Executor {
             }
         }
 
-        if let Some(value) = self.expand_braced_pattern_or_transform_parameter(name) {
+        // rubash#3581: the routed entry already records the quote context
+        // (DoubleQuoted | HereDocument) in EXTQUOTE_NAME_QUOTED_CONTEXT —
+        // the flag GNU `quoted` corresponds to for the `#`/`%` gate
+        // (heredoc bodies count: GNU diagnoses `"${a[*]#bad}"` there too).
+        if let Some(value) = self.expand_braced_pattern_or_transform_parameter(
+            name,
+            crate::executor::expand_word::extquote_name_quoted_context(),
+        ) {
             if apfae_trace_enabled() {
                 eprintln!("[EQPWM-tail-pattern] name={name:?}");
             }
@@ -1351,7 +1358,22 @@ impl Executor {
         super::expand_braced_replacement::ASSIGNMENT_RHS.with(|f| f.set(true));
         let result = self.expand_assignment_alternate_mut_inner(value, double_quoted);
         super::expand_braced_replacement::ASSIGNMENT_RHS.with(|f| f.set(old));
-        result
+        // The `=`/`:=` rhs never carries a quoted null. GNU emits CTLNUL
+        // only when (W_NOSPLIT|W_EXPANDRHS|W_ASSIGNRHS) == W_EXPANDRHS
+        // (subst.c:11843, subst.c:11905); the `=` word flags include
+        // W_ASSIGNRHS (subst.c:4495), so the gate fails and the empty
+        // ""'' span is discarded by the NOSPLIT2 branch (subst.c:11853,
+        // subst.c:11921). A quoted null spliced in from a nested
+        // `${x- ""}` dies in list_string's remove_quoted_nulls
+        // (subst.c:3181-3192), and dequote_string runs on the remainder
+        // (subst.c:8085). Net: the assigned and substituted value is
+        // CTLNUL-free, so `${v= "$x" }` field-splits to zero words where
+        // the `-`/`+` alternates anchor one empty field.
+        // E400-aware (rubash#2882): a typed `$''` is user data.
+        crate::executor::markers::restore_bare_sentinels(
+            &result,
+            &[(crate::executor::markers::QUOTED_NULL_MARKER, "")],
+        )
     }
 
     fn expand_assignment_alternate_mut_inner(

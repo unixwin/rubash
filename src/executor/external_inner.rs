@@ -1664,6 +1664,9 @@ impl Executor {
             env_vars.remove(&name);
         }
         let raws_aligned = cmd.assignment_raws.len() == cmd.assignments.len();
+        // rubash#3456: snapshot the arithmetic flags so the prefix
+        // composition below can be adjudicated before the handler runs.
+        let prefix_arith_before = self.snapshot_arithmetic_error_flags();
         for (index, (var_name, var_value)) in cmd.assignments.iter().enumerate() {
             let (base_name, append) = assignment_name_and_append(var_name);
             // GNU variables.c:3589 assign_in_env: an ASSIGN_DISALLOWED
@@ -1731,6 +1734,17 @@ impl Executor {
             if is_valid_process_env(&env_name, &expanded_value) {
                 env_vars.insert(env_name, expanded_value);
             }
+        }
+        // rubash#3456: a fatal arithmetic error in the prefix was already
+        // diagnosed once by the composition above; GNU discards the whole
+        // element, so the host child must never run — return the dead
+        // member's empty output with the discard status instead.
+        if let Some(status) = self.take_prefix_arith_failure(&prefix_arith_before) {
+            return Some(HostExternalCommandOutput {
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                status,
+            });
         }
         self.host_external_command_handler
             .as_mut()
