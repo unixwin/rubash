@@ -1253,6 +1253,9 @@ impl Executor {
         if caller_line > 1 {
             for token in tokens.iter_mut() {
                 token.position += caller_line - 1;
+                // rubash#3605: the gather end line shifts in lockstep
+                // (see script_driver.rs).
+                token.heredoc_end_line = token.heredoc_end_line.map(|line| line + caller_line - 1);
             }
         }
         let mut ast = crate::parser::parse_with_options(
@@ -10513,6 +10516,11 @@ impl Executor {
         if line_offset > 0 {
             for token in tokens.iter_mut() {
                 token.position += line_offset as usize;
+                // rubash#3605: the gather end line shifts in lockstep
+                // (see script_driver.rs).
+                token.heredoc_end_line = token
+                    .heredoc_end_line
+                    .map(|line| line + line_offset as usize);
             }
         }
         let ast = crate::parser::parse_with_options(
