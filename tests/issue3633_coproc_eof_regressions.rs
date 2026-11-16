@@ -14,6 +14,8 @@
 //! Expectations cross-checked against the vendored GNU Bash 5.3.20
 //! (`third_party/bash/bash`, script-file probes).
 
+#![cfg(unix)]
+
 use std::path::PathBuf;
 use std::process::Command;
 
