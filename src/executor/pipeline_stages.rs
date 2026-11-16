@@ -1073,6 +1073,24 @@ impl Executor {
         // stays in the element's `$-`, and a `set -m` inside the
         // element re-arms the variable through flags.c:257.
         subshell.shell_state.job_control.set(false);
+        // A pipeline member runs in a subshell: caught signal traps reset to
+        // the inherited disposition (execute_cmd.c subshell trap reset), so
+        // only traps the member itself installs run at its exit. The
+        // compound and function stages already reset at entry; this
+        // builtin stage missed it, so the parent's live EXIT action
+        // fired at the element's teardown (run_exit_trap_for_status
+        // below) and again at shell exit (rubash#3409: `trap 'echo
+        // bye' EXIT; type ls | cat` printed `bye` twice). GNU
+        // disarms the EXIT trap in the forked element child:
+        // execute_cmd.c:4833 reset_signal_handlers() in the
+        // already-forked simple-command child, via trap.c:1433
+        // reset_or_restore_signal_handlers (SIG_TRAPPED cleared for
+        // EXIT_TRAP, trap string kept); the element still runs its
+        // exit trap (shell.c:1054 subshell_exit calls run_exit_trap
+        // only if signal_is_trapped(0)), so a trap set INSIDE the
+        // element re-arms and fires, exactly as the compound and
+        // function stages already behave.
+        crate::builtins::trap::reset_for_subshell_child(&mut subshell.shell_state.env_vars);
         // GNU execute_cmd.c:6373 do_piping: EVERY element is forked with
         // its fd 1 bound to the pipeline — the pipe for a non-rightmost
         // element, the pipeline's own stdout for the rightmost — never to
