@@ -7088,10 +7088,62 @@ impl Executor {
         self.close_persistent_output_fd(fd)?;
         self.close_persistent_input_fd(fd);
         self.fd_table.close(fd);
+        // GNU redir.c r_close_this: close(redirector) drops THE
+        // descriptor at the redirector's number. A respawned child can
+        // carry the table endpoint on a transport handle at a different
+        // OS slot (the __RUBASH_FD_{,W}HANDLE dup restored at init), so
+        // dropping the endpoint frees the dup while the process's real
+        // descriptor `fd` stays open — an orphaned descriptor GNU's
+        // close(fd) removes (a coproc child's `exec >&-` leaving the
+        // c2p write end open, so the parent's `read` never sees EOF).
+        // Close it only when it is genuinely orphaned: still open and
+        // not the backing of another live table entry.
+        self.close_orphaned_process_fd(fd);
         self.shell_state
             .env_vars
             .insert(fd_closed_key(fd), "1".to_string());
         Ok(())
+    }
+
+    #[cfg(unix)]
+    fn close_orphaned_process_fd(&self, fd: u32) {
+        // Only the stdio slots carry an identity between the table fd
+        // and the process descriptor: spawn wires the child's real
+        // fd 0/1/2 to the streams the endpoints describe, so a slot
+        // close below 3 that left its OS twin behind is a leaked
+        // descriptor. Slots ≥3 are virtual numbers — an open OS fd at
+        // that number belongs to the runtime (self-pipes, inherited
+        // handles), never to this table entry.
+        if fd >= 3 {
+            return;
+        }
+        let target = fd as crate::fd::HANDLE;
+        let referenced = self.fd_table.entries.values().any(|entry| {
+            !entry.closed
+                && (entry
+                    .read
+                    .as_ref()
+                    .and_then(read_endpoint_os_handle)
+                    .is_some_and(|handle| handle == target)
+                    || entry
+                        .write
+                        .as_ref()
+                        .and_then(write_endpoint_os_handle)
+                        .is_some_and(|handle| handle == target))
+        });
+        if referenced {
+            return;
+        }
+        unsafe {
+            if libc::fcntl(target, libc::F_GETFD) != -1 {
+                libc::close(target);
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn close_orphaned_process_fd(&self, fd: u32) {
+        let _ = fd;
     }
 
     pub(in crate::executor) fn execute_persistent_output_process_substitution(
@@ -9709,6 +9761,33 @@ fn exec_has_only_redirects(cmd: &CommandNode) -> bool {
                     .iter()
                     .any(|redirect| redirect.fd.is_some_and(|fd| fd.to_string() == *fd_word))
     )
+}
+
+/// The process descriptor backing a read endpoint, when it carries one:
+/// an owned FileFd handle, a coproc pipe end, or the process standard
+/// descriptor a symbolic endpoint aliases (InheritedProcessStdin → fd 0).
+/// Virtual endpoints (in-memory Text, ProcSub carriers, Directory) have
+/// no descriptor behind them. Used to recognize the OS descriptor a
+/// closed slot leaves orphaned (close_orphaned_process_fd).
+#[cfg(unix)]
+fn read_endpoint_os_handle(endpoint: &FdReadEndpoint) -> Option<crate::fd::HANDLE> {
+    match endpoint {
+        FdReadEndpoint::File(file) => Some(file.handle),
+        FdReadEndpoint::CoprocStdout { fd, .. } => Some(fd.handle),
+        other => other.standard_backing().map(|(handle, _)| handle),
+    }
+}
+
+/// The write-side twin of `read_endpoint_os_handle` — FileFd and coproc
+/// ends expose their handle; Stdout/Stderr resolve through
+/// `standard_backing` to the process descriptors they alias.
+#[cfg(unix)]
+fn write_endpoint_os_handle(endpoint: &FdWriteEndpoint) -> Option<crate::fd::HANDLE> {
+    match endpoint {
+        FdWriteEndpoint::File(file) => Some(file.handle),
+        FdWriteEndpoint::CoprocStdin { fd, .. } => Some(fd.handle),
+        other => other.standard_backing().map(|(handle, _)| handle),
+    }
 }
 
 /// The four stdio-slot redirect arms of a compound command, ordered by
