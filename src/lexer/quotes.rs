@@ -354,11 +354,16 @@ fn q22_name_start_byte(b: u8) -> bool {
 /// parse.y:5305+): `rest` walks the raw word byte-by-byte and runs of
 /// non-trigger bytes are pushed as one `&str` span.
 fn remove_shell_quotes_inner_cursor(raw: &str, posix: bool) -> String {
-    if !raw
-        .as_bytes()
-        .iter()
-        .any(|&b| matches!(b, b'\'' | b'"' | b'\\' | b'$' | b'`' | b'[' | b']'))
-    {
+    // rubash#3816: the fast path's admission ("no trigger byte") is not
+    // "provably trivial": a trigger-free word can still hold a literal
+    // control byte that collides with a transport carrier (`V=<0x11>`),
+    // which must be tagged as a raw-byte marker pair, not returned bare.
+    // A carrier byte therefore disqualifies the fast path exactly like a
+    // trigger byte does; the walk below tags it in its bulk span.
+    if !raw.as_bytes().iter().any(|&b| {
+        matches!(b, b'\'' | b'"' | b'\\' | b'$' | b'`' | b'[' | b']')
+            || super::ansi::is_assignment_carrier_byte(b as u32)
+    }) {
         return raw.to_string();
     }
     let mut out = String::with_capacity(raw.len());

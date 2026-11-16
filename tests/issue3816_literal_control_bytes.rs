@@ -17,7 +17,11 @@
 //! push_ansi_c_byte (lexer/ansi.rs) re-encodes every decoded carrier
 //! byte as a raw-byte marker pair (E000+E001+byte) at entry, per the
 //! registry's user_reachable contract (markers.rs) — the single/double
-//! quote and unquoted dequote paths do not.
+//! quote and unquoted dequote paths do not. The unquoted path had a
+//! second leak: remove_shell_quotes_inner_cursor's trigger-free fast
+//! path returned the raw word verbatim, so a word with no quote/escape
+//! trigger but a literal carrier byte (`V=<0x11>`) never reached the
+//! tagging walk at all.
 //!
 //! GNU owner: parse.y:5694-5706 got_character/got_escaped_character — GNU
 //! inserts CTLESC before a CTLESC/CTLNUL byte that arrives as data, so
@@ -116,6 +120,27 @@ fn probe_unq_assign(bytes: &[u8]) -> Vec<u8> {
     driver
 }
 
+fn probe_unq_word(bytes: &[u8]) -> Vec<u8> {
+    // Unquoted plain-word position: the byte as a bare argument word.
+    // `printf '%s'` shows the argument the lexer delivered; `set --`
+    // plus `${#1}` gives its length without any assignment path. Same
+    // skips as probe_unq_assign (TAB/LF/CR cannot appear bare here).
+    // This pins the remove_shell_quotes_inner_cursor fast path in
+    // non-assignment position: a trigger-free word with a literal
+    // carrier byte must not be returned verbatim.
+    let mut driver = Vec::new();
+    for b in bytes {
+        if *b == 0x09 || *b == 0x0a || *b == 0x0d {
+            continue;
+        }
+        let ch = char::from(*b);
+        driver.extend_from_slice(format!("printf '%s' {ch} | od -An -tx1\n").as_bytes());
+        driver.extend_from_slice(format!("set -- {ch}\n").as_bytes());
+        driver.extend_from_slice(b"echo \"LEN=${#1}\"\n");
+    }
+    driver
+}
+
 fn probe_esc_assign(bytes: &[u8]) -> Vec<u8> {
     // Backslash-LF is a line continuation, so 0x0a is skipped here. CR
     // (0x0d) is skipped too: `V=\<CR>` ends in CR LF, which the script
@@ -183,6 +208,21 @@ fn literal_unquoted_assignment_keeps_control_bytes() {
         .filter(|b| *b != 0x09 && *b != 0x0a && *b != 0x0d)
         .collect();
     let (stdout, stderr, rc) = run_driver("unq-assign", &probe_unq_assign(&bytes));
+    assert_eq!(rc, Some(0), "stderr: {stderr}");
+    assert_eq!(stderr, "");
+    assert_eq!(stdout, expected_probe_output(&bytes));
+}
+
+/// Unquoted plain word: same fast-path leak, non-assignment position.
+/// Base fails the same 10 bytes (the trigger-free word was returned
+/// verbatim by remove_shell_quotes_inner_cursor's fast path).
+#[test]
+fn literal_unquoted_word_keeps_control_bytes() {
+    let bytes: Vec<u8> = cc_bytes()
+        .into_iter()
+        .filter(|b| *b != 0x09 && *b != 0x0a && *b != 0x0d)
+        .collect();
+    let (stdout, stderr, rc) = run_driver("unq-word", &probe_unq_word(&bytes));
     assert_eq!(rc, Some(0), "stderr: {stderr}");
     assert_eq!(stderr, "");
     assert_eq!(stdout, expected_probe_output(&bytes));
