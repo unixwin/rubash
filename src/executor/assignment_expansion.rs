@@ -1027,7 +1027,21 @@ impl Executor {
         // `var="${other//X/Y}"` have none, so their results stay literal.
         // A wholly double-quoted RHS (`var="<(x)"`) is data too (the
         // subst.c case-'<' branch checks Q_DOUBLE_QUOTES), hence `!quoted`.
-        let rhs_has_procsub_text = !quoted && (value.contains("<(") || value.contains(">("));
+        // rubash#3605 new-exp1: a `<(`/ `>(` inside a `${var op word}`
+        // operand is materialized where that operand is expanded (the
+        // expand_embedded_parameters_alternate_mut funnel,
+        // embedded_mutations.rs) when — and only when — its arm is
+        // chosen. The cooked rescan below
+        // therefore has to ignore `$`-introduced groups: for
+        // `y=${x:-<(echo b)}` with x set the alternative never expands,
+        // and the `<(echo a)` in the cooked text is x's VALUE — data,
+        // never a substitution (expand_word_internal appends expanded
+        // values without re-scanning them, subst.c:11229-11385). Only a
+        // top-level unquoted span in the raw RHS still needs this
+        // fallback materialization.
+        let rhs_has_procsub_text = !quoted
+            && (value.contains("<(") || value.contains(">("))
+            && crate::parser::raw_word_has_unquoted_process_substitution(value);
         // A quoted value with no expansion syntax is already fully decoded
         // and must not go through the general expansion walker, which would
         // also run quote removal on quote syntax that the value legitimately

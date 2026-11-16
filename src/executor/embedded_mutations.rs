@@ -194,6 +194,31 @@ impl Executor {
         &mut self,
         word: &str,
     ) -> String {
+        // GNU subst.c:7663 parameter_brace_expand_word hands the
+        // `${var op word}` word half back to expand_word_internal,
+        // whose scan owns the `<`/`>` process-substitution cases
+        // (subst.c:11365-11385 — subst.c:11369 also skips them inside
+        // double quotes, which this Unquoted walker's quote state
+        // reproduces). An unquoted `<(`/ `>(` in the alternative's own
+        // text therefore materializes when — and only when — the arm
+        // that expands the alternative is taken
+        // (`cat ${foo:-<(echo a)}` -> /dev/fd/N, new-exp1.sub). A `<(`
+        // arriving from a variable's value is appended as expansion
+        // output below and never re-scanned, so value-borne text stays
+        // data. The materializer's quote-aware scan leaves quoted or
+        // escaped spans literal, matching the same GNU conditions.
+        let word_owned;
+        let word = if word.contains("<(") || word.contains(">(") {
+            match self.materialize_assignment_process_substitutions(word) {
+                Ok(materialized) => {
+                    word_owned = materialized;
+                    word_owned.as_str()
+                }
+                Err(_) => word,
+            }
+        } else {
+            word
+        };
         self.expand_embedded_parameters_mut_inner(
             word,
             SubstitutionQuoteContext::Unquoted,
@@ -1478,12 +1503,26 @@ impl Executor {
                                 // Propagate the outer quote context so a
                                 // double-quoted "${v:-~}" keeps its quoted
                                 // default-word semantics (no tilde expansion).
-                                // rubash#281: resolve the fragment without
-                                // re-entering the whole pipeline (GNU
-                                // subst.c:11229 expand_word_internal is a
-                                // single pass; its `${` arm runs
-                                // parameter_brace_expand inline).
-                                executor.expand_braced_parameter_fragment_in_word(&name, context)
+                                // GNU param_expand passes `quoted` down to
+                                // parameter_brace_expand_word
+                                // (subst.c:7840-7860): when this fragment
+                                // sits inside a double-quoted region the
+                                // alternate expands under Q_DOUBLE_QUOTES,
+                                // which is also what keeps an unquoted-
+                                // looking `<(`/`>(` inside it literal
+                                // (subst.c:11369 — the procsub cases skip
+                                // double-quoted text, `"${v:-<( )}"`).
+                                let fragment_context = if (in_double || quoted_span_start.is_some())
+                                    && matches!(context, SubstitutionQuoteContext::Unquoted)
+                                {
+                                    SubstitutionQuoteContext::DoubleQuoted
+                                } else {
+                                    context
+                                };
+                                executor.expand_braced_parameter_fragment_in_word(
+                                    &name,
+                                    fragment_context,
+                                )
                             });
                         let value = protect_rhs_value(
                             &value,
