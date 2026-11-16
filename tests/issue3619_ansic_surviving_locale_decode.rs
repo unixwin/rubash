@@ -16,7 +16,7 @@
 //! Pre-fix rubash emitted the literal `\u03B1` for the failed-locale
 //! line because `locale_name_selects_utf8` returned false for any
 //! non-UTF-8 name without checking whether it could activate.
-#![cfg(unix)]
+#![cfg(all(unix, not(target_os = "android")))]
 
 use std::process::Command;
 

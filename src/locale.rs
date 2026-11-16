@@ -293,7 +293,9 @@ fn locale_activatable(_name: &str) -> bool {
 
 /// The charset of the locale the C library currently has in force —
 /// what a failed setlocale attempt leaves behind (nl_langinfo CODESET).
-#[cfg(unix)]
+/// Android's libc crate exposes neither nl_langinfo nor CODESET, so it
+/// keeps the requested-name model like the non-Unix fallback.
+#[cfg(all(unix, not(target_os = "android")))]
 fn effective_locale_selects_utf8() -> bool {
     unsafe {
         let codeset = libc::nl_langinfo(libc::CODESET);
@@ -304,9 +306,10 @@ fn effective_locale_selects_utf8() -> bool {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(any(not(unix), target_os = "android"))]
 fn effective_locale_selects_utf8() -> bool {
-    // Windows keeps the requested-name model (utf8_locale_active).
+    // Windows keeps the requested-name model (utf8_locale_active);
+    // Android has no nl_langinfo binding in the libc crate.
     false
 }
 
