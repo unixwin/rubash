@@ -1683,7 +1683,13 @@ impl Executor {
                             })
                         })
                     {
+                        // A stored value's QUOTED_NULL_MARKER is field data,
+                        // never an anchor (GNU subst.c:8090 verbatim value
+                        // read + remove_quoted_nulls at field assembly):
+                        // `S $n T` with n=' ␂ ' yields `S`,`T`, not `S <E002> T`.
                         let value = shell_safe_value(&value);
+                        let value =
+                            crate::executor::parameter_words::dequote_stored_parameter_value(value);
                         let value = protect_rhs_value(
                             &value,
                             protect_rhs_data || protect_expansion_results,

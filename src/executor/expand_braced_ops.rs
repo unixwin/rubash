@@ -26,7 +26,7 @@ impl Executor {
                 return Some(
                     self.parameter_operator_value(var_name)
                         .map(|value| shell_safe_value(&value))
-                        .map(super::parameter_words::dequote_assignment_operator_result)
+                        .map(super::parameter_words::dequote_stored_parameter_value)
                         .unwrap_or_default(),
                 );
             }
@@ -41,7 +41,7 @@ impl Executor {
                 if let Some(resolved) =
                     crate::executor::expand_braced_indices::assign_applied_lookup(&key)
                 {
-                    return Some(super::parameter_words::dequote_assignment_operator_result(
+                    return Some(super::parameter_words::dequote_stored_parameter_value(
                         resolved,
                     ));
                 }
@@ -53,7 +53,7 @@ impl Executor {
             super::expand_braced_replacement::ASSIGNMENT_RHS.with(|f| f.set(true));
             let result = self.expand_parameter_word(word);
             super::expand_braced_replacement::ASSIGNMENT_RHS.with(|f| f.set(old));
-            return Some(super::parameter_words::dequote_assignment_operator_result(
+            return Some(super::parameter_words::dequote_stored_parameter_value(
                 result,
             ));
         }
@@ -65,7 +65,7 @@ impl Executor {
                 return Some(
                     self.parameter_operator_value(var_name)
                         .map(|value| shell_safe_value(&value))
-                        .map(super::parameter_words::dequote_assignment_operator_result)
+                        .map(super::parameter_words::dequote_stored_parameter_value)
                         .unwrap_or_default(),
                 );
             }
@@ -117,8 +117,8 @@ impl Executor {
             super::expand_braced_replacement::ASSIGNMENT_RHS.with(|f| f.set(old));
             // GNU parameter_brace_expand_rhs (subst.c:8172): the `=` result
             // is quote_escapes'd — its CTLNUL is field-internal data, never
-            // an empty-field anchor (see dequote_assignment_operator_result).
-            return Some(super::parameter_words::dequote_assignment_operator_result(
+            // an empty-field anchor (see dequote_stored_parameter_value).
+            return Some(super::parameter_words::dequote_stored_parameter_value(
                 result,
             ));
         }
@@ -185,7 +185,7 @@ impl Executor {
             return Some(
                 self.parameter_operator_value(var_name)
                     .map(|value| shell_safe_value(&value))
-                    .map(super::parameter_words::dequote_assignment_operator_result)
+                    .map(super::parameter_words::dequote_stored_parameter_value)
                     .unwrap_or_else(|| self.expand_parameter_word(word)),
             );
         }
@@ -240,7 +240,7 @@ impl Executor {
                 self.shell_variable_value(array_expr)
                     .filter(|value| !value.is_empty() && !is_array_storage(value))
                     .map(|value| shell_safe_value(&value))
-                    .map(super::parameter_words::dequote_assignment_operator_result)
+                    .map(super::parameter_words::dequote_stored_parameter_value)
                     .unwrap_or_else(|| default.to_string()),
             );
         }

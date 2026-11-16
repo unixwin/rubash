@@ -83,6 +83,21 @@ fn colon_dash_value_side_drops_marker() {
     assert_eq!(stdout, "argv[1] = <C>\nargv[2] = <D>\n");
 }
 
+#[test]
+fn plain_var_unquoted_read_drops_marker() {
+    // `S $n T` with n bound to ` ␂ `: the stored marker dequotes and the
+    // empty field drops — GNU `S`,`T`, never `S <E002> T`.
+    let (stdout, _, _) = rubash_file("set -- ''; sa() { local i=1; for a in \"$@\"; do echo \"argv[$i] = <$a>\"; i=$((i+1)); done; }; n=${v= \"$@\" }; sa S $n T");
+    assert_eq!(stdout, "argv[1] = <S>\nargv[2] = <T>\n");
+}
+
+#[test]
+fn plain_var_quoted_read_keeps_spaces() {
+    // `"$n"` → the dequoted `  ` survives as one quoted field.
+    let (stdout, _, _) = rubash_file("set -- ''; sa() { local i=1; for a in \"$@\"; do echo \"argv[$i] = <$a>\"; i=$((i+1)); done; }; n=${v= \"$@\" }; sa S \"$n\" T");
+    assert_eq!(stdout, "argv[1] = <S>\nargv[2] = <  >\nargv[3] = <T>\n");
+}
+
 // Remaining residual (next family, NOT fixed here): the RHS-emitted quoted
 // empty `"$@"` segment should GLUE to neighbouring fields — GNU
 // `M${v- "$@" }N` → `MN` while rubash still splits it to `M`,`N`. That is the
