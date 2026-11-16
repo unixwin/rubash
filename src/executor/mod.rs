@@ -1736,6 +1736,15 @@ pub struct Executor {
     /// restricted shell must never create — GNU refuses the member inside
     /// its subshell before do_redirections, so nothing opens.
     pipeline_stage_restricted_refused: Cell<bool>,
+    /// rubash#3499: set by the stage wrapper's bad-substitution harvest:
+    /// a bad substitution in the element's words DISCARDs the element
+    /// (subst.c:10277-10288), and GNU runs expand_words before
+    /// do_redirections, so the element's redirects never apply — the
+    /// driver then skips `route_pipeline_stage_streams` for the stage,
+    /// because the routing walk would OPEN the `>file` target and
+    /// materialize the very file the discarded element must never
+    /// create. Same shape as `pipeline_stage_restricted_refused` above.
+    pipeline_stage_bad_substitution_discarded: Cell<bool>,
     /// Tracks the source of the last heredoc EOF warning emitted from
     /// command_substitution_heredoc_output_mut_typed, to avoid duplicate
     /// warnings when the same comsub is expanded through multiple paths

@@ -1002,14 +1002,18 @@ impl Executor {
         // on the `bad substitution` default. Mirror of the same check in
         // expand_braced_parameter_word for the `\x1d`/whole-word entry.
         if crate::executor::expand_word::braced_name_ends_on_quote(name) {
-            self.write_diagnostic_fd2(
-                format!(
-                    "{}{}: bad substitution\n",
-                    self.diagnostic_prefix(),
-                    crate::executor::expand_word::bad_substitution_display(&diagnostic_word)
-                )
-                .as_bytes(),
-            );
+            // rubash#3499: one diagnostic per latch lifetime (see
+            // bad_substitution_report_first).
+            if self.bad_substitution_report_first() {
+                self.write_diagnostic_fd2(
+                    format!(
+                        "{}{}: bad substitution\n",
+                        self.diagnostic_prefix(),
+                        crate::executor::expand_word::bad_substitution_display(&diagnostic_word)
+                    )
+                    .as_bytes(),
+                );
+            }
             self.shell_state.parameter_bad_substitution.set(true);
             return String::new();
         }
@@ -1019,14 +1023,18 @@ impl Executor {
         // runs at its whole-word entry, for words that arrive here without
         // passing a walker `${` arm.
         if crate::executor::expand_word::braced_name_is_bad_substitution(name) {
-            self.write_diagnostic_fd2(
-                format!(
-                    "{}{}: bad substitution\n",
-                    self.diagnostic_prefix(),
-                    crate::executor::expand_word::bad_substitution_display(&diagnostic_word)
-                )
-                .as_bytes(),
-            );
+            // rubash#3499: one diagnostic per latch lifetime (see
+            // bad_substitution_report_first).
+            if self.bad_substitution_report_first() {
+                self.write_diagnostic_fd2(
+                    format!(
+                        "{}{}: bad substitution\n",
+                        self.diagnostic_prefix(),
+                        crate::executor::expand_word::bad_substitution_display(&diagnostic_word)
+                    )
+                    .as_bytes(),
+                );
+            }
             self.shell_state.parameter_bad_substitution.set(true);
             return String::new();
         }
