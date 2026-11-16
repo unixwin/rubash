@@ -112,10 +112,8 @@ fn issue_own_output_redirect_diagnoses() {
     // The command's own redirect makes fd 0 write-only for this
     // read only: GNU applies the redirect first (redir.c:237), then
     // the read fails EBADF.
-    let (stdout, stderr, code, dir) = run_script(
-        "own-out-redir",
-        "read x 0>out2.txt; echo \"rc=$? x=$x\"\n",
-    );
+    let (stdout, stderr, code, dir) =
+        run_script("own-out-redir", "read x 0>out2.txt; echo \"rc=$? x=$x\"\n");
     assert_eq!(code, Some(0), "stderr={stderr:?}");
     assert_eq!(stdout, "rc=1 x=\n", "stdout={stdout:?}");
     assert!(
