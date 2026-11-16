@@ -178,7 +178,7 @@ fn validate_respawn_proof_fd(fd: std::os::unix::io::RawFd, nonce_hex: &str) -> b
     if unsafe { libc::fstat(fd, &mut st) } != 0 {
         return false;
     }
-    if (st.st_mode & libc::S_IFMT) != libc::S_IFIFO {
+    if (u32::from(st.st_mode) & u32::from(libc::S_IFMT)) != u32::from(libc::S_IFIFO) {
         return false;
     }
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
