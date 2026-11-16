@@ -1057,7 +1057,19 @@ impl Executor {
                         let internal = if report_open {
                             open_line.saturating_sub(1)
                         } else {
-                            eof_line
+                            // GNU yyerror (parse.y:6883-6891) reports
+                            // `line_number` at EOF — one past the last
+                            // input line of the string, in the SAME
+                            // numbering the open_line arm maps through
+                            // `caller_line + i - 1` (evalstring.c:345
+                            // line_number--). eof_line is a line index,
+                            // so it takes the identical -1 mapping:
+                            // `eval 'f() { _; } >_[${ $() }]'` at caller
+                            // line N reports N+1, not N+2 (rubash#3605
+                            // class B, run-exportfunc). Siblings
+                            // (command_substitution.rs, command_input_
+                            // scope.rs) already map `base + eof_line - 1`.
+                            eof_line.saturating_sub(1)
                         };
                         let saved_eval_context = self
                             .shell_state
