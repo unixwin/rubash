@@ -52,7 +52,22 @@ fn run_script(tag: &str, body: &str, extra: &[(&str, &str)]) -> (String, String,
         .output()
         .expect("run rubash");
     let normalize = |bytes: &[u8]| {
-        String::from_utf8_lossy(bytes).replace(path.to_str().expect("utf8 path"), "S")
+        let mut text = String::from_utf8_lossy(bytes).into_owned();
+        let raw = path.to_str().expect("utf8 path");
+        // Diagnostics echo the script path in rubash's internal form:
+        // verbatim on Unix, MSYS-style `/c/...` for a Windows drive path
+        // (drive letter lowercased, `:` dropped, `/` separators).
+        let fwd = raw.replace('\\', "/");
+        let mut needles = vec![raw.to_string(), fwd.clone()];
+        if fwd.len() > 2 && fwd.as_bytes()[1] == b':' && fwd.as_bytes()[0].is_ascii_alphabetic() {
+            needles.push(format!("/{}{}", fwd[..1].to_lowercase(), &fwd[2..]));
+        }
+        for needle in needles {
+            if !needle.is_empty() {
+                text = text.replace(&needle, "S");
+            }
+        }
+        text
     };
     (
         normalize(&output.stdout),

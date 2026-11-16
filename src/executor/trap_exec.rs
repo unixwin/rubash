@@ -1991,6 +1991,13 @@ impl Executor {
             &tokens,
             crate::parser::ParseLoopOptions {
                 source_text: Some(action.into()),
+                // Token positions are absolute (start_line-anchored), so
+                // the parse must know the same shift to map them back
+                // onto action-text lines and to compute the physical EOF
+                // line — same contract as the eval runner above
+                // (trap.c:_run_trap_internal parses the action at the
+                // caller's line_number).
+                source_line_offset: call_line.unwrap_or(1).saturating_sub(1),
                 ..Default::default()
             },
         );
@@ -3376,6 +3383,11 @@ impl Executor {
             &tokens,
             crate::parser::ParseLoopOptions {
                 source_text: Some(action.as_str().into()),
+                // Same start_line-anchored contract as the RETURN runner:
+                // the physical EOF line is source_line_offset + the
+                // action's newline count + 1, so the offset must be
+                // failed_line - 1 for GNU's `line N+1` EOF diagnostic.
+                source_line_offset: failed_line.unwrap_or(1).saturating_sub(1),
                 ..Default::default()
             },
         );
