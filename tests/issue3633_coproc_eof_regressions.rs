@@ -80,12 +80,23 @@ fn coproc_child_exec_close_delivers_eof_while_alive() {
     // COPROC_PID live), so the whole script finishes far inside the
     // child's 5s lifetime. With the orphaned fd1 the read blocked
     // until the child died of its own accord.
+    //
+    // Teardown notes (post-merge with master): the coproc child is a
+    // `rubash -c` respawn wrapper whose `sleep 5` is a grandchild —
+    // `kill $COPROC_PID` cannot reach it, and a TERM landing in the
+    // child's early blocked-signal window leaves the wrapper waiting
+    // out the sleep. The orphaned sleep would keep the parent's
+    // stderr (inherited through the coproc) open and stall the test
+    // harness's pipe drain, so the body detaches fd 2 and the kill
+    // uses SIGKILL — cleanup determinism only; the fd-1 EOF contract
+    // under test is unchanged (the kill still runs strictly after the
+    // read returns, so it cannot mask an unfixed blocking read).
     let start = std::time::Instant::now();
     let run = run_script(
-        "coproc { exec >&-; sleep 5; }\n\
+        "coproc { exec >&-; exec 2>/dev/null; sleep 5; }\n\
          read -r r <&${COPROC[0]}; echo \"eof:$?\"\n\
          echo \"bound:${COPROC[@]}\"\n\
-         kill $COPROC_PID 2>/dev/null; wait $COPROC_PID 2>/dev/null\n\
+         kill -9 $COPROC_PID 2>/dev/null; wait $COPROC_PID 2>/dev/null\n\
          echo done\n",
     );
     assert_eq!(run.status, 0, "stderr: {}", run.stderr);
