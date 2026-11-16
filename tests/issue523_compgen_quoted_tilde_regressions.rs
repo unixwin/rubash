@@ -21,7 +21,6 @@
 
 #![cfg(windows)]
 
-use std::io::Write;
 use std::process::{Command, Stdio};
 
 struct RunOutcome {
