@@ -3044,10 +3044,15 @@ impl Executor {
                 .create(true)
                 .open(&path)
                 .err()
-        } else if super::shell_options::redirect_path_is_fifo(&path) {
-            super::shell_options::probe_input_redirect_gate(&path).err()
         } else {
-            std::fs::File::open(&path).err()
+            // rubash#3777: validate with the same opener the bind uses
+            // (probe_input_redirect_gate, FILE_FLAG_BACKUP_SEMANTICS
+            // retry) — a bare File::open refuses a directory with EACCES
+            // and the compound is abandoned before its reader ever runs.
+            // The gate owns the FIFO carve-out (rubash#1820: access(2)
+            // validation, no rendezvous consumed), so no separate FIFO
+            // arm is needed here.
+            super::shell_options::probe_input_redirect_gate(&path).err()
         };
         match probe_error {
             None => None,
