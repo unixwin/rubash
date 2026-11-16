@@ -57,12 +57,6 @@ pub fn script_may_set_onecmd(contents: &str) -> bool {
 }
 
 fn line_may_set_onecmd(line: &str) -> bool {
-    // `set -o onecmd` and `set -oonecmd` both carry the option name
-    // verbatim; so does a comment or string mentioning it — the
-    // scan only routes, so the substring is enough.
-    if line.contains("onecmd") {
-        return true;
-    }
     let bytes = line.as_bytes();
     let mut i = 0usize;
     while i < bytes.len() {
@@ -90,7 +84,9 @@ fn line_may_set_onecmd(line: &str) -> bool {
                     if word != "set" {
                         return true;
                     }
-                    if set_args_may_set_onecmd(&line[i + w.len()..]) {
+                    if set_args_may_set_onecmd(&line[i + w.len()..])
+                        || set_option_words_contain(&line[i + w.len()..], "onecmd")
+                    {
                         return true;
                     }
                 }
@@ -115,31 +111,106 @@ fn dot_is_command_position(bytes: &[u8], i: usize) -> bool {
     j == 0 || matches!(bytes[j - 1], b';' | b'&' | b'|' | b'(' | b'{')
 }
 
-fn set_args_may_set_onecmd(args: &str) -> bool {
+/// A word of a `set` command's arguments that GNU's option scan can
+/// reach, in order, tagged by role. The walk models the pre-scan
+/// (builtins/set.def:671-691, `internal_getopt` with optflags
+/// `"+<flags>o;"`, flags.c:372-382) together with the apply loop's
+/// `o` arm (set.def:737-762):
+///
+/// * `--` and a lone `-` end option interpretation (bashgetopt.c
+///   returns the end-of-options marker; the apply loop stops there
+///   too) — rubash#3410: everything after them is positional.
+/// * A `-`/`+` word is a flag bundle; every `o` in it consumes one
+///   following word as the option name, but only when that word is
+///   not itself an option word (a dash word is scanned as a bundle
+///   in its own right — `set -o -t` sets onecmd via the `-t`).
+/// * The first non-option word that no `o` consumed ends option
+///   interpretation (`set foo -t` leaves `-t` positional).
+/// * `++` is skipped, never a bundle: the validation pass rejects
+///   it before anything applies.
+///
+/// Words past the stop point are never returned, so no caller can
+/// mistake a positional for a flag again.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SetWordRole {
+    /// A `-`/`+` flag bundle.
+    Bundle,
+    /// A word consumed as an `-o`/`+o` option name.
+    Operand,
+}
+
+fn set_option_words(args: &str) -> Vec<(&str, SetWordRole)> {
+    let mut words = Vec::new();
+    let mut operands_due = 0usize;
     for token in args.split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|')) {
-        if token.len() >= 2 && token.starts_with('-') && !token.starts_with("--") {
-            // A flag bundle carrying `t` in any position counts:
-            // GNU's apply loop walks the bundle letter by letter
-            // (builtins/set.def:726-766), and an `o` takes its
-            // option name from the NEXT WORD, never from the bundle
-            // remainder (set.def:737-762) — after listing options
-            // (no next word) or setting the named option it
-            // CONTINUES with the next letter, so `set -ot` sets
-            // onecmd AND lists the option table (verified against
-            // GNU bash 5.3.20: `FLAGS=htBc`, table printed), the
-            // same letter-by-letter rule the verbose scanner
-            // already uses for `set -ov`. The old `split('o')`
-            // truncation assumed the rest was swallowed as the
-            // option name; it is not. A false positive (an `o`
-            // whose next word is an invalid option name aborts
-            // before the `t`, or a bundle the validation pass
-            // rejects) only costs the incremental driver.
-            if token[1..].contains('t') {
-                return true;
+        if token.is_empty() {
+            continue;
+        }
+        if operands_due > 0 {
+            if token.starts_with('-') || token.starts_with('+') {
+                // Not consumed: a dash word is a bundle, and the
+                // `o` that waited for a name prints the table
+                // instead — no later `o` consumes this word either.
+                operands_due = 0;
+            } else {
+                operands_due -= 1;
+                words.push((token, SetWordRole::Operand));
+                continue;
             }
         }
+        if token == "--" || token == "-" {
+            break;
+        }
+        if token.starts_with('-') || token.starts_with('+') {
+            if token.starts_with("++") {
+                continue;
+            }
+            let body = &token[1..];
+            operands_due += body.chars().filter(|c| *c == 'o').count();
+            words.push((token, SetWordRole::Bundle));
+            continue;
+        }
+        break;
     }
-    false
+    words
+}
+
+/// Whether the option name `needle` appears in a `set` command's
+/// option region — inside a flag bundle (`set -oonecmd`) or as an
+/// `-o` operand (`set -o onecmd`). The old bare-substring check
+/// fired for the name anywhere on the line, including past `--`
+/// (`set -- -o onecmd`) and in comments; the option region is the
+/// only place the name can act (rubash#3410).
+fn set_option_words_contain(args: &str, needle: &str) -> bool {
+    set_option_words(args)
+        .iter()
+        .any(|(word, _)| word.contains(needle))
+}
+
+fn set_args_may_set_onecmd(args: &str) -> bool {
+    // A flag bundle carrying `t` in any position counts:
+    // GNU's apply loop walks the bundle letter by letter
+    // (builtins/set.def:726-766), and an `o` takes its
+    // option name from the NEXT WORD, never from the bundle
+    // remainder (set.def:737-762) — after listing options
+    // (no next word) or setting the named option it
+    // CONTINUES with the next letter, so `set -ot` sets
+    // onecmd AND lists the option table (verified against
+    // GNU bash 5.3.20: `FLAGS=htBc`, table printed), the
+    // same letter-by-letter rule the verbose scanner
+    // already uses for `set -ov`. The old `split('o')`
+    // truncation assumed the rest was swallowed as the
+    // option name; it is not. A false positive (an `o`
+    // whose next word is an invalid option name aborts
+    // before the `t`, or a bundle the validation pass
+    // rejects) only costs the incremental driver.
+    //
+    // rubash#3410: the walk stops at `--` (and at a lone `-`,
+    // and at the first non-option word) — a `t` bundle past
+    // the stop point is a positional parameter, never a flag.
+    set_option_words(args).iter().any(|(word, role)| {
+        *role == SetWordRole::Bundle && word.starts_with('-') && word[1..].contains('t')
+    })
 }
 
 /// rubash#2773: over-admitting routing scan in the
@@ -159,12 +230,6 @@ pub fn script_may_toggle_verbose(contents: &str) -> bool {
 }
 
 fn line_may_toggle_verbose(line: &str) -> bool {
-    // `set -o verbose` and `set -overbose` both carry the option
-    // name verbatim; so does a comment or string mentioning it —
-    // the scan only routes, so the substring is enough.
-    if line.contains("verbose") {
-        return true;
-    }
     let bytes = line.as_bytes();
     let mut i = 0usize;
     while i < bytes.len() {
@@ -193,7 +258,9 @@ fn line_may_toggle_verbose(line: &str) -> bool {
                     if word != "set" {
                         return true;
                     }
-                    if set_args_may_toggle_verbose(&line[i + w.len()..]) {
+                    if set_args_may_toggle_verbose(&line[i + w.len()..])
+                        || set_option_words_contain(&line[i + w.len()..], "verbose")
+                    {
                         return true;
                     }
                 }
@@ -205,25 +272,22 @@ fn line_may_toggle_verbose(line: &str) -> bool {
 }
 
 fn set_args_may_toggle_verbose(args: &str) -> bool {
-    for token in args.split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|')) {
-        if token.len() >= 2
-            && (token.starts_with('-') || token.starts_with('+'))
-            && !token.starts_with("--")
-            && !token.starts_with("++")
-        {
-            // A flag bundle carrying `v` in any position counts:
-            // GNU's set parser works the bundle letter by letter,
-            // and an `o` whose remainder is not an option name does
-            // not swallow the rest (verified against GNU bash
-            // 5.3.20: `set -ov` prints the option table AND sets
-            // verbose, `$-` = hvBc). A false positive (the `-ovi`
-            // name form) only costs the incremental driver.
-            if token[1..].contains('v') {
-                return true;
-            }
-        }
-    }
-    false
+    // A flag bundle carrying `v` in any position counts:
+    // GNU's set parser works the bundle letter by letter,
+    // and an `o` whose remainder is not an option name does
+    // not swallow the rest (verified against GNU bash
+    // 5.3.20: `set -ov` prints the option table AND sets
+    // verbose, `$-` = hvBc). A false positive (the `-ovi`
+    // name form) only costs the incremental driver.
+    //
+    // rubash#3410: the walk stops at `--` (and at a lone `-`,
+    // and at the first non-option word) — a `v` bundle past
+    // the stop point is a positional parameter, never a flag.
+    set_option_words(args).iter().any(|(word, role)| {
+        *role == SetWordRole::Bundle
+            && (word.starts_with('-') || word.starts_with('+'))
+            && word[1..].contains('v')
+    })
 }
 
 fn line_enables_history(line: &str) -> bool {
@@ -250,29 +314,22 @@ fn line_enables_history(line: &str) -> bool {
 }
 
 fn set_args_enable_history(args: &str) -> bool {
-    let mut expecting_option = false;
-    for token in args.split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|')) {
-        if token.is_empty() {
-            continue;
-        }
-        if expecting_option {
-            if token == "history" || token == "histexpand" {
-                return true;
-            }
-            expecting_option = false;
-            continue;
-        }
-        if token == "-o" {
-            expecting_option = true;
-        } else if token.len() >= 2
-            && token.starts_with('-')
-            && !token.starts_with("--")
-            && token[1..].contains('H')
-        {
-            return true;
-        }
-    }
-    false
+    // rubash#3410: the walk stops at `--` (and at a lone `-`,
+    // and at the first non-option word) — `-H` / `-o history`
+    // past the stop point are positionals. A bundle `o` also
+    // takes its option name from the next word (`set -eo history`
+    // enables history, `set -o -H` enables histexpand via the
+    // `-H` the `-o` refused to consume); the old exact-`-o`
+    // check missed both, an under-admission the shared walk
+    // fixes. (`set +o history` now routes too — disabling
+    // history needs no grouped reader, but the over-admission
+    // costs only the incremental driver.)
+    set_option_words(args)
+        .iter()
+        .any(|(word, role)| match role {
+            SetWordRole::Operand => *word == "history" || *word == "histexpand",
+            SetWordRole::Bundle => word.starts_with('-') && word[1..].contains('H'),
+        })
 }
 
 /// Does this script turn alias expansion on? `shopt -s expand_aliases` is
