@@ -1242,7 +1242,17 @@ impl Executor {
                 match self.open_net_redirect(&expanded_target) {
                     Ok(file) => {
                         let file = FileFd::from_file(file, expanded_target.clone().into());
-                        let saved = self.fd_table.entries.get(&0).cloned();
+                        // rubash#3728: snapshot fd 0 with a kernel dup
+                        // (saved_entry), not a bare Rc clone — the bind
+                        // below retires the displaced descriptor
+                        // (rubash#3213), so a cloned save would restore
+                        // a dead entry (same hazard as #3706). A dup
+                        // failure fails this read (GNU REDIRECTION_ERROR
+                        // on a failed F_DUPFD save, redir.c:965).
+                        let saved = match self.fd_table.saved_entry(0) {
+                            Ok(saved) => saved,
+                            Err(_) => return None,
+                        };
                         self.fd_table
                             .open_input(0, FdReadEndpoint::File(file), false);
                         let line = self.read_virtual_fd_stdin(
@@ -1348,7 +1358,13 @@ impl Executor {
                     return None;
                 };
                 let file = FileFd::from_file(server, path.clone());
-                let saved = self.fd_table.entries.get(&0).cloned();
+                // rubash#3728: kernel-dup snapshot of fd 0 (see the
+                // /dev/tcp arm above) — the bind below retires the
+                // displaced descriptor (rubash#3213).
+                let saved = match self.fd_table.saved_entry(0) {
+                    Ok(saved) => saved,
+                    Err(_) => return None,
+                };
                 self.fd_table
                     .open_input(0, FdReadEndpoint::File(file), false);
                 let line = self.read_virtual_fd_stdin(
@@ -1403,7 +1419,13 @@ impl Executor {
                 }) else {
                     return None;
                 };
-                let saved = self.fd_table.entries.get(&0).cloned();
+                // rubash#3728: kernel-dup snapshot of fd 0 (see the
+                // /dev/tcp arm above) — the bind below retires the
+                // displaced descriptor (rubash#3213).
+                let saved = match self.fd_table.saved_entry(0) {
+                    Ok(saved) => saved,
+                    Err(_) => return None,
+                };
                 self.fd_table
                     .open_input(0, FdReadEndpoint::File(file), false);
                 let line = self.read_virtual_fd_stdin(
