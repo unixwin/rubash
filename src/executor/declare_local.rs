@@ -1565,8 +1565,23 @@ impl Executor {
         let skip_builtin = dirstack_routed && local_names(&args).is_empty();
 
         let result = (|| -> Result<i32, ExecuteError> {
-            let mut stdout = Vec::new();
-            let mut stderr = Vec::new();
+            // rubash#3408: a print request (`declare -p NAME...`)
+            // interleaves per-name listings (stdout) with `not found`
+            // diagnostics (stderr) in operand order — GNU's per-name
+            // sequential emission (builtins/setattr.def
+            // `set_or_show_attributes`). The pair route
+            // (`write_buffered_builtin_output`: whole stdout block,
+            // then whole stderr block) cannot express that order, so
+            // the builtin runs against one OrderedOutputLog and the
+            // chunks flush in log order — the same route `type`,
+            // `command -v` and `printf` already take (rubash#2699 /
+            // #3324). Every other declare shape has at most one
+            // stream non-empty, so the chunk route renders it exactly
+            // like the pair route (and falls back to the pair blocks
+            // when the walk declines).
+            let log = super::trap_stack_builtins::OrderedOutputLog::new();
+            let mut stdout = log.stdout_writer();
+            let mut stderr = log.stderr_writer();
             // rubash#2424: the DIRSTACK router's builtin-phase
             // diagnostics (readonly refusals, a standalone bad
             // subscript) — written here so the command's redirections
@@ -1881,7 +1896,7 @@ impl Executor {
                     // Flush here: this early return skips the normal
                     // buffered-output flush below, which would swallow the
                     // diagnostic (rubash#635).
-                    self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+                    self.write_buffered_builtin_output_chunks(cmd, &log)?;
                     return Ok(1);
                 }
                 if local_blocked.is_empty() && noassign_blocked.is_empty() {
@@ -1899,7 +1914,7 @@ impl Executor {
             // earlier guard dropped the buffered stderr whenever
             // stdout_capture was active (bashdb hardening, no GNU anchor),
             // which swallowed the diagnostic entirely (rubash#189).
-            self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+            self.write_buffered_builtin_output_chunks(cmd, &log)?;
             Ok(status)
         })();
         // PIPESTATUS cell-shape transitions for this declare's operands
