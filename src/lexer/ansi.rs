@@ -62,9 +62,7 @@ pub(crate) fn is_assignment_carrier_byte(byte: u32) -> bool {
 /// carrier set above.
 pub(crate) fn push_tagged_source_char(out: &mut String, ch: char) {
     if is_assignment_carrier_byte(ch as u32) {
-        out.push_str(
-            &crate::executor::substitution_metadata::encode_raw_byte_marker(ch as u8),
-        );
+        out.push_str(&crate::executor::substitution_metadata::encode_raw_byte_marker(ch as u8));
     } else {
         out.push(ch);
     }
@@ -77,10 +75,7 @@ pub(crate) fn push_tagged_source_char(out: &mut String, ch: char) {
 /// transport. A UTF-8 multi-byte char never triggers the slow path: its
 /// bytes are all >= 0x80, outside the carrier set.
 pub(crate) fn push_tagged_source_span(out: &mut String, span: &str) {
-    if !span
-        .bytes()
-        .any(|b| is_assignment_carrier_byte(b as u32))
-    {
+    if !span.bytes().any(|b| is_assignment_carrier_byte(b as u32)) {
         out.push_str(span);
         return;
     }

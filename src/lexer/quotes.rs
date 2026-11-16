@@ -2341,11 +2341,7 @@ pub(super) fn remove_shell_quotes_outside_backticks(raw: &str) -> String {
                         // quotes is user data — tag it as a raw-byte
                         // marker pair so no downstream decoder can claim
                         // it as the carrier it collides with.
-                        quoted
-                            if crate::lexer::ansi::is_assignment_carrier_byte(
-                                quoted as u32,
-                            ) =>
-                        {
+                        quoted if crate::lexer::ansi::is_assignment_carrier_byte(quoted as u32) => {
                             crate::lexer::ansi::push_tagged_source_char(&mut out, quoted);
                         }
                         _ => out.push(quoted),
