@@ -373,8 +373,7 @@ fn dollar_command_substitution(
         {
             nested_case_subst += 1;
         }
-        let closes_nested_subst =
-            ch == ')' && !single && !double && nested_case_subst > 0;
+        let closes_nested_subst = ch == ')' && !single && !double && nested_case_subst > 0;
         if closes_nested_subst {
             nested_case_subst -= 1;
         }
@@ -387,12 +386,8 @@ fn dollar_command_substitution(
         // for the body parser's grammar verdict. Pattern closers
         // (content seen), nested-paren closers, nested `$(` closers
         // and quoted `)` never reach this arm.
-        let case_close_candidate = ch == ')'
-            && !single
-            && !double
-            && depth == 1
-            && case_depth > 0
-            && !closes_nested_subst;
+        let case_close_candidate =
+            ch == ')' && !single && !double && depth == 1 && case_depth > 0 && !closes_nested_subst;
         if case_close_candidate
             && ((region_before && !content_before)
                 || (word_before == "in" && stage_before == 2)
