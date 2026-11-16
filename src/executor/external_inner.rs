@@ -5446,9 +5446,15 @@ impl Executor {
             }
         }
         if crate::script_driver::check_binary_file(&sample) {
+            // The refusal is internal_error's (execute_cmd.c:6228),
+            // which carries the command's line and appends
+            // strerror(ENOEXEC): GNU 5.3.20 answers `./x` (a corrupt
+            // ELF image) with `bash: line 1: ./x: cannot execute
+            // binary file: Exec format error`.
             return Some((
                 format!(
-                    "bash: {}: cannot execute binary file",
+                    "{}{}: cannot execute binary file: Exec format error",
+                    self.error_prefix_for_line(cmd.line.unwrap_or(1)),
                     cmd.words.first().map(String::as_str).unwrap_or_default()
                 ),
                 126,
@@ -6509,16 +6515,27 @@ pub(in crate::executor) fn is_enoexec_candidate(program: &std::path::Path) -> bo
     let mut head = [0u8; 8];
     let read = file.read(&mut head).unwrap_or(0);
     let head = &head[..read];
-    // rubash#3510 rework: a Mach-O image is a native binary the Darwin
-    // kernel execs directly, so on macOS it is not an ENOEXEC candidate.
-    // On Linux the kernel refuses it with ENOEXEC, so it stays a
-    // candidate there and GNU's post-ENOEXEC binary refusal (126) is
-    // preserved — an ungated exclusion would have flipped a Mach-O file
-    // on Linux from GNU's 126 to the glibc /bin/sh fallback's 127.
-    // (MZ stays a candidate here on every platform: on unix the kernel
-    // refuses a PE image with ENOEXEC.)
+    // execute_cmd.c:6126 shell_execve takes whatever the local kernel
+    // loads: a binary format is an ENOEXEC candidate exactly on the
+    // platforms whose kernel refuses it.
+    //   - ELF: native only where execve(2) accepts it. Darwin's kernel
+    //     refuses ELF with ENOEXEC like any other non-Mach-O file, so
+    //     an ELF operand on macOS MUST stay a candidate — the
+    //     classification then refuses it through check_binary_file
+    //     ("cannot execute binary file", 126) instead of libc's silent
+    //     /bin/sh substitution running its bytes as a script
+    //     (`./x: line 1: ELFgarbage: command not found`, rc 127).
+    //   - Mach-O (rubash#3510 rework): a native binary the Darwin
+    //     kernel execs directly, so on macOS it is not an ENOEXEC
+    //     candidate. On Linux the kernel refuses it with ENOEXEC, so
+    //     it stays a candidate there and GNU's post-ENOEXEC binary
+    //     refusal (126) is preserved — an ungated exclusion would have
+    //     flipped a Mach-O file on Linux from GNU's 126 to the glibc
+    //     /bin/sh fallback's 127.
+    //   - (MZ stays a candidate here on every platform: on unix the
+    //     kernel refuses a PE image with ENOEXEC.)
     !head.starts_with(b"#!")
-        && !head.starts_with(b"\x7fELF")
+        && (cfg!(target_vendor = "apple") || !head.starts_with(b"\x7fELF"))
         && !(cfg!(target_os = "macos") && crate::executor::path::is_macho_binary_magic(head))
 }
 

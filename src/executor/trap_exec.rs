@@ -7364,7 +7364,10 @@ impl Executor {
             .env_vars
             .get(FUNCTION_STDIN_OFFSET)
             .cloned();
-        let old_fd0 = self.fd_table.entries.get(&0).cloned();
+        // rubash#3731: snapshot fd 0 with a kernel dup (FdTable::saved_entry),
+        // like #3723 — a bare Rc clone shares the descriptor the bind-time
+        // retire closes, so the restore would re-insert a retired entry.
+        let old_fd0 = self.fd_table.saved_entry(0)?;
         let fd0_key = fd_stdin_key(0);
         let fd0_offset_key = fd_stdin_offset_key(0);
         let fd0_dynamic_key = fd_dynamic_input_key(0);
