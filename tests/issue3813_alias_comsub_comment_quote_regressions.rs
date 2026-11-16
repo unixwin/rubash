@@ -29,6 +29,13 @@
 //! arm (token-boundary gated) plus a `<<` heredoc arm. Same defect
 //! class as #2033's pre-pass walkers, which already carry the comment
 //! arm — these three helpers were the residual.
+//!
+//! NOTE (pin split, 2026-11-17): four pins that need the REAL lexer
+//! (`${ ... }` funsub bodies with `#` comments/heredocs, and
+//! `${x:-$(...)}` whose closing `}` leaked into the output) were moved
+//! out of this file to rubash #3823 — the pre-scan fix here cannot turn
+//! them green (no-alias probes: base and fixed binaries behave
+//! identically). This file now holds the 11 pre-scan-layer pins only.
 
 use std::fs;
 use std::path::PathBuf;
@@ -169,15 +176,6 @@ fn issue3813_heredoc_in_comsub_with_quote() {
     assert_parses(&scratch, &script, "v=[it's here]");
 }
 
-/// Nested `$(...)` inside `${...}` with the comment quote in the inner
-/// body; `#` inside the braces stays an operator (see the d3 control).
-#[test]
-fn issue3813_nested_comsub_in_brace_expansion() {
-    let scratch = Scratch::new("brace");
-    let script = alias_frame("  v=${x:-$(echo hi # don't\n)}\n  echo \"v=[$v]\"");
-    assert_parses(&scratch, &script, "v=[hi]");
-}
-
 /// `case` patterns with `)` plus the comment quote inside the comsub.
 #[test]
 fn issue3813_case_pattern_comsub_comment_quote() {
@@ -185,31 +183,6 @@ fn issue3813_case_pattern_comsub_comment_quote() {
     let script =
         alias_frame("  w=a\n  v=$(case $w in (a) echo hi # don't\n;; esac)\n  echo \"v=[$v]\"");
     assert_parses(&scratch, &script, "v=[hi]");
-}
-
-/// `${ ... }` funsub body with the comment quote.
-#[test]
-fn issue3813_funsub_comment_quote() {
-    let scratch = Scratch::new("funsub");
-    let script = alias_frame("  v=${ echo hi # don't\n}\n  echo \"v=[$v]\"");
-    assert_parses(&scratch, &script, "v=[hi]");
-}
-
-/// Funsub body with a heredoc whose body carries an apostrophe.
-#[test]
-fn issue3813_funsub_heredoc_quote() {
-    let scratch = Scratch::new("funsubhd");
-    let script = alias_frame("  v=${ cat <<EOF\nit's here\nEOF\n}\n  echo \"v=[$v]\"");
-    assert_parses(&scratch, &script, "v=[it's here]");
-}
-
-/// Funsub body with a heredoc whose body holds a lone `}` line: the
-/// brace must not end the funsub early.
-#[test]
-fn issue3813_funsub_heredoc_brace_line() {
-    let scratch = Scratch::new("funsubhb");
-    let script = alias_frame("  v=${ cat <<EOF\n}\nEOF\n}\n  echo \"v=[$v]\"");
-    assert_parses(&scratch, &script, "v=[}]");
 }
 
 /// Controls — these passed before the fix and must keep passing:
