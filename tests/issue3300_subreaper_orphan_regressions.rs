@@ -40,7 +40,10 @@
 //! subst.c:6362 process_substitute) regardless of who adopted it
 //! after its parent died.
 
-#![cfg(unix)]
+// PR_SET_CHILD_SUBREAPER exists only on Linux/Android; every cell
+// in this file needs the subreaper shape, so the whole pin is gated
+// to those targets (macOS/*BSD have no prctl subreaper).
+#![cfg(any(target_os = "linux", target_os = "android"))]
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
