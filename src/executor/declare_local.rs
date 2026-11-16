@@ -647,8 +647,12 @@ impl Executor {
                     // (declare.def / shopt) makes the local inherit the
                     // global's indexed attribute (varenv14.sub), or the
                     // local scope already carries the mark.
-                    let local_context =
-                        self.shell_state.function_depth > 0 && !declare_args_force_global(args);
+                    // The nested bind localizes only for the declare
+                    // family — export/readonly always bind the
+                    // inherited (global) variable (setattr.def:240-268).
+                    let local_context = declare_family
+                        && self.shell_state.function_depth > 0
+                        && !declare_args_force_global(args);
                     let locally_scoped = local_context
                         && !self
                             .shell_state.local_var_scopes
@@ -666,8 +670,19 @@ impl Executor {
                         assoc_hint && target_indexed && !target_assoc;
                     let nested_indexed_convert =
                         array_hint && target_assoc && !target_indexed;
-                    let nested_readonly =
-                        is_marked_var(&self.shell_state.env_vars, READONLY_VARS, lhs);
+                    // GNU make_local_variable (declare.def:929+,
+                    // variables.c:5524+): a `local`/`declare` operand
+                    // that creates a FRESH local binds the new mutable
+                    // instance — the readonly mark of an OUTER-scope
+                    // variable with the same name never fires on it
+                    // (varenv19.sub ccc(): `local x=(7 8 9)` inside a
+                    // caller whose own `local -r x` is live reports
+                    // nothing). The refusal stands only when the bound
+                    // instance itself is readonly — the global/outer
+                    // target for non-localizing operands, or the
+                    // same-scope local already marked.
+                    let nested_readonly = !locally_scoped
+                        && is_marked_var(&self.shell_state.env_vars, READONLY_VARS, lhs);
                     if nested_assoc_convert || nested_indexed_convert {
                         let kind = if nested_assoc_convert {
                             "indexed to associative"
