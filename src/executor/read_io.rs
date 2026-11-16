@@ -694,6 +694,24 @@ impl Executor {
                 }
             }
         }
+        // rubash#3774: the command's OWN redirect list may leave the
+        // read descriptor write-only (`read x 0>out2.txt`,
+        // `read -u 3 x 3>file`). GNU applies the list before the
+        // builtin runs (redir.c:237 do_redirections), so the
+        // descriptor IS open — sh_validfd passes — and the read
+        // itself fails EBADF (read.def:911). execute_read never binds
+        // the own list into the fd table (builtin_redirects.rs), so
+        // the ambient entry still shows the readable process stdin
+        // and every transport below reads it to a silent EOF. Judge
+        // the list's winner here, before any serve: an output-class
+        // winner records the hard read error the builtin renders,
+        // and no transport runs.
+        if self.own_list_leaves_fd_write_only(cmd, read_fd.unwrap_or(0)) {
+            if self.fd_table.read_error.is_none() {
+                self.fd_table.read_error = Some("Bad file descriptor".to_string());
+            }
+            return None;
+        }
         // rubash#2339: `read -e`/`-E` with a terminal behind the read
         // descriptor acquires through the line editor instead of the
         // raw scanner (read.def:685-710 edit_line). The gate inside
@@ -2073,6 +2091,27 @@ impl Executor {
             if self.fd_table.is_closed(fd) {
                 return None;
             }
+        }
+        // GNU builtins/read.def:911 — a descriptor that is open but
+        // not readable (write-only) fails the read with EBADF; it is
+        // not EOF. The `-u` arm diagnoses this before the transports
+        // (read_fd_is_available consults is_open_for_read), but a
+        // plain `read` reaches this funnel with no such gate: after
+        // `exec 0<<A 0>out.txt` #3655 retires fd 0's read arm, so the
+        // table owns a write-only fd 0 and every transport below
+        // returns None silently (rubash#3770). Record the hard
+        // failure for the read builtin's error arm — the same channel
+        // the EISDIR endpoint (rubash#1495) and hard read failures in
+        // read_file_bytes use. `is_open` without `is_open_for_read`
+        // is exactly "open, read arm absent": an entry with no read
+        // arm at all (a pipeline stage's fd 0) has is_open false, so
+        // the transports below still own it, and a read arm present
+        // but exhausted is a real EOF, not an error.
+        if !self.fd_table.is_open_for_read(fd)
+            && self.fd_table.is_open(fd)
+            && self.fd_table.read_error.is_none()
+        {
+            self.fd_table.read_error = Some("Bad file descriptor".to_string());
         }
         // Coprocess readers are stream endpoints, not text mirrors. Once the
         // pipe reaches EOF, do not interpret the legacy environment adapter
