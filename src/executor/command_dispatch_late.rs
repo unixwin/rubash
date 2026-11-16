@@ -170,8 +170,13 @@ impl Executor {
         let overlaid_env = self.env_with_frame_arrays(&v_bases_ref);
         let env_vars = overlaid_env.as_ref().unwrap_or(&self.shell_state.env_vars);
         let mut stderr = Vec::new();
-        let status =
-            crate::builtins::test::execute_with_stderr(&merged, bracket, env_vars, &mut stderr)?;
+        let status = crate::builtins::test::execute_with_stderr(
+            &merged,
+            bracket,
+            env_vars,
+            self.shell_state.positional_len(),
+            &mut stderr,
+        )?;
         self.write_buffered_builtin_output(cmd, &[], &stderr)?;
         Ok(status)
     }
