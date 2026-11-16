@@ -141,9 +141,16 @@ fn issue3574_cd_failing_after_poison_emits_chdir_then_failure() {
     let (stdout, stderr, code) = run_script_in(&tree.base, &script);
     assert_eq!(code, Some(0));
     assert_eq!(stdout, "rc=1\nrc=1\ncdrc=1\nrc=1\n");
-    assert!(stderr.starts_with(&format!("{GETCWD_DIAGNOSTIC}{CHDIR_DIAGNOSTIC}")));
+    assert!(stderr.starts_with(&format!(
+        "{}{}",
+        GETCWD_DIAGNOSTIC.repeat(2),
+        CHDIR_DIAGNOSTIC
+    )));
     assert!(stderr.contains("cd: /nonexistent-xyz-3574: No such file or directory\n"));
-    assert_eq!(stderr.matches(GETCWD_DIAGNOSTIC).count(), 2);
+    // Three pwd faces: the poison's `pwd -P` and `pwd`, then the
+    // trailing `pwd` after the failed cd re-derives once more
+    // (GNU 5.3.20 oracle, cell3).
+    assert_eq!(stderr.matches(GETCWD_DIAGNOSTIC).count(), 3);
     assert_eq!(stderr.matches(CHDIR_DIAGNOSTIC).count(), 1);
 }
 
@@ -169,7 +176,11 @@ fn issue3574_cdpath_failed_unit_then_hit_emits_two_chdir_lines() {
     );
     assert_eq!(
         stderr,
-        format!("{}{}", GETCWD_DIAGNOSTIC, CHDIR_DIAGNOSTIC.repeat(2))
+        format!(
+            "{}{}",
+            GETCWD_DIAGNOSTIC.repeat(2),
+            CHDIR_DIAGNOSTIC.repeat(2)
+        )
     );
 }
 
@@ -184,7 +195,10 @@ fn issue3574_cd_dot_after_poison_emits_only_chdir_line() {
     let (stdout, stderr, code) = run_script_in(&tree.base, &script);
     assert_eq!(code, Some(0));
     assert_eq!(stdout, "rc=1\nrc=1\ncdrc=0\n");
-    assert_eq!(stderr, format!("{GETCWD_DIAGNOSTIC}{CHDIR_DIAGNOSTIC}"));
+    assert_eq!(
+        stderr,
+        format!("{}{}", GETCWD_DIAGNOSTIC.repeat(2), CHDIR_DIAGNOSTIC)
+    );
 }
 
 #[test]
@@ -197,7 +211,10 @@ fn issue3574_cd_dotdot_after_poison_emits_one_chdir_line() {
     let (stdout, stderr, code) = run_script_in(&tree.base, &script);
     assert_eq!(code, Some(0));
     assert_eq!(stdout, "rc=1\nrc=1\ncdrc=0\n");
-    assert_eq!(stderr, format!("{GETCWD_DIAGNOSTIC}{CHDIR_DIAGNOSTIC}"));
+    assert_eq!(
+        stderr,
+        format!("{}{}", GETCWD_DIAGNOSTIC.repeat(2), CHDIR_DIAGNOSTIC)
+    );
 }
 
 #[test]
@@ -216,7 +233,10 @@ fn issue3574_cd_no_arg_after_poison_emits_one_chdir_line() {
         stdout,
         format!("rc=1\nrc=1\ncdrc=0\n{r}\nrc=0\n", r = tree.real)
     );
-    assert_eq!(stderr, format!("{GETCWD_DIAGNOSTIC}{CHDIR_DIAGNOSTIC}"));
+    assert_eq!(
+        stderr,
+        format!("{}{}", GETCWD_DIAGNOSTIC.repeat(2), CHDIR_DIAGNOSTIC)
+    );
 }
 
 #[test]
@@ -277,6 +297,10 @@ fn issue3574_cdable_vars_after_poison_emits_two_chdir_lines() {
     );
     assert_eq!(
         stderr,
-        format!("{}{}", GETCWD_DIAGNOSTIC, CHDIR_DIAGNOSTIC.repeat(2))
+        format!(
+            "{}{}",
+            GETCWD_DIAGNOSTIC.repeat(2),
+            CHDIR_DIAGNOSTIC.repeat(2)
+        )
     );
 }
