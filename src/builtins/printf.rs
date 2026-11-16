@@ -1079,19 +1079,10 @@ fn render_one_pass(
 
                 // Inline (non-`*') width/precision overflow splits along
                 // GNU's two output engines:
-                //   * the PF macro hands the whole directive verbatim to
-                //     the host libc's printf(3), which parses the digit
-                //     run itself. BSD/Darwin libc (xprintf.c) accumulates
-                //     an inline field width into a bound-checked value —
-                //     > INT_MAX fails with EOVERFLOW — but precision
-                //     digits land straight in an `int` field
-                //     (xprintf.c:558-559 `pi->prec *= 10; pi->prec +=
-                //     digit`), so the run wraps mod 2^32 and the
-                //     directive renders normally:
-                //     `%.9223372036854775825s' becomes `%.17s' and prints
-                //     `XY' (printf7.sub, vendored .right). A
-                //     wrapped-negative precision is "as if it were
-                //     missing".
+                //   * the PF macro hands the directive to the C library,
+                //     whose printf fails with EOVERFLOW: builtin_error
+                //     prints strerror(errno), the directive's output is
+                //     lost, and PRETURN stops the whole builtin (rc 1);
                 //   * printstr/printwidestr re-parse the digit run with
                 //     decodeint(diagnose=1): report_erange names the
                 //     digits, conversion_error is set (rc 1), and the
@@ -1112,7 +1103,7 @@ fn render_one_pass(
                             format!("{prefix}printf: {digits}: Numerical result out of range"),
                         );
                         conversion_error = true;
-                    } else if spec.inline_width_overflow {
+                    } else {
                         push_printf_error(
                             &mut segments,
                             format!("{prefix}printf: Value too large for defined data type"),
@@ -1123,12 +1114,6 @@ fn render_one_pass(
                             stop_output: true,
                             conversion_error: true,
                         };
-                    } else if let Some(digits) = spec.precision_digits.take() {
-                        spec.precision = match wrap_digit_run_i32(&digits) {
-                            p if p >= 0 => Some(p as usize),
-                            _ => None,
-                        };
-                        spec.inline_precision_overflow = false;
                     }
                 }
 
@@ -1225,15 +1210,6 @@ fn render_one_pass(
         stop_output: false,
         conversion_error,
     }
-}
-
-// Two's-complement i32 accumulation of a format-string digit run — the
-// BSD/Darwin libc printf model, where `n *= 10; n += digit` runs on `int`
-// fields (xprintf.c:558-559, 604-625) and overflows wrap mod 2^32.
-fn wrap_digit_run_i32(digits: &str) -> i32 {
-    digits.bytes().fold(0i32, |acc, b| {
-        acc.wrapping_mul(10).wrapping_add((b - b'0') as i32)
-    })
 }
 
 fn next_arg<'a>(args: &'a [&str], arg_index: &mut usize) -> &'a str {
