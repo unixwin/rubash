@@ -19,6 +19,8 @@
 //!                             NUL in the first line and is not ELF, so GNU runs it as a script)
 //!   bash -c './t.sh'       -> ran (non-#! text keeps the ENOEXEC script fallback)
 
+#![cfg(unix)]
+
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
