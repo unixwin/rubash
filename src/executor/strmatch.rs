@@ -1,5 +1,7 @@
-//! Port of GNU bash `lib/glob/strmatch.c` + `lib/glob/smatch.c` (single-byte
-//! `internal_strmatch`/`gmatch`) for the loadable-builtin C ABI.
+//! Port of GNU bash `lib/glob/strmatch.c` + `lib/glob/smatch.c` for the
+//! loadable-builtin C ABI, covering both `internal_strmatch` (single-byte
+//! compile of sm_loop.c) and `internal_wstrmatch` (the wide-char compile
+//! smatch.c:585-603 `xstrmatch` selects under a multibyte locale).
 //!
 //! GNU bash exports `strmatch` (lib/glob/strmatch.c:32-39) so that loadable
 //! builtins linked with `-undefined dynamic_lookup` can call back into the
@@ -7,12 +9,13 @@
 //! and crashes when the host does not export the symbol. This module exports
 //! `strmatch` with the same signature and semantics.
 //!
-//! The port is the single-byte (CHAR = unsigned char) compile of sm_loop.c:
-//! strings are compared byte-wise, `FOLD` is ASCII-only case folding under
-//! FNM_CASEFOLD, `ISDIRSEP` is `/` only (non-Cygwin branch), and collation
-//! (`strcoll`/`COLLSYM`/`COLLEQUIV`) is C-locale byte comparison. That matches
-//! a C-locale GNU build; it does not implement `internal_wstrmatch`
-//! locale-sensitive multibyte matching.
+//! The engine operates on `char` elements: bytes are lifted through the
+//! Latin-1 bijection (`char::from(u8)`), which preserves the byte domain's
+//! equality and ordering, so `strmatch_bytes` is the single-byte compile
+//! (`FOLD` ASCII-only, `ISDIRSEP` = `/`, C-locale collation) while
+//! `strmatch_chars` is the wide compile (Unicode `fold`/character classes
+//! via the internal FNM_WIDE selector, standing in for GNU's `towlower`/
+//! `isw*` wide calls).
 
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int};
@@ -26,6 +29,11 @@ pub const FNM_CASEFOLD: u32 = 1 << 4;
 pub const FNM_EXTMATCH: u32 = 1 << 5;
 pub const FNM_DOTDOT: u32 = 1 << 7;
 const FNM_NOMATCH: c_int = 1;
+
+/// Internal selector, not part of the public flag set (strmatch.h:35-50
+/// ends at bit 7): when set, `fold` and `is_cclass` use the wide compile's
+/// `towlower`/`isw*` semantics instead of the single-byte ASCII domain.
+const FNM_WIDE: u32 = 1 << 8;
 
 /// lib/glob/strmatch.c:32-39 `strmatch()`: exported so loadable builtins can
 /// resolve the symbol against the host image (GNU exports it from bash for
@@ -49,17 +57,33 @@ pub unsafe extern "C" fn strmatch(
     }
 }
 
-/// `internal_strmatch` entry point (smatch.c FCT): GMATCH over byte slices.
+/// `internal_strmatch` entry point (smatch.c FCT, single-byte compile):
+/// GMATCH over bytes lifted to chars through the Latin-1 bijection.
 pub(crate) fn strmatch_bytes(pattern: &[u8], string: &[u8], flags: u32) -> bool {
-    gmatch(pattern, string, flags)
+    let pat: Vec<char> = pattern.iter().map(|&b| b as char).collect();
+    let s: Vec<char> = string.iter().map(|&b| b as char).collect();
+    gmatch(&pat, &s, flags & !FNM_WIDE)
+}
+
+/// `internal_wstrmatch` entry point (smatch.c wide compile): GMATCH over
+/// decoded characters. Callers perform the smatch.c:585-603 `xstrmatch`
+/// locale check before selecting this path.
+pub(crate) fn strmatch_chars(pattern: &[char], string: &[char], flags: u32) -> bool {
+    gmatch(pattern, string, flags | FNM_WIDE)
 }
 
 #[inline]
-fn fold(c: u8, flags: u32) -> u8 {
-    // smatch.c:301-304 FOLD: ASCII TOLOWER under FNM_CASEFOLD (the
-    // UTF8_SINGLEBYTE guard means non-ASCII bytes are never folded).
-    if flags & FNM_CASEFOLD != 0 && c.is_ascii_uppercase() {
-        c + 32
+fn fold(c: char, flags: u32) -> char {
+    // smatch.c:301-304 FOLD: single-byte compile is ASCII TOLOWER only (the
+    // UTF8_SINGLEBYTE guard means non-ASCII bytes are never folded); the
+    // wide compile folds through `towlower`, which handles non-ASCII.
+    if flags & FNM_CASEFOLD == 0 {
+        return c;
+    }
+    if flags & FNM_WIDE != 0 {
+        c.to_lowercase().next().unwrap_or(c)
+    } else if c.is_ascii_uppercase() {
+        ((c as u8) + 32) as char
     } else {
         c
     }
@@ -68,18 +92,18 @@ fn fold(c: u8, flags: u32) -> u8 {
 /// smatch.c:313 PDOT_OR_DOTDOT: `s` begins with `.`/`..` followed by a path
 /// separator or end. `s` here is the slice starting at the checked position.
 #[inline]
-fn pdot_or_dotdot(s: &[u8]) -> bool {
-    s.first() == Some(&b'.')
+fn pdot_or_dotdot(s: &[char]) -> bool {
+    s.first() == Some(&'.')
         && (s.get(1).is_none()
-            || s.get(1) == Some(&b'/')
-            || (s.get(1) == Some(&b'.') && (s.get(2).is_none() || s.get(2) == Some(&b'/'))))
+            || s.get(1) == Some(&'/')
+            || (s.get(1) == Some(&'.') && (s.get(2).is_none() || s.get(2) == Some(&'/'))))
 }
 
 /// smatch.c:314 SDOT_OR_DOTDOT: `s` is exactly `.` or `..`.
 #[inline]
-fn sdot_or_dotdot(s: &[u8]) -> bool {
-    s.first() == Some(&b'.')
-        && (s.get(1).is_none() || (s.get(1) == Some(&b'.') && s.get(2).is_none()))
+fn sdot_or_dotdot(s: &[char]) -> bool {
+    s.first() == Some(&'.')
+        && (s.get(1).is_none() || (s.get(1) == Some(&'.') && s.get(2).is_none()))
 }
 
 /// POSIX collating symbols table, generated from lib/glob/collsyms.h.
@@ -183,10 +207,10 @@ static POSIX_COLLSYMS: &[(&[u8], u8)] = &[
 
 /// smatch.c:167-182 collsym(): resolve a `[.sym.]` collating symbol name to a
 /// byte; a single-character name is its own symbol. None = INVALID.
-fn collsym(name: &[u8]) -> Option<u8> {
+fn collsym(name: &[char]) -> Option<char> {
     for &(n, code) in POSIX_COLLSYMS {
-        if n == name {
-            return Some(code);
+        if n.len() == name.len() && n.iter().zip(name.iter()).all(|(&a, &b)| a as char == b) {
+            return Some(code as char);
         }
     }
     if name.len() == 1 {
@@ -196,36 +220,55 @@ fn collsym(name: &[u8]) -> Option<u8> {
     }
 }
 
-/// smatch.c:283-297 is_cclass(): test byte C against a `[:class:]` name.
+/// smatch.c:283-297 is_cclass(): test C against a `[:class:]` name.
 /// Returns -1 for an invalid class name (sm_loop.c:474-486 then skips the
-/// class and keeps scanning), 1/0 for a real test.
-fn is_cclass(c: u8, name: &[u8]) -> i32 {
-    match name {
-        b"ascii" => (c <= 0x7F) as i32,
-        b"alnum" => c.is_ascii_alphanumeric() as i32,
-        b"alpha" => c.is_ascii_alphabetic() as i32,
-        b"blank" => (c == b' ' || c == b'\t') as i32,
-        b"cntrl" => c.is_ascii_control() as i32,
-        b"digit" => c.is_ascii_digit() as i32,
-        b"graph" => (0x21..=0x7E).contains(&c) as i32,
-        b"lower" => c.is_ascii_lowercase() as i32,
-        b"print" => (0x20..=0x7E).contains(&c) as i32,
-        b"punct" => c.is_ascii_punctuation() as i32,
-        b"space" => c.is_ascii_whitespace() as i32,
-        b"upper" => c.is_ascii_uppercase() as i32,
-        b"word" => (c.is_ascii_alphanumeric() || c == b'_') as i32,
-        b"xdigit" => c.is_ascii_hexdigit() as i32,
-        _ => -1,
+/// class and keeps scanning), 1/0 for a real test. The single-byte compile
+/// tests ASCII only; the wide compile (FNM_WIDE) uses the `isw*` domains.
+fn is_cclass(c: char, name: &[char], flags: u32) -> i32 {
+    // sm_loop.c:474-486: an unknown class name yields -1 and the caller
+    // skips the class and keeps scanning, which is not the same as a
+    // class that simply fails to match.
+    const KNOWN: &[&str] = &[
+        "ascii", "alnum", "alpha", "blank", "cntrl", "digit", "graph", "lower", "print", "punct",
+        "space", "upper", "word", "xdigit",
+    ];
+    let name: String = name.iter().collect();
+    if !KNOWN.contains(&name.as_str()) {
+        return -1;
     }
+    let matched = if flags & FNM_WIDE != 0 {
+        // Wide compile: isw* predicates, aligned to the glibc class
+        // semantics rubash already models for the pattern matcher.
+        crate::locale::utf8_posix_class_matches(&name, c)
+    } else {
+        match name.as_str() {
+            "ascii" => (c as u32) <= 0x7F,
+            "alnum" => c.is_ascii_alphanumeric(),
+            "alpha" => c.is_ascii_alphabetic(),
+            "blank" => c == ' ' || c == '\t',
+            "cntrl" => c.is_ascii_control(),
+            "digit" => c.is_ascii_digit(),
+            "graph" => (0x21..=0x7Eu32).contains(&(c as u32)),
+            "lower" => c.is_ascii_lowercase(),
+            "print" => (0x20..=0x7Eu32).contains(&(c as u32)),
+            "punct" => c.is_ascii_punctuation(),
+            "space" => c.is_ascii_whitespace(),
+            "upper" => c.is_ascii_uppercase(),
+            "word" => c.is_ascii_alphanumeric() || c == '_',
+            "xdigit" => c.is_ascii_hexdigit(),
+            _ => unreachable!(),
+        }
+    };
+    matched as i32
 }
 
 /// glob.c:431-447 udequote_pathname(): remove backslash quoting in place
 /// (the C version is unconditional — no FNM_NOESCAPE check).
-fn dequote_pathname(s: &[u8]) -> Vec<u8> {
+fn dequote_pathname(s: &[char]) -> Vec<char> {
     let mut out = Vec::with_capacity(s.len());
     let mut i = 0;
     while i < s.len() {
-        if s[i] == b'\\' {
+        if s[i] == '\\' {
             i += 1;
         }
         if i >= s.len() {
@@ -241,15 +284,15 @@ fn dequote_pathname(s: &[u8]) -> Vec<u8> {
 /// (`:`/`=`/`.`). Returns the index of the matching `type]` terminator's
 /// type char, or None. A `.` type does not stop at a bare `]` (collating
 /// symbols may contain it); `/` ends the scan under FNM_PATHNAME.
-fn parse_subbracket(pat: &[u8], flags: u32) -> Option<usize> {
+fn parse_subbracket(pat: &[char], flags: u32) -> Option<usize> {
     let ty = *pat.first()?;
     let mut i = 1;
     while i < pat.len() {
         let c = pat[i];
-        if c == 0 || (c == b'/' && flags & FNM_PATHNAME != 0) || (ty != b'.' && c == b']') {
+        if c == '\0' || (c == '/' && flags & FNM_PATHNAME != 0) || (ty != '.' && c == ']') {
             return None;
         }
-        if c == ty && pat.get(i + 1) == Some(&b']') {
+        if c == ty && pat.get(i + 1) == Some(&']') {
             return Some(i);
         }
         i += 1;
@@ -260,7 +303,7 @@ fn parse_subbracket(pat: &[u8], flags: u32) -> Option<usize> {
 /// sm_loop.c:675-757 PATSCAN: scan `pat` for DELIM (or the matching `)` when
 /// DELIM is 0) respecting `(...)` and `[...]` nesting and backslash escapes.
 /// Returns the index just past the delimiter, or None on empty/ill-formed.
-fn patscan(pat: &[u8], delim: u8, flags: u32) -> Option<usize> {
+fn patscan(pat: &[char], delim: char, flags: u32) -> Option<usize> {
     if pat.is_empty() {
         return None;
     }
@@ -269,7 +312,7 @@ fn patscan(pat: &[u8], delim: u8, flags: u32) -> Option<usize> {
     let mut s = 0usize;
     while s < pat.len() {
         let c = pat[s];
-        if c == 0 {
+        if c == '\0' {
             return None;
         }
         if skip {
@@ -278,38 +321,38 @@ fn patscan(pat: &[u8], delim: u8, flags: u32) -> Option<usize> {
             continue;
         }
         match c {
-            b'\\' => {
+            '\\' => {
                 if flags & FNM_NOESCAPE == 0 {
                     skip = true;
                 }
             }
-            b'[' => {
+            '[' => {
                 if bnest == 0 {
                     let mut bf = s + 1;
-                    if matches!(pat.get(bf), Some(b'!') | Some(b'^')) {
+                    if matches!(pat.get(bf), Some('!') | Some('^')) {
                         bf += 1;
                     }
                     bfirst = Some(bf);
                     bnest += 1;
-                } else if matches!(pat.get(s + 1), Some(b':') | Some(b'.') | Some(b'=')) {
+                } else if matches!(pat.get(s + 1), Some(':') | Some('.') | Some('=')) {
                     // POSIX special bracket expression: skip past `type]`.
                     if let Some(t) = parse_subbracket(&pat[s + 1..], flags) {
                         s = s + 1 + t + 1; // t + 2 - 1 cancels the s += 1 below
                     }
                 }
             }
-            b']' => {
+            ']' => {
                 if bnest != 0 && Some(s) != bfirst {
                     bnest -= 1;
                     bfirst = None;
                 }
             }
-            b'(' => {
+            '(' => {
                 if bnest == 0 {
                     pnest += 1;
                 }
             }
-            b')' => {
+            ')' => {
                 if bnest == 0 {
                     if pnest <= 0 {
                         return Some(s + 1);
@@ -317,8 +360,8 @@ fn patscan(pat: &[u8], delim: u8, flags: u32) -> Option<usize> {
                     pnest -= 1;
                 }
             }
-            b'|' => {
-                if bnest == 0 && pnest == 0 && delim == b'|' {
+            '|' => {
+                if bnest == 0 && pnest == 0 && delim == '|' {
                     return Some(s + 1);
                 }
             }
@@ -346,13 +389,13 @@ enum Brack {
 
 /// sm_loop.c:398-652 BRACKMATCH: `pat` starts just after the `[`. `test` is
 /// the single name character being matched.
-fn brackmatch(pat: &[u8], test: u8, flags: u32) -> Brack {
+fn brackmatch(pat: &[char], test: char, flags: u32) -> Brack {
     let orig_test = test;
     let test = fold(test, flags);
     // Every "literal [`" exit in C checks `test == '['` (folded); `[` is
     // unaffected by folding.
     let lit = |_: usize| -> Brack {
-        if test == b'[' {
+        if test == '[' {
             Brack::LiteralOpen
         } else {
             Brack::NoMatch
@@ -360,12 +403,12 @@ fn brackmatch(pat: &[u8], test: u8, flags: u32) -> Brack {
     };
 
     let mut p = 0usize;
-    let not = matches!(pat.first(), Some(b'!') | Some(b'^'));
+    let not = matches!(pat.first(), Some('!') | Some('^'));
     if not {
         p += 1;
     }
 
-    let mut c: u8 = pat.get(p).copied().unwrap_or(0);
+    let mut c: char = pat.get(p).copied().unwrap_or('\0');
     p += 1;
     loop {
         let mut cstart = c;
@@ -374,23 +417,23 @@ fn brackmatch(pat: &[u8], test: u8, flags: u32) -> Brack {
         let mut isrange = false;
 
         // [=x=] POSIX.2 equivalence class (sm_loop.c:431-457).
-        if c == b'[' && pat.get(p) == Some(&b'=') {
+        if c == '[' && pat.get(p) == Some(&'=') {
             if let Some(close) = parse_subbracket(&pat[p..], flags) {
                 p += 1;
                 // COLLSYM(p, close - p): name ends at the terminator.
                 let pc = collsym(&pat[p..p + close - 1])
                     .map(|v| fold(v, flags))
-                    .unwrap_or(0xFF);
+                    .unwrap_or('\u{FF}');
                 p += close + 1; // C: p = close + 2 relative to the type char
                 if pc == test {
                     p += 1;
                     return match_class_tail(pat, p, not, flags, lit);
                 }
-                c = pat.get(p).copied().unwrap_or(0);
+                c = pat.get(p).copied().unwrap_or('\0');
                 p += 1;
-                if c == 0 || (c == b'/' && flags & FNM_PATHNAME != 0) {
+                if c == '\0' || (c == '/' && flags & FNM_PATHNAME != 0) {
                     return lit(0);
-                } else if c == b']' {
+                } else if c == ']' {
                     break;
                 }
                 c = fold(c, flags);
@@ -399,21 +442,21 @@ fn brackmatch(pat: &[u8], test: u8, flags: u32) -> Brack {
         }
 
         // [:class:] POSIX.2 character class (sm_loop.c:460-513).
-        if c == b'[' && pat.get(p) == Some(&b':') {
+        if c == '[' && pat.get(p) == Some(&':') {
             if let Some(close) = parse_subbracket(&pat[p..], flags) {
                 p += 1;
                 let ccname = dequote_pathname(&pat[p..p + close - 1]);
-                let pc = is_cclass(orig_test, &ccname);
+                let pc = is_cclass(orig_test, &ccname, flags);
                 p += close + 1;
                 if pc != 0 && pc != -1 {
                     p += 1;
                     return match_class_tail(pat, p, not, flags, lit);
                 }
-                c = pat.get(p).copied().unwrap_or(0);
+                c = pat.get(p).copied().unwrap_or('\0');
                 p += 1;
-                if c == 0 || (c == b'/' && flags & FNM_PATHNAME != 0) {
+                if c == '\0' || (c == '/' && flags & FNM_PATHNAME != 0) {
                     return lit(0);
-                } else if c == b']' {
+                } else if c == ']' {
                     break;
                 }
                 c = fold(c, flags);
@@ -422,10 +465,10 @@ fn brackmatch(pat: &[u8], test: u8, flags: u32) -> Brack {
         }
 
         // [.x.] POSIX.2 collating symbol (sm_loop.c:519-525).
-        if c == b'[' && pat.get(p) == Some(&b'.') {
+        if c == '[' && pat.get(p) == Some(&'.') {
             if let Some(close) = parse_subbracket(&pat[p..], flags) {
                 p += 1;
-                cstart = collsym(&pat[p..p + close - 1]).unwrap_or(0xFF);
+                cstart = collsym(&pat[p..p + close - 1]).unwrap_or('\u{FF}');
                 cend = cstart;
                 p += close + 1;
                 forcecoll = true;
@@ -433,10 +476,10 @@ fn brackmatch(pat: &[u8], test: u8, flags: u32) -> Brack {
         }
 
         // Backslash-quoted class char (sm_loop.c:527-534).
-        if flags & FNM_NOESCAPE == 0 && c == b'\\' {
+        if flags & FNM_NOESCAPE == 0 && c == '\\' {
             match pat.get(p) {
-                None | Some(0) => return lit(0),
-                Some(&b'/') if flags & FNM_PATHNAME != 0 => return lit(0),
+                None | Some('\0') => return lit(0),
+                Some(&'/') if flags & FNM_PATHNAME != 0 => return lit(0),
                 Some(&q) => {
                     cstart = q;
                     cend = q;
@@ -448,44 +491,44 @@ fn brackmatch(pat: &[u8], test: u8, flags: u32) -> Brack {
         cstart = fold(cstart, flags);
         cend = fold(cend, flags);
 
-        if c == 0 || (c == b'/' && flags & FNM_PATHNAME != 0) {
+        if c == '\0' || (c == '/' && flags & FNM_PATHNAME != 0) {
             return lit(0);
         }
 
-        c = fold(pat.get(p).copied().unwrap_or(0), flags);
+        c = fold(pat.get(p).copied().unwrap_or('\0'), flags);
         p += 1;
-        if c == 0 || (c == b'/' && flags & FNM_PATHNAME != 0) {
+        if c == '\0' || (c == '/' && flags & FNM_PATHNAME != 0) {
             return lit(0);
         }
 
         // Range `cstart-cend`, unless `-` is the last class char
         // (sm_loop.c:568-601).
-        if c == b'-' && pat.get(p) != Some(&b']') {
-            cend = pat.get(p).copied().unwrap_or(0);
+        if c == '-' && pat.get(p) != Some(&']') {
+            cend = pat.get(p).copied().unwrap_or('\0');
             p += 1;
-            if flags & FNM_NOESCAPE == 0 && cend == b'\\' {
-                cend = pat.get(p).copied().unwrap_or(0);
+            if flags & FNM_NOESCAPE == 0 && cend == '\\' {
+                cend = pat.get(p).copied().unwrap_or('\0');
                 p += 1;
             }
-            if cend == 0 || (cend == b'/' && flags & FNM_PATHNAME != 0) {
+            if cend == '\0' || (cend == '/' && flags & FNM_PATHNAME != 0) {
                 return lit(0);
             }
-            if cend == b'[' && pat.get(p) == Some(&b'.') {
+            if cend == '[' && pat.get(p) == Some(&'.') {
                 if let Some(close) = parse_subbracket(&pat[p..], flags) {
                     p += 1;
-                    cend = collsym(&pat[p..p + close - 1]).unwrap_or(0xFF);
+                    cend = collsym(&pat[p..p + close - 1]).unwrap_or('\u{FF}');
                     p += close + 1;
                     forcecoll = true;
                 }
             }
             cend = fold(cend, flags);
-            c = pat.get(p).copied().unwrap_or(0);
+            c = pat.get(p).copied().unwrap_or('\0');
             p += 1;
             // Invalid range (end < start): skip it, keep scanning
             // (sm_loop.c:593-599). RANGECMP is a byte compare in the C
             // locale regardless of forcecoll.
             if (cstart as i32) - (cend as i32) > 0 {
-                if c == b']' {
+                if c == ']' {
                     break;
                 }
                 c = fold(c, flags);
@@ -500,7 +543,7 @@ fn brackmatch(pat: &[u8], test: u8, flags: u32) -> Brack {
         if isrange && (test as i32) - (cstart as i32) >= 0 && (test as i32) - (cend as i32) <= 0 {
             return match_class_tail(pat, p, not, flags, lit);
         }
-        if c == b']' {
+        if c == ']' {
             break;
         }
     }
@@ -517,31 +560,31 @@ fn brackmatch(pat: &[u8], test: u8, flags: u32) -> Brack {
 /// `[...]` and return the pattern index past `]`. `p` enters pointing one
 /// char past the resume point (the C code does `c = *--p` on entry).
 fn match_class_tail(
-    pat: &[u8],
+    pat: &[char],
     mut p: usize,
     not: bool,
     flags: u32,
     lit: impl Fn(usize) -> Brack,
 ) -> Brack {
-    let mut c = pat.get(p - 1).copied().unwrap_or(0);
+    let mut c = pat.get(p - 1).copied().unwrap_or('\0');
     p -= 1;
     loop {
-        if c == 0 || (c == b'/' && flags & FNM_PATHNAME != 0) {
+        if c == '\0' || (c == '/' && flags & FNM_PATHNAME != 0) {
             return lit(0);
         }
-        c = pat.get(p).copied().unwrap_or(0);
+        c = pat.get(p).copied().unwrap_or('\0');
         p += 1;
-        if c == b'[' && matches!(pat.get(p), Some(b'=') | Some(b':') | Some(b'.')) {
+        if c == '[' && matches!(pat.get(p), Some('=') | Some(':') | Some('.')) {
             if let Some(close) = parse_subbracket(&pat[p..], flags) {
                 // C: p = close + 2 (past the `]`).
                 p += close + 2;
             }
-        } else if c == b']' {
+        } else if c == ']' {
             break;
-        } else if flags & FNM_NOESCAPE == 0 && c == b'\\' {
+        } else if flags & FNM_NOESCAPE == 0 && c == '\\' {
             match pat.get(p) {
-                None | Some(0) => return lit(0),
-                Some(&b'/') if flags & FNM_PATHNAME != 0 => return lit(0),
+                None | Some('\0') => return lit(0),
+                Some(&'/') if flags & FNM_PATHNAME != 0 => return lit(0),
                 _ => p += 1,
             }
         }
@@ -556,25 +599,25 @@ fn match_class_tail(
 /// sm_loop.c:761-793 STRCOMPARE: literal compare of the rest of the pattern
 /// (operator char included) against the rest of the string — used when an
 /// extglob group is ill-formed.
-fn strcompare(p: &[u8], s: &[u8]) -> bool {
+fn strcompare(p: &[char], s: &[char]) -> bool {
     p == s
 }
 
 /// sm_loop.c:799-922 EXTMATCH. `op_pat` is the pattern starting at the
 /// operator char (`?`, `*`, `+`, `@`, `!`); `op_pat[1]` is normally `(`.
-fn extmatch(op_pat: &[u8], s: &[u8], flags: u32) -> bool {
+fn extmatch(op_pat: &[char], s: &[char], flags: u32) -> bool {
     let xc = op_pat[0];
     // prest = PATSCAN(p + (*p == '('), pe, 0, flags): scan from just after
     // the `(` for the group's close; the result points just past `)`.
-    let group_open = 1 + usize::from(op_pat.get(1) == Some(&b'('));
-    let Some(prest) = patscan(&op_pat[group_open..], 0, flags).map(|i| group_open + i) else {
+    let group_open = 1 + usize::from(op_pat.get(1) == Some(&'('));
+    let Some(prest) = patscan(&op_pat[group_open..], '\0', flags).map(|i| group_open + i) else {
         return strcompare(op_pat, s);
     };
 
-    let alternatives = |psub: usize| -> (usize, &[u8]) {
+    let alternatives = |psub: usize| -> (usize, &[char]) {
         // pnext = PATSCAN(psub, pe, '|', flags): lands just past `|` or the
         // group's closing `)` (== prest).
-        let pnext = patscan(&op_pat[psub..], b'|', flags)
+        let pnext = patscan(&op_pat[psub..], '|', flags)
             .map(|i| psub + i)
             .unwrap_or(prest);
         (pnext, &op_pat[psub..pnext - 1])
@@ -588,9 +631,9 @@ fn extmatch(op_pat: &[u8], s: &[u8], flags: u32) -> bool {
     };
 
     match xc {
-        b'+' | b'*' => {
+        '+' | '*' => {
             // sm_loop.c:830: `*()` tries zero occurrences first.
-            if xc == b'*' && gmatch(&op_pat[prest..], s, flags) {
+            if xc == '*' && gmatch(&op_pat[prest..], s, flags) {
                 return true;
             }
             let mut psub = 2;
@@ -611,9 +654,9 @@ fn extmatch(op_pat: &[u8], s: &[u8], flags: u32) -> bool {
             }
             false
         }
-        b'?' | b'@' => {
+        '?' | '@' => {
             // sm_loop.c:867: `?()` tries zero occurrences first.
-            if xc == b'?' && gmatch(&op_pat[prest..], s, flags) {
+            if xc == '?' && gmatch(&op_pat[prest..], s, flags) {
                 return true;
             }
             // sm_loop.c:876: a group ending the pattern must match the whole
@@ -636,7 +679,7 @@ fn extmatch(op_pat: &[u8], s: &[u8], flags: u32) -> bool {
             }
             false
         }
-        b'!' => {
+        '!' => {
             for srest in 0..=s.len() {
                 let mut psub = 2;
                 let m1;
@@ -655,7 +698,7 @@ fn extmatch(op_pat: &[u8], s: &[u8], flags: u32) -> bool {
                 if !m1 {
                     // sm_loop.c:907-911: the negation must not match a string
                     // whose first char needs explicit matching.
-                    if flags & FNM_PERIOD != 0 && s.first() == Some(&b'.') {
+                    if flags & FNM_PERIOD != 0 && s.first() == Some(&'.') {
                         return false;
                     }
                     if flags & FNM_DOTDOT != 0 && sdot_or_dotdot(s) {
@@ -674,19 +717,19 @@ fn extmatch(op_pat: &[u8], s: &[u8], flags: u32) -> bool {
 
 /// sm_loop.c:GMATCH (smatch.c single-byte compile). `pat`/`s` are the
 /// remaining pattern and string; position 0 of `s` is the C call's `string`.
-fn gmatch(pat: &[u8], s: &[u8], flags: u32) -> bool {
+fn gmatch(pat: &[char], s: &[char], flags: u32) -> bool {
     let mut p = 0usize;
     let mut n = 0usize;
     while p < pat.len() {
         let c = pat[p];
         p += 1;
         let c = fold(c, flags);
-        let sc = s.get(n).copied().unwrap_or(0);
+        let sc = s.get(n).copied().unwrap_or('\0');
 
         // sm_loop.c:85-93 EXTMATCH dispatch.
         if flags & FNM_EXTMATCH != 0
-            && pat.get(p) == Some(&b'(')
-            && matches!(c, b'+' | b'*' | b'?' | b'@' | b'!')
+            && pat.get(p) == Some(&'(')
+            && matches!(c, '+' | '*' | '?' | '@' | '!')
         {
             let lflags = if n == 0 {
                 flags
@@ -697,16 +740,16 @@ fn gmatch(pat: &[u8], s: &[u8], flags: u32) -> bool {
         }
 
         match c {
-            b'?' => {
-                if sc == 0 {
+            '?' => {
+                if sc == '\0' {
                     return false;
                 }
-                if flags & FNM_PATHNAME != 0 && sc == b'/' {
+                if flags & FNM_PATHNAME != 0 && sc == '/' {
                     return false;
                 }
                 if flags & FNM_PERIOD != 0
-                    && sc == b'.'
-                    && (n == 0 || (flags & FNM_PATHNAME != 0 && s[n - 1] == b'/'))
+                    && sc == '.'
+                    && (n == 0 || (flags & FNM_PATHNAME != 0 && s[n - 1] == '/'))
                 {
                     return false;
                 }
@@ -714,16 +757,16 @@ fn gmatch(pat: &[u8], s: &[u8], flags: u32) -> bool {
                     && ((n == 0 && sdot_or_dotdot(&s[n..]))
                         || (flags & FNM_PATHNAME != 0
                             && n > 0
-                            && s[n - 1] == b'/'
+                            && s[n - 1] == '/'
                             && pdot_or_dotdot(&s[n..])))
                 {
                     return false;
                 }
                 n += 1;
             }
-            b'\\' => {
+            '\\' => {
                 // sm_loop.c:121-138: trailing `\` matches a trailing `\`.
-                if p == pat.len() && sc == b'\\' && n + 1 == s.len() {
+                if p == pat.len() && sc == '\\' && n + 1 == s.len() {
                     n += 1;
                     continue;
                 }
@@ -741,10 +784,10 @@ fn gmatch(pat: &[u8], s: &[u8], flags: u32) -> bool {
                 }
                 n += 1;
             }
-            b'*' => {
+            '*' => {
                 if flags & FNM_PERIOD != 0
-                    && sc == b'.'
-                    && (n == 0 || (flags & FNM_PATHNAME != 0 && s[n - 1] == b'/'))
+                    && sc == '.'
+                    && (n == 0 || (flags & FNM_PATHNAME != 0 && s[n - 1] == '/'))
                 {
                     return false;
                 }
@@ -752,7 +795,7 @@ fn gmatch(pat: &[u8], s: &[u8], flags: u32) -> bool {
                     && ((n == 0 && sdot_or_dotdot(&s[n..]))
                         || (flags & FNM_PATHNAME != 0
                             && n > 0
-                            && s[n - 1] == b'/'
+                            && s[n - 1] == '/'
                             && pdot_or_dotdot(&s[n..])))
                 {
                     return false;
@@ -764,27 +807,27 @@ fn gmatch(pat: &[u8], s: &[u8], flags: u32) -> bool {
                 // sm_loop.c:168-228: collapse the following `?`/`*` run.
                 let mut c = pat[p];
                 p += 1;
-                while c == b'?' || c == b'*' {
-                    let sc = s.get(n).copied().unwrap_or(0);
-                    if flags & FNM_PATHNAME != 0 && sc == b'/' {
+                while c == '?' || c == '*' {
+                    let sc = s.get(n).copied().unwrap_or('\0');
+                    if flags & FNM_PATHNAME != 0 && sc == '/' {
                         return false;
                     }
-                    if flags & FNM_EXTMATCH != 0 && c == b'?' && pat.get(p) == Some(&b'(') {
+                    if flags & FNM_EXTMATCH != 0 && c == '?' && pat.get(p) == Some(&'(') {
                         // `?(` inside a run: try the group; on failure skip
                         // it and continue the run (sm_loop.c:176-191).
                         if extmatch(&pat[p - 1..], &s[n..], flags) {
                             return true;
                         }
-                        p = patscan(&pat[p + 1..], 0, flags)
+                        p = patscan(&pat[p + 1..], '\0', flags)
                             .map(|i| p + 1 + i)
                             .unwrap_or(pat.len());
-                    } else if c == b'?' {
-                        if sc == 0 {
+                    } else if c == '?' {
+                        if sc == '\0' {
                             return false;
                         }
                         n += 1;
                     }
-                    if flags & FNM_EXTMATCH != 0 && c == b'*' && pat.get(p) == Some(&b'(') {
+                    if flags & FNM_EXTMATCH != 0 && c == '*' && pat.get(p) == Some(&'(') {
                         // `*(` inside a run: try the group at every position
                         // (sm_loop.c:206-224); on failure skip it.
                         for newn in n..s.len() {
@@ -792,7 +835,7 @@ fn gmatch(pat: &[u8], s: &[u8], flags: u32) -> bool {
                                 return true;
                             }
                         }
-                        p = patscan(&pat[p + 1..], 0, flags)
+                        p = patscan(&pat[p + 1..], '\0', flags)
                             .map(|i| p + 1 + i)
                             .unwrap_or(pat.len());
                     }
@@ -804,7 +847,7 @@ fn gmatch(pat: &[u8], s: &[u8], flags: u32) -> bool {
                 }
 
                 // sm_loop.c:249-250: the run reached the end of the pattern.
-                if p == pat.len() && (c == b'?' || c == b'*') {
+                if p == pat.len() && (c == '?' || c == '*') {
                     return true;
                 }
 
@@ -812,20 +855,20 @@ fn gmatch(pat: &[u8], s: &[u8], flags: u32) -> bool {
                 // next — the negation inverts the result.
                 if n == s.len()
                     && flags & FNM_EXTMATCH != 0
-                    && (c == b'!' || c == b'?')
-                    && pat.get(p) == Some(&b'(')
+                    && (c == '!' || c == '?')
+                    && pat.get(p) == Some(&'(')
                 {
                     let m = extmatch(&pat[p - 1..], &s[n..], flags);
-                    return if c == b'!' { !m } else { m };
+                    return if c == '!' { !m } else { m };
                 }
 
                 // sm_loop.c:268-275: `*/...` — consume the name to its next
                 // slash, then match the rest past it.
-                if c == b'/' && flags & FNM_PATHNAME != 0 {
-                    while n < s.len() && s[n] != b'/' {
+                if c == '/' && flags & FNM_PATHNAME != 0 {
+                    while n < s.len() && s[n] != '/' {
                         n += 1;
                     }
-                    if n < s.len() && s[n] == b'/' && gmatch(&pat[p..], &s[n + 1..], flags) {
+                    if n < s.len() && s[n] == '/' && gmatch(&pat[p..], &s[n + 1..], flags) {
                         return true;
                     }
                     return false;
@@ -835,28 +878,28 @@ fn gmatch(pat: &[u8], s: &[u8], flags: u32) -> bool {
                 // pattern at each position up to the next `/` (or end).
                 // The `ends` backtracking cursor is elided: it does not
                 // change the accepted set, only the retry order.
-                let c1 = if flags & FNM_NOESCAPE == 0 && c == b'\\' {
-                    fold(pat.get(p).copied().unwrap_or(0), flags)
+                let c1 = if flags & FNM_NOESCAPE == 0 && c == '\\' {
+                    fold(pat.get(p).copied().unwrap_or('\0'), flags)
                 } else {
                     c
                 };
                 let endp = if flags & FNM_PATHNAME != 0 {
                     s[n..]
                         .iter()
-                        .position(|&b| b == b'/')
+                        .position(|&b| b == '/')
                         .map(|i| n + i)
                         .unwrap_or(s.len())
                 } else {
                     s.len()
                 };
                 for k in n..endp {
-                    if flags & FNM_EXTMATCH == 0 && c != b'[' && fold(s[k], flags) != c1 {
+                    if flags & FNM_EXTMATCH == 0 && c != '[' && fold(s[k], flags) != c1 {
                         continue;
                     }
                     if flags & FNM_EXTMATCH != 0
-                        && pat.get(p) != Some(&b'(')
-                        && !matches!(c, b'?' | b'*' | b'+' | b'@' | b'!')
-                        && c != b'['
+                        && pat.get(p) != Some(&'(')
+                        && !matches!(c, '?' | '*' | '+' | '@' | '!')
+                        && c != '['
                         && fold(s[k], flags) != c1
                     {
                         continue;
@@ -867,24 +910,24 @@ fn gmatch(pat: &[u8], s: &[u8], flags: u32) -> bool {
                 }
                 return false;
             }
-            b'[' => {
-                if sc == 0 || n == s.len() {
+            '[' => {
+                if sc == '\0' || n == s.len() {
                     return false;
                 }
                 if flags & FNM_PERIOD != 0
-                    && sc == b'.'
-                    && (n == 0 || (flags & FNM_PATHNAME != 0 && s[n - 1] == b'/'))
+                    && sc == '.'
+                    && (n == 0 || (flags & FNM_PATHNAME != 0 && s[n - 1] == '/'))
                 {
                     return false;
                 }
-                if sc == b'/' && flags & FNM_PATHNAME != 0 {
+                if sc == '/' && flags & FNM_PATHNAME != 0 {
                     return false;
                 }
                 if flags & FNM_DOTDOT != 0
                     && ((n == 0 && sdot_or_dotdot(&s[n..]))
                         || (flags & FNM_PATHNAME != 0
                             && n > 0
-                            && s[n - 1] == b'/'
+                            && s[n - 1] == '/'
                             && pdot_or_dotdot(&s[n..])))
                 {
                     return false;
@@ -915,7 +958,7 @@ fn gmatch(pat: &[u8], s: &[u8], flags: u32) -> bool {
         return true;
     }
     // sm_loop.c:369-371: FNM_LEADING_DIR accepts `foo*` == `foo/bar`.
-    if flags & FNM_LEADING_DIR != 0 && s[n] == b'/' {
+    if flags & FNM_LEADING_DIR != 0 && s[n] == '/' {
         return true;
     }
     false
