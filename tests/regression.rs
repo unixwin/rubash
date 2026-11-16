@@ -5844,10 +5844,10 @@ mod issue_1976 {
         assert_eq!(stdout, "rc=142\nline=[]\n", "stderr:\n{stderr}");
     }
 }
+#[cfg(unix)]
 mod issue_1584 {
     use super::*;
 
-    #[cfg(unix)]
     fn run(dir: &Path, script: &str) -> (String, String, Option<i32>) {
         let path = dir.join("case.sh");
         std::fs::write(&path, script).expect("write probe script");
@@ -6004,10 +6004,10 @@ mod issue_1584 {
     }
 }
 
+#[cfg(unix)]
 mod issue_1582 {
     use super::*;
 
-    #[cfg(unix)]
     fn run(dir: &Path, script: &str) -> (String, String, Option<i32>) {
         let path = dir.join("case.sh");
         std::fs::write(&path, script).expect("write probe script");
