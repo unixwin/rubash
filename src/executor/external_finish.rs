@@ -851,7 +851,6 @@ impl Executor {
             FileFd::open_read(path).ok().map(|file| (file, None))
         });
         if let Some((file, write_end)) = file_stdin {
-            self.set_fd_input_file(0, file, false);
             if let Some((write_file, target)) = write_end {
                 // rubash#2261: the write half of the `<>` pair plus
                 // the fd-0 output env bookkeeping set_fd_readwrite_file
@@ -862,12 +861,27 @@ impl Executor {
                 // and are restored after the child runs — the same
                 // save/restore contract the function face spells out
                 // per binding (FunctionCallStdinBinding).
-                self.fd_table
-                    .open_output(0, FdWriteEndpoint::File(write_file), false);
+                // rubash#3655: one O_RDWR description — a single
+                // open_readwrite install, not an input bind followed
+                // by an output bind (the second would retire the
+                // first). The mirror lines are the set_fd_input_file
+                // lines the pair replaces, plus the output ledger.
+                self.fd_table.open_readwrite(
+                    0,
+                    FdReadEndpoint::File(file),
+                    FdWriteEndpoint::File(write_file),
+                    false,
+                );
+                self.shell_state.env_vars.remove(&fd_closed_key(0));
+                self.shell_state.env_vars.remove(&fd_stdin_key(0));
+                self.shell_state.env_vars.remove(&fd_stdin_offset_key(0));
+                self.shell_state.env_vars.remove(&fd_dynamic_input_key(0));
                 self.shell_state
                     .env_vars
                     .remove(&fd_output_process_substitution_key(0));
                 self.shell_state.env_vars.insert(fd_output_key(0), target);
+            } else {
+                self.set_fd_input_file(0, file, false);
             }
             self.shell_state.env_vars.remove(FUNCTION_STDIN);
             self.shell_state.env_vars.remove(FUNCTION_STDIN_OFFSET);

@@ -1708,13 +1708,21 @@ impl Executor {
             // directions (redir.c netopen), so a `<>` net call binds
             // the same FileFd as fd 0's write endpoint too.
             let file_fd = FileFd::from_file(file, target.clone().into());
-            self.fd_table
-                .open_input(0, FdReadEndpoint::File(file_fd.clone()), false);
             let env = if readwrite {
-                self.fd_table
-                    .open_output(0, FdWriteEndpoint::File(file_fd), false);
+                // rubash#3655: one O_RDWR description — a single
+                // open_readwrite install, not an input bind followed
+                // by an output bind (the second would retire the
+                // first).
+                self.fd_table.open_readwrite(
+                    0,
+                    FdReadEndpoint::File(file_fd.clone()),
+                    FdWriteEndpoint::File(file_fd),
+                    false,
+                );
                 self.save_and_apply_fd0_readwrite_env(&target)
             } else {
+                self.fd_table
+                    .open_input(0, FdReadEndpoint::File(file_fd), false);
                 Vec::new()
             };
             return Ok((
@@ -1766,10 +1774,13 @@ impl Executor {
                     .map_err(|error| crate::posix_errors::path_error(&target, error))?;
                 // rubash#3727: kernel-dup save, not a bare Rc clone -- the bind below retires fd 0's displaced descriptor (FdTable::saved_entry).
                 let saved = self.fd_table.saved_entry(0)?;
-                self.fd_table
-                    .open_input(0, FdReadEndpoint::File(read_file), false);
-                self.fd_table
-                    .open_output(0, FdWriteEndpoint::File(write_file), false);
+                // rubash#3655: one description, one install.
+                self.fd_table.open_readwrite(
+                    0,
+                    FdReadEndpoint::File(read_file),
+                    FdWriteEndpoint::File(write_file),
+                    false,
+                );
                 let env = self.save_and_apply_fd0_readwrite_env(&target);
                 return Ok((
                     None,
@@ -1815,10 +1826,13 @@ impl Executor {
                 .map_err(|error| crate::posix_errors::path_error(&target, error))?;
             // rubash#3727: kernel-dup save, not a bare Rc clone -- the bind below retires fd 0's displaced descriptor (FdTable::saved_entry).
             let saved = self.fd_table.saved_entry(0)?;
-            self.fd_table
-                .open_input(0, FdReadEndpoint::File(read_file), false);
-            self.fd_table
-                .open_output(0, FdWriteEndpoint::File(write_file), false);
+            // rubash#3655: one description, one install.
+            self.fd_table.open_readwrite(
+                0,
+                FdReadEndpoint::File(read_file),
+                FdWriteEndpoint::File(write_file),
+                false,
+            );
             let env = self.save_and_apply_fd0_readwrite_env(&target);
             return Ok((
                 None,

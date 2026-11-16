@@ -1640,15 +1640,31 @@ impl Executor {
                 },
                 None => None,
             };
-            if let Some(rc) = read_rc {
-                executor
-                    .fd_table
-                    .open_input(fd, FdReadEndpoint::File(rc), false);
-            }
-            if let Some(rc) = write_rc {
-                executor
-                    .fd_table
-                    .open_output(fd, FdWriteEndpoint::File(rc), false);
+            // rubash#3655: when both arms restore, they are ONE
+            // description — a single open_readwrite install, or the
+            // output restore would retire the read arm (dup2
+            // wholesale). Either arm alone keeps its
+            // single-direction install.
+            match (read_rc, write_rc) {
+                (Some(read), Some(write)) => {
+                    executor.fd_table.open_readwrite(
+                        fd,
+                        FdReadEndpoint::File(read),
+                        FdWriteEndpoint::File(write),
+                        false,
+                    );
+                }
+                (Some(rc), None) => {
+                    executor
+                        .fd_table
+                        .open_input(fd, FdReadEndpoint::File(rc), false);
+                }
+                (None, Some(rc)) => {
+                    executor
+                        .fd_table
+                        .open_output(fd, FdWriteEndpoint::File(rc), false);
+                }
+                (None, None) => {}
             }
         }
         // rubash#1557: adopt whatever descriptors the process itself
