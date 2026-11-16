@@ -326,4 +326,46 @@ mod tests {
         assert_eq!(render(&["-e", "\\u"]), "\\u\n");
         assert_eq!(render(&["-e", "\\U"]), "\\U\n");
     }
+
+    #[test]
+    fn drops_top_bit_unicode_escapes_in_any_locale() {
+        // rubash#3787: GNU u32cconv (lib/sh/unicode.c:239) reaches
+        // wctomb only for c <= 0x7fffffff and u32toutf8's table tops out
+        // below 0x80000000, so values >= 0x80000000 convert to zero
+        // bytes before the locale split is consulted — dropped in the
+        // C locale too (probed on GNU 5.3.20 + 5.2.21).
+        assert_eq!(render_bytes(&["-e", "A\\U80000000B"]), b"AB\n");
+        assert_eq!(render_bytes(&["-e", "A\\UFFFFFFFFB"]), b"AB\n");
+    }
+
+    #[test]
+    fn encodes_nonscalar_codepoints_as_numeric_utf8() {
+        // rubash#3787: under a UTF-8 locale GNU encodes the numeric
+        // value as-is (lib/sh/unicode.c:154 u32toutf8, no scalar
+        // check): surrogates as 3-byte CESU-8, U+110000 as the 4-byte
+        // form. The guard pins the shell locale for this thread only.
+        let mut vars = std::collections::HashMap::new();
+        vars.insert("LC_ALL".to_string(), "C.utf8".to_string());
+        let _guard = crate::locale::ShellLocaleGuard::new(&vars);
+        assert_eq!(
+            render_bytes(&["-e", "A\\ud83d\\ude00B"]),
+            b"A\xed\xa0\xbd\xed\xb8\x80B\n"
+        );
+        assert_eq!(render_bytes(&["-e", "A\\ud800B"]), b"A\xed\xa0\x80B\n");
+        assert_eq!(render_bytes(&["-e", "A\\udfffB"]), b"A\xed\xbf\xbfB\n");
+        assert_eq!(
+            render_bytes(&["-e", "A\\U0000D800B"]),
+            b"A\xed\xa0\x80B\n"
+        );
+        assert_eq!(
+            render_bytes(&["-e", "A\\U00110000B"]),
+            b"A\xf4\x90\x80\x80B\n"
+        );
+        // Valid scalars are unchanged by the same path.
+        assert_eq!(render_bytes(&["-e", "A\\u00e9B"]), "AéB\n".as_bytes());
+        assert_eq!(
+            render_bytes(&["-e", "A\\U0010FFFFB"]),
+            b"A\xf4\x8f\xbf\xbfB\n"
+        );
+    }
 }
