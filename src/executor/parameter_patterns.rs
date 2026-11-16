@@ -60,11 +60,18 @@ impl Executor {
         &self,
         indirect_name: &str,
     ) -> Option<String> {
+        // GNU parameter_brace_find_indir (subst.c:7839-7881): t is the
+        // scalar VALUE of the source parameter — for `#` the positional
+        // count, not the last positional — and the operator applies to
+        // the parameter t names: `${!#@Q}` with $#=2 is `${2@Q}`.
         if indirect_name == "#" {
-            return self.shell_state.positional_window().last().cloned();
+            return Some(self.shell_state.positional_window().len().to_string());
         }
         if indirect_name == "?" {
             return Some(self.dollar_question_status().to_string());
+        }
+        if matches!(indirect_name, "@" | "*") {
+            return self.parameter_error_value(indirect_name);
         }
         if is_shell_name(indirect_name) {
             if let Some(target_name) = self.nameref_target_name(indirect_name) {
@@ -72,6 +79,11 @@ impl Executor {
             }
         }
         if let Ok(index) = indirect_name.parse::<usize>() {
+            // `0` is the $0 special parameter (script name), never
+            // positional_window[0] — `${!0}` names the script name.
+            if index == 0 {
+                return Some(self.script_name_value());
+            }
             return self
                 .shell_state
                 .positional_window()
@@ -104,6 +116,37 @@ impl Executor {
         transform: ParameterTransform,
     ) -> Option<String> {
         let indirect_name = name.strip_prefix('!')?;
+        // VALID_INDIR_PARAM specials and positional digits
+        // (subst.c:7839-7881 parameter_brace_find_indir): resolve t to
+        // the parameter the source VALUE names, then apply the transform
+        // to that parameter — `${!#@Q}` with $#=2 is `${2@Q}`. A
+        // name-head read of `!#` sees no `#` variable, so the generic
+        // path below would render an unset cell as `''`.
+        if indirect_name.chars().all(|c| c.is_ascii_digit()) && !indirect_name.is_empty()
+            || indirect_name.len() == 1 && matches!(indirect_name, "#" | "?" | "@" | "*")
+        {
+            let Some(t) = self.indirect_holder_target_name(indirect_name) else {
+                return Some(String::new());
+            };
+            if !Self::is_valid_indirect_target(&t) {
+                // `<t>: invalid variable name` is diagnosed by the
+                // parameter-expansion error pre-scan.
+                return Some(String::new());
+            }
+            let op = match transform {
+                ParameterTransform::Quote => "Q",
+                ParameterTransform::Escape => "E",
+                ParameterTransform::Assignment => "A",
+                ParameterTransform::Attributes => "a",
+                ParameterTransform::KeyValueQuoted => "K",
+                ParameterTransform::KeyValueSplit => "k",
+                ParameterTransform::Prompt => "P",
+                ParameterTransform::Upper => "U",
+                ParameterTransform::UpperFirst => "u",
+                ParameterTransform::Lower => "L",
+            };
+            return self.expand_braced_transform_parameter(&format!("{t}@{op}"));
+        }
         let ref_name = indirect_name
             .strip_suffix("[@]")
             .or_else(|| indirect_name.strip_suffix("[*]"));
@@ -159,23 +202,27 @@ impl Executor {
             if transform == ParameterTransform::KeyValueSplit {
                 return Some(self.parameter_key_value_transform(target_name, false));
             }
-            let value = self
-                .array_element_parameter_value(target_name)
-                .or_else(|| {
-                    self.shell_state
-                        .env_vars
-                        .get(target_name)
-                        .and_then(|value| {
-                            // Cell type, not value text (rubash#755).
-                            if self.parameter_is_array_variable(target_name) {
-                                array_value_at(value, 0)
-                            } else {
-                                Some(value.clone())
-                            }
-                        })
-                })
-                .unwrap_or_default();
-            return Some(self.apply_parameter_transform_value(&value, transform));
+            let value = self.array_element_parameter_value(target_name).or_else(|| {
+                self.shell_state
+                    .env_vars
+                    .get(target_name)
+                    .and_then(|value| {
+                        // Cell type, not value text (rubash#755).
+                        if self.parameter_is_array_variable(target_name) {
+                            array_value_at(value, 0)
+                        } else {
+                            Some(value.clone())
+                        }
+                    })
+            });
+            // GNU parameter_brace_transform (subst.c:8927): an unset
+            // parameter's word is NULL and the transform renders
+            // nothing — `${!x@Q}` with an unset target is empty, not
+            // the quoted-empty `''` a set-empty cell earns.
+            return Some(match value {
+                Some(value) => self.apply_parameter_transform_value(&value, transform),
+                None => String::new(),
+            });
         }
         let ref_name = ref_name?;
         // The source's own value: an env variable contributes its raw

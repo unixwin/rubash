@@ -881,7 +881,7 @@ impl Executor {
     /// the special parameters, and valid array references. Anything else
     /// triggers GNU's "invalid variable name" when indirected through
     /// (probe: x=123bad).
-    fn is_valid_indirect_target(value: &str) -> bool {
+    pub(in crate::executor) fn is_valid_indirect_target(value: &str) -> bool {
         if value.is_empty() {
             return false;
         }
@@ -961,10 +961,16 @@ impl Executor {
         // (indirect_parameter_body); `$`/`-`/`!` heads stay a bad
         // substitution — VALID_INDIR_PARAM (subst.c:122) does not admit
         // them as sources.
+        //
+        // The tail class is exactly the string_extract stop set at
+        // subst.c:9844-9860 (`#%:-=?+/@`): `^` and `,` are NOT scanned
+        // after a special indir source, so `${!#^}`/`${!#,}` stay bad
+        // substitutions (named and positional heads keep them — casemod
+        // binds post-expansion there, `${!x^}` -> Zzz).
         if matches!(base.chars().next(), Some('@' | '*' | '#' | '?')) {
             return matches!(
                 base[1..].chars().next(),
-                Some(':' | '-' | '+' | '=' | '?' | '#' | '%' | '/' | '^' | ',' | '@')
+                Some('#' | '%' | ':' | '-' | '=' | '?' | '+' | '/' | '@')
             );
         }
         if let Some(prefix) = base.strip_suffix(['@', '*']) {
@@ -2821,6 +2827,23 @@ impl Executor {
                     };
                     if !t.is_empty() && !Self::is_valid_indirect_target(&t) {
                         return Some((t, "invalid variable name".to_string(), 1));
+                    }
+                }
+                // Same adjudication for a special source WITH an operator
+                // tail (subst.c:9844-9860 + parameter_brace_find_indir
+                // subst.c:7839-7881): `${!@/a/Q}` resolves t = "a b" and
+                // reports `a b: invalid variable name` before the operator
+                // ever runs.
+                if let Some(head) = indirect
+                    .chars()
+                    .next()
+                    .filter(|c| matches!(c, '#' | '?' | '@' | '*'))
+                    .filter(|_| indirect.len() > 1)
+                {
+                    if let Some(t) = self.parameter_error_value(&head.to_string()) {
+                        if !t.is_empty() && !Self::is_valid_indirect_target(&t) {
+                            return Some((t, "invalid variable name".to_string(), 1));
+                        }
                     }
                 }
                 if Self::is_indirect_array_operator_expression(indirect) {

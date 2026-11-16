@@ -156,10 +156,29 @@ fn positional_default_silent_when_unset() {
 }
 
 /// `${!0}` names the script name, which is not a valid variable name —
-/// `<t>: invalid variable name`, never a bare `$1` read.
+/// `<t>: invalid variable name`, never a bare `$1` read. Script-file
+/// form: under `-c` GNU's $0 is the shell name (`bash`), a valid
+/// identifier, so the script path is the form that exercises the
+/// invalid-name verdict.
 #[test]
 fn zero_reports_script_name_as_target() {
-    let out = run("echo ${!0}");
+    let dir = std::env::temp_dir().join(format!("rubash-i3605-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let script = dir.join("zero_indir.sh");
+    std::fs::write(&script, "echo ${!0}\n").expect("write script");
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg(&script)
+        .env("LC_ALL", "C.UTF-8")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("spawn rubash");
+    let out = Outcome {
+        stdout: output.stdout,
+        stderr: output.stderr,
+        code: output.status.code().unwrap_or(-1),
+    };
     let err = stderr_text(&out);
     assert!(
         err.contains("invalid variable name") && !err.contains("bad substitution"),
@@ -176,6 +195,93 @@ fn dollar_head_stays_bad_substitution() {
     let err = stderr_text(&out);
     assert!(err.contains("bad substitution"), "got {err:?}");
     assert_eq!(out.code, 1, "stderr {err:?}");
+}
+
+/// `^`/`,` are NOT in the scanned tail class (subst.c:9844-9860 scans
+/// `#%:-=?+/@` only): `${!#^}` is a bad substitution, not a case-mod on
+/// the count or a silent empty.
+#[test]
+fn hash_caret_tail_is_bad_substitution() {
+    for src in ["${!#^}", "${!#,}", "${!#^2}"] {
+        let out = run(&format!("set a b; echo {src}"));
+        let err = stderr_text(&out);
+        assert!(
+            err.contains("bad substitution"),
+            "{src} must be bad substitution; got {err:?}"
+        );
+        assert_eq!(out.code, 1, "{src} stderr {err:?}");
+    }
+}
+
+/// `:off:len` tails slice the resolved-t parameter: `${!#:0:1}` with
+/// $#=2 is `${2:0:1}` = `b` (parameter_brace_find_indir feeding the
+/// operator, subst.c:7839-7881, 9978-10017).
+#[test]
+fn hash_substring_tail_slices_target() {
+    let out = run("set a b; echo \"x${!#:0:1}y\"");
+    assert_eq!(out.stdout, b"xby\n", "stderr: {:?}", stderr_text(&out));
+    assert_eq!(out.code, 0);
+}
+
+/// `?` resolves t to `0` — the `0` parameter — so `${!?/a/Q}` applies
+/// the patsub to $0's value, identically to `${0/a/Q}` (find_indir
+/// feeding parameter ops, subst.c:7839-7881, 9978-10017).
+#[test]
+fn question_patsub_applies_to_resolved_target() {
+    // `true` pins $? to 0 first: rubash's startup $? is a tracked
+    // pre-existing divergence (1 vs GNU 0), so the pin must not depend
+    // on the entry status.
+    let out = run("true; echo \"x${!?/a/Q}y\"; echo \"x${0/a/Q}y\"");
+    let mut lines = out.stdout.split(|b| *b == b'\n');
+    let (indirect, direct) = (lines.next().unwrap(), lines.next().unwrap());
+    assert_eq!(indirect, direct, "stderr: {:?}", stderr_text(&out));
+    assert_eq!(out.code, 0);
+}
+
+/// Patsub/removal/substring tails apply to the resolved-t parameter:
+/// with `set a b`, `${!#%2}`/`${!#/@(2)/Q}`/`${!#/2/zz}` all operate on
+/// `$2` = `b` (parameter_brace_find_indir feeding the operator,
+/// subst.c:7839-7881, 9978-10017); `${!2/a/Q}` resolves t=`b` — the
+/// parameter `b`, which is unset and renders empty.
+#[test]
+fn f2_tails_apply_to_resolved_t_parameter() {
+    for (src, want) in [
+        ("${!#%2}", "b"),
+        ("${!#/@(2)/Q}", "b"),
+        ("${!#/2/Q}", "b"),
+        ("${!#/2/zz}", "b"),
+        ("${!#:0:1}", "b"),
+        ("${!#:1:1}", ""),
+        ("${!2/a/Q}", ""),
+        // t is NULL for unset `$9`: the `:-` operator adjudicates an
+        // unset parameter and renders the default word.
+        ("${!9:-d}", "d"),
+    ] {
+        let out = run(&format!("set a b; echo \"x{src}y\""));
+        assert_eq!(
+            out.stdout,
+            format!("x{want}y\n").as_bytes(),
+            "{src} stderr: {:?}",
+            stderr_text(&out)
+        );
+        assert_eq!(out.code, 0, "{src}");
+    }
+}
+
+/// A normal-name indirect source resolves t from the source's VALUE:
+/// `x=zzz` (unset target) applies the tail operator to the unset
+/// parameter `zzz` — `${!x@Q}` is empty (subst.c:8927 NULL word), not
+/// the quoted-empty `''` a set-empty cell earns; `^`/`,` are legal
+/// casemod tails on a NAME head (`${!x^}` == `${zzz^}` -> empty), the
+/// `#%:-=?+/@` tail-class scan (subst.c:9844-9860) restricting
+/// `^`/`,` applies to `!`+special/digit heads only.
+#[test]
+fn named_source_tails_follow_the_resolved_target() {
+    for src in ["${!x@Q}", "${!x^}", "${!x,Q}"] {
+        let out = run(&format!("x=zzz; echo \"x{src}y\""));
+        assert_eq!(out.stdout, b"xy\n", "{src} stderr: {:?}", stderr_text(&out));
+        assert_eq!(out.code, 0, "{src}");
+    }
 }
 
 /// `${!#x}` — `x` is not an operator tail and `#x` is not a parameter —

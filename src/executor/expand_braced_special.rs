@@ -59,6 +59,50 @@ impl Executor {
         if matches!(indirect_name.chars().next(), Some('-' | '=' | '+' | ':')) {
             return None;
         }
+        // GNU subst.c:9844-9860: after `!` + a VALID_INDIR_PARAM
+        // single-char source (`#`/`?`/`@`/`*`), string_extract scans the
+        // operator tail with the class `#%:-=?+/@`, and the operator then
+        // applies to the parameter the resolved t names
+        // (parameter_brace_find_indir, subst.c:7839-7881): `${!#/a/Q}`
+        // with $#=2 is `${2/a/Q}`. The operator parsers' name heads stop
+        // at `!` (`!#` is two units to them), so the pattern/replacement/
+        // transform/substring tails are dispatched here — `:-`-family
+        // word operators keep the existing has_indirect_parameter_
+        // word_operator route below (already verified against GNU).
+        if let Some(head) = indirect_name
+            .chars()
+            .next()
+            .filter(|c| matches!(c, '#' | '?' | '@' | '*'))
+        {
+            let tail = &indirect_name[head.len_utf8()..];
+            let dispatched = match tail.chars().next() {
+                Some('#' | '%' | '/' | '@') => true,
+                // `:` is a word operator only in the `:-`/`:=`/`:?`/`:+`
+                // forms; anything else is a substring operator.
+                Some(':') => !matches!(tail.chars().nth(1), Some('-' | '=' | '?' | '+')),
+                _ => false,
+            };
+            if dispatched {
+                let Some(t) = self.parameter_error_value(&head.to_string()) else {
+                    // NULL t (e.g. `${!@/...}` with no positional
+                    // parameters): the operator adjudicates an unset
+                    // parameter — an empty result for these families.
+                    return Some(String::new());
+                };
+                if !Self::is_valid_indirect_target(&t) {
+                    // `<t>: invalid variable name` is diagnosed by
+                    // parameter_expansion_error_in_word_context.
+                    return Some(String::new());
+                }
+                let inner = format!("{t}{tail}");
+                let word = format!("${{{inner}}}");
+                return Some(if unquoted {
+                    self.expand_braced_parameter_word(&word, &inner)
+                } else {
+                    self.expand_quoted_parameter_word(&word)
+                });
+            }
+        }
         if has_indirect_parameter_word_operator(name) {
             return None;
         }
