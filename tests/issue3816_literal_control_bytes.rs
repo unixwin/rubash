@@ -97,10 +97,15 @@ fn probe_dq_assign(bytes: &[u8]) -> Vec<u8> {
 fn probe_unq_assign(bytes: &[u8]) -> Vec<u8> {
     // TAB (0x09) is IFS whitespace and LF (0x0a) ends the line: neither
     // can appear as a bare unquoted byte, so they are skipped here (they
-    // are covered by the quoted shapes).
+    // are covered by the quoted shapes). CR (0x0d) is skipped too: a bare
+    // `V=<CR>` line ends in the byte sequence CR LF, which the script
+    // reader's line splitting consumes as a CRLF line ending before the
+    // lexer ever sees the byte (on Windows the CR vanishes and the value
+    // is empty; on Linux it survives) — a line-ending face separate from
+    // #3816, still pinned for 0x0d by the quoted shapes.
     let mut driver = Vec::new();
     for b in bytes {
-        if *b == 0x09 || *b == 0x0a {
+        if *b == 0x09 || *b == 0x0a || *b == 0x0d {
             continue;
         }
         let ch = char::from(*b);
@@ -112,10 +117,14 @@ fn probe_unq_assign(bytes: &[u8]) -> Vec<u8> {
 }
 
 fn probe_esc_assign(bytes: &[u8]) -> Vec<u8> {
-    // Backslash-LF is a line continuation, so 0x0a is skipped here.
+    // Backslash-LF is a line continuation, so 0x0a is skipped here. CR
+    // (0x0d) is skipped too: `V=\<CR>` ends in CR LF, which the script
+    // reader consumes as a CRLF line ending, leaving a bare `V=\` that
+    // continues onto the next line (same separate line-ending face as
+    // probe_unq_assign; 0x0d is still pinned by the quoted shapes).
     let mut driver = Vec::new();
     for b in bytes {
-        if *b == 0x0a {
+        if *b == 0x0a || *b == 0x0d {
             continue;
         }
         let ch = char::from(*b);
@@ -171,7 +180,7 @@ fn literal_double_quoted_assignment_keeps_all_32_control_bytes() {
 fn literal_unquoted_assignment_keeps_control_bytes() {
     let bytes: Vec<u8> = cc_bytes()
         .into_iter()
-        .filter(|b| *b != 0x09 && *b != 0x0a)
+        .filter(|b| *b != 0x09 && *b != 0x0a && *b != 0x0d)
         .collect();
     let (stdout, stderr, rc) = run_driver("unq-assign", &probe_unq_assign(&bytes));
     assert_eq!(rc, Some(0), "stderr: {stderr}");
@@ -182,7 +191,10 @@ fn literal_unquoted_assignment_keeps_control_bytes() {
 /// Same 10 bytes break backslash-escaped too (LF skipped: continuation).
 #[test]
 fn literal_backslash_escaped_assignment_keeps_control_bytes() {
-    let bytes: Vec<u8> = cc_bytes().into_iter().filter(|b| *b != 0x0a).collect();
+    let bytes: Vec<u8> = cc_bytes()
+        .into_iter()
+        .filter(|b| *b != 0x0a && *b != 0x0d)
+        .collect();
     let (stdout, stderr, rc) = run_driver("esc-assign", &probe_esc_assign(&bytes));
     assert_eq!(rc, Some(0), "stderr: {stderr}");
     assert_eq!(stderr, "");
