@@ -1679,6 +1679,11 @@ impl Executor {
         );
 
         self.apply_child_environment(&mut process);
+        // rubash#3456: snapshot the arithmetic flags so the prefix
+        // composition below can be adjudicated before the spawn (the
+        // absolute variant below reads them — the host channel already
+        // expanded this prefix once, so a delta would miss it).
+        let prefix_arith_before = self.snapshot_arithmetic_error_flags();
         let raws_aligned = command.assignment_raws.len() == command.assignments.len();
         for (index, (var_name, var_value)) in command.assignments.iter().enumerate() {
             let (base_name, append) = assignment_name_and_append(var_name);
@@ -1711,6 +1716,16 @@ impl Executor {
             if is_valid_process_env(base_name, expanded_value) {
                 process.env(base_name, expanded_value);
             }
+        }
+        // rubash#3456: a fatal arithmetic error in the prefix was already
+        // diagnosed once by the composition above (and the stage status
+        // folds to 1); GNU discards the whole element, so the child must
+        // never spawn — return the dead member now, before any stdio
+        // wiring or spawn. Dropping `process` here releases the pipe
+        // ends it took, so the downstream reads EOF exactly as when
+        // GNU's dead child closed them.
+        if let Some(status) = self.take_prefix_arith_failure_absolute(&prefix_arith_before) {
+            return Ok(self.dead_member_stage_result(String::new(), String::new(), status));
         }
         if fd0_redirect_wins {
             self.apply_external_stdin_redirect(command, &mut process)?;
