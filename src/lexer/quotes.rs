@@ -2259,7 +2259,7 @@ pub(crate) fn remove_double_quoted_into_cursor<'a>(
                 }
                 // rubash#3816: tag literal carrier bytes in the span as
                 // raw-byte marker pairs (see ansi::push_tagged_source_span).
-                super::ansi::push_tagged_source_span(&mut out, &rest[..idx]);
+                super::ansi::push_tagged_source_span(&mut *out, &rest[..idx]);
                 rest = &rest[idx..];
             }
         }
@@ -2526,7 +2526,7 @@ fn remove_double_quoted_into(
                 // quotes is user data — tag it as a raw-byte marker pair
                 // so no downstream decoder can claim it as the carrier
                 // it collides with.
-                super::ansi::push_tagged_source_char(&mut out, quoted);
+                super::ansi::push_tagged_source_char(&mut *out, quoted);
             }
         }
     }
