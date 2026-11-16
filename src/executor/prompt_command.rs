@@ -384,7 +384,9 @@ mod tests {
 
         let mut executor = Executor::new();
         let session = Rc::new(RefCell::new(crate::history::SessionHistory::new()));
-        session.borrow_mut().record("echo USER1", "", "", None);
+        session
+            .borrow_mut()
+            .record("echo USER1", "", "", None, true);
         executor.set_session_history(Some(session.clone()));
         executor.set_env("PROMPT_COMMAND", "__pc_ran=1");
         assert_eq!(executor.execute_prompt_command(), Some(0));
@@ -407,7 +409,9 @@ mod tests {
 
         let mut executor = Executor::new();
         let session = Rc::new(RefCell::new(crate::history::SessionHistory::new()));
-        session.borrow_mut().record("echo USER2", "", "", None);
+        session
+            .borrow_mut()
+            .record("echo USER2", "", "", None, true);
         executor.set_session_history(Some(session.clone()));
         executor.set_env("PROMPT_COMMAND", "history -a");
         executor.set_env("HISTFILE", &histpath);
@@ -450,7 +454,9 @@ mod tests {
 
         // Two prompts with one command between them (the loop shape).
         assert_eq!(executor.execute_prompt_command(), Some(0));
-        session.borrow_mut().record("echo USER3", "", "", None);
+        session
+            .borrow_mut()
+            .record("echo USER3", "", "", None, true);
         assert_eq!(executor.execute_prompt_command(), Some(0));
         assert_eq!(executor.execute_prompt_command(), Some(0));
 
