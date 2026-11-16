@@ -620,14 +620,16 @@ impl Executor {
 
     /// Per-element values of an `AtModified` segment (rubash#1456): the
     /// segment body is `<target><op>` where the admission gate already
-    /// proved the target is `@` or `name[@]` and the operator is one of
-    /// the pattern/replacement/case forms. Resolution reuses the exact
-    /// helpers the whole-word forms use — `positional_modified_word_values`
-    /// for `@` (quoted `@` semantics: the operator applies per parameter)
-    /// and `array_pattern_word_values` for `name[@]` — so the per-element
-    /// results are identical to the standalone `"${...}"` expansion; only
-    /// the enclosing word's affix attachment differs (handled by the
-    /// segment expander).
+    /// proved the target is `@`, `*`, `name[@]` or `name[*]` (star forms
+    /// rubash#3581) and the operator is one of the pattern/replacement/
+    /// case forms. Resolution reuses the exact helpers the whole-word
+    /// forms use — `positional_modified_word_values` for `@` and `*`
+    /// (quoted `@`/` *` semantics: the operator applies per parameter,
+    /// then the `*` results join with IFS[0]) and
+    /// `array_pattern_word_values` for `name[@]` / `name[*]` — so the
+    /// per-element results are identical to the standalone `"${...}"`
+    /// expansion; only the enclosing word's affix attachment differs
+    /// (handled by the segment expander).
     pub(in crate::executor) fn at_modified_segment_values(
         &self,
         inner: &str,
@@ -639,7 +641,13 @@ impl Executor {
         // joined word as silent for a one-"" list — the previous
         // hardcoded `true` diagnosed it (rubash#3501). Quoted segments
         // keep `true` (a quoted one-"" list diagnoses, #3581).
-        if inner.starts_with('@') {
+        //
+        // The admission gate proved the target is one of `@`, `*`,
+        // `name[@]`, `name[*]`; a leading `*` can only be the positional
+        // star target (array names never start with `*`, indirect `!`
+        // targets are not admitted), so it routes to the positional
+        // helper exactly like `@` (rubash#3581).
+        if inner.starts_with('@') || inner.starts_with('*') {
             return self
                 .positional_modified_word_values(inner, quoted)
                 .unwrap_or_default();
@@ -1523,32 +1531,45 @@ fn at_slice_segment_body(inner: &str) -> Option<AtSliceTarget> {
 
 /// Validate an `${...}` inner body as a per-element-operator word-list
 /// source for the segment scanners (`name[@]%pat`, `name[@]/pat/repl`,
-/// `name[@]^^`, `@%pat`, ...; rubash#1456).
+/// `name[@]^^`, `@%pat`, `name[*]%pat`, `*%pat`, ...; rubash#1456,
+/// star forms rubash#3581).
 ///
 /// GNU anchor — subst.c:10119-10128 parameter_brace_expand calls
 /// chk_atstar (subst.c:7635-7639) BEFORE the operator switch, so a quoted
 /// `[@]`/`@` target keeps quoted_dollar_at and the operator is applied
 /// per element (subst.c:9777 parameter_brace_expand's array loop), never
-/// to the space-joined string the generic path produces.
+/// to the space-joined string the generic path produces. The same
+/// chk_atstar call covers the `*` targets: GNU applies the operator per
+/// element for `[*]`/` *` exactly as for `[@]`/`@` and joins the results
+/// afterwards (oracle-verified: `a=(xx hyy); "${a[*]#h}"` is `xx yy`).
 ///
 /// Admission is a whitelist (rubash#117 discipline), mirroring
 /// `at_slice_segment_body`: the body must parse through one of the three
 /// pure text operator parsers the whole-word helpers themselves use, and
-/// its target must be exactly `@` or `name[@]`. Declined: `[*]` targets
-/// (GNU joins those into one word — the String path already does),
-/// `:-`-family operators (no per-element loop in GNU; the word stays a
-/// single value on the braced-alternate path), `${name[@]@Q}`-style
-/// transforms (different resolver), `!`-indirect targets, and bodies
-/// containing `$(` or a backtick anywhere (the `&self` segment resolver
-/// cannot execute command substitutions; those stay on the generic path).
+/// its target must be exactly `@`, `*`, `name[@]` or `name[*]`. The `*`
+/// forms were declined by #1456 on the grounds that GNU joins them into
+/// one word and "the String path already does" the join — but that
+/// rationale only holds for the VALUE: the scalar path's removal gate
+/// hardcodes `empty_is_silent = true` (`expand_parameter_pattern_removal`),
+/// so a quoted one-`""` `[*]`/` *` list stays silent where GNU diagnoses
+/// (subst.c:10320 reads the QUOTED_NULL-marked joined word, 10133-10140).
+/// The star forms therefore belong on this path too (rubash#3581).
+/// Declined: `:-`-family operators (no per-element loop in GNU; the word
+/// stays a single value on the braced-alternate path),
+/// `${name[@]@Q}`-style transforms (different resolver), `!`-indirect
+/// targets, and bodies containing `$(` or a backtick anywhere (the `&self`
+/// segment resolver cannot execute command substitutions; those stay on
+/// the generic path).
 fn at_modified_segment_body(inner: &str) -> bool {
     if inner.contains("$(") || inner.contains('`') {
         return false;
     }
     let target_ok = |var_name: &str| {
         var_name == "@"
+            || var_name == "*"
             || var_name
                 .strip_suffix("[@]")
+                .or_else(|| var_name.strip_suffix("[*]"))
                 .is_some_and(|name| is_shell_name(name))
     };
     if let Some((var_name, _, _)) = parse_indirect_pattern_removal(inner) {
