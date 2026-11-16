@@ -5083,6 +5083,15 @@ fn run_source_impl_inner_body(
         // startup file run by run_init_file (rubash#1161). Printing it
         // via the catch-all below leaked a bare `return N` line.
         Err(ExecuteError::Return(code)) => code,
+        // A respawned fork-child whose own write met a dead pipe is
+        // GNU's SIGPIPE death (trap.c:1480 reset_signal_handlers leaves
+        // the fork SIG_DFL): the process ends at the verdict with no
+        // diagnostic — status 141, matching child_process_exit_status's
+        // BrokenPipe arm for in-process child scripts. Pipeline-stage
+        // producers absorb their own BrokenPipe as a 141 element status
+        // long before this arm, so what reaches here is the run's own
+        // death.
+        Err(ExecuteError::BrokenPipe) => 141,
         Err(e) => {
             if interactive {
                 eprintln!("Error: {}", e);
