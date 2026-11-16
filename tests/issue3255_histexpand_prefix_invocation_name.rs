@@ -101,8 +101,7 @@ fn invocation_c_with_explicit_name_keeps_operand() {
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let invocation =
-        rubash::invocation::ShellInvocation::parse(&args).expect("parse -c with name");
+    let invocation = rubash::invocation::ShellInvocation::parse(&args).expect("parse -c with name");
     invocation
         .apply_to_executor(&mut executor)
         .expect("apply -c invocation");
