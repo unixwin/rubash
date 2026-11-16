@@ -1,4 +1,4 @@
-use super::types::INHERIT_PROCESS_STDIN;
+use super::types::{FUNCTION_STDIN_OFFSET, INHERIT_PROCESS_STDIN};
 use super::*;
 use crate::executor::markers::STORAGE_WORD_PREFIX;
 
@@ -628,7 +628,7 @@ impl Executor {
                 // before run_callback when reads are buffered
                 // (zsyncfd, mapfile.def:195) — a callback reading the
                 // same fd must see exactly the unconsumed bytes.
-                source.sync_offset();
+                self.mapfile_source_sync(&mut source);
                 self.execute_mapfile_callback(callback, target, &record, cmd)?;
                 // A3-F4: GNU mapfile.def:142-218 re-looks-up the array
                 // after run_callback ("Bad things can happen if the
@@ -643,11 +643,15 @@ impl Executor {
                     .map(|current| indexed_array_entries(current))
                     .unwrap_or_default();
             }
+            // rubash#3659: the callback above received the raw record
+            // (GNU mapfile.def:195-203); the attribute conversion applies
+            // at the bind, like bind_array_element.
+            let record = self.convert_array_element_value(name, &record);
             let previous_max = entries.keys().next_back().copied();
             entries.insert(target, record.clone());
             self.bind_mapfile_element_live(name, &entries, target, &record, previous_max);
         }
-        source.sync_offset();
+        self.mapfile_source_sync(&mut source);
         // Canonical final render: byte-identical to the shape the
         // slurp path stores for the same input.
         self.shell_state
@@ -656,6 +660,20 @@ impl Executor {
         mark_env_name(&mut self.shell_state.env_vars, "__RUBASH_ARRAY_VARS", name);
         let _ = self.write_buffered_builtin_output(cmd, &[], stderr);
         Ok(Some(0))
+    }
+
+    /// `source.sync_offset()` plus the staged-text cursor publish:
+    /// a pull over the FUNCTION_STDIN mirror reports its consumed
+    /// byte boundary so the next reader of the same stage input
+    /// resumes there (rubash#2779, mapfile.def:162-166 bounded
+    /// pipe reads leaving the tail).
+    pub(in crate::executor) fn mapfile_source_sync(&mut self, source: &mut MapfileRecordSource) {
+        source.sync_offset();
+        if let Some(target) = source.staged_target_offset() {
+            self.shell_state
+                .env_vars
+                .insert(FUNCTION_STDIN_OFFSET.to_string(), target.to_string());
+        }
     }
 
     /// Bind one record into the live array stores (typed cell + mirror)
@@ -788,6 +806,33 @@ impl Executor {
                 return Some(source);
             }
         }
+        // rubash#2779 — when the command's fd 0 resolves to the staged
+        // FUNCTION_STDIN mirror (a pipeline stage's brace-group/subshell
+        // input, not a real handle), the slurp arm below drains the
+        // shared remainder wholesale: stdin_string_for_command_mut
+        // parks FUNCTION_STDIN_OFFSET at end, so even a bounded read
+        // starves the next reader of the same stage input. GNU's
+        // bounded read never over-consumes — a pipe switches to
+        // unbuffered zgetline record reads (builtins/mapfile.def:162-166,
+        // lseek ESPIPE). Pull records incrementally over the staged
+        // bytes; the consumer's mapfile_source_sync publishes only the
+        // consumed cursor back to FUNCTION_STDIN_OFFSET, leaving the
+        // tail for the next reader of the shared fd.
+        if cmd.heredoc.is_none()
+            && cmd.here_string.is_none()
+            && cmd.heredoc_redirects.is_empty()
+            && self.function_stdin_is_command_source(cmd)
+        {
+            if let Some(text) = self.function_stdin_remaining() {
+                let origin = self
+                    .shell_state
+                    .env_vars
+                    .get(FUNCTION_STDIN_OFFSET)
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .unwrap_or(0);
+                return Some(MapfileRecordSource::staged(text, origin));
+            }
+        }
         if let Some(input) = self.stdin_string_for_command_mut(cmd) {
             return Some(MapfileRecordSource::values(input, delimiter, trim_newline));
         }
@@ -847,6 +892,37 @@ impl MapfileRecordSource {
         MapfileRecordSource::Values(
             split_mapfile_input(&input, delimiter, trim_newline).into_iter(),
         )
+    }
+
+    /// Incremental pull over the staged FUNCTION_STDIN mirror
+    /// (rubash#2779). `origin` is the FUNCTION_STDIN_OFFSET the mirror
+    /// was read at; `taken` counts consumed bytes, so the publish
+    /// target is `origin + taken` — idempotent across repeated syncs.
+    fn staged(text: String, origin: u64) -> Self {
+        MapfileRecordSource::Pull(MapfileRecordPuller {
+            source: MapfilePullSource::StagedText {
+                bytes: text.into_bytes(),
+                pos: 0,
+                origin,
+            },
+            buffer: Vec::new(),
+            eof: false,
+            taken: 0,
+            rewind: None,
+            next_fill_offset: 0,
+        })
+    }
+
+    /// Absolute FUNCTION_STDIN_OFFSET a staged-text pull consumed to,
+    /// or None for every other source kind.
+    pub(in crate::executor) fn staged_target_offset(&self) -> Option<u64> {
+        match self {
+            MapfileRecordSource::Pull(puller) => match &puller.source {
+                MapfilePullSource::StagedText { origin, .. } => Some(origin + puller.taken),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     fn from_endpoint(endpoint: &FdReadEndpoint) -> Option<Self> {
@@ -932,6 +1008,15 @@ enum MapfilePullSource {
         handle: crate::fd::HANDLE,
         chunked: bool,
     },
+    /// The staged FUNCTION_STDIN mirror: already materialized, so the
+    /// fill delivers the unread tail in one chunk and `taken` tracks
+    /// the byte boundary the caller folds back into
+    /// FUNCTION_STDIN_OFFSET (rubash#2779).
+    StagedText {
+        bytes: Vec<u8>,
+        pos: usize,
+        origin: u64,
+    },
     /// A plain file opened by path for the `< file` form.
     File(std::fs::File),
     /// The process's inherited stdin (byte-wise, like a pipe).
@@ -998,6 +1083,15 @@ impl MapfileRecordPuller {
                     }
                 }
             }
+            MapfilePullSource::StagedText { bytes, pos, .. } => {
+                if *pos >= bytes.len() {
+                    self.eof = true;
+                    return;
+                }
+                let chunk = bytes[*pos..].to_vec();
+                *pos = bytes.len();
+                chunk
+            }
             MapfilePullSource::InheritedStdin => {
                 match crate::fd::read_some(crate::fd::process_std_handle(0), 1) {
                     Ok(bytes) if !bytes.is_empty() => bytes,
@@ -1036,6 +1130,7 @@ impl MapfileRecordPuller {
                 let _ = std::io::Seek::seek(file, std::io::SeekFrom::Start(target));
             }
             MapfilePullSource::InheritedStdin => {}
+            MapfilePullSource::StagedText { .. } => {}
         }
         self.next_fill_offset = self.taken;
     }

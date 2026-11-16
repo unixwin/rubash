@@ -1,5 +1,4 @@
 use super::*;
-use crate::executor::markers::STORAGE_WORD_PREFIX;
 
 /// rubash#1166: rebase a trap action's parsed line numbers onto the line
 /// the trap fired at. GNU parses the action string with line_number
@@ -119,27 +118,6 @@ impl std::io::Write for ExecDiagStderr<'_> {
             ExecDiagStderr::Process(stderr) => stderr.flush(),
         }
     }
-}
-
-/// Run `body` with the exec spawn's stderr destination bound (see
-/// ExecDiagStderr). The capture slot is taken out for the call so the
-/// destination can borrow the buffer while the body also borrows the
-/// rest of the executor, then restored — including on the body's
-/// error path, so a failed spawn cannot orphan the capture.
-fn with_exec_diag_stderr<R>(
-    capture_slot: &mut Option<Vec<u8>>,
-    body: impl FnOnce(&mut ExecDiagStderr<'_>) -> Result<R, ExecuteError>,
-) -> Result<R, ExecuteError> {
-    let mut capture = capture_slot.take();
-    let result = {
-        let mut target = match capture.as_mut() {
-            Some(buffer) => ExecDiagStderr::Capture(buffer),
-            None => ExecDiagStderr::Process(std::io::stderr()),
-        };
-        body(&mut target)
-    };
-    *capture_slot = capture;
-    result
 }
 
 /// One std fd's binding for the exec spawn's ordered redirect walk
@@ -1550,7 +1528,19 @@ impl Executor {
             .env_vars
             .insert("__RUBASH_TRAP_CONTEXT".to_string(), "exit trap".to_string());
         let tokens = crate::lexer::tokenize(&action);
-        let mut ast = crate::parser::parse(&tokens);
+        // rubash#3328: GNU trap.c:1071 parse_and_execute reads the
+        // action string as parser input, so parser_error echoes the
+        // action's own line verbatim (error.c:300-316) — thread the
+        // string as the diagnostic source instead of the bare parse(),
+        // whose token-join fallback re-serializes it (`echo inaction
+        // ; echo (` for `echo inaction; echo (`).
+        let mut ast = crate::parser::parse_with_options(
+            &tokens,
+            crate::parser::ParseLoopOptions {
+                source_text: Some(action.as_str().into()),
+                ..Default::default()
+            },
+        );
         if let Some(redirect_cmd) = redirect_cmd {
             self.apply_inherited_command_output_redirects(redirect_cmd, &mut ast)?;
         }
@@ -1777,7 +1767,17 @@ impl Executor {
                 Some((key, cached_ast, base)) if key == action => (cached_ast, base),
                 _ => {
                     let tokens = crate::lexer::tokenize(&action);
-                    (crate::parser::parse(&tokens), 1)
+                    // rubash#3328: thread the spliced action as the
+                    // diagnostic source (same shape as the EXIT-trap
+                    // site): the bare parse() re-serialized the echo line.
+                    let ast = crate::parser::parse_with_options(
+                        &tokens,
+                        crate::parser::ParseLoopOptions {
+                            source_text: Some(action.as_str().into()),
+                            ..Default::default()
+                        },
+                    );
+                    (ast, 1)
                 }
             }
         };
@@ -1852,7 +1852,17 @@ impl Executor {
             self.shell_state.function_depth + self.source_nest_depth,
         );
         let tokens = crate::lexer::tokenize(&action);
-        let mut ast = crate::parser::parse(&tokens);
+        // rubash#3328: thread the action as the diagnostic source
+        // (same shape as the EXIT-trap site): GNU _run_trap_internal
+        // parses the action string as fresh input, so the echo line
+        // is the action's own line verbatim, not a token-join rebuild.
+        let mut ast = crate::parser::parse_with_options(
+            &tokens,
+            crate::parser::ParseLoopOptions {
+                source_text: Some(action.into()),
+                ..Default::default()
+            },
+        );
         // GNU trap.c:_run_trap_internal:1196 only sets SEVAL_RESETLINE for
         // ordinary signal traps; the RETURN trap keeps the caller's current
         // line_number, so $LINENO inside the action (and the DEBUG fire for
@@ -2517,7 +2527,17 @@ impl Executor {
                 },
             );
             let tokens = crate::lexer::tokenize(&action);
-            let ast = crate::parser::parse(&tokens);
+            // rubash#3328: thread the action as the diagnostic source
+            // (same shape as the EXIT-trap site): GNU trap.c:496 runs
+            // the action through parse_and_execute, so the echo line
+            // is the action's own line verbatim.
+            let ast = crate::parser::parse_with_options(
+                &tokens,
+                crate::parser::ParseLoopOptions {
+                    source_text: Some(action.as_str().into()),
+                    ..Default::default()
+                },
+            );
             // trap.c:496 runs the action through parse_and_execute: the
             // xtrace indirection level rises by one for the action.
             let result = self.with_xtrace_indirection(|executor| executor.execute_ast(&ast));
@@ -2637,10 +2657,45 @@ impl Executor {
     /// background child observes its own mailbox even inside its subshell
     /// body.
     pub(crate) fn observe_signals_while_blocked(&mut self) -> Result<(), ExecuteError> {
+        self.observe_signals_while_blocked_ex(None)
+    }
+
+    /// rubash#2729: the GNU wait_for recording model — while the shell
+    /// waits for a foreground job with no job control, its
+    /// wait_sigint_handler (jobs.c:2908) only RECORDS a shell-side
+    /// SIGINT (wait_sigint_received); trapped or not, the delivery is
+    /// never dispatched mid-wait. The wait's tail adjudicates it by
+    /// the job's outcome (jobs.c:4157-4163 child_caught_sigint, the
+    /// 4410ff cleanup's maybe_call_trap_handler / termsig_handler
+    /// re-raise). `sigint_received` swallows every queued SIGINT into
+    /// the flag for that tail classification.
+    #[cfg(unix)]
+    pub(crate) fn observe_signals_while_blocked_recording_sigint(
+        &mut self,
+        sigint_received: &mut bool,
+    ) -> Result<(), ExecuteError> {
+        self.observe_signals_while_blocked_ex(Some(sigint_received))
+    }
+
+    fn observe_signals_while_blocked_ex(
+        &mut self,
+        mut record_sigint: Option<&mut bool>,
+    ) -> Result<(), ExecuteError> {
+        // rubash#3401: the command-substitution conduit is exempt from
+        // the flat-layer guard below — a clone whose drain permit is
+        // set drains the shared mailbox only to hand a parent-death
+        // delivery back (see observe_signals_comsub_conduit), never to
+        // dispatch a trap.
         if self.signal_trap_running
-            || (self.shell_state.subshell_depth.get() > 0 && self.shell_pid == std::process::id())
+            || (!self.comsub_drain_permit.get()
+                && self.shell_state.subshell_depth.get() > 0
+                && self.shell_pid == std::process::id())
         {
             return Ok(());
+        }
+        #[cfg(unix)]
+        if self.comsub_drain_permit.get() {
+            return self.observe_signals_comsub_conduit();
         }
         let signals =
             crate::builtins::kill::take_pending_signals_now(std::process::id()).unwrap_or_default();
@@ -2649,6 +2704,17 @@ impl Executor {
         }
         let mut trapped = Vec::new();
         for &signal in &signals {
+            // rubash#2729: inside a recording foreground wait every
+            // queued SIGINT — trapped or untrapped — is the delivery
+            // GNU's wait_sigint_handler records; its dispatch is the
+            // wait tail's, by the child's outcome.
+            #[cfg(unix)]
+            if signal == libc::SIGINT as i32 {
+                if let Some(sink) = record_sigint.as_deref_mut() {
+                    *sink = true;
+                    continue;
+                }
+            }
             // Stale registry flag from a disposition flip: drop it (see
             // run_pending_signal_traps above).
             #[cfg(unix)]
@@ -2713,6 +2779,127 @@ impl Executor {
             }
         }
         crate::builtins::kill::requeue_pending_signals(trapped);
+        Ok(())
+    }
+
+    /// rubash#3401 (face 1): the parent-side death verdict for a
+    /// command-substitution conduit — `termsig_death_armed` evaluated
+    /// against the snapshot the clone took at build time (the clone's
+    /// own trap table was reset for the subshell child, so its own
+    /// `termsig_death_armed` can never fire). Mirrors that helper
+    /// exactly: EXIT-armed plus `exit_reroutes`, or an interactive
+    /// SIGHUP; an interactive SIGINT is never armed. EXIT-armed has
+    /// TWO sources: the clone's snapshot Cell AND the live trap table.
+    /// The Cell is the clone's only source, but on the parent executor
+    /// it is always false — initialised false, only ever set when a
+    /// clone is built — so the fast path (which runs on the parent)
+    /// must also consult the live table, exactly like
+    /// `termsig_death_armed`. Without the live read the verdict never
+    /// returns death on the fast path and the wait rides out the whole
+    /// child (pin term-comsub died at 5.05s on head ddd41e5c).
+    #[cfg(unix)]
+    fn comsub_parent_termsig_armed(&self, signal: i32) -> bool {
+        if self.invocation_interactive() && signal == libc::SIGINT as i32 {
+            return false;
+        }
+        if self.invocation_interactive() && signal == libc::SIGHUP as i32 {
+            return true;
+        }
+        let exit_armed = self.comsub_parent_exit_armed.get()
+            || crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "EXIT").is_some();
+        exit_armed && crate::builtins::kill::exit_reroutes(signal)
+    }
+
+    /// rubash#3401: the shared termsig classifier for `&self` waits
+    /// (the comsub conduit and the external-command fast path). Drains
+    /// the mailbox once and sorts each delivery like the normal drain —
+    /// trapped ones re-queued, ignored / SIGCHLD / SIGQUIT dropped —
+    /// except an untrapped terminating delivery whose parent-side
+    /// verdict is death, which is returned raw for the caller to act
+    /// on (the caller re-queues it itself after killing its child, so
+    /// the parent's next boundary poll adjudicates it — EXIT trap
+    /// first, then death by the signal — before the next command
+    /// runs). `&self` only: the mailbox is process-global free fns
+    /// and the trap table is read through `&self`, so no `&mut`
+    /// receiver is needed — the fast path runs in `&self` expansion
+    /// contexts that cannot lend one
+    /// (expand_command_substitution_inner is `&self`).
+    #[cfg(unix)]
+    pub(in crate::executor) fn pending_termsig_verdict(&self) -> Option<i32> {
+        let signals =
+            crate::builtins::kill::take_pending_signals_now(std::process::id()).unwrap_or_default();
+        if signals.is_empty() {
+            return None;
+        }
+        let mut trapped = Vec::new();
+        let mut death = None;
+        for &signal in &signals {
+            if death.is_some() {
+                // A death verdict is already taken: preserve the rest
+                // for the next boundary poll rather than dropping them.
+                trapped.push(signal);
+                continue;
+            }
+            if !crate::builtins::kill::kernel_handler_installed(signal) {
+                continue;
+            }
+            let Some(signal_name) = signal_trap_name(signal) else {
+                continue;
+            };
+            let action =
+                crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, &signal_name);
+            match action {
+                Some(action) if !action.is_empty() => trapped.push(signal),
+                Some(_) => {}
+                None if signal == crate::builtins::kill::SIGCHLD_NUMBER => {}
+                // sig.c:333: every shell ignores SIGQUIT for itself; an
+                // untrapped delivery while blocked is dropped, not fatal.
+                None if signal == crate::builtins::kill::SIGQUIT_NUMBER => {}
+                None => {
+                    if self.comsub_parent_termsig_armed(signal) {
+                        death = Some(signal);
+                    } else {
+                        trapped.push(signal);
+                    }
+                }
+            }
+        }
+        crate::builtins::kill::requeue_pending_signals(trapped);
+        death
+    }
+
+    /// rubash#3401 (face 1): the command-substitution conduit drain.
+    /// A comsub clone shares this process, so GNU's model — the parent
+    /// waiting on its forked child observes the termsig in `wait_for`
+    /// (jobs.c:3064 CHECK_TERMSIG) and dies — has no direct analogue:
+    /// the clone IS the parent's wait. The clone therefore acts as a
+    /// conduit, not a judge: it drains the shared mailbox (which the
+    /// flat-layer guard otherwise forbids it to touch) and sorts each
+    /// delivery exactly like the normal drain — trapped ones re-queued
+    /// for the parent's boundary poll, ignored / SIGCHLD / SIGQUIT
+    /// dropped — except an untrapped terminating delivery whose
+    /// parent-side verdict is death. That one is recorded raw in
+    /// `comsub_termsig_pending` and aborts the clone's wait, so the
+    /// teardown can hand the signal to the parent for adjudication
+    /// against its own trap table. A delivery whose parent verdict is
+    /// NOT death is re-queued and the clone keeps waiting: the parent
+    /// adjudicates it at its boundary after the substitution completes,
+    /// exactly as on the base tree. A death already recorded aborts
+    /// the next wait at once, so a doomed clone's body never runs past
+    /// its verdict into a further long wait.
+    #[cfg(unix)]
+    fn observe_signals_comsub_conduit(&mut self) -> Result<(), ExecuteError> {
+        if let Some(sig) = self.comsub_termsig_pending.get() {
+            return Err(ExecuteError::ExitCode(128 + sig));
+        }
+        // The shared classifier already re-queued the trapped batch
+        // (an earlier form of this drain returned here without doing
+        // so, dropping them); the death signal itself is recorded raw
+        // — the teardown re-queues it for the parent's boundary poll.
+        if let Some(sig) = self.pending_termsig_verdict() {
+            self.comsub_termsig_pending.set(Some(sig));
+            return Err(ExecuteError::ExitCode(128 + sig));
+        }
         Ok(())
     }
 
@@ -3053,10 +3240,27 @@ impl Executor {
         // the tracking value with — pin the action's node lines instead, the
         // way run_debug_trap does. The flat-region caller pins the subshell's
         // close-paren line (execute_cmd.c:696, honored by the :769 fire).
-        let failed_line = line_override.or(command.line);
+        // GNU binds `line_number_for_err_trap` here (execute_cmd.c:873):
+        // for a leaf command it IS command.line (the leaf stamped it), but
+        // a compound's own redirect failure reports the PREVIOUS leaf's
+        // line — `{ :; } </bad` after `echo x` names echo's line, and a
+        // failing compound inside a function names the call line
+        // (rubash#3553).
+        let failed_line = line_override
+            .or_else(|| self.err_trap_line.get())
+            .or(command.line);
         let action = self.comsub_body_alias_splice(&action);
         let tokens = crate::lexer::tokenize(&action);
-        let mut ast = crate::parser::parse(&tokens);
+        // rubash#3328: thread the spliced action as the diagnostic
+        // source (same shape as the EXIT-trap site): the bare parse()
+        // re-serialized the echo line.
+        let mut ast = crate::parser::parse_with_options(
+            &tokens,
+            crate::parser::ParseLoopOptions {
+                source_text: Some(action.as_str().into()),
+                ..Default::default()
+            },
+        );
         if let Some(line) = failed_line {
             // rubash#1166: rebase the whole action onto the failed
             // command's line, nested nodes included (see
@@ -3146,10 +3350,20 @@ impl Executor {
         }
         let saved_exit = self.exit_code;
         self.signal_trap_running = true;
+        // rubash#3328: the action text is the diagnostic source for
+        // every re-parse in the loop below (same shape as the
+        // EXIT-trap site): the bare parse() re-serialized the echo line.
+        let action_source: std::rc::Rc<str> = action.as_str().into();
         let mut result: Result<(), ExecuteError> = Ok(());
         loop {
             let tokens = crate::lexer::tokenize(&action);
-            let ast = crate::parser::parse(&tokens);
+            let ast = crate::parser::parse_with_options(
+                &tokens,
+                crate::parser::ParseLoopOptions {
+                    source_text: Some(action_source.clone()),
+                    ..Default::default()
+                },
+            );
             result = self.with_xtrace_indirection(|executor| executor.execute_ast(&ast));
             if result.is_err() {
                 break;
@@ -3651,16 +3865,24 @@ impl Executor {
             self.execute_stdio_only_exec_redirect_scoped(cmd)?;
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
+            // rubash#3401 (face 3): the simulated-exec wait takes the
+            // executor, so the env/cwd borrows are cloned locals — the
+            // `&mut self` executor arg cannot share the call with
+            // `&self.shell_state.*` borrows.
+            let exec_env_vars = self.shell_state.env_vars.clone();
+            let exec_cwd = self.shell_state.cwd.clone();
             let status = crate::builtins::exec::execute_with_io(
+                Some(&mut *self),
                 &cmd.words[1..],
-                &self.shell_state.env_vars,
-                &self.shell_state.cwd,
+                &exec_env_vars,
+                &exec_cwd,
                 &mut stdout,
                 &mut stderr,
                 // No spawn happens on this path (a bare `exec` with
                 // redirects only reports option diagnostics); inherit is
                 // the no-op value.
                 Stdio::inherit(),
+                &crate::executor::ChildFdSetup::default(),
             )?;
             // GNU exec.def reports option errors through builtin_error,
             // which carries the script:line context prefix
@@ -3851,6 +4073,7 @@ impl Executor {
         cmd: &CommandNode,
         stdout: Option<Stdio>,
         stderr: Option<Stdio>,
+        setup: &crate::executor::ChildFdSetup,
     ) -> Option<Result<i32, ExecuteError>> {
         if !self.exec_image_replacement_applies(cmd) {
             return None;
@@ -3875,6 +4098,7 @@ impl Executor {
             &self.shell_state.env_vars,
             &self.shell_state.cwd,
             Some((stdin, stdout, stderr)),
+            setup,
         )?;
         Some(match status {
             Ok(status) => Ok(status),
@@ -3909,7 +4133,12 @@ impl Executor {
             std::collections::HashMap::new();
         bindings.insert(1, self.exec_spawn_table_binding(1));
         bindings.insert(2, self.exec_spawn_table_binding(2));
-        for redirect in &cmd.redirects {
+        // rubash#3311: fd >= 3 output targets this walk opened, by list
+        // position — the shared fd delivery below stamps/pins THESE
+        // descriptions for the child instead of opening them again.
+        let mut preopened: std::collections::HashMap<usize, Rc<FileFd>> =
+            std::collections::HashMap::new();
+        for (position, redirect) in cmd.redirects.iter().enumerate() {
             if redirect.fd_var.is_some()
                 || crate::executor::support_names::is_injected_group_redirect(redirect)
             {
@@ -3925,23 +4154,27 @@ impl Executor {
                         bindings.insert(fd, ExecSpawnBinding::Closed);
                         continue;
                     }
-                    let file = if matches!(redirect.kind, crate::parser::RedirectKind::Append) {
-                        // rubash#3104: the append open is a name-
-                        // consumption boundary — master's scalar
-                        // append arms folded raw-byte pairs via
-                        // redirect_target_filesystem_path; the walk
-                        // keeps that conversion.
-                        open_redirect_append(&self.session_path(
-                            self.redirect_target_filesystem_path_for(redirect, &target),
-                        ))?
-                    } else {
-                        self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?
-                    };
+                    // rubash#3104: the append open is a name-
+                    // consumption boundary — master's scalar append
+                    // arms folded raw-byte pairs via
+                    // redirect_target_filesystem_path; the walk keeps
+                    // that conversion (exec_spawn_open_output).
+                    let file = self.exec_spawn_open_output(
+                        redirect,
+                        &target,
+                        matches!(redirect.kind, crate::parser::RedirectKind::Append),
+                    )?;
                     // rubash#2635: the open above is GNU's redir_open
                     // (the target now exists); the dup2 onto a
                     // redirector at/above the soft limit fails EBADF.
                     if self.redirect_fd_over_limit(fd) {
                         return self.exec_spawn_limit_failure(fd);
+                    }
+                    if fd >= 3 {
+                        preopened.insert(
+                            position,
+                            FileFd::from_file(file.try_clone()?, target.clone().into()),
+                        );
                     }
                     bindings.insert(
                         fd,
@@ -3953,18 +4186,11 @@ impl Executor {
                     if is_closed_redirect_target(&target) {
                         continue;
                     }
-                    let file =
-                        if matches!(redirect.kind, crate::parser::RedirectKind::CombinedAppend) {
-                            open_redirect_append(&self.session_path(
-                                self.redirect_target_filesystem_path_for(redirect, &target),
-                            ))?
-                        } else {
-                            self.create_redirect_output_for(
-                                Some(redirect),
-                                &target,
-                                redirect.clobber,
-                            )?
-                        };
+                    let file = self.exec_spawn_open_output(
+                        redirect,
+                        &target,
+                        matches!(redirect.kind, crate::parser::RedirectKind::CombinedAppend),
+                    )?;
                     let binding = ExecSpawnBinding::File(std::rc::Rc::new(file), Some(target));
                     bindings.insert(1, binding.clone());
                     bindings.insert(2, binding);
@@ -3997,17 +4223,7 @@ impl Executor {
                     // r_err_and_out — one open, both std fds share it.
                     if fd == 1 {
                         let path = target.strip_prefix('&').unwrap_or(&target).to_string();
-                        let file = if redirect.append {
-                            open_redirect_append(&self.session_path(
-                                self.redirect_target_filesystem_path_for(redirect, &path),
-                            ))?
-                        } else {
-                            self.create_redirect_output_for(
-                                Some(redirect),
-                                &path,
-                                redirect.clobber,
-                            )?
-                        };
+                        let file = self.exec_spawn_open_output(redirect, &path, redirect.append)?;
                         let binding = ExecSpawnBinding::File(std::rc::Rc::new(file), Some(path));
                         bindings.insert(1, binding.clone());
                         bindings.insert(2, binding);
@@ -4030,16 +4246,90 @@ impl Executor {
             .get(&2)
             .cloned()
             .unwrap_or(ExecSpawnBinding::Ambient(2));
+        let (setup, parent_side_dups) = self.exec_child_fd_setup(cmd, preopened);
         // Pure-ambient: neither std fd was rebound by the walk or
         // resolved to a file/closed fd-table endpoint — the
         // historical tail (image replacement, capture routing)
         // applies verbatim.
-        if matches!(fd1, ExecSpawnBinding::Ambient(1))
+        let status = if matches!(fd1, ExecSpawnBinding::Ambient(1))
             && matches!(fd2, ExecSpawnBinding::Ambient(2))
         {
-            return self.execute_exec_spawn_tail(cmd);
+            self.execute_exec_spawn_tail(cmd, &setup)
+        } else {
+            self.execute_exec_spawn_bound(cmd, fd1, fd2, &setup)
+        };
+        // The child holds its own copies (GNU's open -> exec; the
+        // simulation's spawn resolved above).
+        for dup in parent_side_dups {
+            crate::fd::close_handle(dup);
         }
-        self.execute_exec_spawn_bound(cmd, fd1, fd2)
+        status
+    }
+
+    /// rubash#3311/#3313: the descriptor set the exec'd image
+    /// inherits beyond the std slots the spawn arms compose. GNU
+    /// exec_builtin (builtins/exec.def:231) calls shell_execve on the
+    /// shell's own table after execute_builtin_or_function ran
+    /// do_redirections (execute_cmd.c:5606, made permanent for exec at
+    /// execute_cmd.c:5624): every fd >= 3 the command opened (redir.c:949
+    /// redir_open) or an earlier `exec N>f` bound survives at its
+    /// number, and a `<&-` slot (redir.c:1239 r_close_this) is simply
+    /// closed. This is the plain disk command's delivery
+    /// (collect_external_fd_delivery — env transport for rubash
+    /// children, unix pins for foreign ones) collected for the
+    /// builtin's own Command, with `preopened` handing it the walk's
+    /// fd >= 3 descriptions; fd 0 joins `close_fds` when the table
+    /// holds it closed (exec_stdin_closed). Returns the parent-side
+    /// duplicates the caller closes after the spawn.
+    fn exec_child_fd_setup(
+        &mut self,
+        cmd: &CommandNode,
+        mut preopened: std::collections::HashMap<usize, Rc<FileFd>>,
+    ) -> (crate::executor::ChildFdSetup, Vec<crate::fd::HANDLE>) {
+        // The scratch Command is never spawned: it only records the
+        // delivery's env stamps, read back below.
+        let mut scratch = std::process::Command::new("rubash-exec-fd-delivery");
+        let delivery =
+            self.collect_external_fd_delivery(cmd, &mut scratch, None, Some(&mut preopened));
+        let env = scratch
+            .get_envs()
+            .map(|(key, value)| (key.to_os_string(), value.map(|value| value.to_os_string())))
+            .collect();
+        let mut close_fds = Vec::new();
+        if cfg!(unix) && self.exec_stdin_closed() {
+            close_fds.push(0);
+        }
+        (
+            crate::executor::ChildFdSetup::new(env, delivery.pins, close_fds),
+            delivery.parent_side_dups,
+        )
+    }
+
+    /// One output open of the exec spawn walk at its list position
+    /// (GNU redir.c:949 redir_open): a `/dev/full` target opens the
+    /// device where the platform has it (open_spawn_full_device —
+    /// rubash#3312: the #1898 stand-in sink absorbed the image's
+    /// writes, so `exec /bin/echo hi >/dev/full` exited 0 silently);
+    /// append forms open O_APPEND through the filesystem-path fold
+    /// (rubash#3104); everything else takes the noclobber-aware
+    /// create.
+    fn exec_spawn_open_output(
+        &self,
+        redirect: &crate::parser::Redirect,
+        target: &str,
+        append: bool,
+    ) -> Result<std::fs::File, ExecuteError> {
+        if let Some(file) =
+            crate::executor::external_redirects::open_spawn_full_device(target, append)
+        {
+            return Ok(file);
+        }
+        if append {
+            return Ok(open_redirect_append(&self.session_path(
+                self.redirect_target_filesystem_path_for(redirect, target),
+            ))?);
+        }
+        Ok(self.create_redirect_output_for(Some(redirect), target, redirect.clobber)?)
     }
 
     /// One fd's spawn binding resolved from the fd table (see
@@ -4132,6 +4422,7 @@ impl Executor {
         cmd: &CommandNode,
         fd1: ExecSpawnBinding,
         fd2: ExecSpawnBinding,
+        setup: &crate::executor::ChildFdSetup,
     ) -> Result<i32, ExecuteError> {
         // rubash#1175: with both std fds resolving to real
         // descriptors, attempt the true image replacement first (the
@@ -4143,9 +4434,12 @@ impl Executor {
                 self.exec_spawn_stdio(1, &fd1),
                 self.exec_spawn_stdio(2, &fd2),
             ) {
-                if let Some(result) =
-                    self.try_exec_image_replacement_with_stdio(cmd, Some(stdout), Some(stderr))
-                {
+                if let Some(result) = self.try_exec_image_replacement_with_stdio(
+                    cmd,
+                    Some(stdout),
+                    Some(stderr),
+                    setup,
+                ) {
                     return result;
                 }
             }
@@ -4166,6 +4460,12 @@ impl Executor {
             },
         );
         let child_stdin = self.exec_inherited_stdin()?;
+        // rubash#3401 (face 3): the simulated-exec wait takes the
+        // executor, so the env/cwd borrows are cloned locals — the
+        // `&mut self` executor arg cannot share the call with
+        // `&self.shell_state.*` borrows.
+        let exec_env_vars = self.shell_state.env_vars.clone();
+        let exec_cwd = self.shell_state.cwd.clone();
         let status = if matches!(fd1, ExecSpawnBinding::Ambient(1))
             && self.fd_table.write_endpoint(1) == Some(FdWriteEndpoint::Stdout)
             && (self.stdout_capture.is_some()
@@ -4182,41 +4482,65 @@ impl Executor {
                 ExecSpawnBinding::File(file, _) => {
                     let mut diag = file.as_ref().try_clone()?;
                     crate::builtins::exec::execute_with_io(
+                        Some(&mut *self),
                         &exec_args,
-                        &self.shell_state.env_vars,
-                        &self.shell_state.cwd,
+                        &exec_env_vars,
+                        &exec_cwd,
                         &mut crate::executor::GlobalStdout,
                         &mut diag,
                         child_stdin,
+                        setup,
                     )?
                 }
                 ExecSpawnBinding::Ambient(1) => crate::builtins::exec::execute_with_io(
+                    Some(&mut *self),
                     &exec_args,
-                    &self.shell_state.env_vars,
-                    &self.shell_state.cwd,
+                    &exec_env_vars,
+                    &exec_cwd,
                     &mut crate::executor::GlobalStdout,
                     &mut crate::executor::GlobalStdout,
                     child_stdin,
+                    setup,
                 )?,
                 ExecSpawnBinding::Closed => crate::builtins::exec::execute_with_io(
+                    Some(&mut *self),
                     &exec_args,
-                    &self.shell_state.env_vars,
-                    &self.shell_state.cwd,
+                    &exec_env_vars,
+                    &exec_cwd,
                     &mut crate::executor::GlobalStdout,
                     &mut std::io::sink(),
                     child_stdin,
+                    setup,
                 )?,
-                _ => with_exec_diag_stderr(&mut self.stderr_capture, |diag| {
-                    crate::builtins::exec::execute_with_io(
-                        &exec_args,
-                        &self.shell_state.env_vars,
-                        &self.shell_state.cwd,
-                        &mut crate::executor::GlobalStdout,
-                        diag,
-                        child_stdin,
-                    )
-                    .map_err(ExecuteError::from)
-                })?,
+                _ => {
+                    // rubash#3401 (face 3): the diag-capture helper's
+                    // closure cannot carry the `&mut self` executor arg
+                    // while `self.stderr_capture` is mutably borrowed,
+                    // so the take/restore is inlined here.
+                    let mut capture = self.stderr_capture.take();
+                    // The slot is restored BEFORE the error propagates —
+                    // the old helper guaranteed this (a failed spawn must
+                    // not orphan the capture); a `?` inside the block
+                    // would skip the restore.
+                    let result = {
+                        let mut target = match capture.as_mut() {
+                            Some(buffer) => ExecDiagStderr::Capture(buffer),
+                            None => ExecDiagStderr::Process(std::io::stderr()),
+                        };
+                        crate::builtins::exec::execute_with_io(
+                            Some(&mut *self),
+                            &exec_args,
+                            &exec_env_vars,
+                            &exec_cwd,
+                            &mut crate::executor::GlobalStdout,
+                            &mut target,
+                            child_stdin,
+                            setup,
+                        )
+                    };
+                    self.stderr_capture = capture;
+                    result?
+                }
             }
         } else {
             // Direct composition: both std fds resolve to concrete
@@ -4264,28 +4588,32 @@ impl Executor {
                 ExecSpawnBinding::File(file, _) => {
                     let mut diag = file.as_ref().try_clone()?;
                     crate::builtins::exec::execute_with_child_stdio_closing(
+                        Some(&mut *self),
                         &exec_args,
-                        &self.shell_state.env_vars,
-                        &self.shell_state.cwd,
+                        &exec_env_vars,
+                        &exec_cwd,
                         &mut stdout_writer,
                         &mut diag,
                         child_stdout,
                         child_stderr,
                         child_stdin,
                         &close_fds,
+                        setup,
                     )?
                 }
                 ExecSpawnBinding::Closed => {
                     crate::builtins::exec::execute_with_child_stdio_closing(
+                        Some(&mut *self),
                         &exec_args,
-                        &self.shell_state.env_vars,
-                        &self.shell_state.cwd,
+                        &exec_env_vars,
+                        &exec_cwd,
                         &mut stdout_writer,
                         &mut std::io::sink(),
                         child_stdout,
                         child_stderr,
                         child_stdin,
                         &close_fds,
+                        setup,
                     )?
                 }
                 ExecSpawnBinding::Ambient(1) => {
@@ -4297,44 +4625,63 @@ impl Executor {
                             let dup = crate::fd::duplicate_handle_inheritable(file_fd.handle)?;
                             let mut diag = crate::fd::handle_to_file(dup);
                             crate::builtins::exec::execute_with_child_stdio_closing(
+                                Some(&mut *self),
                                 &exec_args,
-                                &self.shell_state.env_vars,
-                                &self.shell_state.cwd,
+                                &exec_env_vars,
+                                &exec_cwd,
                                 &mut stdout_writer,
                                 &mut diag,
                                 child_stdout,
                                 child_stderr,
                                 child_stdin,
                                 &close_fds,
+                                setup,
                             )?
                         }
                         _ => crate::builtins::exec::execute_with_child_stdio_closing(
+                            Some(&mut *self),
                             &exec_args,
-                            &self.shell_state.env_vars,
-                            &self.shell_state.cwd,
+                            &exec_env_vars,
+                            &exec_cwd,
                             &mut stdout_writer,
                             &mut crate::executor::GlobalStdout,
                             child_stdout,
                             child_stderr,
                             child_stdin,
                             &close_fds,
+                            setup,
                         )?,
                     }
                 }
-                _ => with_exec_diag_stderr(&mut self.stderr_capture, |diag| {
-                    crate::builtins::exec::execute_with_child_stdio_closing(
-                        &exec_args,
-                        &self.shell_state.env_vars,
-                        &self.shell_state.cwd,
-                        &mut stdout_writer,
-                        diag,
-                        child_stdout,
-                        child_stderr,
-                        child_stdin,
-                        &close_fds,
-                    )
-                    .map_err(ExecuteError::from)
-                })?,
+                _ => {
+                    // rubash#3401 (face 3): the diag-capture helper's
+                    // closure cannot carry the `&mut self` executor arg,
+                    // so the take/restore is inlined here. The slot is
+                    // restored BEFORE the error propagates — a `?` inside
+                    // the block would orphan the capture on a failed spawn.
+                    let mut capture = self.stderr_capture.take();
+                    let result = {
+                        let mut target = match capture.as_mut() {
+                            Some(buffer) => ExecDiagStderr::Capture(buffer),
+                            None => ExecDiagStderr::Process(std::io::stderr()),
+                        };
+                        crate::builtins::exec::execute_with_child_stdio_closing(
+                            Some(&mut *self),
+                            &exec_args,
+                            &exec_env_vars,
+                            &exec_cwd,
+                            &mut stdout_writer,
+                            &mut target,
+                            child_stdout,
+                            child_stderr,
+                            child_stdin,
+                            &close_fds,
+                            setup,
+                        )
+                    };
+                    self.stderr_capture = capture;
+                    result?
+                }
             }
         };
         self.finish_dev_fd_operands(dev_ops);
@@ -4348,7 +4695,11 @@ impl Executor {
     /// ordered walk in execute_exec_spawn has already opened every
     /// numbered output entry, so the apply_no_output pass the tail
     /// used to need no longer runs here.
-    fn execute_exec_spawn_tail(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
+    fn execute_exec_spawn_tail(
+        &mut self,
+        cmd: &CommandNode,
+        setup: &crate::executor::ChildFdSetup,
+    ) -> Result<i32, ExecuteError> {
         // rubash#1175: with every gate in exec_image_replacement_applies
         // satisfied, replace this process's image for real (GNU
         // shell_execve) instead of simulating it with a child whose PID
@@ -4381,6 +4732,7 @@ impl Executor {
                     &self.shell_state.env_vars,
                     &self.shell_state.cwd,
                     Some(stdio),
+                    setup,
                 ) {
                     return Ok(status?);
                 }
@@ -4406,18 +4758,31 @@ impl Executor {
             crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
             crate::executor::dev_fd_operands::DevOperandStdout::FdTable,
         );
+        // rubash#3401 (face 3): same executor-threading borrow split as
+        // execute_exec_spawn above — the env/cwd borrows are cloned
+        // locals for the `&mut self` executor arg.
+        let exec_env_vars = self.shell_state.env_vars.clone();
+        let exec_cwd = self.shell_state.cwd.clone();
         let status = if fd1_lands_in_capture {
             // `exec cmd 2>&1` inside the substitution resolves fd 2 to the
             // same Stdout endpoint — its diagnostics join the capture too;
             // a plain fd 2 stays the terminal stream.
             if self.fd_table.write_endpoint(2) == Some(FdWriteEndpoint::Stdout) {
+                // The stdin resolve is hoisted out of the call's argument
+                // list: `Some(&mut *self)` activates its mutable reborrow
+                // at once (no two-phase borrow through `Some`), so a later
+                // `self.exec_inherited_stdin()?` argument would be E0502
+                // — the else branch below hoists it the same way.
+                let child_stdin = self.exec_inherited_stdin()?;
                 crate::builtins::exec::execute_with_io(
+                    Some(&mut *self),
                     &exec_args,
-                    &self.shell_state.env_vars,
-                    &self.shell_state.cwd,
+                    &exec_env_vars,
+                    &exec_cwd,
                     &mut crate::executor::GlobalStdout,
                     &mut crate::executor::GlobalStdout,
-                    self.exec_inherited_stdin()?,
+                    child_stdin,
+                    setup,
                 )?
             } else {
                 // rubash#2395: the child's piped stderr belongs to the
@@ -4427,17 +4792,30 @@ impl Executor {
                 // those bytes; writing them to the terminal dropped
                 // the stage's `2>/dev/null` on the floor).
                 let child_stdin = self.exec_inherited_stdin()?;
-                with_exec_diag_stderr(&mut self.stderr_capture, |diag| {
+                // rubash#3401 (face 3): the diag-capture helper's
+                // closure cannot carry the `&mut self` executor arg, so
+                // the take/restore is inlined here; the slot is restored
+                // BEFORE the error propagates (a `?` inside the block
+                // would orphan the capture on a failed spawn).
+                let mut capture = self.stderr_capture.take();
+                let result = {
+                    let mut target = match capture.as_mut() {
+                        Some(buffer) => ExecDiagStderr::Capture(buffer),
+                        None => ExecDiagStderr::Process(std::io::stderr()),
+                    };
                     crate::builtins::exec::execute_with_io(
+                        Some(&mut *self),
                         &exec_args,
-                        &self.shell_state.env_vars,
-                        &self.shell_state.cwd,
+                        &exec_env_vars,
+                        &exec_cwd,
                         &mut crate::executor::GlobalStdout,
-                        diag,
+                        &mut target,
                         child_stdin,
+                        setup,
                     )
-                    .map_err(ExecuteError::from)
-                })?
+                };
+                self.stderr_capture = capture;
+                result?
             }
         } else {
             // GNU exec.def: `exec cmd` runs cmd in the shell's current fd
@@ -4450,19 +4828,32 @@ impl Executor {
             let child_stdout = self.exec_inherited_stdio(1)?;
             let child_stderr = self.exec_inherited_stdio(2)?;
             let child_stdin = self.exec_inherited_stdin()?;
-            with_exec_diag_stderr(&mut self.stderr_capture, |diag| {
+            // rubash#3401 (face 3): the diag-capture helper's closure
+            // cannot carry the `&mut self` executor arg, so the
+            // take/restore is inlined here; the slot is restored BEFORE
+            // the error propagates (a `?` inside the block would orphan
+            // the capture on a failed spawn).
+            let mut capture = self.stderr_capture.take();
+            let result = {
+                let mut target = match capture.as_mut() {
+                    Some(buffer) => ExecDiagStderr::Capture(buffer),
+                    None => ExecDiagStderr::Process(std::io::stderr()),
+                };
                 crate::builtins::exec::execute_with_child_stdio(
+                    Some(&mut *self),
                     &exec_args,
-                    &self.shell_state.env_vars,
-                    &self.shell_state.cwd,
+                    &exec_env_vars,
+                    &exec_cwd,
                     &mut crate::executor::GlobalStdout,
-                    diag,
+                    &mut target,
                     child_stdout,
                     child_stderr,
                     child_stdin,
+                    setup,
                 )
-                .map_err(ExecuteError::from)
-            })?
+            };
+            self.stderr_capture = capture;
+            result?
         };
         self.finish_dev_fd_operands(dev_ops);
         Ok(status)
@@ -4491,6 +4882,41 @@ impl Executor {
     /// stdin to Stdio::null() unless .stdin() is set, so this channel must
     /// be resolved and passed explicitly at every exec spawn site.
     fn exec_inherited_stdin(&self) -> Result<Stdio, ExecuteError> {
+        // rubash#3046: a live fd-table File endpoint on slot 0 outranks
+        // the FUNCTION_STDIN mirror. GNU runs the element's own
+        // do_redirections AFTER do_piping (execute_cmd.c:5520-5522
+        // execute_subshell_builtin_or_function: do_piping, then
+        // do_redirections (redirects, RX_ACTIVE)), so the element's
+        // own `< file` / `< /dev/char` replaces the pipe on fd 0, and
+        // redir.c redir_open opens the target uniformly — the file
+        // TYPE of the stdin target is never consulted. rubash's text
+        // channel deliberately declines character devices
+        // (shell_options.rs stdin_string_for_command: a device has no
+        // EOF to slurp, "the caller binds the live fd instead"), and
+        // execute_exec's bind_command_fd0_input does bind that live
+        // FileFd — but this function used to consult the mirror first,
+        // so a stage-0 mirror (empty: no producer) handed the child
+        // Stdio::null() (0 bytes), and a later stage's mirror handed
+        // it the upstream pipe bytes (`echo hi | exec dd </dev/urandom`
+        // read "hi\n"), in both cases shadowing the redirect the
+        // shell had just bound. The mirror is fd 0's binding only
+        // while fd 0 itself is unbound — the same precedence the
+        // codebase already states in function_stdin_is_command_source
+        // (shell_options.rs) and in stdin_string_for_command's tail
+        // ("an exec-installed fd 0 in the fd table shadows the
+        // ambient FUNCTION_STDIN buffer"). The bind's text branch
+        // removes the fd-table entry when it stages text
+        // (heredoc / here-string / procsub), so no stale File
+        // endpoint can coexist with a text mirror installed by the
+        // same bind; a File endpoint found here is the command's own
+        // redirect (or an enclosing scope's bind the command did not
+        // supersede, which GNU likewise leaves in place).
+        if let Some(FdReadEndpoint::File(file))
+        | Some(FdReadEndpoint::CoprocStdout { fd: file, .. }) = self.fd_table.read_endpoint(0)
+        {
+            let dup = crate::fd::duplicate_handle_inheritable(file.handle)?;
+            return Ok(Stdio::from(crate::fd::handle_to_file(dup)));
+        }
         // FUNCTION_STDIN stages bound virtual text (command_input_scope's
         // bind_command_fd0_input, pipeline staging); the unread remainder
         // is what the exec'd image would read off fd 0. background_stdio
@@ -4501,6 +4927,17 @@ impl Executor {
             return Ok(file.map(Stdio::from).unwrap_or(Stdio::null()));
         }
         match self.fd_table.read_endpoint(0) {
+            // rubash#3046 (rework): the File / CoprocStdout arms are
+            // required for exhaustiveness (E0004) and bind the live fd
+            // exactly as the early return above does
+            // (open_fd_read_endpoint_stream, shell_options.rs:1182/1194:
+            // a File or coproc-pipe read end is handle-backed; duplicate
+            // the handle and hand the child the live fd). They are
+            // unreachable while the early return stands, but they keep
+            // the match total — and semantically identical — if that
+            // return is ever restructured. Never collapse these into a
+            // wildcard: the live fd must win over the mirror, not fall
+            // through to Stdio::null().
             Some(FdReadEndpoint::File(file))
             | Some(FdReadEndpoint::CoprocStdout { fd: file, .. }) => {
                 let dup = crate::fd::duplicate_handle_inheritable(file.handle)?;
@@ -4524,11 +4961,33 @@ impl Executor {
             // hand the image; the null device is the closest
             // spawnable state (cross-boundary residual).
             Some(FdReadEndpoint::Directory) => Ok(Stdio::null()),
-            // fd 0 closed (`exec 0<&-`): the closest spawnable state to
-            // GNU's inherited-but-unreadable descriptor.
-            None if self.fd_table.has_entry(0) => Ok(Stdio::null()),
+            // fd 0 closed (`exec cat <&-`, an earlier `exec 0<&-`):
+            // GNU's image starts with fd 0 CLOSED (redir.c:1239
+            // r_close_this; exec.def:231 shell_execve) and its reads
+            // fail EBADF. On unix the slot is inherited here and closed
+            // in the child by the setup's pre_exec close
+            // (exec_child_fd_setup, rubash#3313 — the null device
+            // stand-in read EOF and the image succeeded). Elsewhere
+            // the null device stays the closest spawnable state.
+            None if self.fd_table.has_entry(0) => {
+                if cfg!(unix) && self.exec_stdin_closed() {
+                    Ok(Stdio::inherit())
+                } else {
+                    Ok(Stdio::null())
+                }
+            }
             None => Ok(Stdio::inherit()),
         }
+    }
+
+    /// rubash#3313: whether the exec'd image's fd 0 is a closed slot —
+    /// the closed arm of exec_inherited_stdin (no FUNCTION_STDIN
+    /// remainder, an fd-0 table entry marked closed). A write-only
+    /// fd 0 is an OPEN descriptor in GNU and is not this shape.
+    fn exec_stdin_closed(&self) -> bool {
+        self.function_stdin_remaining().is_none()
+            && self.fd_table.read_endpoint(0).is_none()
+            && self.fd_table.is_closed(0)
     }
 
     /// Write `bytes` to a fresh temp file and open it for the child.
@@ -4616,8 +5075,7 @@ impl Executor {
         line: Option<usize>,
     ) -> Option<Rc<FileFd>> {
         use std::process::{Command, Stdio};
-        let exe = std::env::var_os("CARGO_BIN_EXE_rubash")
-            .map(std::path::PathBuf::from)
+        let exe = test_rubash_binary_from_env()
             .or_else(test_rubash_binary_from_current_exe)
             .or_else(|| std::env::current_exe().ok())
             .unwrap_or_else(|| "rubash".into());
@@ -5025,6 +5483,13 @@ impl Executor {
         // `{ exec 10>&1; } >file` must not leave fd 1 pointing at file).
         let mut ambient: std::collections::BTreeMap<u32, String> =
             std::collections::BTreeMap::new();
+        // rubash#3578: the parser mirrors every heredoc / numbered
+        // here-string into BOTH `redirects` (its list position) and
+        // `heredoc_redirects` (its body) in the same order — only an
+        // unnumbered here-string has no twin (its fd-0 bind is the
+        // `here_string` field below). Pair them in the walk so each
+        // entry binds its body at its GNU do_redirections position.
+        let mut heredoc_twins = cmd.heredoc_redirects.iter();
         for redirect in &cmd.redirects {
             if let Some(fd) = redirect.fd {
                 occupied_slots.insert(fd);
@@ -5057,6 +5522,15 @@ impl Executor {
             // (exec redirections are never undone). A failed redirect stops
             // the list — do_redirections returns on the first error.
             if redirect.fd_var.is_some() {
+                // A `{var}<<` entry still consumes its heredoc_redirects
+                // twin to keep the pairing aligned — the fd_var heredoc
+                // loop below owns its bind (vredir1.sub).
+                if matches!(
+                    redirect.kind,
+                    crate::parser::RedirectKind::HereDoc | crate::parser::RedirectKind::HereString
+                ) {
+                    let _ = heredoc_twins.next();
+                }
                 match self.execute_dynamic_fd_var_redirect(
                     redirect,
                     false,
@@ -5652,7 +6126,10 @@ impl Executor {
                         if self.bind_input_process_substitution_child(
                             fd,
                             source,
-                            super::command_text::procsub_body_seed_line(cmd),
+                            super::command_text::procsub_body_seed_line(
+                                cmd,
+                                self.ambient_line.get(),
+                            ),
                         ) {
                             continue;
                         }
@@ -5819,6 +6296,28 @@ impl Executor {
                         }
                     }
                 }
+                crate::parser::RedirectKind::HereDoc | crate::parser::RedirectKind::HereString => {
+                    // GNU redir.c here_document_to_fd (redir.c:423 +
+                    // :1065-1072): the body materializes at this list
+                    // position and dup2's onto the redirector — under a
+                    // redirect-only exec the bind is persistent, and
+                    // EVERY entry binds (rubash#3578: `exec 14<<A 15<<B`
+                    // kept only fd 15). An unnumbered here-string has no
+                    // heredoc_redirects twin; its fd-0 bind is the
+                    // `here_string` path below.
+                    let unnumbered_here_string =
+                        matches!(redirect.kind, crate::parser::RedirectKind::HereString)
+                            && redirect.fd.is_none();
+                    if !unnumbered_here_string {
+                        if let Some(info) = heredoc_twins.next() {
+                            if info.body.is_some() || info.body_carrier.is_some() {
+                                let fd = redirect.fd.unwrap_or(0);
+                                let input = self.expand_heredoc_redirect_text(info);
+                                self.set_fd_input_text(fd, input, fd != 0);
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
             handled = true;
@@ -5876,9 +6375,16 @@ impl Executor {
             return Ok(Some(0));
         }
 
-        if let Some((fd, input)) = self.exec_heredoc_fd_input(cmd) {
-            self.set_fd_input_text(fd, input, fd != 0);
-            return Ok(Some(0));
+        // Any heredoc entry the walk did not pair (a store with no
+        // `redirects` twin) still binds at its tail position, the same
+        // persistent-descriptor semantics the paired entries got.
+        for info in heredoc_twins {
+            if info.fd_var.is_none() && (info.body.is_some() || info.body_carrier.is_some()) {
+                let fd = info.fd.unwrap_or(0);
+                let input = self.expand_heredoc_redirect_text(info);
+                self.set_fd_input_text(fd, input, fd != 0);
+                handled = true;
+            }
         }
 
         if handled {
@@ -5888,65 +6394,6 @@ impl Executor {
             return Ok(Some(0));
         }
         Ok(None)
-    }
-
-    fn exec_heredoc_fd_input(&self, cmd: &CommandNode) -> Option<(u32, String)> {
-        let redirect = cmd
-            .heredoc_redirects
-            .iter()
-            .rev()
-            // `{var}` heredocs are bound by the fd_var loop above; every
-            // other heredoc/here-string with a body belongs to its explicit
-            // fd, or to fd 0 when the redirect names no fd. The old
-            // `fd.is_some()` gate silently dropped `exec <<EOF` and
-            // `exec <<<word`, whose persistence is the whole point of the
-            // no-operand exec form (GNU redir.c: a redirect-only exec makes
-            // the redirection permanent; rubash#1413).
-            .find(|redirect| redirect.fd_var.is_none() && redirect.body.is_some())?;
-        let fd = redirect.fd.unwrap_or(0);
-        let body = redirect.body.as_deref()?;
-        let input = if let Some(carrier) = &redirect.body_carrier {
-            if let crate::parser::StdinBody::Preexpanded(text) = carrier {
-                text.clone()
-            } else {
-                // NeedsExpansion case: fall through to legacy checks
-                if let Some(word) = body.strip_prefix(STORAGE_WORD_PREFIX) {
-                    let mut input =
-                        decode_ansi_c_quoted_word(word).unwrap_or_else(|| self.expand_word(word));
-                    input.push('\n');
-                    input
-                } else {
-                    strip_unterminated_heredoc_marker(strip_quoted_heredoc_marker(body)).to_string()
-                }
-            }
-        } else if let Some(word) = body.strip_prefix(STORAGE_WORD_PREFIX) {
-            let mut input =
-                decode_ansi_c_quoted_word(word).unwrap_or_else(|| self.expand_word(word));
-            input.push('\n');
-            input
-        } else if let Some(pre) = preexpanded_stdin_body(body) {
-            pre.to_string()
-        } else {
-            strip_unterminated_heredoc_marker(strip_quoted_heredoc_marker(body)).to_string()
-        };
-        // A here-string's stored word is the lexer's transport text:
-        // `$'p\nq\n'` carries ANSI_C_IFS_GUARD pairs around every decoded
-        // blank (lexer/quotes.rs — field-split transport, GNU's CTLESC-
-        // quoted bytes) and the DATA_* carriers hold its literal
-        // quote/dollar bytes. Once the text crosses into the fd byte
-        // channel there is no later strip boundary, so the guards leak
-        // into every consumer of the descriptor (rubash#1208: `exec
-        // 3<<<$'p\nq\n'` + `mapfile -u 3` stored "p<U+E401>" elements).
-        // Resolve them at the entry boundary like the fd-0 here-string
-        // path does (expand_here_string_mut's decode tail).
-        let input = if redirect.here_string {
-            crate::executor::markers::strip_ansi_c_ifs_guard(
-                &crate::executor::markers::decode_word_position_carriers(&input),
-            )
-        } else {
-            input
-        };
-        Some((fd, input))
     }
 
     /// `exec fd>&src` inside a redirected compound must resolve `src`
