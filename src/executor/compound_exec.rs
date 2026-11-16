@@ -4996,7 +4996,7 @@ impl Executor {
     where
         F: FnOnce(&mut Executor) -> Result<T, ExecuteError>,
     {
-        let saved_fd_inputs = self.bind_numbered_heredoc_redirects(cmd, true);
+        let saved_fd_inputs = self.bind_numbered_heredoc_redirects(cmd, true)?;
         let result = f(self);
         self.restore_numbered_heredoc_redirects(saved_fd_inputs);
         result
@@ -5015,7 +5015,7 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
         include_stdin: bool,
-    ) -> Vec<(u32, Option<crate::executor::fd_table::FdEntry>)> {
+    ) -> Result<Vec<(u32, Option<crate::executor::fd_table::FdEntry>)>, ExecuteError> {
         let mut saved_fd_inputs = Vec::new();
         for redirect in &cmd.heredoc_redirects {
             let Some(fd) = redirect.fd else {
@@ -5036,11 +5036,26 @@ impl Executor {
             // to the heredoc expansion leaked the storage prefix into
             // the stream and lost the last line (rubash#1867).
             let body = self.expand_heredoc_redirect_text(redirect);
-            saved_fd_inputs.push((fd, self.fd_table.entries.get(&fd).cloned()));
+            // rubash#3706: the saved entry duplicates the displaced
+            // descriptor (FdTable::saved_entry) — a plain clone shares
+            // the descriptor the heredoc bind's open_input retires, so
+            // the restore would replay a dead entry. A dup failure
+            // unwinds the heredocs this call already bound (GNU
+            // undo_partial_redirects, execute_cmd.c:855) before the
+            // error propagates — the caller never sees a half-bound
+            // list.
+            let saved = match self.fd_table.saved_entry(fd) {
+                Ok(saved) => saved,
+                Err(error) => {
+                    self.restore_numbered_heredoc_redirects(std::mem::take(&mut saved_fd_inputs));
+                    return Err(ExecuteError::IoError(error));
+                }
+            };
+            saved_fd_inputs.push((fd, saved));
             self.fd_table
                 .open_input(fd, FdReadEndpoint::text(&body), true);
         }
-        saved_fd_inputs
+        Ok(saved_fd_inputs)
     }
 
     /// The restore half of bind_numbered_heredoc_redirects: each bound
