@@ -41,9 +41,27 @@ fn rubash(script: &str) -> (String, String, Option<i32>) {
         .env("LC_ALL", "C.UTF-8")
         .output()
         .expect("run rubash");
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    // std exposes no argv[0] override on Windows; normalize the harness
+    // exe-path token to `bash` in captured stderr, the same
+    // normalization the GNU suites apply to the baseline's path
+    // (see tests/issue2749_arith_for_attribution_regressions.rs).
+    #[cfg(windows)]
+    let stderr = {
+        let exe = env!("CARGO_BIN_EXE_rubash");
+        let slashed = exe.replace('\\', "/");
+        let mut normalized = stderr.replace(exe, "bash").replace(&slashed, "bash");
+        if let Some(drive) = slashed.chars().next().filter(|c| c.is_ascii_alphabetic()) {
+            if slashed.as_bytes().get(1) == Some(&b':') {
+                let posix = format!("/{}/{}", drive.to_ascii_lowercase(), &slashed[3..]);
+                normalized = normalized.replace(&posix, "bash");
+            }
+        }
+        normalized
+    };
     (
         String::from_utf8_lossy(&output.stdout).into_owned(),
-        String::from_utf8_lossy(&output.stderr).into_owned(),
+        stderr,
         output.status.code(),
     )
 }
