@@ -2736,13 +2736,16 @@ impl Executor {
         } else {
             self.quoted_positional_at_word_values_with_raw(word, raw, cmd.word_kinds.get(index))
         } {
-            // GNU quoted-$@ + quoted-null retention (see
-            // raw_quoted_at_word_has_quoted_null): `"$@"''` with no
-            // positional parameters is one empty argument, not zero
-            // (subst.c 12026-12035 had_quoted_null beats the discard).
-            if values.is_empty()
-                && raw.is_some_and(|raw| raw_quoted_at_word_has_quoted_null(raw, self))
-            {
+            // GNU subst.c:12026-12052 expand_word_internal tail for a
+            // quoted-$@ word whose expansion came back empty: one empty
+            // field survives iff
+            //   had_quoted_null || (quoted_dollar_at == 0 && PARTIALLY_QUOTED)
+            // — `"$@"''` is one empty argument (the '' flags a quoted
+            // null), `"$(true)""$@"` survives on the "$(true)" span's
+            // quoted null, while `"$(true)$@"` / `"$xxx$@"` / `$xxx"$@"`
+            // drop: the quoted $@ list is empty, quoted_dollar_at is set,
+            // and the span's other empty pieces are swallowed with it.
+            if values.is_empty() && raw.is_some_and(|raw| raw_empty_word_keeps_field(raw, self)) {
                 return vec![String::new()];
             }
             // The cooked word loses stripped quoting (`''"${@/*}"`
@@ -3130,8 +3133,20 @@ impl Executor {
         // the generic `expanded` text already carries the transform result
         // and splits through field_split_values_with_ifs below, matching
         // GNU's quote_escapes+field-split pipeline (subst.c:8705).
-        if expanded.is_empty() && self.removes_unquoted_null_word(cmd, index) {
-            Vec::new()
+        // GNU subst.c:12026-12052 expand_word_internal tail for an empty
+        // expansion result: one empty field survives iff
+        //     had_quoted_null || (quoted_dollar_at == 0 && PARTIALLY_QUOTED)
+        // — a ''/""/$'' literal-empty span or a quoted expansion producing
+        // nothing ("$xxx", "$(true)") flags had_quoted_null, while a
+        // double-quoted $@/${@}/${..[@]} list (quoted_dollar_at: an empty
+        // list swallows the span's pieces, "$xxx$@" is 0 fields) and an
+        // unquoted or wholly-quoted word without a null both drop it.
+        if expanded.is_empty() {
+            if self.empty_expanded_word_keeps_field(cmd, index, raw) {
+                vec![String::new()]
+            } else {
+                Vec::new()
+            }
         } else if raw_word_contains_process_substitution(raw)
             && expanded_word_has_process_substitution(&expanded)
         {
@@ -3171,6 +3186,28 @@ impl Executor {
             )
         } else {
             vec![strip_ifs_protection_markers(&expanded).into_owned()]
+        }
+    }
+
+    /// expand_command_word tail for a word whose expansion came back
+    /// EMPTY — the GNU subst.c:12026-12052 keep/discard decision, decided
+    /// on the raw word text by raw_empty_word_keeps_field (quoted_dollar_at
+    /// / had_quoted_null / PARTIALLY_QUOTED). Synthetic words without raw
+    /// metadata fall back to the cooked-word null-removal rule.
+    fn empty_expanded_word_keeps_field(
+        &self,
+        cmd: &CommandNode,
+        index: usize,
+        raw: Option<&str>,
+    ) -> bool {
+        let raw = raw.or_else(|| {
+            cmd.word_metadata
+                .get(index)
+                .map(|metadata| metadata.raw.as_str())
+        });
+        match raw {
+            Some(raw) => raw_empty_word_keeps_field(raw, self),
+            None => !self.removes_unquoted_null_word(cmd, index),
         }
     }
 
@@ -5052,6 +5089,265 @@ pub(in crate::executor) fn raw_quoted_at_word_has_quoted_null(
         }
     }
     saw_quoted_null
+}
+
+/// GNU subst.c:12026-12052 expand_word_internal tail for a word whose
+/// expansion came back EMPTY: one empty field survives iff
+///
+///     had_quoted_null || (quoted_dollar_at == 0 && PARTIALLY_QUOTED)
+///
+/// and the word is discarded for UNQUOTED, for quoted_dollar_at, and for
+/// WHOLLY_QUOTED without a quoted null (both else arms drop the word).
+///
+/// quoted_dollar_at (raw-level): a double-quoted span containing a
+/// positional/array @-list (`$@`, `${@}`, `${...[@]}`) — its pieces merge
+/// into the list, and an empty list swallows them WITHOUT flagging a
+/// quoted null: `"$xxx$@"` is 0 fields while `"$xxx""$@"` is 1.
+///
+/// had_quoted_null (raw-level): a word-level ''/""/$'' literal-empty
+/// span, or — reaching this check means the whole word expanded to
+/// nothing — a "..." span carrying an expansion but no @-list (it must
+/// have produced empty output itself: "$(true)" in `"$(true)""$@"`).
+/// Quoting inside a ${...} body or a substitution does not count: those
+/// are operands of that expansion, not the word's own quoting
+/// (`recho ${v= ''}` on empty output is ZERO fields — UNQUOTED).
+pub(in crate::executor) fn raw_empty_word_keeps_field(raw: &str, executor: &Executor) -> bool {
+    let chars: Vec<char> = raw.chars().collect();
+    let mut index = 0usize;
+    let mut saw_quote = false;
+    let mut quoted_dollar_at = false;
+    let mut had_quoted_null = false;
+    while index < chars.len() {
+        match chars[index] {
+            '\\' => index += 2,
+            // Quotes inside a ${...} body or a command/arithmetic
+            // substitution are operands of that expansion — not the word's
+            // own quoting (quoted_state keys on word-level quote state):
+            // `${v= ''}` is UNQUOTED, and GNU discards its empty result.
+            '$' if chars.get(index + 1) == Some(&'{') => {
+                let rest: String = chars[index + 2..].iter().collect();
+                match matching_parameter_brace(&rest) {
+                    Some(end) => {
+                        index += 2 + rest[..end].chars().count() + 1;
+                    }
+                    None => index += 2,
+                }
+            }
+            '$' if chars.get(index + 1) == Some(&'(') => {
+                index = crate::lexer::skip_parenthesized_unit_corrected(&chars, index + 1)
+                    .unwrap_or(chars.len());
+            }
+            '`' => {
+                index += 1;
+                while index < chars.len() && chars[index] != '`' {
+                    if chars[index] == '\\' {
+                        index += 1;
+                    }
+                    index += 1;
+                }
+                index += 1;
+            }
+            '\'' => {
+                saw_quote = true;
+                let start = index;
+                index += 1;
+                while index < chars.len() && chars[index] != '\'' {
+                    index += 1;
+                }
+                if index == start + 1 {
+                    had_quoted_null = true;
+                }
+                index += 1;
+            }
+            '"' => {
+                saw_quote = true;
+                index += 1;
+                let start = index;
+                while index < chars.len() && chars[index] != '"' {
+                    if chars[index] == '\\' && index + 1 < chars.len() {
+                        index += 2;
+                        continue;
+                    }
+                    // A `${...}`/`$(...)` inside the span nests its own
+                    // quoting (parse.y:3877 parse_matched_pair /
+                    // parse_comsub): a `"` there does not close this span.
+                    if chars[index] == '$' && chars.get(index + 1) == Some(&'{') {
+                        let rest: String = chars[index + 2..].iter().collect();
+                        match matching_parameter_brace(&rest) {
+                            Some(end) => {
+                                index += 2 + rest[..end].chars().count() + 1;
+                                continue;
+                            }
+                            None => break,
+                        }
+                    }
+                    if chars[index] == '$' && chars.get(index + 1) == Some(&'(') {
+                        index = crate::lexer::skip_parenthesized_unit_corrected(&chars, index + 1)
+                            .unwrap_or(chars.len());
+                        continue;
+                    }
+                    index += 1;
+                }
+                let content: String = chars[start..index].iter().collect();
+                index += 1;
+                match quoted_span_at_list(&content, executor) {
+                    // An @-list with ZERO elements: chk_atstar set
+                    // quoted_dollar_at and the empty list swallowed the
+                    // span's other empty pieces — no quoted null
+                    // ("$xxx$@" is 0 fields).
+                    Some(true) => quoted_dollar_at = true,
+                    // An @-list with elements — all necessarily empty (the
+                    // word expanded to nothing): each is a quoted null
+                    // element, like "${arr[@]:+x}" on arr=('') — keep.
+                    Some(false) => had_quoted_null = true,
+                    // "" is a literal quoted null; a nonempty span at this
+                    // gate expanded empty — a quoted null too
+                    // (subst.c:11841-11847).
+                    None => had_quoted_null = true,
+                }
+            }
+            '$' if chars.get(index + 1) == Some(&'\'') => {
+                saw_quote = true;
+                index += 2;
+                let span_start = index;
+                while index < chars.len() && chars[index] != '\'' {
+                    index += 1;
+                }
+                if index == span_start {
+                    had_quoted_null = true;
+                }
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    if had_quoted_null {
+        return true;
+    }
+    if quoted_dollar_at {
+        return false;
+    }
+    // PARTIALLY_QUOTED: the raw word has quoting but is not wholly quoted
+    // (raw_word_is_quoted). At this point the expansion produced nothing,
+    // so the quoted section produced an empty result and GNU keeps one
+    // empty field (subst.c:12031).
+    saw_quote && !raw_word_is_quoted(Some(raw))
+}
+
+/// Whether a double-quoted span's content carries an @-list at depth 0,
+/// and whether that list is EMPTY:
+///   Some(true)  — a `$@`, `${@...}`, or `${...[@]...}` whose expansion
+///                 took the @-LIST path and produced zero elements
+///                 (chk_atstar's quoted_dollar_at case, subst.c:7635-7639:
+///                 the empty list swallows the span's pieces — `"$xxx$@"`
+///                 and `"${@:+x}"` on an empty $@ are 0 fields).
+///   Some(false) — the span produced a quoted-null scalar or a list of
+///                 empty elements, keeping one empty field:
+///                 `"${arr[@]:+x}"` on arr=(''), `"${arr2[@]:+x}"` with
+///                 arr2 unset (the `+` set-check never expands a list),
+///                 `"${@:-}"` (the alternate produces a scalar).
+///   None        — no top-level @-list in the span.
+/// A `$@` nested inside a `${...}` operand (`"${foo=$@}"`) is NOT at word
+/// level — its list merges into the braced result, not the word's
+/// pieces — so it does not count.
+fn quoted_span_at_list(content: &str, executor: &Executor) -> Option<bool> {
+    let chars: Vec<char> = content.chars().collect();
+    let mut index = 0usize;
+    while index < chars.len() {
+        match chars[index] {
+            '\\' => index += 2,
+            '$' if chars.get(index + 1) == Some(&'@') => {
+                return Some(executor.shell_state.positional_window().is_empty());
+            }
+            '$' if chars.get(index + 1) == Some(&'{') => {
+                let rest: String = chars[index + 2..].iter().collect();
+                let Some(end) = matching_parameter_brace(&rest) else {
+                    index += 2;
+                    continue;
+                };
+                let inner: String = rest[..end].chars().collect();
+                if inner.starts_with('@') {
+                    let positional = executor.shell_state.positional_window();
+                    return Some(match at_operator_kind(&inner[1..]) {
+                        // `${@:-x}`-family: the operator yields a scalar
+                        // word, not the positional list.
+                        AtOperator::Scalar => false,
+                        // List ops and the `+` set-check both expand the
+                        // @-list — empty positionals mean an empty list.
+                        _ => positional.is_empty(),
+                    });
+                }
+                let name_end = inner
+                    .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                    .unwrap_or(inner.len());
+                if inner[name_end..].starts_with("[@]") {
+                    let name = &inner[..name_end];
+                    let elements = executor.array_subscript_range_values(name, 0, None);
+                    return Some(match at_operator_kind(&inner[name_end + 3..]) {
+                        // `${arr[@]:-x}`-family: scalar result.
+                        AtOperator::Scalar => false,
+                        // `+` only expands the list when the array is SET:
+                        // unset -> scalar '' (quoted null, keep).
+                        AtOperator::SetCheck => elements.is_some_and(|v| v.is_empty()),
+                        // The list itself expands: unset OR zero-element
+                        // arrays are empty lists (quoted_dollar_at).
+                        AtOperator::List => elements.is_none_or(|v| v.is_empty()),
+                    });
+                }
+                index += 2 + inner.chars().count() + 1;
+            }
+            '$' if chars.get(index + 1) == Some(&'(') => {
+                index = crate::lexer::skip_parenthesized_unit_corrected(&chars, index + 1)
+                    .unwrap_or(chars.len());
+            }
+            '`' => {
+                index += 1;
+                while index < chars.len() && chars[index] != '`' {
+                    if chars[index] == '\\' {
+                        index += 1;
+                    }
+                    index += 1;
+                }
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+/// The operator family following `@` or `[@]` inside `${...}`:
+///   List     — bare/slice/pattern/substitution/transform ops that expand
+///              the @-list itself (`${@}`, `${@:0:2}`, `${@#p}`, `${@Q}`).
+///   SetCheck — `+` (with or without `:`): GNU expands the parameter's
+///              list for the set test, so chk_atstar still runs
+///              (`"${@:+x}"` on an empty $@ is 0 fields).
+///   Scalar   — `-`/`=`/`?` (with or without `:`): the operator produces
+///              a scalar word — no @-list expansion, so an empty result
+///              is a quoted null (`"${@:-}"` on an empty $@ is `argv[1] = <>`).
+#[derive(Clone, Copy)]
+enum AtOperator {
+    List,
+    SetCheck,
+    Scalar,
+}
+
+fn at_operator_kind(rest: &str) -> AtOperator {
+    let first = rest.chars().next();
+    if first == Some(':') {
+        let op = rest[1..].chars().next();
+        return match op {
+            Some('+') => AtOperator::SetCheck,
+            Some('-' | '=' | '?') => AtOperator::Scalar,
+            // `${@:0}` / `${@: -1}` — subscript slice keeps the list.
+            _ => AtOperator::List,
+        };
+    }
+    match first {
+        Some('+') => AtOperator::SetCheck,
+        Some('-' | '=' | '?') => AtOperator::Scalar,
+        _ => AtOperator::List, // bare, slices handled above, transforms
+    }
 }
 
 /// "$e" / "${e}" with a currently empty (or unset) value is a quoted null

@@ -135,6 +135,21 @@ impl Executor {
             return false;
         }
 
+        // GNU subst.c:12026-12035 discard gate keys on had_quoted_null,
+        // not on whole-word quoting: an empty `''`/`""` span anywhere in
+        // the raw word emits CTLNUL (11841-11847 / 11940-11944), which
+        // keeps one empty field even when every expansion comes back
+        // empty — `n ''$xxx` (xxx unset) yields argv count 1
+        // (dollar-at-star5).
+        if cmd.word_metadata.get(index).is_some_and(|metadata| {
+            crate::executor::command_prepare::raw_quoted_at_word_has_quoted_null(
+                &metadata.raw,
+                self,
+            )
+        }) {
+            return false;
+        }
+
         cmd.word_kinds
             .get(index)
             .is_some_and(|kind| *kind == TokenKind::Variable)
