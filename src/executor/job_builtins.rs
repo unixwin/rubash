@@ -4902,6 +4902,11 @@ impl Executor {
                     let ignore = self.get_env("HISTIGNORE").unwrap_or_default();
                     let histsize =
                         crate::history::SessionHistory::size_limit(self.get_env("HISTSIZE"));
+                    // readline/history.c hist_inittime: the stamp an
+                    // entry takes is armed by the first HISTTIMEFORMAT
+                    // bind (rubash#3392).
+                    let comment_char_armed = self.shell_state.history_comment_char_armed
+                        || self.get_env("HISTTIMEFORMAT").is_some();
                     let mut shell = session.borrow_mut();
                     // The fc-line entry was already deleted above
                     // (fc.def:403-421); the executed text is remembered
@@ -4914,7 +4919,7 @@ impl Executor {
                     let was_recorded = if edited.is_empty() {
                         false
                     } else {
-                        shell.record(&edited, &control, &ignore, histsize)
+                        shell.record(&edited, &control, &ignore, histsize, comment_char_armed)
                     };
                     shell.last_line_added = was_recorded;
                 }
@@ -4948,26 +4953,43 @@ impl Executor {
                     let ignore = self.get_env("HISTIGNORE").unwrap_or_default();
                     let histsize =
                         crate::history::SessionHistory::size_limit(self.get_env("HISTSIZE"));
+                    // readline/history.c hist_inittime: the stamp an
+                    // entry takes is armed by the first HISTTIMEFORMAT
+                    // bind (rubash#3392).
+                    let comment_char_armed = self.shell_state.history_comment_char_armed
+                        || self.get_env("HISTTIMEFORMAT").is_some();
                     let mut shell = session.borrow_mut();
-                    // fc.def fc_replhist: the executed command REPLACES
-                    // the last entry (bash_delete_last_history +
-                    // maybe_add_history), so the fc command itself never
-                    // appears in the history. Rubash pops when the last
-                    // entry is the current line's (hist_last_line_added),
-                    // which covers both the interactive fc line and the
-                    // entry an `fc -s`/`fc -e -` re-execution resolved.
-                    // fc_replhist returns early on an empty command
+                    // fc.def fc_replhist (766-780): for a non-empty
+                    // command the executed command REPLACES the last
+                    // entry — `bash_delete_last_history` runs
+                    // UNCONDITIONALLY, then `maybe_add_history` adds
+                    // the new command. The delete is NOT gated on
+                    // `hist_last_line_added`: whenever the `fc -s`
+                    // line itself was never recorded — e.g.
+                    // interactively when HISTIGNORE filters it, or
+                    // when the script driver takes the history-off
+                    // branch (script_driver.rs:2301) — the gate left
+                    // the previous entry in place and the new command
+                    // was APPENDED (rubash#3391 face 2). The same
+                    // unconditional delete is what GNU does interactively
+                    // when HISTIGNORE filters the `fc` line itself: the
+                    // previous real command is deleted and the new one
+                    // takes its place (PTY probe vs GNU 5.3.20, clean
+                    // HISTFILE, HISTIGNORE="fc *").
+                    // `bash_delete_last_history` (bashhist.c:392) is a
+                    // no-op on an empty list, hence the emptiness guard
+                    // below. fc_replhist returns early on an empty command
                     // (fc.def:770-780 `*command == '\0'`) BEFORE the
                     // delete, so an empty command pops nothing and
                     // records nothing (rubash#3329).
                     let was_recorded = if command.is_empty() {
                         false
                     } else {
-                        if shell.last_line_added && !shell.entries.is_empty() {
+                        if !shell.entries.is_empty() {
                             shell.entries.pop();
                             shell.timestamps.pop();
                         }
-                        shell.record(&command, &control, &ignore, histsize)
+                        shell.record(&command, &control, &ignore, histsize, comment_char_armed)
                     };
                     shell.last_line_added = was_recorded;
                 }

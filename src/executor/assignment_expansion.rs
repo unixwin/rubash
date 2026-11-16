@@ -1460,9 +1460,29 @@ impl Executor {
                     crate::executor::markers::IFS_GLUE_STR,
                     "",
                 );
-                crate::executor::markers::restore_bare_sentinels(
+                let unescaped = crate::executor::markers::restore_bare_sentinels(
                     &unescaped,
                     &[(crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH, "\\")],
+                );
+                // rubash#3663: restore the lexer's DATA_BACKSLASH carrier
+                // only AFTER the unescape pass above. The carrier is the
+                // decoded form of a source `\\`, i.e. data, not escape
+                // syntax — restoring it in the walker tail handed this pass
+                // a raw `\` it folded as a source escape, so `x=a\\*e`
+                // stored `a*e` (and `x=a\\?b` stored `a?b`) while `\\[`
+                // and `\\b` survived only because `[`/`b` are outside the
+                // pass's escape set. GNU's dequote_string (subst.c:4807)
+                // strips only CTLESC bytes, so a literal `\` in the
+                // expanded value is never re-read as an escape; this is
+                // the same defer-and-restore-later discipline rubash#3088
+                // established for the operator-word walker. The restore
+                // rides the pair-aware helper (not a blind cow_replace)
+                // because the marker lint requires it; a bare U+0014 here
+                // is the carrier by construction (ANSI-C bytes arrive as
+                // U+E000 pairs, never as a bare U+0014).
+                crate::executor::markers::restore_bare_sentinels(
+                    &unescaped,
+                    &[(crate::executor::markers::DATA_BACKSLASH, "\\")],
                 )
                 .into()
             };

@@ -70,6 +70,13 @@ fn run_script_in(dir: &std::path::Path, script: &str) -> (String, String, Option
 const GETCWD_DIAGNOSTIC: &str =
     "pwd: error retrieving current directory: getcwd: cannot access parent directories: No such file or directory\n";
 
+/// The `cd` entry re-derivation's diagnostic (rubash#3574): in the
+/// poisoned state, GNU's change_to_directory calls
+/// get_working_directory ("chdir") (builtins/cd.def:529-534), whose
+/// failing getcwd prints this line before the move stands.
+const CHDIR_DIAGNOSTIC: &str =
+    "chdir: error retrieving current directory: getcwd: cannot access parent directories: No such file or directory\n";
+
 #[test]
 fn issue3349_chain_pwd_p_failure_poisons_logical_pwd() {
     let tree = make_tree("cell1");
@@ -168,12 +175,11 @@ fn issue3349_cd_out_after_poison_restores_logical_pwd() {
     // The poison is not permanent: a successful cd re-establishes
     // the_current_working_directory (builtins/cd.def
     // change_to_directory: set_working_directory), so pwd works again.
-    // GNU's stderr here carries one more line than rubash's: the cd
-    // entry re-derivation (cd.def:529-534 get_working_directory
-    // ("chdir")) prints `chdir: error retrieving current directory:
-    // getcwd: ...` before the move stands. That is cd's face of the
-    // poisoned state, not pwd's, and is owed separately — this cell
-    // pins only the pwd faces (two pwd diagnostics) plus the restore.
+    // GNU's stderr here carries one more line than the two pwd
+    // diagnostics: the cd entry re-derivation (cd.def:529-534
+    // get_working_directory ("chdir")) prints the `chdir:` line
+    // before the move stands (rubash#3574; pinned in full by
+    // tests/issue3574_cd_deleted_cwd_chdir_diag.rs).
     let tree = make_tree("cell5");
     let script = format!(
         "cd \"{r}/d\"; rmdir ../d; pwd -P; echo \"rc=$?\"; pwd; echo \"rc=$?\"; cd \"{r}\"; pwd; echo \"rc=$?\"\n",
@@ -182,5 +188,8 @@ fn issue3349_cd_out_after_poison_restores_logical_pwd() {
     let (stdout, stderr, code) = run_script_in(&tree.base, &script);
     assert_eq!(code, Some(0));
     assert_eq!(stdout, format!("rc=1\nrc=1\n{r}\nrc=0\n", r = tree.real));
-    assert_eq!(stderr, GETCWD_DIAGNOSTIC.repeat(2));
+    assert_eq!(
+        stderr,
+        format!("{}{}", GETCWD_DIAGNOSTIC.repeat(2), CHDIR_DIAGNOSTIC)
+    );
 }

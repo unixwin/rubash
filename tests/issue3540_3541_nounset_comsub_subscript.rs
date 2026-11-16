@@ -69,7 +69,7 @@ fn comsub_subscript_runs_before_fatal() {
 /// #3541: a subscript arithmetic error aborts before the `:?` report.
 #[test]
 fn subscript_arith_error_suppresses_question_report() {
-    let (stdout, stderr, status) = rubash("a=(x); : ${a[$(echo E; echo 5)]:?err}; echo st=$?\n");
+    let (_stdout, stderr, status) = rubash("a=(x); : ${a[$(echo E; echo 5)]:?err}; echo st=$?\n");
     assert!(
         stderr.contains("arithmetic syntax error"),
         "stderr={stderr:?}"

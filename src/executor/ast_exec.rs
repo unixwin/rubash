@@ -265,6 +265,22 @@ impl Executor {
         command: &CommandNode,
         error: &std::io::Error,
     ) -> Result<(), ExecuteError> {
+        // GNU: a respawned `rubash -c` child emulates a FORK (async `&`,
+        // coproc, both process-substitution forms): the forked child
+        // restores every signal's startup disposition
+        // (execute_cmd.c:1670 -> trap.c:1480 reset_signal_handlers), so
+        // SIGPIPE is SIG_DFL and a write that meets a pipe with no
+        // readers is the child's SIGPIPE death — silent, status 141.
+        // The report path below is the MAIN shell's model instead:
+        // SIGPIPE stays ignored there (rubash#440), so the failed write
+        // prints `line N: Broken pipe' and continues with status 1.
+        // Unwind the SIGPIPE-shaped verdict; the -c/script driver maps
+        // it to the child's 141 with no diagnostic.
+        if crate::executor::init::RESPAWNED_CHILD.load(std::sync::atomic::Ordering::Relaxed)
+            && super::shell_options::is_broken_pipe_error(error)
+        {
+            return Err(ExecuteError::BrokenPipe);
+        }
         let mut owner = command;
         loop {
             if let Some(inner) = &owner.inverted_command {

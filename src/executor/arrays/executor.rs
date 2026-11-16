@@ -1517,7 +1517,7 @@ impl Executor {
             // carries the QUOTED_NULL marker and GNU diagnoses
             // (follow-up #3581). The scalar entry point already gates
             // this way; the list entry point expanded unconditionally.
-            if self.pattern_word_is_silent(var_name, !quoted_array_word) {
+            if self.pattern_word_is_silent(var_name, true, quoted_array_word) {
                 return Some(vec![]);
             }
             let pattern = self.expand_parameter_pattern_word(pattern);
@@ -1533,7 +1533,7 @@ impl Executor {
             // GNU subst.c:9362-9367 parameter_brace_patsub returns NULL
             // before getpattern when the value is absent (rubash#3501):
             // an empty list is absent, but a one-"" list is present.
-            if self.pattern_word_is_silent(var_name, false) {
+            if self.pattern_word_is_silent(var_name, false, false) {
                 return Some(vec![]);
             }
             let pattern = self.expand_parameter_pattern_word(pattern);
@@ -1549,7 +1549,7 @@ impl Executor {
             }
             // GNU subst.c:9604-9608 parameter_brace_casemod: same
             // absent-value gate as patsub (rubash#3501).
-            if self.pattern_word_is_silent(var_name, false) {
+            if self.pattern_word_is_silent(var_name, false, false) {
                 return Some(vec![]);
             }
             let pattern = self.expand_embedded_parameters(pattern);
