@@ -73,11 +73,7 @@ fn non_root_set_unlimited_is_a_noop() {
 fn macos_table_prints_memlock_rss_virtmem_rows() {
     let (stdout, stderr, _) = rubash("ulimit -a");
     assert!(stderr.is_empty(), "stderr not empty: {stderr}");
-    for row in [
-        "max locked memory",
-        "max memory size",
-        "virtual memory",
-    ] {
+    for row in ["max locked memory", "max memory size", "virtual memory"] {
         assert!(stdout.contains(row), "missing `{row}` row in:\n{stdout}");
     }
     for opt in ["-l", "-m", "-v"] {
