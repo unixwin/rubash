@@ -1373,7 +1373,7 @@ impl Executor {
                 }
                 continue;
             }
-            for field in self.expand_alternate_word_fragment(token) {
+            for field in self.expand_alternate_word_fragment(token, false) {
                 let fields = match super::glob::pathname_expand_word(
                     &field,
                     &self.shell_state.env_vars,

@@ -3380,7 +3380,7 @@ impl Executor {
             // double-quoted ${...} retains one empty field when the used
             // alternate expands to zero words (`"${foo-$@}"` with no
             // positional parameters yields `argv[1] = <>`, not zero args).
-            let values = self.expand_alternate_word_fragment(&format!("\"{alternate}\""));
+            let values = self.expand_alternate_word_fragment(&format!("\"{alternate}\""), true);
             return Some(if values.is_empty() {
                 vec![String::new()]
             } else {
@@ -3615,7 +3615,7 @@ impl Executor {
         // double-quoted `${...}` keeps one empty field when the used
         // alternate expands to zero words (`"${foo-"$@"}"`, `"${foo:-${@}}"`,
         // `"${foo-$@$@}"` with no positional parameters).
-        let values = self.expand_alternate_word_fragment(alternate);
+        let values = self.expand_alternate_word_fragment(alternate, outer_double_quoted);
         if outer_double_quoted && values.is_empty() {
             return Some(vec![String::new()]);
         }
@@ -3795,6 +3795,7 @@ impl Executor {
     pub(in crate::executor) fn expand_alternate_word_fragment(
         &mut self,
         fragment: &str,
+        outer_double_quoted: bool,
     ) -> Vec<String> {
         // In POSIX mode, quotes inside a double-quoted parameter expansion
         // word are literal for quote-state purposes. Preserve that context
@@ -3818,15 +3819,111 @@ impl Executor {
             return Vec::new();
         };
 
-        let mut values = Vec::new();
+        // GNU carries the whole alternate as ONE word: `${0+  "$@"  }` is a
+        // single WORD_DESC whose rhs text is `  "$@"  `, so the whitespace
+        // before/after/between the fragment's words is affix text that glues
+        // to the boundary fields (subst.c:7840-7860 param_expand feeds the
+        // rhs through the ordinary word machinery; expand_word_list_internal
+        // then splits only unquoted-IFS-whitespace runs). Re-lexing the
+        // fragment as a command drops exactly those separators: `  "$@"  `
+        // tokenizes to a bare `"$@"`. Recover each separator as the source
+        // gap between consecutive word raws, expand every word, then merge
+        // fields across word boundaries — a separator character is a field
+        // delimiter only when it is ambient-IFS whitespace (inside a
+        // double-quoted outer word nothing splits).
+        let mut raws: Vec<String> = Vec::new();
+        let mut word_fields: Vec<Vec<String>> = Vec::new();
         for index in 1..cmd.words.len() {
             let raw = cmd
                 .word_metadata
                 .get(index)
                 .map(|metadata| metadata.raw.as_str());
-            values.extend(self.expand_command_word(cmd, index, &cmd.words[index], raw));
+            raws.push(raw.unwrap_or_default().to_string());
+            word_fields.push(self.expand_command_word(cmd, index, &cmd.words[index], raw));
         }
-        values
+
+        let mut separators: Vec<String> = Vec::with_capacity(raws.len() + 1);
+        let mut cursor = 0usize;
+        let mut located = true;
+        for raw in &raws {
+            match fragment[cursor..].find(raw.as_str()) {
+                Some(offset) => {
+                    separators.push(fragment[cursor..cursor + offset].to_string());
+                    cursor += offset + raw.len();
+                }
+                None => {
+                    located = false;
+                    break;
+                }
+            }
+        }
+        if !located {
+            // Defensive fallback: a raw that does not appear verbatim in the
+            // fragment keeps the pre-existing flat concatenation.
+            return word_fields.into_iter().flatten().collect();
+        }
+        separators.push(fragment[cursor..].to_string());
+        Self::merge_fragment_fields(
+            word_fields,
+            &separators,
+            self.shell_state.env_vars.get("IFS").map(String::as_str),
+            outer_double_quoted,
+        )
+    }
+
+    /// Merge per-word expansion fields with the source separators recovered
+    /// between them, reproducing GNU's single-word rhs semantics for
+    /// `${param OP word}`: separator text glues to boundary fields, and a
+    /// separator character splits only when it is ambient-IFS whitespace
+    /// (unset IFS: space/tab/newline; set IFS: its whitespace members).
+    /// Inside a double-quoted outer word every separator is literal text.
+    fn merge_fragment_fields(
+        word_fields: Vec<Vec<String>>,
+        separators: &[String],
+        ifs: Option<&str>,
+        outer_double_quoted: bool,
+    ) -> Vec<String> {
+        let is_delimiter = |ch: char| -> bool {
+            if outer_double_quoted {
+                return false;
+            }
+            if !matches!(ch, ' ' | '\t' | '\n') {
+                return false;
+            }
+            match ifs {
+                None => true,
+                Some(ifs) => ifs.contains(ch),
+            }
+        };
+        let mut result: Vec<String> = Vec::new();
+        // Whether result.last is still open for glued text (a delimiter run
+        // closes the current field; GNU collapses each run to one break).
+        let mut open = false;
+        let mut apply_separator = |separator: &str, result: &mut Vec<String>, open: &mut bool| {
+            for ch in separator.chars() {
+                if is_delimiter(ch) {
+                    *open = false;
+                } else if *open {
+                    result.last_mut().expect("open field").push(ch);
+                } else {
+                    result.push(ch.to_string());
+                    *open = true;
+                }
+            }
+        };
+        for (index, fields) in word_fields.into_iter().enumerate() {
+            apply_separator(&separators[index], &mut result, &mut open);
+            for (field_index, field) in fields.into_iter().enumerate() {
+                if field_index == 0 && open {
+                    result.last_mut().expect("open field").push_str(&field);
+                } else {
+                    result.push(field);
+                }
+                open = true;
+            }
+        }
+        apply_separator(&separators[separators.len() - 1], &mut result, &mut open);
+        result
     }
 
     // Whole-word x1d-marked braced alternates whose raw word has no outer
