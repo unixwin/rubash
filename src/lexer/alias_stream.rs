@@ -1234,9 +1234,7 @@ fn skip_funsub_body(chars: &[char], open: usize) -> Option<usize> {
             // (rubash#3813: a `}` line ended the funsub early, an
             // apostrophe swallowed it). `<<<` is a herestring — no body
             // to skip — and falls through to the plain `<`/`>` arm.
-            '<' if chars.get(index + 1) == Some(&'<')
-                && chars.get(index + 2) != Some(&'<') =>
-            {
+            '<' if chars.get(index + 1) == Some(&'<') && chars.get(index + 2) != Some(&'<') => {
                 let (next, _closes) =
                     super::heredoc_scan::skip_heredoc_in_chars_with_closure(chars, index);
                 index = next;

@@ -112,10 +112,7 @@ fn issue3813_parity_apostrophe_count_in_comsub_comment() {
         let script = alias_frame(&format!("  v=$(echo hi # {comment}\n)\n  echo \"v=[$v]\""));
         let (out, err, rc) = scratch.run(&script);
         assert_eq!(rc, 0, "p{n}: rc mismatch; stderr:\n{err}");
-        assert!(
-            out.contains("v=[hi]"),
-            "p{n}: stdout mismatch:\n{out}"
-        );
+        assert!(out.contains("v=[hi]"), "p{n}: stdout mismatch:\n{out}");
     }
 }
 
@@ -185,7 +182,8 @@ fn issue3813_nested_comsub_in_brace_expansion() {
 #[test]
 fn issue3813_case_pattern_comsub_comment_quote() {
     let scratch = Scratch::new("case");
-    let script = alias_frame("  w=a\n  v=$(case $w in (a) echo hi # don't\n;; esac)\n  echo \"v=[$v]\"");
+    let script =
+        alias_frame("  w=a\n  v=$(case $w in (a) echo hi # don't\n;; esac)\n  echo \"v=[$v]\"");
     assert_parses(&scratch, &script, "v=[hi]");
 }
 
@@ -222,8 +220,16 @@ fn issue3813_hash_controls_stay_literal() {
     let scratch = Scratch::new("controls");
     for (tag, body, want) in [
         ("dollar-hash", "  v=$(echo $#)\n  echo \"v=[$v]\"", "v=[0]"),
-        ("quoted-hash", "  v=$(echo 'a'#b)\n  echo \"v=[$v]\"", "v=[a#b]"),
-        ("midword-hash", "  v=$(echo a#b)\n  echo \"v=[$v]\"", "v=[a#b]"),
+        (
+            "quoted-hash",
+            "  v=$(echo 'a'#b)\n  echo \"v=[$v]\"",
+            "v=[a#b]",
+        ),
+        (
+            "midword-hash",
+            "  v=$(echo a#b)\n  echo \"v=[$v]\"",
+            "v=[a#b]",
+        ),
         (
             "brace-hash-operator",
             "  v=$(echo \"${x:-a # b}\")\n  echo \"v=[$v]\"",
