@@ -6560,11 +6560,14 @@ fn strip_ifs_protection_markers(value: &str) -> std::borrow::Cow<'_, str> {
     // pipeline (glue removal, then guard strip).
     if !value.contains(crate::executor::markers::IFS_GLUE)
         && !value.contains(crate::executor::markers::ANSI_C_IFS_GUARD)
+        && !crate::executor::markers::contains_split_on_spaces_sentinel(value)
     {
         return std::borrow::Cow::Borrowed(value);
     }
     std::borrow::Cow::Owned(crate::executor::markers::strip_ansi_c_ifs_guard(
-        &value.replace(crate::executor::markers::IFS_GLUE, ""),
+        &crate::executor::markers::strip_split_on_spaces_sentinel(
+            &value.replace(crate::executor::markers::IFS_GLUE, ""),
+        ),
     ))
 }
 

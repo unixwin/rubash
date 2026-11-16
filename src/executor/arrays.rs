@@ -603,6 +603,16 @@ pub(super) fn field_split_values_with_ifs(value: &str, ifs: Option<&str>) -> Vec
     if value.is_empty() {
         return Vec::new();
     }
+    // GNU W_SPLITSPACE (command.h:79 → subst.c:11535 accumulate →
+    // subst.c:12103-12107): an unquoted $*/$@ piece produced while IFS was
+    // set-but-null marks the whole word to split on spaces — " " whenever
+    // IFS is set at split time (a mid-word ${IFS:=...} bind does not move
+    // the charset), " \t\n" when unset — instead of the current IFS value.
+    if crate::executor::markers::contains_split_on_spaces_sentinel(value) {
+        let cleaned = crate::executor::markers::strip_split_on_spaces_sentinel(value);
+        let charset = if ifs.is_some() { " " } else { " \t\n" };
+        return field_split_values_with_ifs(&cleaned, Some(charset));
+    }
     let Some(ifs) = ifs else {
         return split_ifs_whitespace(value, " \t\n");
     };

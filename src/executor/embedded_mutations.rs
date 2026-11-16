@@ -1184,9 +1184,9 @@ impl Executor {
                     // with $IFS[0] when IFS is set non-empty, else ' '
                     // (subst.c:2975-3000) — a set-but-empty IFS still
                     // yields ' ' for `$@`.
-                    let ifs_first = if self.inside_assignment_rhs.get()
-                        || super::expand_braced_replacement::ASSIGNMENT_RHS.with(|f| f.get())
-                    {
+                    let assign_rhs = self.inside_assignment_rhs.get()
+                        || super::expand_braced_replacement::ASSIGNMENT_RHS.with(|f| f.get());
+                    let ifs_first = if assign_rhs {
                         ' '
                     } else {
                         self.shell_state
@@ -1196,35 +1196,82 @@ impl Executor {
                             .unwrap_or(' ')
                     }
                     .to_string();
+                    // GNU quote_escapes_internal (subst.c:4620-4650):
+                    // element whitespace is protected only when IFS is
+                    // set-but-null (quote_spaces); unset/non-null IFS leaves
+                    // it split-eligible. preserve_quotes keeps its own
+                    // compound tag for the storage pass, independent of IFS.
+                    let no_split =
+                        super::expand_braced_replacement::NO_SPLIT_DOLLAR_STAR.with(|f| f.get());
+                    let ifs_is_null = self
+                        .shell_state
+                        .env_vars
+                        .get("IFS")
+                        .is_some_and(|ifs| ifs.is_empty());
                     let value = self
                         .shell_state
                         .positional_window()
                         .iter()
                         .map(|element| {
-                            mark_expansion_whitespace(
-                                &protect_rhs_value(
-                                    element,
-                                    protect_rhs_data || protect_expansion_results,
-                                ),
-                                preserve_quotes,
-                            )
+                            let element = protect_rhs_value(
+                                element,
+                                protect_rhs_data || protect_expansion_results,
+                            );
+                            if (ifs_is_null && !no_split) || preserve_quotes {
+                                std::borrow::Cow::Owned(mark_expansion_whitespace(
+                                    &element,
+                                    preserve_quotes,
+                                ))
+                            } else {
+                                element
+                            }
                         })
                         .collect::<Vec<_>>()
                         .join(&ifs_first);
+                    // W_SPLITSPACE (subst.c:11535 → 12103-12107): the
+                    // assembled word splits on " " when a piece was
+                    // produced under a set-null IFS, independent of later
+                    // mid-word IFS binds. Never on the assignment-RHS or
+                    // quoted paths — those never split.
+                    if ifs_is_null && !assign_rhs && !no_split && !preserve_quotes {
+                        output.push(crate::executor::markers::SPLIT_ON_SPACES_SENTINEL);
+                    }
                     output.push_str(&value);
                 }
                 Some('*') => {
                     chars.next();
-                    // Same element model as `@` above, but `$*` separates
-                    // with ifs_firstchar (subst.c:2902-2930): a set-but-empty
-                    // IFS joins the elements with no separator at all
+                    // Same element model as `@` above, but unquoted `$*`
+                    // outside an assignment RHS dispatches to
+                    // string_list_dollar_at (Posix interp 888,
+                    // subst.c:10662-10670): separator ' ' when IFS is unset
+                    // or set-but-null, ifs[0] otherwise. Assignment RHS
+                    // takes string_list_dollar_star (subst.c:10612-10660),
+                    // where a set-but-empty IFS joins with no separator
                     // (`IFS='' x=$*` concatenates).
-                    let ifs_first = match self.shell_state.env_vars.get("IFS") {
-                        Some(ifs) => ifs
-                            .chars()
-                            .next()
-                            .map(|c| c.to_string())
-                            .unwrap_or_default(),
+                    let star_assign_rhs = self.inside_assignment_rhs.get()
+                        || super::expand_braced_replacement::ASSIGNMENT_RHS.with(|f| f.get());
+                    // expand_no_split_dollar_star (subst.c:237,
+                    // expand_string_for_pat at subst.c:4518): no-split
+                    // contexts take string_list_dollar_star like the
+                    // assignment-RHS arm (subst.c:3048, 10612-10660).
+                    let star_no_split =
+                        super::expand_braced_replacement::NO_SPLIT_DOLLAR_STAR.with(|f| f.get());
+                    let dollar_star = star_assign_rhs || star_no_split;
+                    let star_ifs_value = self.shell_state.env_vars.get("IFS");
+                    let ifs_is_null = star_ifs_value.is_some_and(|ifs| ifs.is_empty());
+                    let ifs_first = match star_ifs_value {
+                        Some(ifs) => {
+                            ifs.chars()
+                                .next()
+                                .map(|c| c.to_string())
+                                .unwrap_or_else(|| {
+                                    if dollar_star {
+                                        String::new()
+                                    } else {
+                                        " ".to_string()
+                                    }
+                                })
+                        }
                         None => " ".to_string(),
                     };
                     let value = self
@@ -1232,16 +1279,25 @@ impl Executor {
                         .positional_window()
                         .iter()
                         .map(|element| {
-                            mark_expansion_whitespace(
-                                &protect_rhs_value(
-                                    element,
-                                    protect_rhs_data || protect_expansion_results,
-                                ),
-                                preserve_quotes,
-                            )
+                            let element = protect_rhs_value(
+                                element,
+                                protect_rhs_data || protect_expansion_results,
+                            );
+                            if (ifs_is_null && !star_no_split) || preserve_quotes {
+                                std::borrow::Cow::Owned(mark_expansion_whitespace(
+                                    &element,
+                                    preserve_quotes,
+                                ))
+                            } else {
+                                element
+                            }
                         })
                         .collect::<Vec<_>>()
                         .join(&ifs_first);
+                    // W_SPLITSPACE (subst.c:10665-10668 → 11535 → 12103-12107).
+                    if ifs_is_null && !dollar_star && !preserve_quotes {
+                        output.push(crate::executor::markers::SPLIT_ON_SPACES_SENTINEL);
+                    }
                     output.push_str(&value);
                 }
                 Some('#') => {
