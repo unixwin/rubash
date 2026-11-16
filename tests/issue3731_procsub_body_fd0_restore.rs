@@ -25,9 +25,17 @@
 //! cell below therefore binds the substitution to fd 3 and closes it
 //! explicitly (`exec 3>&-`), which runs the deferred body
 //! synchronously (close_persistent_output_fd) before the post-close
-//! reads. Every cell except the no-procsub control and the implicit
-//! -close documentation cell is fail-first on the unfixed base
-//! (post-close read rc=1, empty line).
+//! reads. Eight regression cells are fail-first on the unfixed base
+//! (primitive, body-reads, cat, compound, twice, readwrite, loop,
+//! nested — post-close read rc=1, empty line). The devnull cell
+//! passes on base either way (EOF rc=1 on /dev/null vs EBADF rc=1
+//! on the retired entry — same observed rc), and the no-procsub
+//! control and the implicit-close documentation cell pass too.
+//! Unix-only hazard: the bind-time retire (retire_read_arm /
+//! retire_write_arm) is `#[cfg(unix)]` — a no-op on Windows — so
+//! the fail-first leg MUST run on Linux; on Windows the pin passes
+//! on base by construction and only the no-regression leg is
+//! meaningful there.
 
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -124,15 +132,18 @@ fn procsub_cat_body_restores_outer_stdin() {
     assert_eq!(stdout, "hello\nr1=0 l1=[o1] r2=0 l2=[o2] r3=0 l3=[o3]\n");
 }
 
-/// Compound body: `>({ echo a; echo b; })` prints both lines at the
-/// close, then the outer file resumes.
+/// Compound body: `>(echo a; echo b)` prints both lines at the
+/// close, then the outer file resumes. (A `{ ...; }` group as the
+/// procsub body — `>({ echo a; echo b; })` — is valid GNU but rubash
+/// rejects it as "ambiguous redirect": a separate parser gap, not
+/// this issue; recorded in REPORT §4.)
 #[test]
 fn compound_procsub_body_restores_outer_stdin() {
     let (stdout, stderr, rc) = run_driver(
         "compound",
         "printf 'o1\\no2\\no3\\n' > outer.txt\n\
          exec 0<outer.txt\n\
-         exec 3> >({ echo a; echo b; })\n\
+         exec 3> >(echo a; echo b)\n\
          IFS= read -r l1 <&0; r1=$?\n\
          echo hello >&3\n\
          exec 3>&-\n\
