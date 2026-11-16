@@ -305,7 +305,13 @@ impl Executor {
                 return Ok(Some(done_index + 1));
             }
         }
-        if words.first().map(String::as_str) != Some("for") {
+        // rubash#3557: literal `for` head (quoted — parser froze it as a
+        // plain word) is a command name, not a loop opener; only an
+        // alias-introduced `for` re-lexes as syntax (parse.y:3249
+        // alias_expand_token -> push_string).
+        if words.first().map(String::as_str) != Some("for")
+            || command.words.first().map(String::as_str) == Some("for")
+        {
             return Ok(None);
         }
         let do_index = scan_do_index(command_index + 1);

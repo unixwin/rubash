@@ -36,6 +36,28 @@ enum SpecErr {
     Erange,
 }
 
+/// GNU `strsub` for one `fc -s` `pat=rep` substitution (fc_dosubs calls
+/// `strsub (new, r->pat, r->rep, 1)`, fc.def:747-757 — global replace).
+///
+/// Faithful to `stringlib.c:136-171`: `strsub` appends the replacement
+/// bytes on a match and copies every other character, but when the
+/// pattern eats the WHOLE string with an empty replacement nothing is
+/// ever appended, `temp` stays NULL, and strsub returns the ORIGINAL
+/// string (`savestring (string)`) instead of `""`. So `fc -s true=` on
+/// `true` re-executes `true` (rubash#3391 face 1); a partial eat
+/// (`echo xtruex` -> `echo xx`) is unaffected — at least one character
+/// is copied, so `temp` is non-NULL and the substituted string stands.
+/// `str::replace` is the same global replace; only the empty-result
+/// case needs the quirk.
+fn fc_strsub(command: &str, pat: &str, rep: &str) -> String {
+    let replaced = command.replace(pat, rep);
+    if replaced.is_empty() && !command.is_empty() {
+        command.to_string()
+    } else {
+        replaced
+    }
+}
+
 /// Returns true if arg looks like a history number (possibly negative),
 /// matching bash's fc_number() so that e.g. "-1" is not misread as an option.
 fn is_number_arg(arg: &str) -> bool {
@@ -303,7 +325,7 @@ where
         let idx = idx.min(count - 1);
         let mut command = entries[idx].clone();
         for (pat, rep) in &subs {
-            command = command.replace(pat.as_str(), rep.as_str());
+            command = fc_strsub(&command, pat, rep);
         }
         // fc.def:308: the substituted command is echoed to stderr.
         writeln!(stderr, "{command}")?;
@@ -711,6 +733,31 @@ mod tests {
             ),
         }
         assert_eq!(stderr, "echo xx xb xc\n");
+    }
+
+    #[test]
+    fn test_fc_s_empty_replacement_of_whole_command_returns_original() {
+        // rubash#3391 face 1: GNU strsub (stringlib.c:136-171) returns the
+        // ORIGINAL string when the pattern eats the whole command with an
+        // empty replacement, so `fc -s true=` on `true` re-executes `true`.
+        let (_, stderr, result) = run_fc(&["-s", "true="], &["true", "fc"]);
+        match result {
+            FcResult::Reexec { command } => assert_eq!(command, "true"),
+            _ => panic!("expected Reexec"),
+        }
+        assert_eq!(stderr, "true\n");
+    }
+
+    #[test]
+    fn test_fc_s_chained_subs_empty_result_returns_original() {
+        // rubash#3391: the quirk applies per strsub call (fc_dosubs):
+        // `truex` -x-> `true` -true=-> `true`, not "".
+        let (_, stderr, result) = run_fc(&["-s", "x=", "true="], &["truex", "fc"]);
+        match result {
+            FcResult::Reexec { command } => assert_eq!(command, "true"),
+            _ => panic!("expected Reexec"),
+        }
+        assert_eq!(stderr, "true\n");
     }
 
     #[test]
