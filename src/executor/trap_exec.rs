@@ -7161,7 +7161,17 @@ impl Executor {
             // would be silently discarded. Reinstate the stdio marker
             // for the body's duration, then put the closed slot back
             // exactly as close_output left it (rubash#1336).
-            let saved_entry = self.fd_table.entries.get(&fd).cloned();
+            // rubash#3729: snapshot via a kernel duplicate
+            // (FdTable::saved_entry) -- a plain clone shares the
+            // descriptor the stdio-marker bind's open_output retires
+            // (retire_read_arm, rubash#3213), so the restore would
+            // replay a dead entry; the duplicate keeps the saved
+            // descriptor alive until the restore replays it, exactly
+            // like GNU's `fcntl (fd, F_DUPFD, SHELL_FD_BASE)` save
+            // (redir.c:965/1082/1144). A dup failure propagates
+            // (GNU fails the redirect the same way, redir.c
+            // REDIRECTION_ERROR on a failed F_DUPFD save).
+            let saved_entry = self.fd_table.saved_entry(fd)?;
             if fd == 1 || fd == 2 {
                 let marker = if fd == 1 {
                     FdWriteEndpoint::Stdout
