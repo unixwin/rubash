@@ -223,22 +223,37 @@ fn push_char(output: &mut Vec<u8>, ch: char) {
 }
 
 fn push_codepoint(output: &mut Vec<u8>, value: u32) {
-    // GNU echo -e decodes \u/\U through ansicstr (builtins/echo.def:169 ->
-    // lib/sh/strtrans.c:161-181 -> lib/sh/unicode.c:239 u32cconv), the same
-    // path as $'\u': values <= 0x7f are emitted directly, everything else
-    // goes through u32cconv, whose non-UTF-8-locale fallback is u32tocesc
-    // (unicode.c:141: `\u%04X` / `\U%08X`, ISO C99 escape with UPPERCASE
-    // hex) — under LC_ALL=C GNU keeps `echo -e '\u00e9'` as the six literal
-    // characters `\u00E9` (rubash#1488). The ANSI-C decoder in lexer/ansi.rs
-    // applies exactly this gate (#353); mirror it here — through the ONE
-    // shared locale decision (locale::locale_name_selects_utf8, the same
-    // predicate behind the `${#var}` length face), so a non-UTF-8 decision
-    // closes the gate here too, including the no-locale-variables case,
-    // where setlocale(LC_ALL, "") falls back to the C locale and GNU keeps
-    // the escape literal (rubash#1837).
+    // GNU echo -e decodes \u/\U through ansicstr (builtins/echo.def ->
+    // lib/sh/strtrans.c:161-181 -> lib/sh/unicode.c:239 u32cconv).
+    //
+    // Values with the top bit set (>= 0x80000000) produce NOTHING in
+    // every locale (rubash#3787; cf. lexer/ansi.rs #1465): u32cconv
+    // reaches wctomb only for `c <= 0x7fffffff`, and u32toutf8's length
+    // table tops out below 0x80000000, so the conversion yields zero
+    // bytes before the locale split is even consulted. This drop must
+    // precede the locale gate below, which would otherwise keep the
+    // escape literal under LC_ALL=C. Probed on GNU 5.3.20 + 5.2.21:
+    // `echo -e 'A\U80000000B'` / `'\UFFFFFFFFB'` print `AB` in both
+    // C.utf8 and C locales.
+    if value >= 0x8000_0000 {
+        return;
+    }
     if value > 0x7f {
         let name = crate::locale::active_locale_name();
         if !crate::locale::locale_name_selects_utf8(&name) {
+            // Non-UTF-8 locale: u32cconv's fallback is u32tocesc
+            // (unicode.c:141: `\u%04X` / `\U%08X`, ISO C99 escape with
+            // UPPERCASE hex) — under LC_ALL=C GNU keeps `echo -e
+            // '\u00e9'` as the six literal characters `\u00E9`
+            // (rubash#1488). The ANSI-C decoder in lexer/ansi.rs
+            // applies exactly this gate (#353); mirror it here —
+            // through the ONE shared locale decision
+            // (locale::locale_name_selects_utf8, the same predicate
+            // behind the `${#var}` length face), so a non-UTF-8
+            // decision closes the gate here too, including the
+            // no-locale-variables case, where setlocale(LC_ALL, "")
+            // falls back to the C locale and GNU keeps the escape
+            // literal (rubash#1837).
             if value < 0x1_0000 {
                 output.extend_from_slice(format!("\\u{value:04X}").as_bytes());
             } else {
@@ -247,8 +262,49 @@ fn push_codepoint(output: &mut Vec<u8>, value: u32) {
             return;
         }
     }
-    if let Some(ch) = char::from_u32(value) {
-        push_char(output, ch);
+    // UTF-8 locale (or an ASCII value, which strtrans.c:174 translates
+    // directly): encode the numeric value as-is with the u32toutf8
+    // length table — no scalar-validity check. Surrogates encode as
+    // 3-byte CESU-8 (U+D800 -> ED A0 80; unicode.c:170 even notes the
+    // table could return 0 for 0xD800..=0xDFFF but does not), values
+    // above U+10FFFF as 4/5/6-byte forms (U+110000 -> F4 90 80 80).
+    // The old `char::from_u32` path returned None for exactly these
+    // values and silently dropped the escape.
+    push_u32toutf8(output, value);
+}
+
+/// Byte port of GNU lib/sh/unicode.c:154-216 `u32toutf8`: encode the
+/// numeric value with the UTF-8 length table (1-6 bytes). Callers must
+/// have dropped values >= 0x80000000 first (the table's top); values
+/// below that always produce 1-6 bytes.
+fn push_u32toutf8(output: &mut Vec<u8>, value: u32) {
+    if value < 0x80 {
+        output.push(value as u8);
+    } else if value < 0x800 {
+        output.push(((value >> 6) | 0xc0) as u8);
+        output.push(((value & 0x3f) | 0x80) as u8);
+    } else if value < 0x1_0000 {
+        output.push(((value >> 12) | 0xe0) as u8);
+        output.push((((value >> 6) & 0x3f) | 0x80) as u8);
+        output.push(((value & 0x3f) | 0x80) as u8);
+    } else if value < 0x20_0000 {
+        output.push(((value >> 18) | 0xf0) as u8);
+        output.push((((value >> 12) & 0x3f) | 0x80) as u8);
+        output.push((((value >> 6) & 0x3f) | 0x80) as u8);
+        output.push(((value & 0x3f) | 0x80) as u8);
+    } else if value < 0x400_0000 {
+        output.push(((value >> 24) | 0xf8) as u8);
+        output.push((((value >> 18) & 0x3f) | 0x80) as u8);
+        output.push((((value >> 12) & 0x3f) | 0x80) as u8);
+        output.push((((value >> 6) & 0x3f) | 0x80) as u8);
+        output.push(((value & 0x3f) | 0x80) as u8);
+    } else {
+        output.push(((value >> 30) | 0xfc) as u8);
+        output.push((((value >> 24) & 0x3f) | 0x80) as u8);
+        output.push((((value >> 18) & 0x3f) | 0x80) as u8);
+        output.push((((value >> 12) & 0x3f) | 0x80) as u8);
+        output.push((((value >> 6) & 0x3f) | 0x80) as u8);
+        output.push(((value & 0x3f) | 0x80) as u8);
     }
 }
 
