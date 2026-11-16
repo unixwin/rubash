@@ -131,10 +131,31 @@ const LIMITS: &[LimitSpec] = &[
     spec('x', Block::Units(1), "file locks", None),
 ];
 
-/// Conservative table for non-Linux unix targets: the resources POSIX-ish
-/// libc implementations agree on. Exotic letters are invalid options there,
-/// exactly like a C build without the corresponding RLIMIT_* defines.
-#[cfg(all(unix, not(target_os = "linux")))]
+/// macOS table: Darwin's sys/resource.h carries RLIMIT_MEMLOCK/-l,
+/// RLIMIT_RSS/-m and RLIMIT_AS (the RLIMIT_VIRTMEM of ulimit.def:287-289
+/// under HAVE_RESOURCE)/-v on top of the POSIX core set, so `ulimit -a`
+/// prints all eleven rows — verified against the GNU Bash 5.3.20
+/// `ulimit -a` oracle on macOS arm64.
+#[cfg(target_os = "macos")]
+const LIMITS: &[LimitSpec] = &[
+    spec('c', Block::Posix, "core file size", Some("blocks")),
+    spec('d', Block::Units(1024), "data seg size", Some("kbytes")),
+    spec('f', Block::Posix, "file size", Some("blocks")),
+    spec('l', Block::Units(1024), "max locked memory", Some("kbytes")),
+    spec('m', Block::Units(1024), "max memory size", Some("kbytes")),
+    spec('n', Block::Units(1), "open files", None),
+    spec('p', Block::Units(512), "pipe size", Some("512 bytes")),
+    spec('s', Block::Units(1024), "stack size", Some("kbytes")),
+    spec('t', Block::Units(1), "cpu time", Some("seconds")),
+    spec('u', Block::Units(1), "max user processes", None),
+    spec('v', Block::Units(1024), "virtual memory", Some("kbytes")),
+];
+
+/// Conservative table for other non-Linux unix targets: the resources
+/// POSIX-ish libc implementations agree on. Exotic letters are invalid
+/// options there, exactly like a C build without the corresponding
+/// RLIMIT_* defines.
+#[cfg(all(unix, not(target_os = "linux"), not(target_os = "macos")))]
 const LIMITS: &[LimitSpec] = &[
     spec('c', Block::Posix, "core file size", Some("blocks")),
     spec('d', Block::Units(1024), "data seg size", Some("kbytes")),
@@ -243,10 +264,10 @@ mod plat {
             newlim
         };
         if mode & LIMIT_SOFT != 0 {
-            limit.rlim_cur = val as libc::rlim_t;
+            limit.rlim_cur = to_rlim_t(val);
         }
         if mode & LIMIT_HARD != 0 {
-            limit.rlim_max = val as libc::rlim_t;
+            limit.rlim_max = to_rlim_t(val);
         }
         if unsafe { libc::setrlimit(res, &limit) } < 0 {
             return Err(io::Error::last_os_error());
@@ -287,7 +308,24 @@ mod plat {
         }
     }
 
-    #[cfg(all(unix, not(target_os = "linux")))]
+    #[cfg(target_os = "macos")]
+    fn resource(option: char) -> libc::c_int {
+        match option {
+            'c' => libc::RLIMIT_CORE,
+            'd' => libc::RLIMIT_DATA,
+            'f' => libc::RLIMIT_FSIZE,
+            'l' => libc::RLIMIT_MEMLOCK,
+            'm' => libc::RLIMIT_RSS,
+            'n' => libc::RLIMIT_NOFILE,
+            's' => libc::RLIMIT_STACK,
+            't' => libc::RLIMIT_CPU,
+            'u' => libc::RLIMIT_NPROC,
+            'v' => libc::RLIMIT_AS,
+            _ => libc::RLIMIT_FSIZE, // unreachable: parser only admits table letters
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "linux"), not(target_os = "macos")))]
     fn resource(option: char) -> libc::c_int {
         match option {
             'c' => libc::RLIMIT_CORE,
@@ -307,7 +345,33 @@ mod plat {
         if unsafe { libc::getrlimit(res, &mut limit) } < 0 {
             return Err(io::Error::last_os_error());
         }
-        Ok((limit.rlim_cur as u64, limit.rlim_max as u64))
+        Ok((norm_in(limit.rlim_cur), norm_in(limit.rlim_max)))
+    }
+
+    /// The kernel's own infinity sentinel does not always equal the
+    /// internal UNLIMITED (u64::MAX): Darwin's RLIM_INFINITY is
+    /// (1<<63)-1, so a raw `rlim_cur == u64::MAX` comparison misses it
+    /// and printone (ulimit.def:754-777) renders `unlimited / factor`
+    /// as a giant number. Read: anything at or above the platform
+    /// infinity normalizes to UNLIMITED. Write (to_rlim_t): UNLIMITED
+    /// maps back to the platform infinity — passing u64::MAX to
+    /// Darwin's setrlimit counts as a hard-limit RAISE above the real
+    /// maximum and fails EPERM for a non-root `ulimit -f unlimited`
+    /// that GNU treats as a no-op.
+    fn norm_in(value: libc::rlim_t) -> u64 {
+        if value >= libc::RLIM_INFINITY {
+            UNLIMITED
+        } else {
+            value as u64
+        }
+    }
+
+    fn to_rlim_t(value: u64) -> libc::rlim_t {
+        if value == UNLIMITED {
+            libc::RLIM_INFINITY
+        } else {
+            value as libc::rlim_t
+        }
     }
 
     #[cfg(all(unix, not(target_os = "linux")))]
@@ -316,7 +380,7 @@ mod plat {
         if unsafe { libc::getrlimit(res, &mut limit) } < 0 {
             return Err(io::Error::last_os_error());
         }
-        Ok((limit.rlim_cur as u64, limit.rlim_max as u64))
+        Ok((norm_in(limit.rlim_cur), norm_in(limit.rlim_max)))
     }
 
     /// rubash#2636: snapshot the whole PROCESS rlimit set (every
@@ -347,15 +411,15 @@ mod plat {
         for &(option, soft, hard) in snapshot {
             let res = resource(option);
             let mut limit: libc::rlimit = unsafe { std::mem::zeroed() };
-            limit.rlim_cur = soft as libc::rlim_t;
-            limit.rlim_max = hard as libc::rlim_t;
+            limit.rlim_cur = to_rlim_t(soft);
+            limit.rlim_max = to_rlim_t(hard);
             if unsafe { libc::setrlimit(res, &limit) } == 0 {
                 continue;
             }
             if let Ok((_, current_hard)) = rlimit_get(res) {
                 let mut fallback: libc::rlimit = unsafe { std::mem::zeroed() };
-                fallback.rlim_cur = soft.min(current_hard) as libc::rlim_t;
-                fallback.rlim_max = current_hard as libc::rlim_t;
+                fallback.rlim_cur = to_rlim_t(soft.min(current_hard));
+                fallback.rlim_max = to_rlim_t(current_hard);
                 unsafe {
                     libc::setrlimit(res, &fallback);
                 }
