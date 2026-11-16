@@ -26,7 +26,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 const RUBASH: &str = env!("CARGO_BIN_EXE_rubash");
 
@@ -45,26 +45,6 @@ fn rubash_in(dir: &Path, script: &str) -> (String, String, Option<i32>) {
         .arg("-c")
         .arg(script)
         .current_dir(dir)
-        .output()
-        .expect("run rubash");
-    (
-        String::from_utf8_lossy(&output.stdout).into_owned(),
-        String::from_utf8_lossy(&output.stderr).into_owned(),
-        output.status.code(),
-    )
-}
-
-fn rubash_in_stdin_file(
-    dir: &Path,
-    script: &str,
-    stdin_file: &Path,
-) -> (String, String, Option<i32>) {
-    let file = fs::File::open(stdin_file).expect("open stdin file");
-    let output = Command::new(RUBASH)
-        .arg("-c")
-        .arg(script)
-        .current_dir(dir)
-        .stdin(Stdio::from(file))
         .output()
         .expect("run rubash");
     (

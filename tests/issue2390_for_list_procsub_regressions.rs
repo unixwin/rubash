@@ -25,12 +25,17 @@
 //! with script-file probes; /dev/fd numbers are normalised before
 //! comparison. All for-list cells are red on master 5727567f.
 
+#[cfg(unix)]
 use std::io::Read;
+#[cfg(unix)]
 use std::process::{Command, Stdio};
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
 const RUBASH: &str = env!("CARGO_BIN_EXE_rubash");
 
+#[cfg(unix)]
 struct Outcome {
     stdout: String,
     stderr: String,
@@ -39,6 +44,7 @@ struct Outcome {
 
 /// Run `script` (written to a temp file) under the shell at `bin`
 /// with a bounded wait; /dev/fd digits are normalised to `N`.
+#[cfg(unix)]
 fn run_script(bin: &str, tag: &str, script: &str) -> Outcome {
     let dir = std::env::temp_dir().join(format!("rubash-issue2390-{}-{}", tag, std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -88,6 +94,7 @@ fn run_script(bin: &str, tag: &str, script: &str) -> Outcome {
     }
 }
 
+#[cfg(unix)]
 fn normalize_fd_numbers(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -103,6 +110,7 @@ fn normalize_fd_numbers(text: &str) -> String {
     out
 }
 
+#[cfg(unix)]
 fn assert_case(tag: &str, script: &str, want_stdout: &str, want_code: i32) {
     let got = run_script(RUBASH, tag, script);
     assert_eq!(got.stdout, want_stdout, "stdout for {tag}");
