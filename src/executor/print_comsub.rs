@@ -721,42 +721,13 @@ impl ComsubPrinter {
         }
     }
 
+    /// print_cmd.c:1150 print_redirection through the one shared owner
+    /// (`ast_print::print_redirection_text`, the same renderer
+    /// `declare -f` uses): parse_comsub stores exactly this text in the
+    /// word (parse.y:4632), so `>&2` reads back as `1>&2`, `<&-` as
+    /// `0>&-`, `&>f` as `&> f` (rubash#3404).
     fn redirect_text(&mut self, redirect: &Redirect) -> String {
-        // The ordered `redirects` list carries the fd INSIDE the operator
-        // (`2>`, `2>&`, `<`), exactly as print_cmd.c prints it; only a
-        // `{var}` dynamic redirector lives in its own field
-        // (print_cmd.c:1150-1260 `{%s}` prefixes).
-        let mut prefix = String::new();
-        if let Some(fd_var) = &redirect.fd_var {
-            if !redirect.operator.contains('{') {
-                prefix.push_str(&format!("{{{fd_var}}}"));
-            }
-        }
-        let target = Self::word_source_text(&redirect.target, Some(&redirect.target_metadata));
-        // Word-taking redirections print `op target`; fd duplications print
-        // the operand glued to the operator (print_cmd.c:1150-1260). The
-        // stored operator carries the fd (`2>&`) and the target carries the
-        // leading `&` (`&1`); print exactly one of each.
-        let glued_target = target.strip_prefix('&').unwrap_or(&target).to_string();
-        let fd_digit = if redirect.operator.starts_with(|c: char| c.is_ascii_digit()) {
-            String::new()
-        } else {
-            redirect.fd.map(|fd| fd.to_string()).unwrap_or_default()
-        };
-        match redirect.kind {
-            crate::parser::RedirectKind::DuplicateInput
-            | crate::parser::RedirectKind::DuplicateOutput => {
-                format!("{prefix}{fd_digit}{}{glued_target}", redirect.operator)
-            }
-            crate::parser::RedirectKind::CloseInput | crate::parser::RedirectKind::CloseOutput => {
-                format!("{prefix}{}", redirect.operator)
-            }
-            crate::parser::RedirectKind::CombinedOutput
-            | crate::parser::RedirectKind::CombinedAppend => {
-                format!("{prefix}{}", redirect.operator)
-            }
-            _ => format!("{prefix}{} {target}", redirect.operator),
-        }
+        crate::parser::ast_print::print_redirection_text(redirect)
     }
 }
 

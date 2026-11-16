@@ -107,40 +107,21 @@ fn byte_domain_text(text: &str) -> String {
         .collect()
 }
 
+/// Normalize a byte-domain field back to storage text. The field's
+/// bytes are exactly the record bytes GNU binds (read.def:838-845 escapes
+/// CTLESC/CTLNUL and read.def:1127 / :1061 dequote_string undoes it, so the
+/// bound value is byte-identical to the input). `bytes_to_shell_text` is
+/// the storage-domain inverse of `shell_text_to_raw_bytes`: valid UTF-8
+/// re-forms its characters, a stray >= 0x80 byte stays a raw-byte marker,
+/// and every ASCII carrier byte (0x1b, 0x0c, 0x11, 0x13, 0x14..=0x1f) is
+/// re-tagged as its marker pair, exactly as `tag_read_carrier_text` tagged
+/// it on the way in. Emitting those bytes as bare chars (the pre-#3489
+/// walk) let the lexer's carrier consumers claim them: 0x14 became `\`,
+/// 0x1f `$`, 0x11/0x13 vanished, and 0x1b stopped matching `$'\e'`
+/// patterns (rubash#3489, the bats junit formatter's ANSI strip).
 fn byte_domain_value(text: &str) -> String {
-    use crate::executor::substitution_metadata::{encode_raw_byte_marker, shell_text_to_raw_bytes};
-    let bytes = shell_text_to_raw_bytes(text);
-    let mut output = String::new();
-    let mut index = 0;
-    while index < bytes.len() {
-        let first = bytes[index];
-        let len = if first < 0x80 {
-            1
-        } else if first & 0xE0 == 0xC0 {
-            2
-        } else if first & 0xF0 == 0xE0 {
-            3
-        } else if first & 0xF8 == 0xF0 {
-            4
-        } else {
-            1
-        };
-        let end = (index + len).min(bytes.len());
-        if end - index == len {
-            if let Ok(valid) = std::str::from_utf8(&bytes[index..end]) {
-                output.push_str(valid);
-                index = end;
-                continue;
-            }
-        }
-        if first < 0x80 {
-            output.push(char::from(first));
-        } else {
-            output.push_str(&encode_raw_byte_marker(first));
-        }
-        index += 1;
-    }
-    output
+    use crate::executor::substitution_metadata::{bytes_to_shell_text, shell_text_to_raw_bytes};
+    bytes_to_shell_text(&shell_text_to_raw_bytes(text))
 }
 
 /// Byte length of `text`'s first `unit_count` logical units.

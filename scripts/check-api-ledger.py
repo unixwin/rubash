@@ -332,8 +332,9 @@ def _child_module(module, name, require_pub=True):
     The ledger path itself may only step through `pub mod` (a consumer
     cannot name a private module); a `pub use` target inside the crate
     may name any module, because the re-export is what publishes it.
-    A `#[path = "..."]` attribute on the line above the declaration is
-    honoured relative to the declaring file's directory.
+    A `#[path = "..."]` attribute anywhere in the declaration's
+    attribute block (doc comments and blank lines may sit between
+    attributes) is honoured relative to the declaring file's directory.
     """
     text = module.text
     if require_pub:
@@ -354,9 +355,20 @@ def _child_module(module, name, require_pub=True):
                 raw=module.raw,
             )
         line_start = module.raw.rfind("\n", 0, match.start())
-        previous = module.raw[: max(line_start, 0)].rstrip().splitlines()[-1:]
-        for attr in previous:
-            path_attr = _PATH_ATTR.search(attr.strip())
+        # Walk back over the declaration's attribute block — attributes,
+        # comments (incl. doc comments) and blank lines — stopping at the
+        # first other code line (rubash#3572: previously only the line
+        # immediately above was inspected).
+        lines = module.raw[: max(line_start, 0)].splitlines()
+        attr_block = []
+        for line in reversed(lines):
+            stripped = line.strip()
+            if not stripped or stripped.startswith(("#", "//")):
+                attr_block.append(stripped)
+            else:
+                break
+        for attr in attr_block:
+            path_attr = _PATH_ATTR.search(attr)
             if path_attr:
                 target = module.path.parent / path_attr.group(1)
                 return _load_module_file(target, target.parent / target.stem)
