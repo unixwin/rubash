@@ -749,26 +749,94 @@ impl Executor {
                 }
                 Some('@') => {
                     chars.next();
-                    let value = self.shell_state.positional_window().join(" ");
-                    if preserve_quotes {
-                        push_preserved_expansion_output(&mut output, &value, in_double);
+                    // GNU subst.c:12054-12153 `@` case: `$@` contributes one
+                    // word-list element per positional parameter — each
+                    // element's own whitespace stays protected while the
+                    // element boundaries remain real separators. Marking
+                    // the joined value wholesale glued the elements into
+                    // one field; leaving them bare split `q r`
+                    // (dollar-at-star9 family). The boundary byte is the
+                    // first IFS character — string_list_dollar_at separates
+                    // positional parameters with $IFS[0] (subst.c:12097).
+                    // Under PF_ASSIGNRHS the separator is always ' ', and a
+                    // set-but-empty IFS also yields ' ' (subst.c:2975-3000).
+                    let ifs_first = if self.inside_assignment_rhs.get()
+                        || super::expand_braced_replacement::ASSIGNMENT_RHS.with(|f| f.get())
+                    {
+                        ' '.to_string()
                     } else {
-                        output.push_str(&protect_result_backslashes(
-                            &value,
-                            protect_results || protect_data,
-                        ));
+                        self.shell_state
+                            .env_vars
+                            .get("IFS")
+                            .and_then(|ifs| ifs.chars().next())
+                            .map(|c| c.to_string())
+                            .unwrap_or_else(|| " ".to_string())
+                    };
+                    if preserve_quotes {
+                        let mut first = true;
+                        for element in self.shell_state.positional_window() {
+                            if !first {
+                                output.push_str(&ifs_first);
+                            }
+                            first = false;
+                            push_preserved_expansion_output(&mut output, element, in_double);
+                        }
+                    } else {
+                        let value = self
+                            .shell_state
+                            .positional_window()
+                            .iter()
+                            .map(|element| {
+                                crate::executor::embedded_mutations::mark_alternate_whitespace(
+                                    &protect_result_backslashes(
+                                        element,
+                                        protect_results || protect_data,
+                                    ),
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(&ifs_first);
+                        output.push_str(&value);
                     }
                 }
                 Some('*') => {
                     chars.next();
-                    let value = self.positional_params_star_joined();
+                    // Same element model as `@`, but `$*` separates with
+                    // ifs_firstchar (subst.c:2902-2930): a set-but-empty IFS
+                    // joins the elements with no separator at all.
+                    let ifs_first = match self.shell_state.env_vars.get("IFS") {
+                        Some(ifs) => ifs
+                            .chars()
+                            .next()
+                            .map(|c| c.to_string())
+                            .unwrap_or_default(),
+                        None => " ".to_string(),
+                    };
                     if preserve_quotes {
-                        push_preserved_expansion_output(&mut output, &value, in_double);
+                        let mut first = true;
+                        for element in self.shell_state.positional_window() {
+                            if !first {
+                                output.push_str(&ifs_first);
+                            }
+                            first = false;
+                            push_preserved_expansion_output(&mut output, element, in_double);
+                        }
                     } else {
-                        output.push_str(&protect_result_backslashes(
-                            &value,
-                            protect_results || protect_data,
-                        ));
+                        let value = self
+                            .shell_state
+                            .positional_window()
+                            .iter()
+                            .map(|element| {
+                                crate::executor::embedded_mutations::mark_alternate_whitespace(
+                                    &protect_result_backslashes(
+                                        element,
+                                        protect_results || protect_data,
+                                    ),
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(&ifs_first);
+                        output.push_str(&value);
                     }
                 }
                 Some('#') => {

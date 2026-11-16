@@ -1166,26 +1166,83 @@ impl Executor {
                 }
                 Some('@') => {
                     chars.next();
-                    let value = self.shell_state.positional_window().join(" ");
-                    let value =
-                        protect_rhs_value(&value, protect_rhs_data || protect_expansion_results);
-                    if expansion_ws_marked(alternate, preserve_quotes, in_double) {
-                        output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
+                    // GNU subst.c:12054-12153 param_expand `@` case: `$@`
+                    // contributes one word-list element per positional
+                    // parameter — each element's own whitespace stays
+                    // CTLESC-protected while the element BOUNDARIES remain
+                    // real separators. Joining first and then marking the
+                    // whole value glued the elements into one field
+                    // (dollar-at-star9 `Q${q- "$@" }W`); emitting bare
+                    // whitespace inside an element split `q r` instead
+                    // (`${v- "$@" }` with `set -- p 'q r' r`). Mark each
+                    // element's whitespace, then join with the first IFS
+                    // character — string_list_dollar_at separates the
+                    // positional parameters with $IFS[0] (subst.c:12097),
+                    // so under IFS=: the boundary byte is ':' and splits.
+                    // string_list_dollar_at separates positional
+                    // parameters with a space under PF_ASSIGNRHS, else
+                    // with $IFS[0] when IFS is set non-empty, else ' '
+                    // (subst.c:2975-3000) — a set-but-empty IFS still
+                    // yields ' ' for `$@`.
+                    let ifs_first = if self.inside_assignment_rhs.get()
+                        || super::expand_braced_replacement::ASSIGNMENT_RHS.with(|f| f.get())
+                    {
+                        ' '
                     } else {
-                        output.push_str(&value);
+                        self.shell_state
+                            .env_vars
+                            .get("IFS")
+                            .and_then(|ifs| ifs.chars().next())
+                            .unwrap_or(' ')
                     }
+                    .to_string();
+                    let value = self
+                        .shell_state
+                        .positional_window()
+                        .iter()
+                        .map(|element| {
+                            mark_expansion_whitespace(
+                                &protect_rhs_value(
+                                    element,
+                                    protect_rhs_data || protect_expansion_results,
+                                ),
+                                preserve_quotes,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(&ifs_first);
+                    output.push_str(&value);
                 }
                 Some('*') => {
                     chars.next();
-                    // Bash joins `$*` with the first IFS character (not a space).
-                    let value = self.positional_params_star_joined();
-                    let value =
-                        protect_rhs_value(&value, protect_rhs_data || protect_expansion_results);
-                    if expansion_ws_marked(alternate, preserve_quotes, in_double) {
-                        output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
-                    } else {
-                        output.push_str(&value);
-                    }
+                    // Same element model as `@` above, but `$*` separates
+                    // with ifs_firstchar (subst.c:2902-2930): a set-but-empty
+                    // IFS joins the elements with no separator at all
+                    // (`IFS='' x=$*` concatenates).
+                    let ifs_first = match self.shell_state.env_vars.get("IFS") {
+                        Some(ifs) => ifs
+                            .chars()
+                            .next()
+                            .map(|c| c.to_string())
+                            .unwrap_or_default(),
+                        None => " ".to_string(),
+                    };
+                    let value = self
+                        .shell_state
+                        .positional_window()
+                        .iter()
+                        .map(|element| {
+                            mark_expansion_whitespace(
+                                &protect_rhs_value(
+                                    element,
+                                    protect_rhs_data || protect_expansion_results,
+                                ),
+                                preserve_quotes,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(&ifs_first);
+                    output.push_str(&value);
                 }
                 Some('#') => {
                     chars.next();

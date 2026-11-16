@@ -326,7 +326,33 @@ impl Executor {
         // whole-word argument position.
         let expanded = unescape_unquoted_rhs_escapes(&decode_parameter_word_quotes(&expanded));
         let expanded = restore_deferred_operator_backslashes(&expanded);
-        tilde_expand::expand_assignment_tilde_value(&expanded, &self.shell_state.env_vars, false)
+        let expanded = tilde_expand::expand_assignment_tilde_value(
+            &expanded,
+            &self.shell_state.env_vars,
+            false,
+        );
+        // GNU subst.c:12123 + :12153 expand_word_internal end-of-word:
+        // when the rhs word's expansion produced a $@-family word list
+        // (has_dollar_at), the assembled istring is list_string'd over
+        // the ambient IFS and the surviving words are rejoined through
+        // string_list_dollar_star (subst.c:2902, ifs[0] separators,
+        // each element's own protection kept). That is what lets an
+        // empty "$@" contribute NOTHING (affixes glue together:
+        // `Q${q- "$@" }W` -> `QW`), and glues edge text onto the
+        // boundary elements (`A${q- "$@" }B` -> `Ap`,`q r`,`rB`).
+        // subst.c:12074 W_ASSIGNRHS keeps the istring verbatim instead
+        // (`x=${q- "$@" }` stores ` p q r `) — inside_assignment_rhs
+        // is that flag here.
+        if !self.inside_assignment_rhs.get() && rhs_expansion_has_dollar_at(word) {
+            let ifs = self.shell_state.env_vars.get("IFS").map(String::as_str);
+            let joiner: String = ifs
+                .and_then(|ifs| ifs.chars().next())
+                .unwrap_or(' ')
+                .to_string();
+            split_operator_rhs_fields(&expanded, ifs).join(&joiner)
+        } else {
+            expanded
+        }
     }
 
     // Alternate word of the `-`/`+`/`:-`/`:+` operators. GNU expands the
@@ -339,7 +365,23 @@ impl Executor {
     // and their own whitespace stays protected (more-exp ${B:-"$A"}).
     pub(in crate::executor) fn expand_alternate_parameter_word(&mut self, word: &str) -> String {
         let expanded = self.expand_embedded_parameters_alternate_mut(word);
-        tilde_expand::expand_assignment_tilde_value(&expanded, &self.shell_state.env_vars, false)
+        let expanded = tilde_expand::expand_assignment_tilde_value(
+            &expanded,
+            &self.shell_state.env_vars,
+            false,
+        );
+        // Same subst.c:12123/12153 has_dollar_at rejoin as
+        // expand_parameter_word; W_ASSIGNRHS keeps the verbatim string.
+        if !self.inside_assignment_rhs.get() && rhs_expansion_has_dollar_at(word) {
+            let ifs = self.shell_state.env_vars.get("IFS").map(String::as_str);
+            let joiner: String = ifs
+                .and_then(|ifs| ifs.chars().next())
+                .unwrap_or(' ')
+                .to_string();
+            split_operator_rhs_fields(&expanded, ifs).join(&joiner)
+        } else {
+            expanded
+        }
     }
 
     pub(in crate::executor) fn expand_parameter_word_mut(&mut self, word: &str) -> String {
@@ -2352,13 +2394,136 @@ fn unescape_double_quoted_backslashes(value: &str) -> String {
 /// by the CURRENT word's own RHS expansion carries anchoring provenance —
 /// this helper must never run on RHS expansion results.
 pub(in crate::executor) fn dequote_stored_parameter_value(value: String) -> String {
-    if !value.contains(crate::executor::markers::QUOTED_NULL_MARKER) {
+    if !crate::executor::markers::contains_bare_sentinel(
+        &value,
+        crate::executor::markers::QUOTED_NULL_MARKER,
+    ) {
         return value;
     }
     crate::executor::markers::restore_bare_sentinels(
         &value,
         &[(crate::executor::markers::QUOTED_NULL_MARKER, "")],
     )
+}
+
+/// GNU has_dollar_at (subst.c:11745-11753 — set by param_expand's `@`/`*`
+/// cases and `[@]`/`[*]` subscripts): does this rhs word contain an
+/// expansion contributing a word LIST? Scanned on the raw rhs text; a
+/// `'$@'` inside a single-quoted span is literal data, so sq spans are
+/// skipped the way read_token_word does. `$@`/`$*`, `${@..}`/`${*..}`,
+/// `${!..}` indirections, and `[@]`/`[*]` subscripts inside the parameter
+/// name slot all count; `${#..}` counts are scalars and do not.
+fn rhs_expansion_has_dollar_at(word: &str) -> bool {
+    let chars: Vec<char> = word.chars().collect();
+    let mut i = 0;
+    let mut in_squote = false;
+    while i < chars.len() {
+        match chars[i] {
+            '\'' => {
+                in_squote = !in_squote;
+                i += 1;
+            }
+            _ if in_squote => i += 1,
+            '\\' => i += 2,
+            '$' => {
+                match chars.get(i + 1).copied() {
+                    Some('@') | Some('*') => return true,
+                    Some('{') => {
+                        let mut j = i + 2;
+                        if matches!(chars.get(j), Some('!')) {
+                            j += 1;
+                        }
+                        if matches!(chars.get(j), Some('@') | Some('*')) {
+                            return true;
+                        }
+                        // Scan the name + subscript region only; the first
+                        // non-name, non-subscript character starts the
+                        // operator word, where `[@]`/`[*]` are data.
+                        while let Some(&c) = chars.get(j) {
+                            if is_shell_name_char(c) {
+                                j += 1;
+                            } else if c == '[' {
+                                let mut k = j + 1;
+                                while let Some(&s) = chars.get(k) {
+                                    k += 1;
+                                    if s == ']' {
+                                        break;
+                                    }
+                                    if s == '@' || s == '*' {
+                                        return true;
+                                    }
+                                }
+                                j = k;
+                            } else {
+                                break;
+                            }
+                        }
+                        i += 1;
+                    }
+                    _ => i += 1,
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    false
+}
+
+/// Split a fully expanded `-`/`+` rhs string on the ambient IFS the way
+/// GNU's end-of-word `list_string` (subst.c:3181-3192) does: IFS whitespace
+/// runs collapse into one boundary and produce no empty fields, every
+/// non-whitespace IFS char is one boundary (internal empties kept), and
+/// IFS_GLUE-protected bytes stay inside their field — unlike
+/// `field_split_values`, the carriers are preserved in the output so the
+/// caller's rejoin keeps each element's quoting intact.
+fn split_operator_rhs_fields(text: &str, ifs: Option<&str>) -> Vec<String> {
+    let ifs = ifs.unwrap_or(" \t\n");
+    let is_ifs_ws = |ch: char| matches!(ch, ' ' | '\t' | '\n') && ifs.contains(ch);
+    let is_ifs_nonws = |ch: char| !matches!(ch, ' ' | '\t' | '\n') && ifs.contains(ch);
+    let chars: Vec<char> = text.chars().collect();
+    let mut fields: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let ch = chars[i];
+        if ch == crate::executor::markers::IFS_GLUE {
+            current.push(ch);
+            i += 1;
+            if i < chars.len() {
+                current.push(chars[i]);
+                i += 1;
+            }
+            continue;
+        }
+        if is_ifs_ws(ch) {
+            while i < chars.len() && is_ifs_ws(chars[i]) {
+                i += 1;
+            }
+            // A whitespace run adjacent to a non-whitespace separator is
+            // absorbed into that separator, not a boundary of its own.
+            if i < chars.len() && is_ifs_nonws(chars[i]) {
+                continue;
+            }
+            if !current.is_empty() {
+                fields.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
+        if is_ifs_nonws(ch) {
+            fields.push(std::mem::take(&mut current));
+            i += 1;
+            while i < chars.len() && is_ifs_ws(chars[i]) {
+                i += 1;
+            }
+            continue;
+        }
+        current.push(ch);
+        i += 1;
+    }
+    if !current.is_empty() {
+        fields.push(current);
+    }
+    fields
 }
 
 pub(in crate::executor) fn restore_deferred_operator_backslashes(value: &str) -> String {
