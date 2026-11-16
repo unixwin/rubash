@@ -378,8 +378,10 @@ pub(super) fn protect_fully_single_quoted_assignment(raw: &str) -> String {
             // decoder can claim it as protocol. The four arms above map
             // source metacharacters TO carriers deliberately; this arm
             // keeps source bytes that already ARE carrier bytes from
-            // being read as the carriers they collide with.
-            ch if crate::lexer::ansi::is_assignment_carrier_byte(ch as u32) => {
+            // being read as the carriers they collide with. ESC (0x1b)
+            // is excluded: niubash#200 owns it (word-initial tagged by
+            // tag_word_initial_raw_esc, mid-word verbatim).
+            ch if crate::lexer::ansi::is_literal_source_carrier_byte(ch as u32) => {
                 crate::lexer::ansi::push_tagged_source_char(&mut out, ch);
             }
             _ => out.push(ch),

@@ -360,9 +360,11 @@ fn remove_shell_quotes_inner_cursor(raw: &str, posix: bool) -> String {
     // which must be tagged as a raw-byte marker pair, not returned bare.
     // A carrier byte therefore disqualifies the fast path exactly like a
     // trigger byte does; the walk below tags it in its bulk span.
+    // (ESC is excluded from the carrier set here: niubash#200 owns it —
+    // word-initial tagged by tag_word_initial_raw_esc, mid-word verbatim.)
     if !raw.as_bytes().iter().any(|&b| {
         matches!(b, b'\'' | b'"' | b'\\' | b'$' | b'`' | b'[' | b']')
-            || super::ansi::is_assignment_carrier_byte(b as u32)
+            || super::ansi::is_literal_source_carrier_byte(b as u32)
     }) {
         return raw.to_string();
     }
@@ -2340,8 +2342,15 @@ pub(super) fn remove_shell_quotes_outside_backticks(raw: &str) -> String {
                         // rubash#3816: a literal control byte inside the
                         // quotes is user data — tag it as a raw-byte
                         // marker pair so no downstream decoder can claim
-                        // it as the carrier it collides with.
-                        quoted if crate::lexer::ansi::is_assignment_carrier_byte(quoted as u32) => {
+                        // it as the carrier it collides with. ESC (0x1b)
+                        // is excluded: niubash#200 owns it (word-initial
+                        // tagged by tag_word_initial_raw_esc, mid-word
+                        // verbatim).
+                        quoted
+                            if crate::lexer::ansi::is_literal_source_carrier_byte(
+                                quoted as u32,
+                            ) =>
+                        {
                             crate::lexer::ansi::push_tagged_source_char(&mut out, quoted);
                         }
                         _ => out.push(quoted),

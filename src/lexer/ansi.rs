@@ -37,6 +37,30 @@ pub(crate) fn is_assignment_carrier_byte(byte: u32) -> bool {
         || (0x14..=0x1f).contains(&byte)
 }
 
+/// Literal-source carrier set for the #3816 dequote-entry tagging
+/// (`push_tagged_source_char` / `push_tagged_source_span` and the
+/// fast-path / single-quote guards that feed them): the
+/// `is_assignment_carrier_byte` set EXCEPT U+001B (ESC).
+///
+/// ESC is owned by niubash#200, not by this tagging: a word-initial raw
+/// ESC is tagged by `tag_word_initial_raw_esc` (lexer/word.rs) and a
+/// mid-word raw ESC stays verbatim, because `strip_prefix` consumers
+/// only ever claim a word-initial ESC. Tagging ESC here as well would
+/// double-tag the word-initial one (the lib tests count exactly one
+/// E000 per word) and tag the mid-word one (which must stay a raw
+/// 0x1b). ESC is not in #3816's damaged set (0x11, 0x13, 0x14, 0x16,
+/// 0x17, 0x18, 0x1a, 0x1c, 0x1d, 0x1f), so excluding it keeps the
+/// #3816 pins green.
+///
+/// This predicate is ONLY for literal source bytes at dequote entry.
+/// The ANSI-C decoder (`push_ansi_c_byte`) and the byte-conversion
+/// paths (substitution_metadata, read_helpers, printf, mapfile) keep
+/// using `is_assignment_carrier_byte` — a decoded 0x1b IS data there
+/// and must still be tagged.
+pub(crate) fn is_literal_source_carrier_byte(byte: u32) -> bool {
+    byte != 0x1b && is_assignment_carrier_byte(byte)
+}
+
 /// Push one literal source character into transport text, owner-tagging
 /// it as a raw-byte marker pair (E000 + E001+byte) when it collides with
 /// an assignment carrier byte (rubash#3816).
@@ -56,12 +80,16 @@ pub(crate) fn is_assignment_carrier_byte(byte: u32) -> bool {
 /// for bytes no consumer claims (0x15/0x19/0x1e/0x0c included) and
 /// byte-exact for the ones they do.
 ///
+/// ESC (0x1b) is deliberately NOT tagged here — see
+/// `is_literal_source_carrier_byte`: niubash#200 owns ESC (word-initial
+/// tagged by `tag_word_initial_raw_esc`, mid-word verbatim).
+///
 /// This is deliberately NOT markers::push_literal_char: that is the E400
 /// escape for literal PUA-zone chars, a different protocol family with
 /// its own entry rules (#735/#840) — this helper only covers the C0
 /// carrier set above.
 pub(crate) fn push_tagged_source_char(out: &mut String, ch: char) {
-    if is_assignment_carrier_byte(ch as u32) {
+    if is_literal_source_carrier_byte(ch as u32) {
         out.push_str(&crate::executor::substitution_metadata::encode_raw_byte_marker(ch as u8));
     } else {
         out.push(ch);
@@ -75,7 +103,10 @@ pub(crate) fn push_tagged_source_char(out: &mut String, ch: char) {
 /// transport. A UTF-8 multi-byte char never triggers the slow path: its
 /// bytes are all >= 0x80, outside the carrier set.
 pub(crate) fn push_tagged_source_span(out: &mut String, span: &str) {
-    if !span.bytes().any(|b| is_assignment_carrier_byte(b as u32)) {
+    if !span
+        .bytes()
+        .any(|b| is_literal_source_carrier_byte(b as u32))
+    {
         out.push_str(span);
         return;
     }
