@@ -219,6 +219,9 @@ impl Executor {
         // A live exported PIPESTATUS array prints in array form under
         // `export -p`, not the table's valueless line (rubash#1363).
         self.substitute_pipestatus_print_line(&mut stdout);
+        // GNU variables.c:5820/6257-6266 sv_strict_posix: an export
+        // bind of POSIXLY_CORRECT re-derives the mode (rubash#3661).
+        self.sync_posix_mode_if_assignment_operands(&args);
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
         Ok(status)
     }

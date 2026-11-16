@@ -18,7 +18,8 @@ use crate::executor::{ExecuteError, Executor};
 use crate::history::SessionHistory;
 use crate::history_expand::{HistChars, HistCtx};
 use crate::lexer::{
-    expand_aliases_in_source, tokenize, tokenize_with_initial_posix, AliasLookup, Token, TokenKind,
+    expand_aliases_in_source_marked, tokenize, tokenize_with_initial_posix,
+    tokenize_with_initial_posix_marked, AliasLookup, Token, TokenKind,
 };
 use crate::parser::CommandNode;
 
@@ -371,8 +372,21 @@ pub fn script_uses_runtime_parse_gates(contents: &str) -> bool {
 /// (parse.y:5751-5769): posix keeps reserved words as keywords, default
 /// mode lets an alias replace them (rubash#414).
 pub(crate) fn expand_group_aliases(executor: &Executor, source: &str) -> String {
+    expand_group_aliases_marked(executor, source).0
+}
+
+/// `expand_group_aliases` plus the byte offsets of newlines the
+/// expansion itself introduced — GNU consumes pushed alias text through
+/// shell_getc without the yy_readline_get line_number bump
+/// (parse.y:2504), so those newlines must not advance the token line
+/// stamps (rubash#3605 run-nquote: `alias foo=$'echo foo\\n\\nquux\\n'`
+/// + `foo` on line N reports `quux` at line N, not N+2).
+pub(crate) fn expand_group_aliases_marked(
+    executor: &Executor,
+    source: &str,
+) -> (String, Vec<usize>) {
     if !executor.alias_expansion_enabled() || executor.shell_state.aliases.is_empty() {
-        return source.to_string();
+        return (source.to_string(), Vec::new());
     }
     let posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
     let lookup = move |word: &str| {
@@ -385,7 +399,7 @@ pub(crate) fn expand_group_aliases(executor: &Executor, source: &str) -> String 
             )
         })
     };
-    expand_aliases_in_source(source, &lookup as &AliasLookup<'_>, posix)
+    expand_aliases_in_source_marked(source, &lookup as &AliasLookup<'_>, posix)
 }
 
 /// shell.c run_pending_command style driver for scripts with history on:
@@ -2311,7 +2325,13 @@ fn run_history_group(
             .join("\n")
     };
     let pre_alias_text = exec_text.clone();
-    let exec_text = expand_group_aliases(executor, &exec_text);
+    // GNU pushes the alias text onto the input (parse.y:2055 push_string)
+    // and consumes it through shell_getc — the yy_readline_get
+    // line_number bump (parse.y:2504) only fires on REAL input fetches,
+    // so newlines inside the expansion are line separators but not line
+    // advances (run-nquote: `quux` inside `foo`'s value reports the
+    // `foo` line, not the pushed line's own index).
+    let (exec_text, expansion_newlines) = expand_group_aliases_marked(executor, &exec_text);
     if exec_text.trim().is_empty() {
         return executor.last_exit_code();
     }
@@ -2378,7 +2398,7 @@ fn run_history_group(
                 crate::lexer::set_parse_extended_glob(entry);
                 saved
             });
-            let status = run_source_with_line_offset(
+            let status = run_source_with_line_offset_marked(
                 executor,
                 &exec_text,
                 interactive,
@@ -2389,6 +2409,7 @@ fn run_history_group(
                 } else {
                     Some(pre_alias_text.as_str())
                 },
+                &expansion_newlines,
             );
             if let Some(saved) = saved_extended_glob {
                 crate::lexer::set_parse_extended_glob(saved);
@@ -3586,6 +3607,7 @@ pub(crate) fn run_source_pre_lexed_with_line_offset(
         diagnostic_text,
         Some(pre_lexed),
         false,
+        &[],
     )
 }
 
@@ -3654,6 +3676,25 @@ fn command_paren_verdict_disproved_by_parser(input: &str, parse_posix: bool) -> 
                 .any(command_tree_has_non_cond_parse_error);
     }
     if !ast.commands.iter().any(command_tree_has_parse_error) {
+        // rubash#3405: the real parser stays silent when the offending
+        // `(` hides inside a comsub word — the lexer swallows the whole
+        // body into the word token, so no marker is raised — but the
+        // body's own nested yyparse still dies on the token after it
+        // (parse.y:4549-4555 parse_comsub, 6858-6859). A
+        // ComsubBodyTokenError verdict is therefore NOT disproved by the
+        // main parse's silence: let the unclosed route run and print it.
+        // Every other shape keeps the disproof (notably the matched-pair
+        // EOF, whose `$( (` subshell root the #516/q1, `((` and
+        // `for ((` guards already keep out of this class).
+        if matches!(
+            crate::lexer::unclosed_comsub_eof_shape(input, crate::lexer::parse_extended_glob()),
+            Some((
+                crate::lexer::UnclosedComsubShape::ComsubBodyTokenError { .. },
+                _
+            ))
+        ) {
+            return false;
+        }
         return true;
     }
     // rubash#413: GNU's parser reports the FIRST offending event inside the
@@ -4014,6 +4055,32 @@ pub fn run_source_with_line_offset(
     redirect_cmd: Option<&CommandNode>,
     diagnostic_text: Option<&str>,
 ) -> i32 {
+    run_source_with_line_offset_marked(
+        executor,
+        input,
+        interactive,
+        line_offset,
+        redirect_cmd,
+        diagnostic_text,
+        &[],
+    )
+}
+
+/// `run_source_with_line_offset` plus `noncounting_newlines`: ascending
+/// byte offsets of `\n` characters in `input` that alias expansion
+/// introduced — line separators that must not advance the physical line
+/// counter (GNU: pushed text goes through shell_getc without the
+/// yy_readline_get line_number bump, parse.y:2504 — rubash#3605
+/// run-nquote).
+pub fn run_source_with_line_offset_marked(
+    executor: &mut Executor,
+    input: &str,
+    interactive: bool,
+    line_offset: usize,
+    redirect_cmd: Option<&CommandNode>,
+    diagnostic_text: Option<&str>,
+    noncounting_newlines: &[usize],
+) -> i32 {
     run_source_impl(
         executor,
         input,
@@ -4023,6 +4090,7 @@ pub fn run_source_with_line_offset(
         diagnostic_text,
         None,
         false,
+        noncounting_newlines,
     )
 }
 
@@ -4050,6 +4118,7 @@ fn run_source_prefix_diagnostic_owned(
         diagnostic_text,
         None,
         true,
+        &[],
     )
 }
 
@@ -4186,6 +4255,7 @@ fn run_source_impl(
     diagnostic_text: Option<&str>,
     pre_lexed: Option<Vec<Token>>,
     suppress_unclosed_diagnostic: bool,
+    noncounting_newlines: &[usize],
 ) -> i32 {
     // rubash#2332: mark the call active for its whole duration so the
     // root-span re-seed inside run_source_impl_inner fires only for
@@ -4213,6 +4283,7 @@ fn run_source_impl(
         pre_lexed,
         suppress_unclosed_diagnostic,
         !source_run_prior,
+        noncounting_newlines,
     );
     // rubash#2680: a unit that ended in a parse error has that error's
     // status as its own $? — GNU's reader abandons the unit with the
@@ -4254,6 +4325,7 @@ fn run_source_impl_inner(
     pre_lexed: Option<Vec<Token>>,
     suppress_unclosed_diagnostic: bool,
     root_span_outermost: bool,
+    noncounting_newlines: &[usize],
 ) -> i32 {
     let saved_unit_source = executor
         .shell_state
@@ -4269,6 +4341,7 @@ fn run_source_impl_inner(
         pre_lexed,
         suppress_unclosed_diagnostic,
         root_span_outermost,
+        noncounting_newlines,
     );
     executor
         .shell_state
@@ -4287,6 +4360,7 @@ fn run_source_impl_inner_body(
     pre_lexed: Option<Vec<Token>>,
     suppress_unclosed_diagnostic: bool,
     root_span_outermost: bool,
+    noncounting_newlines: &[usize],
 ) -> i32 {
     // WP-8 (debugger design 5.1): take the file identity the
     // calling group driver set for this unit, if any (see
@@ -4649,7 +4723,29 @@ fn run_source_impl_inner_body(
                 // end of file from `(' command on line N" — while
                 // `$(`/`$((`/array/quote matched pairs keep the "matching
                 // `X'" wording.
-                if close == ')' && command {
+                // rubash#3405: when the shape scan positively identifies
+                // a token-level error inside the comsub body, the
+                // command-position branch must NOT claim the input for
+                // its subshell-EOF fallthrough — the `else if` arm below
+                // renders that verdict (with the matching suffix), and
+                // the MainLevel/dparen arms inside this branch have no
+                // verdict for it. The shape's own guards (#516/q1,
+                // `((` arithmetic root, `for ((` pair) already keep
+                // those families out of the ComsubBodyTokenError class,
+                // so only genuine body token errors defer.
+                if close == ')'
+                    && command
+                    && !matches!(
+                        crate::lexer::unclosed_comsub_eof_shape(
+                            input,
+                            crate::lexer::parse_extended_glob()
+                        ),
+                        Some((
+                            crate::lexer::UnclosedComsubShape::ComsubBodyTokenError { .. },
+                            _
+                        ))
+                    )
+                {
                     // Issue #516 (F181 class): a `(` that follows word
                     // text — any second word, a redirect or an assignment
                     // prefix before it — is a yacc token error at the
@@ -4762,6 +4858,43 @@ fn run_source_impl_inner_body(
                             Some(global_eof),
                         );
                     }
+                } else if let Some((
+                    crate::lexer::UnclosedComsubShape::ComsubBodyTokenError { line, token },
+                    _,
+                )) = crate::lexer::unclosed_comsub_eof_shape(
+                    input,
+                    crate::lexer::parse_extended_glob(),
+                ) {
+                    // rubash#3405: a token-level error inside the
+                    // unclosed comsub's body preempts the matched-pair
+                    // EOF report in file mode too — GNU's nested
+                    // yyparse (parse.y:4549-4555) fails on the offending
+                    // token before EOF is reached, and
+                    // report_syntax_error (parse.y:6833-6865) names it
+                    // with the matching suffix plus the offending line.
+                    let report = line + line_offset;
+                    let prefix = executor.parser_error_prefix_for_line(report);
+                    unclosed_report!(
+                        "{prefix}syntax error near unexpected token `{token}' while looking for matching `{close}'"
+                    );
+                    if !suppress_unclosed_diagnostic {
+                        executor.record_run_diagnostic(
+                            format!(
+                                "syntax error near unexpected token `{token}' while looking for matching `{close}'"
+                            ),
+                            Some(report),
+                        );
+                    }
+                    if !executor.invocation_interactive() {
+                        let offending = input
+                            .lines()
+                            .nth(line.saturating_sub(1))
+                            .unwrap_or_default();
+                        unclosed_report!("{prefix}`{offending}'");
+                    }
+                    executor.errexit_live_at_diagnostic();
+                    executor.set_last_exit_code(2);
+                    return 2;
                 } else {
                     let reported = if report_open { global_open } else { global_eof };
                     unclosed_report!(
@@ -4806,7 +4939,7 @@ fn run_source_impl_inner_body(
     // `input` again would re-read every byte the feeder already scanned.
     let mut tokens = match pre_lexed {
         Some(tokens) => tokens,
-        None => tokenize_with_initial_posix(input, parse_posix),
+        None => tokenize_with_initial_posix_marked(input, parse_posix, noncounting_newlines),
     };
     // A command with more than HEREDOC_MAX (16) here-documents is fatal in
     // GNU (parse.y push_heredoc -> report_syntax_error + exit_shell with
@@ -4840,6 +4973,13 @@ fn run_source_impl_inner_body(
             // compound boundaries (`{ set -- /no/such/*.zzz; }; echo rc`
             // printed rc in the REPL only).
             token.logical_line += line_offset;
+            // rubash#3605 run-heredoc: the gather end line lives in the
+            // same line space as position — the `here-document delimited
+            // by end-of-file` warning and the unclosed-compound EOF error
+            // report it (make_cmd.c:626 internal_warning at the post-gather
+            // line_number; parse.y:6899). Unshifted, a group's EOF-heredoc
+            // diagnostics stamped the fragment-local line.
+            token.heredoc_end_line = token.heredoc_end_line.map(|line| line + line_offset);
         }
     }
     // GNU parse.y: a `)` or case-clause terminator at command position is
@@ -5005,6 +5145,15 @@ fn run_source_impl_inner_body(
         // startup file run by run_init_file (rubash#1161). Printing it
         // via the catch-all below leaked a bare `return N` line.
         Err(ExecuteError::Return(code)) => code,
+        // A respawned fork-child whose own write met a dead pipe is
+        // GNU's SIGPIPE death (trap.c:1480 reset_signal_handlers leaves
+        // the fork SIG_DFL): the process ends at the verdict with no
+        // diagnostic — status 141, matching child_process_exit_status's
+        // BrokenPipe arm for in-process child scripts. Pipeline-stage
+        // producers absorb their own BrokenPipe as a 141 element status
+        // long before this arm, so what reaches here is the run's own
+        // death.
+        Err(ExecuteError::BrokenPipe) => 141,
         Err(e) => {
             if interactive {
                 eprintln!("Error: {}", e);
@@ -5351,7 +5500,15 @@ pub fn initialize_interactive_history(executor: &mut Executor) {
         let histsize = SessionHistory::size_limit(executor.get_env("HISTSIZE"));
         let mut shell = session.borrow_mut();
         shell.histfile_loaded = true;
-        let _ = shell.load_file(&path.to_string_lossy(), histsize);
+        // bashhist.c load_history -> read_history: the startup read takes
+        // the same read-time HISTTIMEFORMAT state as `history -r` — it
+        // arms the comment char (variables.c:6168 sv_histtimefmt) and
+        // gates multi-line regrouping (histfile.c:384, rubash#3393).
+        // The comment-char arming is sticky (rubash#3535): include the
+        // latch a previous session segment may have set.
+        let comment_armed = executor.shell_state.history_comment_char_armed || write_ts;
+        let _ =
+            shell.load_file_with_arming(&path.to_string_lossy(), histsize, write_ts, comment_armed);
     }
 }
 

@@ -52,6 +52,19 @@ impl OrderedOutputLog {
         }
     }
 
+    /// rubash#3453: a write on this channel appends a pass-boundary
+    /// marker chunk (fd u8::MAX). GNU printf.def:819 checks
+    /// `ferror (stdout)` at pass boundaries only, so the chunk route
+    /// must know where one rendering pass ends to fold the abort into
+    /// the buffered stream — same-pass diagnostics still print,
+    /// later passes' renderings die.
+    pub(in crate::executor) fn pass_boundary_writer(&self) -> OrderedChunkWriter {
+        OrderedChunkWriter {
+            fd: u8::MAX,
+            log: self.chunks.clone(),
+        }
+    }
+
     pub(in crate::executor) fn is_empty(&self) -> bool {
         self.chunks.borrow().is_empty()
     }
@@ -222,8 +235,9 @@ impl Executor {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         for (fd, bytes) in &decoded {
-            match fd {
+            match *fd {
                 1 => stdout.extend_from_slice(bytes),
+                u8::MAX => {}
                 _ => stderr.extend_from_slice(bytes),
             }
         }

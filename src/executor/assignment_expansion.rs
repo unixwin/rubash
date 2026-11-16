@@ -401,6 +401,76 @@ pub(in crate::executor) fn dbg_aav_enabled() -> bool {
     *DBG.get_or_init(|| std::env::var_os("RUBASH_DBG_AAV").is_some())
 }
 
+/// The diagnostic word for one compound-assignment element, mirroring GNU
+/// quote_assign (arrayfunc.c:938-977) over quote_array_assignment_chars
+/// (:1108-1129): an indexed `[sub]=value` element is cited with its
+/// subscript span backslash-quoted, an associative element names its bare
+/// value (arrayfunc.c:594-599/:630 expand key/value separately), and a
+/// quoted value keeps the fragment's own word.
+enum CompoundElementDiag {
+    /// Indexed `[sub]=value`: `\[sub\]=value`.
+    Element(String),
+    /// Associative `[key]=value`: the bare value.
+    Value(String),
+    /// Quoted value: the fragment keeps its own word.
+    Fragment,
+}
+
+fn compound_element_diag_word(token_raw: &str, assoc: bool) -> CompoundElementDiag {
+    // Only a word opening with `[sub]=` takes the element/value form;
+    // anything else is a plain element whose walker default already names
+    // the whole token.
+    if !token_raw.starts_with('[') {
+        return CompoundElementDiag::Element(token_raw.to_string());
+    }
+    let Some((sub_end, tail)) =
+        crate::executor::subscript_expansion::scan_compound_subscript(token_raw, 0)
+    else {
+        return CompoundElementDiag::Element(token_raw.to_string());
+    };
+    if tail != crate::executor::subscript_expansion::CompoundSubscriptTail::Assignment {
+        return CompoundElementDiag::Element(token_raw.to_string());
+    }
+    let after = &token_raw[sub_end + 1..];
+    let Some((operator, rhs)) = after
+        .strip_prefix("+=")
+        .map(|rhs| ("+=", rhs))
+        .or_else(|| after.strip_prefix('=').map(|rhs| ("=", rhs)))
+    else {
+        return CompoundElementDiag::Element(token_raw.to_string());
+    };
+    // A quoted value is one quoted word: the bad fragment inside keeps its
+    // own diagnostic word. The double-quote-wrap test mirrors
+    // subscripted_parameter_element; the raw-quote / hoisted-squote /
+    // storage-prefix forms are the other deliveries of a quoted value.
+    let dq_wrapped = rhs.starts_with(ASSIGN_DATA_DQUOTE)
+        && crate::executor::markers::ends_with_bare_sentinel(
+            rhs,
+            crate::executor::markers::ASSIGN_DATA_DQUOTE,
+        );
+    if dq_wrapped
+        || rhs.starts_with('"')
+        || rhs.starts_with('\'')
+        || rhs.starts_with(ASSIGN_HOISTED_SQUOTE)
+        || rhs.starts_with(STORAGE_WORD_PREFIX)
+    {
+        return CompoundElementDiag::Fragment;
+    }
+    if assoc {
+        return CompoundElementDiag::Value(rhs.to_string());
+    }
+    // GNU quote_assign (arrayfunc.c:938-977): before `=`, the `[sub]` span
+    // is copied verbatim between two backslashes; glob/IFS characters
+    // before `=` would take one too, but before `=` there is only the
+    // subscript span itself.
+    CompoundElementDiag::Element(format!(
+        "\\[{}\\]{}{}",
+        &token_raw[1..sub_end],
+        operator,
+        rhs
+    ))
+}
+
 impl Executor {
     // #609 slice 1: `name=literal|$other|"$other"` fast expansion (GNU
     // subst.c:3524 do_assignment_internal; variables.c:3225 bind_variable).
@@ -1153,7 +1223,11 @@ impl Executor {
         // and the same shape through `y='('$x')'`, argument words
         // `echo "y=($x)"`, and prefix assignments).
         if compound_assignment {
-            if let Some(expanded) = self.expand_compound_positional_at_assignment(value, quoted) {
+            if let Some(expanded) = self.expand_compound_positional_at_assignment(
+                value,
+                quoted,
+                self.compound_assignment_is_assoc(name),
+            ) {
                 if dbg_aav_enabled() {
                     eprintln!("[ECPAT] value={value:?} expanded={expanded:?}");
                 }
@@ -1809,12 +1883,27 @@ impl Executor {
         preserve_prompt_escapes(&output)
     }
 
+    /// Whether the compound-assignment target `name` is an associative
+    /// array: the live ASSOC_VARS marking, or the declare-assoc hint for a
+    /// name this command is about to declare with `declare -A` /
+    /// `typeset -A` / `local -A` (rubash#3500 — GNU declare.def creates the
+    /// variable before expanding the operand value, but rubash expands
+    /// command words before the builtin runs, so a fresh `declare -A`
+    /// operand would otherwise look indexed at expansion time).
+    pub(in crate::executor) fn compound_assignment_is_assoc(&self, name: &str) -> bool {
+        let base = name.strip_suffix('+').unwrap_or(name);
+        let base = base.split('[').next().unwrap_or(base);
+        is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, base)
+            || crate::executor::expand_word::declare_assoc_hint_contains(base)
+    }
+
     pub(in crate::executor) fn expand_compound_positional_at_assignment(
         &self,
         value: &str,
         quoted: bool,
+        assoc: bool,
     ) -> Option<String> {
-        self.expand_compound_positional_at_assignment_impl(value, quoted, false)
+        self.expand_compound_positional_at_assignment_impl(value, quoted, false, assoc)
     }
 
     /// GNU eval-argument flatten (xtrace evidence, gg7.sh E1): an
@@ -1826,8 +1915,9 @@ impl Executor {
     pub(in crate::executor) fn expand_compound_positional_at_assignment_bare(
         &self,
         value: &str,
+        assoc: bool,
     ) -> Option<String> {
-        self.expand_compound_positional_at_assignment_impl(value, false, true)
+        self.expand_compound_positional_at_assignment_impl(value, false, true, assoc)
     }
 
     fn expand_compound_positional_at_assignment_impl(
@@ -1835,6 +1925,7 @@ impl Executor {
         value: &str,
         quoted: bool,
         bare: bool,
+        assoc: bool,
     ) -> Option<String> {
         let inner = value.strip_prefix('(')?.strip_suffix(')')?;
         let mut changed = false;
@@ -1961,6 +2052,7 @@ impl Executor {
                                 .positional_window()
                                 .join(&self.ifs_first_char_separator()),
                             fields,
+                            &self.ifs_first_char_separator(),
                         ));
                     }
                 }
@@ -2121,7 +2213,11 @@ impl Executor {
                             } else {
                                 // Same glued transport as the storage arm
                                 // below (compound_field_split_transport).
-                                values.extend(compound_field_split_transport(&joined, fields));
+                                values.extend(compound_field_split_transport(
+                                    &joined,
+                                    fields,
+                                    &self.ifs_first_char_separator(),
+                                ));
                             }
                         }
                         continue;
@@ -2162,6 +2258,7 @@ impl Executor {
                                 members,
                                 self.shell_state.env_vars.get("IFS").map(String::as_str),
                             ),
+                            &self.ifs_first_char_separator(),
                         ));
                     }
                 } else {
@@ -2607,6 +2704,7 @@ impl Executor {
                         &token_raw,
                         bare,
                         &mut changed,
+                        assoc,
                     ));
                 }
             } else {
@@ -2716,7 +2814,11 @@ impl Executor {
                                 // it unsplit, arrayfunc.c:630; indexed storage
                                 // re-splits per field, arrayfunc.c:610) — see
                                 // compound_field_split_transport.
-                                values.extend(compound_field_split_transport(&value, fields));
+                                values.extend(compound_field_split_transport(
+                                    &value,
+                                    fields,
+                                    &self.ifs_first_char_separator(),
+                                ));
                             }
                             continue;
                         }
@@ -2753,7 +2855,11 @@ impl Executor {
                                 } else {
                                     // Same glued transport as the $N arm above
                                     // (compound_field_split_transport).
-                                    values.extend(compound_field_split_transport(&value, fields));
+                                    values.extend(compound_field_split_transport(
+                                        &value,
+                                        fields,
+                                        &self.ifs_first_char_separator(),
+                                    ));
                                 }
                             }
                         }
@@ -2782,7 +2888,7 @@ impl Executor {
                     values.append(&mut fields);
                     continue;
                 }
-                if let Some(word) = self.subscripted_parameter_element(&token_raw) {
+                if let Some(word) = self.subscripted_parameter_element(&token_raw, assoc, bare) {
                     // Raw `[sub]=$param` word: W_ASSIGNMENT|W_NOSPLIT
                     // (parse.y:5786-5796) — the whole expanded value lands
                     // at the subscript, unsplit (see
@@ -2795,12 +2901,18 @@ impl Executor {
                 // stored field; only the bare-element form takes the GNU
                 // per-word quoted/split treatment above.
                 if core.starts_with('[') {
-                    values.push(self.compound_plain_element_value(&token_raw, bare, &mut changed));
+                    values.push(self.compound_plain_element_value(
+                        &token_raw,
+                        bare,
+                        &mut changed,
+                        assoc,
+                    ));
                 } else {
                     values.extend(self.compound_plain_element_value_fields(
                         &token_raw,
                         bare,
                         &mut changed,
+                        assoc,
                     ));
                 }
             }
@@ -3085,6 +3197,7 @@ impl Executor {
         token_raw: &str,
         bare: bool,
         changed: &mut bool,
+        assoc: bool,
     ) -> Vec<String> {
         if bare {
             // Bare (eval-argument) flatten keeps the raw token verbatim.
@@ -3093,7 +3206,19 @@ impl Executor {
         if let Some(fields) = self.glued_quoted_list_element_fields(token_raw, changed) {
             return fields;
         }
-        let expanded = self.expand_embedded_parameters_compound(token_raw);
+        // rubash#3500: install the element word (or the bare value for an
+        // assoc element) as the pending diagnostic word, so a bad
+        // substitution inside this element names the element, not the
+        // `${...}` fragment (GNU subst.c:10278). A quoted value keeps the
+        // fragment's own word.
+        let expanded = match compound_element_diag_word(token_raw, assoc) {
+            CompoundElementDiag::Element(word) | CompoundElementDiag::Value(word) => {
+                crate::executor::expand_word::with_pending_diagnostic_word(&word, || {
+                    self.expand_embedded_parameters_compound(token_raw)
+                })
+            }
+            CompoundElementDiag::Fragment => self.expand_embedded_parameters_compound(token_raw),
+        };
         if expanded == token_raw {
             // No expansion ran: a literal element word never undergoes word
             // splitting (subst.c:13219 — "for which no expansion is done").
@@ -3232,6 +3357,7 @@ impl Executor {
             // transport then falls back to synthetic separators.
             .map(|field| decode_compound_expansion_carriers(&field))
             .collect::<Vec<_>>(),
+            &self.ifs_first_char_separator(),
         )
     }
 
@@ -3240,11 +3366,21 @@ impl Executor {
         token_raw: &str,
         bare: bool,
         changed: &mut bool,
+        assoc: bool,
     ) -> String {
         if bare {
             return token_raw.to_string();
         }
-        let expanded = self.expand_embedded_parameters_compound(token_raw);
+        // rubash#3500: same element-word install as
+        // compound_plain_element_value_fields (see there).
+        let expanded = match compound_element_diag_word(token_raw, assoc) {
+            CompoundElementDiag::Element(word) | CompoundElementDiag::Value(word) => {
+                crate::executor::expand_word::with_pending_diagnostic_word(&word, || {
+                    self.expand_embedded_parameters_compound(token_raw)
+                })
+            }
+            CompoundElementDiag::Fragment => self.expand_embedded_parameters_compound(token_raw),
+        };
         if expanded != token_raw {
             *changed = true;
         }
@@ -3744,6 +3880,7 @@ impl Executor {
                 &value,
                 self.shell_state.env_vars.get("IFS").map(String::as_str),
             ),
+            &self.ifs_first_char_separator(),
         ))
     }
 
@@ -3819,7 +3956,12 @@ impl Executor {
     /// `[..]=` text inside that value is never re-read as a subscript
     /// (issue #198 matrix: `M=([2]=$v)` with v='[9]=q [r]=w' stores
     /// M[2]='[9]=q [r]=w').
-    fn subscripted_parameter_element(&self, token_raw: &str) -> Option<String> {
+    fn subscripted_parameter_element(
+        &self,
+        token_raw: &str,
+        assoc: bool,
+        bare: bool,
+    ) -> Option<String> {
         let (sub_end, tail) =
             crate::executor::subscript_expansion::scan_compound_subscript(token_raw, 0)?;
         if tail != crate::executor::subscript_expansion::CompoundSubscriptTail::Assignment {
@@ -3845,7 +3987,21 @@ impl Executor {
         if !dq_wrapped && unquoted != core && core.starts_with('\'') {
             return None;
         }
-        let value = self.whole_word_parameter_single_value(unquoted)?;
+        // rubash#3500: install the element word (or the bare value for an
+        // assoc element) around the whole-word expansion, so a bad
+        // substitution inside the RHS names the element (GNU subst.c:10278).
+        // A quoted value keeps the fragment's own word. The bare
+        // (eval-argument) flatten re-serializes the word for eval's
+        // re-parse, where the assignment executes afresh with its own
+        // declare context, so no word is installed there.
+        let value = match compound_element_diag_word(token_raw, assoc) {
+            CompoundElementDiag::Element(word) | CompoundElementDiag::Value(word) if !bare => {
+                crate::executor::expand_word::with_pending_diagnostic_word(&word, || {
+                    self.whole_word_parameter_single_value(unquoted)
+                })
+            }
+            _ => self.whole_word_parameter_single_value(unquoted),
+        }?;
         Some(format!(
             "{}{}{}",
             &token_raw[..sub_end + 1],

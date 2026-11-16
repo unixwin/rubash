@@ -690,6 +690,11 @@ impl Executor {
         // start_job (jobs.c:3837) refuses fg/bg inside it.
         self.shell_state.in_command_substitution.set(true);
         self.shell_state.parameter_bad_substitution.set(false);
+        // rubash#3499: the print budget clears with the verdict — the
+        // body is fresh parser input whose own diagnostic deserves its
+        // own report, and the interior snapshot below restores the
+        // parent's budget afterwards.
+        self.shell_state.bad_substitution_reported.set(false);
         // Bash evaluates BASH_COMMAND in a command substitution against the
         // substitution's own command source, rather than the outer word.
         *self.shell_state.debug_trap_command.borrow_mut() = Some(source.trim().to_string());
@@ -1235,9 +1240,12 @@ impl Executor {
             let mut comsub_env = self.shell_state.env_vars.clone();
             let mut out = Vec::new();
             let mut err = Vec::new();
+            // rubash#3605: a comsub body is a GNU fork — always model the
+            // set in env cells even on unix, never the process rlimits.
             let status = crate::builtins::ulimit::execute_with_io(
                 &words[1..],
                 &mut comsub_env,
+                true,
                 &mut out,
                 &mut err,
             )
@@ -1276,6 +1284,10 @@ impl Executor {
                         .to_string();
                 }
             }
+            // The #3349 logical-cache poison is confined to the comsub
+            // fork (subst.c:7143 command_substitute) and this arm returns
+            // before anything could re-read the clone's cache, so only
+            // the status is taken.
             let mut out = Vec::new();
             let mut err = Vec::new();
             let status = crate::builtins::pwd::execute_with_env_and_io(
@@ -1286,6 +1298,7 @@ impl Executor {
                 &mut out,
                 &mut err,
             )
+            .map(|outcome| outcome.status)
             .unwrap_or(1); // Vec<u8> writes are infallible
             let _ = std::io::stderr().write_all(&err);
             self.last_command_substitution_status.set(Some(status));
@@ -1823,6 +1836,18 @@ impl Executor {
         // pipeline stage when this substitution runs inside one, leaking
         // the substitution's output into the stage's pipe. Give the body
         // its own thread-local capture and merge both buffers.
+        // rubash#3401: arm the comsub conduit for the body span (the
+        // clone's blocked-wait drain notices a parent-death delivery
+        // and aborts the wait; the teardown below hands it back).
+        subshell.comsub_drain_permit.set(true);
+        // rubash#3387: the body runs in a forked child (GNU subst.c:7143
+        // command_substitute) — its `times` reads from this body's entry
+        // baseline. The guard lives for the body execution below and
+        // pops when it ends.
+        let _times_baseline = crate::executor::read_helpers::TimesBaselineGuard::enter(
+            crate::executor::read_helpers::TimesBaselineKind::ComsubBody,
+            subshell.shell_state.subshell_depth.get(),
+        );
         let (captured, status) = crate::executor::shell_options::capture_stdout(|| {
             if dbg_trap_enabled() {
                 eprintln!(
@@ -1880,6 +1905,21 @@ impl Executor {
             }
             status
         });
+        subshell.comsub_drain_permit.set(false);
+        // rubash#3401 (face 1): hand a termsig death the conduit
+        // recorded back to the parent for adjudication — re-queue the
+        // raw signal so the parent's next boundary poll (ast_exec,
+        // before the following command) takes it against the parent's
+        // own trap table and dies in GNU order (EXIT trap first, then
+        // death by the signal; jobs.c:3064 wait_for CHECK_TERMSIG).
+        // The clone never adjudicates: its table was reset for the
+        // subshell child. The mailbox is the chain through nesting —
+        // an outer clone's own drain re-records the re-queued delivery
+        // and its teardown re-queues it again, so the signal reaches
+        // the top shell whatever the nesting depth.
+        if let Some(sig) = subshell.comsub_termsig_pending.get() {
+            crate::builtins::kill::requeue_pending_signals(vec![sig]);
+        }
         let mut output = subshell.stdout_capture.take().unwrap_or_default();
         output.extend_from_slice(&captured);
 
@@ -1967,6 +2007,9 @@ impl Executor {
         shell_state.arithmetic_nounset_error.set(false);
         shell_state.arithmetic_last_error_category.set(None);
         shell_state.parameter_bad_substitution.set(false);
+        // rubash#3499: the forked child starts with a clean print
+        // budget as well as a clean verdict.
+        shell_state.bad_substitution_reported.set(false);
         // The substitution body is fresh parser input (subst.c:7143
         // command_substitute re-reads the collected text): GNU expands its
         // aliases at that read, so the driver's streamed-batch marker must
@@ -2004,6 +2047,18 @@ impl Executor {
             unit_expansion_error_discard: false,
             termsig_death_pending: None,
             termsig_death_trap_status: None,
+            // rubash#3401: the comsub conduit snapshot — the clone's own
+            // trap table is reset for the subshell child below, so its
+            // termsig_death_armed can never fire; snapshot the parent's
+            // EXIT-armed bit here (OR the outer clone's snapshot, so a
+            // nested comsub still knows the top shell is armed).
+            comsub_drain_permit: Cell::new(false),
+            comsub_parent_exit_armed: Cell::new(
+                self.comsub_parent_exit_armed.get()
+                    || crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "EXIT")
+                        .is_some(),
+            ),
+            comsub_termsig_pending: Cell::new(None),
             // GNU exit.def bash_logout: subshells never source ~/.bash_logout
             // (subshell_environment check); inherit the parent's latch so a
             // subshell logout cannot double-source it either.
@@ -2075,6 +2130,7 @@ impl Executor {
             unit_lex_locale: std::cell::RefCell::new(None),
             line_lex_extquotes: std::cell::RefCell::new(HashMap::new()),
             ambient_line: Cell::new(None),
+            err_trap_line: Cell::new(None),
             conditional_invert_pending: Cell::new(false),
             inside_compound_condition: Cell::new(false),
             inside_assignment_rhs: Cell::new(false),
@@ -2176,6 +2232,7 @@ impl Executor {
             // rubash#1175: a fork copy shares the parent shell's process;
             // it must never execve that process away.
             owns_process_image: false,
+            emulated_child_depth: std::cell::Cell::new(0),
             source_nest_depth: 0,
             sigchld_notifications_pending: std::cell::Cell::new(0),
             // jobs.c:4607-4612: a comsub child (startup_state 2 +
@@ -2196,6 +2253,7 @@ impl Executor {
             pipeline_final_stage: std::cell::Cell::new(false),
             pipeline_stage_pre_traced: std::cell::Cell::new(false),
             pipeline_stage_restricted_refused: std::cell::Cell::new(false),
+            pipeline_stage_bad_substitution_discarded: std::cell::Cell::new(false),
             last_heredoc_warning_source: RefCell::new(None),
             heredoc_admission_declined_source: RefCell::new(None),
             comsub_leading_newlines: Cell::new(0),
@@ -2221,6 +2279,8 @@ impl Executor {
             posix_special_status_converted: Cell::new(false),
             exec_do_redirections_failed: Cell::new(false),
             timed_dispatch_depth: Cell::new(0),
+            timed_root_redirect_failure: Cell::new(false),
+            timed_err_owned_by_body: Cell::new(None),
             special_builtin_failed: Cell::new(false),
             last_builtin_write_failed: Cell::new(false),
             alias_introduced_words: Cell::new(0),
@@ -2263,6 +2323,8 @@ impl Executor {
             pipeline_stdout_stream: None,
             pipeline_stdin_stream: None,
             pipeline_stage_stderr_live: false,
+            pipeline_stage_feed_sigpipe: Cell::new(false),
+            pipeline_stage_spawn_dead: Cell::new(false),
             external_stdio_outcome: None,
             external_stdio_piped_fallback: false,
             host_external_command_handler: None,
@@ -2409,6 +2471,17 @@ impl Executor {
                 subshell.execute_ast(&ast)
             }
         };
+        // rubash#3401: arm the comsub conduit for the body span (same
+        // mechanism as the `$( )` typed site above).
+        subshell.comsub_drain_permit.set(true);
+        // rubash#3387: the funsub body runs in a forked child (GNU
+        // subst.c:7101 "nofork comsub") — its `times` reads from this
+        // body's entry baseline. The guard lives for the body
+        // execution below and pops when it ends.
+        let _times_baseline = crate::executor::read_helpers::TimesBaselineGuard::enter(
+            crate::executor::read_helpers::TimesBaselineKind::ComsubBody,
+            subshell.shell_state.subshell_depth.get(),
+        );
         let (result, captured) = if valsub {
             (run_body(&mut subshell), None)
         } else {
@@ -2419,6 +2492,14 @@ impl Executor {
             output.extend_from_slice(&thread_captured);
             (result, Some(output))
         };
+        subshell.comsub_drain_permit.set(false);
+        // rubash#3401 (face 1): hand a termsig death the conduit
+        // recorded back to the parent — re-queue the raw signal so the
+        // parent's next boundary poll adjudicates it (see the typed
+        // site for the full note).
+        if let Some(sig) = subshell.comsub_termsig_pending.get() {
+            crate::builtins::kill::requeue_pending_signals(vec![sig]);
+        }
         if subshell.parse_error_occurred {
             self.latch_command_substitution_parse_error();
             // rubash#2751: propagate "already reported" (see the typed

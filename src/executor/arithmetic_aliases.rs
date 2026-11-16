@@ -282,6 +282,13 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<i32, ExecuteError> {
+        // GNU execute_cmd.c:3904 SET_LINE_NUMBER(arith_command->line):
+        // execute_arith_command runs only after the :1141 frame's
+        // do_redirections succeeded, so reaching this point is the
+        // post-redirect own-line stamp (rubash#3553).
+        if !self.error_trap_running {
+            self.err_trap_line.set(cmd.line);
+        }
         let raw_expression = cmd
             .arithmetic_command
             .as_ref()

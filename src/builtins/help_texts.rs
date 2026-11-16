@@ -1329,7 +1329,7 @@ pub(crate) static HELP_TOPICS_TABLE: &[HelpTopic] = &[
     // cd.def
     HelpTopic {
         name: "pwd",
-        short_doc: "pwd [-LP]",
+        short_doc: "pwd [-LPW]",
         doc: &[
             "Print the name of the current working directory.",
             "",
@@ -1337,6 +1337,7 @@ pub(crate) static HELP_TOPICS_TABLE: &[HelpTopic] = &[
             "  -L\tprint the value of $PWD if it names the current working",
             "\t\tdirectory",
             "  -P\tprint the physical directory, without any symbolic links",
+            "  -W\tprint the Win32 value of the physical directory",
             "",
             "By default, `pwd' behaves as if `-L' were specified.",
             "",
