@@ -8050,13 +8050,19 @@ pub(crate) fn test_rubash_binary_from_env() -> Option<std::path::PathBuf> {
 /// dir, and the debug/release profile dirs under each ancestor of the
 /// test binary (nested/workspace layouts). Only a file literally
 /// named `rubash[.exe]` counts — a test binary is `rubash-<hash>`
-/// under `deps/` and never matches. Production behaviour is
-/// unchanged: the `deps/` gate still returns `None` outside a test
-/// binary, so a real shell keeps falling back to `current_exe()`.
+/// under `deps/` or `build/<pkg>/<fingerprint>/out/` and never
+/// matches. Production behaviour is unchanged: the test-layout gate
+/// still returns `None` outside a test binary, so a real shell keeps
+/// falling back to `current_exe()`.
 pub(crate) fn test_rubash_binary_from_current_exe() -> Option<std::path::PathBuf> {
     let current = std::env::current_exe().ok()?;
-    let deps = current.parent()?;
-    if deps.file_name().and_then(|name| name.to_str()) != Some("deps") {
+    let dir = current.parent()?;
+    // Test-binary layouts: `deps/` on the classic build dir, and
+    // `build/<pkg>/<fingerprint>/out/` on the current cargo build-dir
+    // layout (the unit-test binary for a package with a build script is
+    // placed inside the package's own out dir).
+    let dir_name = dir.file_name().and_then(|name| name.to_str());
+    if dir_name != Some("deps") && dir_name != Some("out") {
         return None;
     }
     let binary_name = if cfg!(windows) {
@@ -8065,7 +8071,7 @@ pub(crate) fn test_rubash_binary_from_current_exe() -> Option<std::path::PathBuf
         "rubash"
     };
     let mut profile_dirs: Vec<std::path::PathBuf> = Vec::new();
-    if let Some(debug_dir) = deps.parent() {
+    if let Some(debug_dir) = dir.parent() {
         profile_dirs.push(debug_dir.to_path_buf());
         if let Some(target_dir) = debug_dir.parent() {
             profile_dirs.push(target_dir.join("release"));
