@@ -223,24 +223,39 @@ fn issue3574_cd_no_arg_after_poison_emits_one_chdir_line() {
 fn issue3574_cd_too_many_after_poison_emits_no_chdir_line() {
     // The too-many-arguments refusal returns before
     // change_to_directory (cd.def:329-330), so no entry line is owed.
+    // GNU stderr: the two poison pwd diagnostics, then the refusal
+    // line (`…: cd: too many arguments`, EX_USAGE) — zero `chdir:`
+    // lines (oracle p8, GNU bash 5.3.20).
     let tree = make_tree("cell8");
     let script = format!("{}cd a b; echo \"cdrc=$?\"\n", poison_script(&tree.real));
     let (stdout, stderr, code) = run_script_in(&tree.base, &script);
     assert_eq!(code, Some(0));
     assert_eq!(stdout, "rc=1\nrc=1\ncdrc=2\n");
-    assert_eq!(stderr, GETCWD_DIAGNOSTIC);
+    assert_eq!(stderr.matches(GETCWD_DIAGNOSTIC).count(), 2);
+    assert_eq!(stderr.matches(CHDIR_DIAGNOSTIC).count(), 0);
+    assert!(
+        stderr.contains("cd: too many arguments"),
+        "stderr missing the refusal line: {stderr}"
+    );
 }
 
 #[test]
 fn issue3574_cd_null_after_poison_emits_no_chdir_line() {
     // The null-directory refusal (cd.def:331-336) likewise returns
-    // before change_to_directory.
+    // before change_to_directory. GNU stderr: the two poison pwd
+    // diagnostics, then the refusal line (`…: cd: null directory`) —
+    // zero `chdir:` lines (oracle p9, GNU bash 5.3.20).
     let tree = make_tree("cell9");
     let script = format!("{}cd \"\"; echo \"cdrc=$?\"\n", poison_script(&tree.real));
     let (stdout, stderr, code) = run_script_in(&tree.base, &script);
     assert_eq!(code, Some(0));
     assert_eq!(stdout, "rc=1\nrc=1\ncdrc=1\n");
-    assert_eq!(stderr, GETCWD_DIAGNOSTIC);
+    assert_eq!(stderr.matches(GETCWD_DIAGNOSTIC).count(), 2);
+    assert_eq!(stderr.matches(CHDIR_DIAGNOSTIC).count(), 0);
+    assert!(
+        stderr.contains("cd: null directory"),
+        "stderr missing the refusal line: {stderr}"
+    );
 }
 
 #[test]
