@@ -1843,7 +1843,19 @@ impl FdTable {
             match crate::fd::read_some(file.handle, 8192) {
                 Ok(chunk) if chunk.is_empty() => break,
                 Ok(chunk) => buffer.extend_from_slice(&chunk),
-                Err(_) => break,
+                Err(error) => {
+                    // rubash#3777: the byte-wise loop records the first
+                    // hard read error on an otherwise empty record
+                    // (rubash#1495); the buffered loop swallowed it, so
+                    // a directory bound to the fd read as silent EOF
+                    // instead of `read: 0: read error: Is a directory`
+                    // (read.def:911). Bytes already consumed keep the
+                    // plain partial-record path, as in the byte-wise arm.
+                    if result.is_empty() && self.read_error.is_none() {
+                        self.read_error = Some(crate::posix_errors::message(&error));
+                    }
+                    break;
+                }
             }
             for (index, &byte) in buffer[scanned_from..].iter().enumerate() {
                 let absolute = scanned_from + index;

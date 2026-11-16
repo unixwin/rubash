@@ -5042,7 +5042,12 @@ pub(in crate::executor) fn probe_input_redirect_gate(
         }
         return Ok(());
     }
-    std::fs::File::open(path).map(|_| ())
+    // rubash#3777: the bind ladder opens a directory target with the
+    // FILE_FLAG_BACKUP_SEMANTICS retry (open_redirect_input_file) so
+    // the read itself can fail with EISDIR (read.def:911); the gate
+    // must validate with the same opener, or every directory redirect
+    // dies here with EACCES before the builtin ever runs.
+    open_redirect_input_file(path).map(|_| ())
 }
 
 /// access(2) validation for a FIFO redirect target whose real open is
