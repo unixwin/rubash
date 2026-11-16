@@ -1082,6 +1082,7 @@ impl Executor {
                     .parameter_operator_value(var_name)
                     .filter(|value| !value.is_empty())
                     .map(|value| shell_safe_value(&value))
+                    .map(dequote_assignment_operator_result)
                     .unwrap_or_else(|| {
                         let default = self.tilde_expand_operator_word(default, context);
                         self.expand_operator_rhs_for_context(&default, context)
@@ -1143,7 +1144,7 @@ impl Executor {
 
         if let Some((var_name, word)) = ops.split_colon_pair(name, b'=') {
             if is_parameter_error_name(var_name) {
-                return self
+                let result = self
                     .parameter_operator_value(var_name)
                     .filter(|value| !value.is_empty())
                     .map(|value| shell_safe_value(&value))
@@ -1181,12 +1182,15 @@ impl Executor {
                         super::expand_braced_replacement::ASSIGNMENT_RHS.with(|f| f.set(old));
                         result
                     });
+                // Same GNU quote_escapes dequote as the `=` arm below —
+                // `:=` shares subst.c:8096 parameter_brace_expand_rhs.
+                return dequote_assignment_operator_result(result);
             }
         }
 
         if let Some((var_name, word)) = ops.split_byte(name, b'=') {
             if is_parameter_error_name(var_name) {
-                return self
+                let result = self
                     .parameter_operator_value(var_name)
                     .map(|value| shell_safe_value(&value))
                     .unwrap_or_else(|| {
@@ -1204,6 +1208,11 @@ impl Executor {
                         super::expand_braced_replacement::ASSIGNMENT_RHS.with(|f| f.set(old));
                         result
                     });
+                // GNU parameter_brace_expand_rhs (subst.c:8172): the `=`
+                // result is quote_escapes'd — its CTLNUL is field-internal
+                // data, never an empty-field anchor (see
+                // dequote_assignment_operator_result).
+                return dequote_assignment_operator_result(result);
             }
         }
 
@@ -1293,6 +1302,7 @@ impl Executor {
                 return self
                     .parameter_operator_value(var_name)
                     .map(|value| shell_safe_value(&value))
+                    .map(dequote_assignment_operator_result)
                     .unwrap_or_else(|| {
                         let default = self.tilde_expand_operator_word(default, context);
                         self.expand_operator_rhs_for_context(&default, context)
@@ -2330,6 +2340,27 @@ fn unescape_double_quoted_backslashes(value: &str) -> String {
 /// already skipped the former (they rode as the marker, not as `\`) and
 /// converted the latter itself in the double-quote case, so this is a
 /// no-op safety net there and the real restore in the heredoc case.
+/// GNU parameter_brace_expand_rhs (subst.c:8096-8173) for `=`/`:=`: the
+/// bound value is `dequote_string(temp)` — an embedded CTLNUL survives
+/// (subst.c:4807 only peels CTLESC) — then returns `quote_escapes(t1)`
+/// unquoted / `quote_string(t1)` quoted (subst.c:8172), which protects
+/// CTLNUL as field-internal DATA, and `W_HASQUOTEDNULL` is forgotten
+/// whenever the word is not exactly one CTLNUL (subst.c:8174-8179) —
+/// while even the pure-CTLNUL result arrives CTLESC-led and fails
+/// `QUOTED_NULL(w->word)`. A QUOTED_NULL_MARKER in an `=`/`:=` result
+/// therefore never anchors an empty argv entry: it dequotes to nothing
+/// and the field drops like any empty expansion (`${v="$*"}` unquoted
+/// yields zero args; `"${v= "$*" }"` yields the single field `  `).
+pub(in crate::executor) fn dequote_assignment_operator_result(value: String) -> String {
+    if !value.contains(crate::executor::markers::QUOTED_NULL_MARKER) {
+        return value;
+    }
+    crate::executor::markers::restore_bare_sentinels(
+        &value,
+        &[(crate::executor::markers::QUOTED_NULL_MARKER, "")],
+    )
+}
+
 pub(in crate::executor) fn restore_deferred_operator_backslashes(value: &str) -> String {
     crate::executor::markers::restore_bare_sentinels(
         value,

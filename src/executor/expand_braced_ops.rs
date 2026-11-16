@@ -26,6 +26,7 @@ impl Executor {
                 return Some(
                     self.parameter_operator_value(var_name)
                         .map(|value| shell_safe_value(&value))
+                        .map(super::parameter_words::dequote_assignment_operator_result)
                         .unwrap_or_default(),
                 );
             }
@@ -40,7 +41,9 @@ impl Executor {
                 if let Some(resolved) =
                     crate::executor::expand_braced_indices::assign_applied_lookup(&key)
                 {
-                    return Some(resolved);
+                    return Some(super::parameter_words::dequote_assignment_operator_result(
+                        resolved,
+                    ));
                 }
             }
             // GNU parameter_brace_expand_word sets expand_no_split_dollar_star
@@ -50,7 +53,9 @@ impl Executor {
             super::expand_braced_replacement::ASSIGNMENT_RHS.with(|f| f.set(true));
             let result = self.expand_parameter_word(word);
             super::expand_braced_replacement::ASSIGNMENT_RHS.with(|f| f.set(old));
-            return Some(result);
+            return Some(super::parameter_words::dequote_assignment_operator_result(
+                result,
+            ));
         }
         if let Some((var_name, word)) = split_once_outside_subscript_str(name, ":-") {
             if self
@@ -60,6 +65,7 @@ impl Executor {
                 return Some(
                     self.parameter_operator_value(var_name)
                         .map(|value| shell_safe_value(&value))
+                        .map(super::parameter_words::dequote_assignment_operator_result)
                         .unwrap_or_default(),
                 );
             }
@@ -109,7 +115,12 @@ impl Executor {
                 .map(|value| shell_safe_value(&value))
                 .unwrap_or_else(|| self.expand_parameter_word(word));
             super::expand_braced_replacement::ASSIGNMENT_RHS.with(|f| f.set(old));
-            return Some(result);
+            // GNU parameter_brace_expand_rhs (subst.c:8172): the `=` result
+            // is quote_escapes'd — its CTLNUL is field-internal data, never
+            // an empty-field anchor (see dequote_assignment_operator_result).
+            return Some(super::parameter_words::dequote_assignment_operator_result(
+                result,
+            ));
         }
         if let Some((var_name, word)) = split_once_outside_subscript(name, '+') {
             if self.parameter_operator_value(var_name).is_some() {
@@ -164,9 +175,17 @@ impl Executor {
             );
         }
         if let Some((var_name, word)) = split_once_outside_subscript(name, '-') {
+            // The VALUE side of `-` returns the stored parameter text
+            // verbatim (GNU subst.c:8090 `w->word = temp`): a CTLNUL
+            // sitting in the variable's data is field-internal data that
+            // dequotes to nothing and drops the empty field — it never
+            // anchors (W_HASQUOTEDNULL is expansion-result provenance,
+            // lost on bind). The unset side keeps the RHS expansion's
+            // marker so `${v- "$@" }` still anchors `<>`.
             return Some(
                 self.parameter_operator_value(var_name)
                     .map(|value| shell_safe_value(&value))
+                    .map(super::parameter_words::dequote_assignment_operator_result)
                     .unwrap_or_else(|| self.expand_parameter_word(word)),
             );
         }
@@ -221,6 +240,7 @@ impl Executor {
                 self.shell_variable_value(array_expr)
                     .filter(|value| !value.is_empty() && !is_array_storage(value))
                     .map(|value| shell_safe_value(&value))
+                    .map(super::parameter_words::dequote_assignment_operator_result)
                     .unwrap_or_else(|| default.to_string()),
             );
         }
