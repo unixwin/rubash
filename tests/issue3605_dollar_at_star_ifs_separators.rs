@@ -191,3 +191,35 @@ fn declare_assignment_operand_dollar_at_joins_on_space() {
     assert!(stderr.is_empty(), "stderr not empty: {stderr}");
     assert_eq!(code, Some(0));
 }
+
+/// The `=`/`:=` bind path dequotes the rhs the way GNU's
+/// parameter_brace_expand_rhs does (`dequote_string` before
+/// `bind_variable`, subst.c:8096/8151): a quoted-empty rhs span leaves
+/// a CTLNUL that NOSPLIT2 keeps out of ASSIGNRHS results (subst.c:11853),
+/// so the variable cell never holds the sentinel. After `recho ${v= ''}`,
+/// `recho $v` must produce zero words — not echo the raw marker byte
+/// (dollar-star10 family, `set -- ''`).
+/// All expectations byte-verified against GNU Bash 5.3.20.
+#[test]
+fn assign_operator_stores_dequoted_empty_rhs() {
+    let script = concat!(
+        "recho() { local i=0; for a; do i=$((i+1)); printf 'argv[%d] = <%s>\\n' \"$i\" \"$a\"; done; }\n",
+        "set -- ''\n",
+        "unset v\n",
+        "recho ${v= ''}\n",
+        "recho $v\n",
+        "printf 'v=<%s>\\n' \"$v\"\n",
+        "unset v\n",
+        "recho ${v= $*}\n",
+        "recho $v\n",
+        "printf 'v=<%s>\\n' \"$v\"\n",
+        "unset v IFS\n",
+        "recho ${v= ''}\n",
+        "recho $v\n",
+        "printf 'v=<%s>\\n' \"$v\"\n",
+    );
+    let (stdout, stderr, code) = rubash_file(script);
+    assert_eq!(stdout, "v=< >\nv=< >\nv=< >\n");
+    assert!(stderr.is_empty(), "stderr not empty: {stderr}");
+    assert_eq!(code, Some(0));
+}

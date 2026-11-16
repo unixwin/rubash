@@ -1769,9 +1769,15 @@ impl Executor {
             // decoded out of the stored value — otherwise the variable's
             // whitespace stays un-splittable forever (rubash#428: after
             // `: "${W:=u s p}"`, `set -- $W` yielded one word where GNU
-            // yields three).
-            let bound =
-                crate::executor::command_substitution_values::decode_protected_ifs_chars(&value);
+            // yields three). dequote_string also removes the CTLNUL a
+            // quoted-empty rhs span left behind (subst.c:11853 NOSPLIT2
+            // keeps it out of ASSIGNRHS results entirely), so a variable
+            // cell never holds the marker — `recho $v` after
+            // `recho ${v= ''}` must print nothing, not the raw sentinel
+            // (dollar-star10 family).
+            let bound = dequote_stored_parameter_value(
+                crate::executor::command_substitution_values::decode_protected_ifs_chars(&value),
+            );
             // GNU parameter_brace_assign resolves the subscript AGAIN for
             // the assignment target (array_expand_index on the
             // assign_array_element path), distinct from the set-test's
@@ -1829,9 +1835,12 @@ impl Executor {
             // Same bind-side dequote as the `:=` arm above (GNU subst.c:8096
             // dequote_string -> subst.c:8151 bind_variable): the double-quoted
             // context's IFS_GLUE whitespace protection is word-local and must
-            // not be baked into the stored value (rubash#428).
-            let bound =
-                crate::executor::command_substitution_values::decode_protected_ifs_chars(&value);
+            // not be baked into the stored value (rubash#428); the quoted-null
+            // sentinel comes out of the stored cell the same way
+            // (dollar-star10 `recho $v` family).
+            let bound = dequote_stored_parameter_value(
+                crate::executor::command_substitution_values::decode_protected_ifs_chars(&value),
+            );
             // Same assign-target re-evaluation as `:=` above.
             let _assign_site =
                 crate::executor::expand_braced_indices::SubSiteGuard::new(usize::MAX);
