@@ -267,6 +267,12 @@ impl ComsubPrinter {
             return;
         }
         if let Some(background) = &command.background_command {
+            // print_command already indented for this command; the
+            // wrapped child prints at the SAME level (GNU print_cmd.c
+            // indents once per command, print_cmd.c:1495/1507) — skip
+            // its indent like the time/!/pipeline arms do, or `&`
+            // bodies print one level too deep.
+            self.skip_this_indent += 1;
             self.print_command(&background.command);
             // print_cmd.c:257-272 `&` connector case: prints ` &`, plus
             // one space only when a second command follows — the space
