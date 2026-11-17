@@ -8332,6 +8332,86 @@ pub(crate) fn canonicalize_native(path: &Path) -> io::Result<PathBuf> {
         .map(|resolved| strip_verbatim_prefix(&resolved))
 }
 
+/// Whether the kernel would let this process search (chdir into)
+/// `path`: access(2) X_OK on a directory. The sibling of
+/// `file_is_executable` below, for directories instead of files —
+/// the same real-uid access(2) GNU's findcmd.c file_status uses
+/// (rubash#3788).
+///
+/// Unix-only semantics: Windows has no unix permission-bit
+/// semantics, so every directory qualifies there.
+#[cfg(unix)]
+pub(crate) fn directory_has_search_permission(path: &Path) -> bool {
+    let Ok(cpath) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
+        return false;
+    };
+    // SAFETY: access(2) with a NUL-terminated path.
+    unsafe { libc::access(cpath.as_ptr(), libc::X_OK) == 0 }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn directory_has_search_permission(_path: &Path) -> bool {
+    true
+}
+
+/// The error chdir would have reported for a target that exists but
+/// is not a directory (ENOTDIR / ERROR_DIRECTORY), in a form
+/// `posix_errors::message` renders as "Not a directory".
+fn not_a_directory_error() -> io::Error {
+    #[cfg(windows)]
+    {
+        io::Error::from_raw_os_error(267)
+    }
+    #[cfg(not(windows))]
+    {
+        io::Error::from_raw_os_error(20)
+    }
+}
+
+/// The error chdir would have reported for a target the process may
+/// not search (EACCES / ERROR_ACCESS_DENIED), in a form
+/// `posix_errors::message` renders as "Permission denied".
+fn search_denied_error() -> io::Error {
+    #[cfg(windows)]
+    {
+        io::Error::from_raw_os_error(5)
+    }
+    #[cfg(not(windows))]
+    {
+        io::Error::from_raw_os_error(libc::EACCES)
+    }
+}
+
+/// Probe a directory the way `chdir(2)` would, for the session-cwd
+/// moves (G-02): canonicalize (which carries chdir's ENOENT/ENOTDIR/
+/// EACCES for every component the walk traverses) + the directory
+/// check, PLUS the search-permission check on the target itself.
+///
+/// GNU builtins/cd.def change_to_directory performs a real chdir,
+/// and the kernel refuses a target without the search (execute) bit
+/// with EACCES — while realpath(3) and stat(2) both succeed on such
+/// a directory, because path resolution only needs search permission
+/// on the PARENT components, not on the final component itself. A
+/// probe built from canonicalize + is_dir therefore reports success
+/// for a directory the shell can never enter (rubash#3788):
+/// `cd`/`pushd` bound PWD/DIRSTACK to a directory the process never
+/// moved to. The session-cwd model never chdirs the process, so the
+/// permission half of chdir's verdict is reproduced here with
+/// access(2) X_OK on the resolved directory — root still passes, as
+/// with a real chdir, and ACLs are honored because the kernel itself
+/// adjudicates. The check is a no-op on Windows (no unix
+/// permission-bit semantics there).
+pub(crate) fn probe_directory_for_chdir(path: &Path) -> io::Result<PathBuf> {
+    let resolved = canonicalize_native(path)?;
+    if !resolved.is_dir() {
+        return Err(not_a_directory_error());
+    }
+    if !directory_has_search_permission(&resolved) {
+        return Err(search_denied_error());
+    }
+    Ok(resolved)
+}
+
 /// The canonical PWD display form: always the POSIX `/<drive>/…` spelling
 /// (`/d/…`) on Windows, exactly what GNU Bash on MSYS reports for `$PWD` /
 /// `pwd` / cd's bindpwd value (builtins/cd.def:136-175 bindpwd stores one
