@@ -213,5 +213,5 @@ fn issue3790_c_locale_array_lower_no_conversion() {
     let (stdout, stderr, code) = rubash(C_LOCALE, "declare -la a=(İÉ); echo \"${a[0]}\"");
     assert_eq!(code, Some(0));
     assert_eq!(stderr, "");
-    assert_eq!(stdout, "a=İÉ\n");
+    assert_eq!(stdout, "İÉ\n");
 }
