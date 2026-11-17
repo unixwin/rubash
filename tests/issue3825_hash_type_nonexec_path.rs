@@ -35,7 +35,8 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new(tag: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("rubash-3825-{tag}-{pid}", pid = std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("rubash-3825-{tag}-{pid}", pid = std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("create scratch dir");
         Scratch(dir)
@@ -74,7 +75,10 @@ fn issue3825_hash_nonexecutable_path_file_is_not_found() {
     let script = format!("{SETUP_NONEXEC}; hash mycmd; echo rc=$?\n");
     let (stdout, stderr, code) = scratch.rubash_file(&script);
     assert_eq!(stdout, "rc=1\n");
-    assert!(stderr.contains("hash: mycmd: not found"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("hash: mycmd: not found"),
+        "stderr: {stderr}"
+    );
     assert_eq!(code, Some(0));
 }
 
@@ -93,10 +97,14 @@ fn issue3825_hash_nonexecutable_path_file_is_not_stored() {
 #[test]
 fn issue3825_hash_mode_000_path_file_is_not_found() {
     let scratch = Scratch::new("hash000");
-    let script = "printf 'x' > mycmd; chmod 000 mycmd; PATH=.:/usr/bin:/bin; hash mycmd; echo rc=$?\n";
+    let script =
+        "printf 'x' > mycmd; chmod 000 mycmd; PATH=.:/usr/bin:/bin; hash mycmd; echo rc=$?\n";
     let (stdout, stderr, code) = scratch.rubash_file(script);
     assert_eq!(stdout, "rc=1\n");
-    assert!(stderr.contains("hash: mycmd: not found"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("hash: mycmd: not found"),
+        "stderr: {stderr}"
+    );
     assert_eq!(code, Some(0));
 }
 
@@ -106,7 +114,10 @@ fn issue3825_type_a_nonexecutable_path_file_is_not_found() {
     let script = format!("{SETUP_NONEXEC}; type -a mycmd; echo rc=$?\n");
     let (stdout, stderr, code) = scratch.rubash_file(&script);
     assert_eq!(stdout, "rc=1\n");
-    assert!(stderr.contains("type: mycmd: not found"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("type: mycmd: not found"),
+        "stderr: {stderr}"
+    );
     assert_eq!(code, Some(0));
 }
 
