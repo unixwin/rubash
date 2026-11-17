@@ -19,7 +19,9 @@ fn host_session_history_feeds_and_collects_script_expansions() {
     // a set HISTSIZE). Passing Some(0) here would be HISTSIZE=0, which
     // stifle_history(0) (readline/history.c:675) turns into an EMPTY list —
     // GNU empties it too, so the seedmark preload must carry no limit.
-    assert!(session.borrow_mut().record("echo seedmark", "", "", None));
+    assert!(session
+        .borrow_mut()
+        .record("echo seedmark", "", "", None, true));
 
     let out = std::env::temp_dir().join(format!("rubash-s1-{}-out.txt", std::process::id()));
     let _ = std::fs::remove_file(&out);
@@ -344,7 +346,9 @@ fn prompt_command_scratch_installs_without_provider() {
 #[test]
 fn interactive_session_history_fallback_without_provider() {
     let session = Rc::new(RefCell::new(SessionHistory::new()));
-    assert!(session.borrow_mut().record("echo fallback", "", "", None));
+    assert!(session
+        .borrow_mut()
+        .record("echo fallback", "", "", None, true));
     let mut executor = Executor::new();
     executor.set_session_history(Some(session.clone()));
 

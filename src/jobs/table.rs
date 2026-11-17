@@ -160,6 +160,19 @@ pub struct JobTable {
     /// of these must not publish its death notice before a `wait`
     /// has had its chance to reap the job itself.
     pub fresh_fatal_marks: Vec<(u32, u64)>,
+    /// Terminating signals this shell's own `kill` delivered to a
+    /// background pid (rubash#3802), awaiting the completion that
+    /// records the job's death. Windows `ExitStatus` carries no
+    /// WIFSIGNALED bit — `signal_process` encodes a kill as
+    /// `TerminateProcess (128 + signal)` — so the reap alone cannot
+    /// tell a SIGKILL death (exit code 137) from a plain `exit 137`.
+    /// GNU keeps WTERMSIG in the wait status and printable_job_status
+    /// (jobs.c:1969-1985) prints `j_strsignal`, i.e. `Killed`; the
+    /// delivery record supplies that signal. Consumed by
+    /// [`Self::take_delivered_signal`] at completion, and dropped
+    /// when a pid is re-registered, so a recycled pid cannot borrow
+    /// an old delivery.
+    pub delivered_signals: Vec<(u32, i32)>,
 }
 
 impl JobTable {
@@ -248,6 +261,10 @@ impl JobTable {
                 )
             })
             .collect();
+        // rubash#3802: a delivery record belongs to the process that
+        // occupied this pid; a re-registered pid starts clean.
+        self.delivered_signals
+            .retain(|(marked, _)| !pids.contains(marked));
         let command = command.into();
         // get_job_by_name needs one entry per pipeline stage (GNU's
         // j->pipe PROCESS list); a caller that cannot describe them keeps
@@ -577,6 +594,26 @@ impl JobTable {
         } else {
             false
         }
+    }
+
+    /// Remember the terminating signal the shell's own `kill` handed
+    /// to `pid`, so the completion that reaps it can name the death
+    /// the way GNU's wait status does (rubash#3802). A newer signal
+    /// to the same pid supersedes the older one.
+    pub fn note_delivered_signal(&mut self, pid: u32, signal: i32) {
+        self.delivered_signals.retain(|(marked, _)| *marked != pid);
+        self.delivered_signals.push((pid, signal));
+    }
+
+    /// Consume the delivery record for `pid` at its completion
+    /// (rubash#3802); `None` means the shell's own `kill` is not what
+    /// ended the process, so a plain nonzero exit keeps `Exit <code>`.
+    pub fn take_delivered_signal(&mut self, pid: u32) -> Option<i32> {
+        let position = self
+            .delivered_signals
+            .iter()
+            .position(|(marked, _)| *marked == pid)?;
+        Some(self.delivered_signals.remove(position).1)
     }
 
     /// Publish deferred marks at an observation event

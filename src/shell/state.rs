@@ -593,6 +593,22 @@ pub struct ShellState {
     /// off or inside a subshell, a cleared flag sends the child's stdin to
     /// /dev/null; a set flag inherits the redirected stream instead.
     pub(crate) stdin_redir: Cell<bool>,
+    /// rubash#3605: one-shot `pipe_in != NO_PIPE` marker for a pipeline
+    /// element's own compound dispatch. GNU's element grandchild
+    /// (execute_cmd.c:4570 `stdin_redir |= pipe_in != NO_PIPE`, and the
+    /// execute_in_subshell re-dispatch at :1731-1739/:1759-1764 that
+    /// consumes `command->redirects` before the inner
+    /// execute_command_internal sees them) decides stdin_redir at two
+    /// sites that need this bit: the `( )` assign at :1733
+    /// (`stdin_redirects(own) || pipe_in`) and the :826 control-structure
+    /// assign, which GNU skips for pipe-connected elements because the
+    /// redirects are already NULL there. Set on the compound stage
+    /// clone; consumed (replace(false)) at the element's own compound
+    /// dispatch so nested `( )`/control structures never see it — a
+    /// nested `( )` assigns `own redirects || NO_PIPE` and clears the
+    /// inherited flag, exactly like GNU (`{ ( cat & wait ); } <file`
+    /// feeds the async cat /dev/null, not the file).
+    pub(crate) element_pipe_stdin: Cell<bool>,
     /// jobs.c bookkeeping — the job registry (jobs.c `jobs` array /
     /// `job_table`): bash-observable job identity, pipeline pids, states,
     /// and notification bits. Process handles are Executor resources and
@@ -689,6 +705,19 @@ pub struct ShellState {
     /// substitution's command list, never the enclosing word's command.
     /// TODO: Move to ShellState::clone() for automatic isolation (requires &mut self API change)
     pub(crate) parameter_bad_substitution: Cell<bool>,
+    /// One-shot print budget for the `bad substitution` diagnostic
+    /// (rubash#3499). GNU subst.c:10277-10288 reports the FIRST
+    /// expansion failure of a word list and abandons the rest, so a
+    /// word (or element) expanded on several paths — the pipeline
+    /// scan plus the dispatch arms, a speculative concurrent attempt
+    /// plus the sequential re-expansion — must print the diagnostic
+    /// exactly once per latch lifetime. The verdict latch above still
+    /// sets at every site; only the print is deduplicated. This cell
+    /// rides every boundary the verdict rides (clone, interior
+    /// snapshot, comsub clears, the verdict consumers) so a spent
+    /// budget can neither suppress a later command's diagnostic nor
+    /// re-print inside one command's expansion.
+    pub(crate) bad_substitution_reported: Cell<bool>,
     /// A redirect-target pathname expansion failed under failglob (GNU
     /// subst.c:12668 report_error + exp_jump_to_top_level(DISCARD) inside
     /// redirection_expand -> expand_words_no_vars). The diagnostic prints
@@ -899,6 +928,7 @@ pub(crate) struct InteriorSnapshot {
     conditional_nounset_error: bool,
     arithmetic_last_error_category: Option<crate::executor::arithmetic::ArithmeticErrorCategory>,
     parameter_bad_substitution: bool,
+    bad_substitution_reported: bool,
     redirect_failglob_error: bool,
     redirect_failglob_seen: bool,
     debug_trap_command: Option<String>,
@@ -970,6 +1000,7 @@ impl ShellState {
             conditional_nounset_error: self.conditional_nounset_error.get(),
             arithmetic_last_error_category: self.arithmetic_last_error_category.get(),
             parameter_bad_substitution: self.parameter_bad_substitution.get(),
+            bad_substitution_reported: self.bad_substitution_reported.get(),
             redirect_failglob_error: self.redirect_failglob_error.get(),
             redirect_failglob_seen: self.redirect_failglob_seen.get(),
             debug_trap_command: self.debug_trap_command.borrow().clone(),
@@ -1042,6 +1073,8 @@ impl ShellState {
             .set(snapshot.arithmetic_last_error_category);
         self.parameter_bad_substitution
             .set(snapshot.parameter_bad_substitution);
+        self.bad_substitution_reported
+            .set(snapshot.bad_substitution_reported);
         self.redirect_failglob_error
             .set(snapshot.redirect_failglob_error);
         self.redirect_failglob_seen
@@ -1125,6 +1158,7 @@ impl Clone for ShellState {
             xtrace_suspended: Cell::new(self.xtrace_suspended.get()),
             in_command_substitution: Cell::new(self.in_command_substitution.get()),
             stdin_redir: Cell::new(self.stdin_redir.get()),
+            element_pipe_stdin: Cell::new(self.element_pipe_stdin.get()),
             job_table: self.job_table.clone(),
             last_background_pid: self.last_background_pid,
             last_procsub_pid: self.last_procsub_pid,
@@ -1150,6 +1184,7 @@ impl Clone for ShellState {
             conditional_nounset_error: Cell::new(self.conditional_nounset_error.get()),
             arithmetic_last_error_category: Cell::new(self.arithmetic_last_error_category.get()),
             parameter_bad_substitution: Cell::new(self.parameter_bad_substitution.get()),
+            bad_substitution_reported: Cell::new(self.bad_substitution_reported.get()),
             redirect_failglob_error: Cell::new(self.redirect_failglob_error.get()),
             redirect_failglob_seen: Cell::new(self.redirect_failglob_seen.get()),
             xtrace_fd: Cell::new(self.xtrace_fd.get()),

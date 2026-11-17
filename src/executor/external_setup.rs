@@ -2393,6 +2393,17 @@ impl Executor {
         if super::shell_options::redirect_path_is_fifo(&session_target) {
             return ProcsubPlanCapture::Declined;
         }
+        // rubash#3286: the joined-path check above misses from a
+        // deleted cwd — a FIFO there declines the capture the same way
+        // (the capture open would otherwise block the planner on the
+        // rendezvous, rubash#1820).
+        #[cfg(unix)]
+        {
+            let fs_operand = self.redirect_target_filesystem_path(target);
+            if fs_operand.is_relative() && self.anchor_operand_is_fifo(&fs_operand) == Some(true) {
+                return ProcsubPlanCapture::Declined;
+            }
+        }
         match mode {
             ProcsubPlanMode::Read => match FileFd::open_read(session_target) {
                 Ok(file) => ProcsubPlanCapture::Captured(file),
@@ -2664,12 +2675,32 @@ impl Executor {
     /// twin: it carries the same plan through the `__RUBASH_FD_*`
     /// env channel instead. Returns the pre-bind snapshot for
     /// `restore_procsub_spawn_plan_fd`. A disposition that cannot be
-    /// materialized (an unopenable carrier, a failed dup) leaves
-    /// the fd untouched — the ambient behavior, not a spawn failure.
-    fn bind_procsub_spawn_plan_fd(&mut self, fd: u32, disposition: &ProcsubSpawnFd) -> PlanFdSave {
+    /// materialized (an unopenable carrier, a failed dup of the NEW
+    /// endpoint) leaves the fd untouched — the ambient behavior, not
+    /// a spawn failure. (A failed dup of the SAVED entry is different:
+    /// see the #3732 note below — it fails the bind.)
+    ///
+    /// rubash#3732 (same hazard as #3706): the pre-bind snapshot
+    /// is a kernel dup (`FdTable::saved_entry`), never a bare Rc
+    /// clone — every bind arm below retires the displaced descriptor
+    /// (`FdTable::close` retires both arms; `set_fd_input_file` /
+    /// `open_output` retire the arm they replace, rubash#3213), so
+    /// a cloned save would restore a dead entry and the next spawn's
+    /// pin pass would dup2 whatever recycled that kernel number.
+    /// GNU's undo save IS that kernel dup (`fcntl (fd, F_DUPFD,
+    /// SHELL_FD_BASE)`, redir.c:965/1082/1144; compound groups run
+    /// `do_redirections (..., RX_ACTIVE|RX_UNDOABLE)`,
+    /// execute_cmd.c:854). A dup failure fails the bind (GNU
+    /// REDIRECTION_ERROR) before anything is mutated, so the caller
+    /// can unwind the bindings already made.
+    fn bind_procsub_spawn_plan_fd(
+        &mut self,
+        fd: u32,
+        disposition: &ProcsubSpawnFd,
+    ) -> Result<PlanFdSave, ExecuteError> {
         let saved = PlanFdSave {
             fd,
-            entry: self.fd_table.entries.get(&fd).cloned(),
+            entry: self.fd_table.saved_entry(fd)?,
             alias_generation: self.fd_table.stdout_alias_generation.get(&fd).cloned(),
             fd_stdin: self.shell_state.env_vars.get(&fd_stdin_key(fd)).cloned(),
             fd_stdin_offset: self
@@ -2701,19 +2732,50 @@ impl Executor {
                     .insert(fd_closed_key(fd), "1".to_string());
             }
             ProcsubSpawnFd::File { read, write } => {
-                if let Some(file) = read {
-                    self.set_fd_input_file(fd, file.clone(), false);
-                }
-                if let Some(file) = write {
-                    self.fd_table
-                        .open_output(fd, FdWriteEndpoint::File(file.clone()), false);
-                    self.shell_state.env_vars.remove(&fd_closed_key(fd));
-                    self.shell_state
-                        .env_vars
-                        .insert(fd_output_key(fd), file.path.to_string_lossy().into_owned());
-                    self.shell_state
-                        .env_vars
-                        .remove(&fd_output_process_substitution_key(fd));
+                // rubash#3655: when both arms are present they are
+                // ONE description — a single open_readwrite install,
+                // not an input bind followed by an output bind (the
+                // second would retire the first). Either arm alone
+                // keeps its single-direction install.
+                match (read, write) {
+                    (Some(read), Some(write)) => {
+                        self.fd_table.open_readwrite(
+                            fd,
+                            // rubash#3655 fix: the enclosing match binds
+                            // by reference (match ergonomics), so both
+                            // arms need `.clone()` — the write side had
+                            // it, the read side did not (E0308, CI run
+                            // 43824819839).
+                            FdReadEndpoint::File(read.clone()),
+                            FdWriteEndpoint::File(write.clone()),
+                            false,
+                        );
+                        self.shell_state.env_vars.remove(&fd_closed_key(fd));
+                        self.shell_state.env_vars.remove(&fd_stdin_key(fd));
+                        self.shell_state.env_vars.remove(&fd_stdin_offset_key(fd));
+                        self.shell_state.env_vars.remove(&fd_dynamic_input_key(fd));
+                        self.shell_state
+                            .env_vars
+                            .insert(fd_output_key(fd), write.path.to_string_lossy().into_owned());
+                        self.shell_state
+                            .env_vars
+                            .remove(&fd_output_process_substitution_key(fd));
+                    }
+                    (Some(file), None) => {
+                        self.set_fd_input_file(fd, file.clone(), false);
+                    }
+                    (None, Some(file)) => {
+                        self.fd_table
+                            .open_output(fd, FdWriteEndpoint::File(file.clone()), false);
+                        self.shell_state.env_vars.remove(&fd_closed_key(fd));
+                        self.shell_state
+                            .env_vars
+                            .insert(fd_output_key(fd), file.path.to_string_lossy().into_owned());
+                        self.shell_state
+                            .env_vars
+                            .remove(&fd_output_process_substitution_key(fd));
+                    }
+                    (None, None) => {}
                 }
             }
             ProcsubSpawnFd::TruncatedFile(file) => {
@@ -2784,7 +2846,7 @@ impl Executor {
                 }
             }
         }
-        saved
+        Ok(saved)
     }
 
     fn restore_procsub_spawn_plan_fd(&mut self, saved: PlanFdSave) {
@@ -2844,21 +2906,33 @@ impl Executor {
     /// from the map inherit the ambient table — the in-process
     /// consumer already sees it, unlike a spawned child, which
     /// needs the ambient fds transported (see the #2212 loop in
-    /// `spawn_output_process_substitution_child`).
+    /// `spawn_output_process_substitution_child`). A dup failure
+    /// while saving one fd's pre-bind snapshot (rubash#3732) fails
+    /// the whole run before `run` starts — the bindings already made
+    /// are restored in reverse first, the same unwind a redirect
+    /// apply failure performs (GNU `undo_partial_redirects`).
     pub(in crate::executor) fn with_procsub_spawn_plan<T>(
         &mut self,
         plan: &ProcsubSpawnPlan,
         run: impl FnOnce(&mut Self) -> T,
-    ) -> T {
+    ) -> Result<T, ExecuteError> {
         let mut saved = Vec::new();
         for (fd, disposition) in &plan.fds {
-            saved.push(self.bind_procsub_spawn_plan_fd(*fd, disposition));
+            match self.bind_procsub_spawn_plan_fd(*fd, disposition) {
+                Ok(save) => saved.push(save),
+                Err(error) => {
+                    for save in saved.into_iter().rev() {
+                        self.restore_procsub_spawn_plan_fd(save);
+                    }
+                    return Err(error);
+                }
+            }
         }
         let result = run(self);
         for save in saved.into_iter().rev() {
             self.restore_procsub_spawn_plan_fd(save);
         }
-        result
+        Ok(result)
     }
 
     fn materialize_standalone_process_substitution_word(

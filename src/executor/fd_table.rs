@@ -219,6 +219,37 @@ impl FileFd {
     pub(crate) fn is_retired(&self) -> bool {
         self.closed.get()
     }
+
+    /// rubash#3706: duplicate this descriptor's kernel handle into a
+    /// fresh FileFd naming the same open file description (shared
+    /// offset and status flags) — the undo-save dup. GNU's undoable
+    /// redirect saves the displaced descriptor BEFORE the redirect
+    /// binds, with `fcntl (fd, F_DUPFD, SHELL_FD_BASE)` (redir.c:965
+    /// for input, :1082 for duplicating, :1144 for move; SHELL_FD_BASE
+    /// is 10, redir.c:86), and records the save with
+    /// `add_undo_redirect` so `undo_redirections` can dup it back.
+    /// The duplicate carries the table's close-on-exec discipline
+    /// (unix: F_DUPFD_CLOEXEC, like `crate::fd::dup_adopted_fd`;
+    /// Windows: `duplicate_handle` is already non-inheritable), so
+    /// the spawn path still arranges child layouts explicitly and no
+    /// saved descriptor ever leaks raw into a child.
+    pub(crate) fn duplicate(&self) -> std::io::Result<Rc<Self>> {
+        #[cfg(unix)]
+        let handle = {
+            let n = unsafe { libc::fcntl(self.handle, libc::F_DUPFD_CLOEXEC, 0) };
+            if n < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            n
+        };
+        #[cfg(windows)]
+        let handle = crate::fd::duplicate_handle(self.handle)?;
+        Ok(Rc::new(Self {
+            handle,
+            closed: std::cell::Cell::new(false),
+            path: self.path.clone(),
+        }))
+    }
 }
 
 impl Drop for FileFd {
@@ -347,6 +378,65 @@ pub(crate) struct FdEntry {
     pub(crate) write: Option<FdWriteEndpoint>,
     pub(crate) closed: bool,
     pub(crate) dynamic: bool,
+}
+
+impl FdEntry {
+    /// rubash#3706: clone this entry with every kernel-backed
+    /// endpoint replaced by a fresh duplicate of its descriptor
+    /// (same open file description, shared offset) — the undo-save
+    /// form. A plain Rc clone shares the descriptor the bind-time
+    /// retire (`retire_read_arm` / `retire_write_arm`, rubash#3213)
+    /// closes when the scope's redirect binds, so a scope that saved
+    /// the clone restores a dead entry; the duplicate keeps the saved
+    /// descriptor alive until the scope's restore replays it, exactly
+    /// like GNU's `fcntl (fd, F_DUPFD, SHELL_FD_BASE)` save
+    /// (redir.c:965/1082/1144). Only the File-backed endpoints carry
+    /// a kernel descriptor (File, CoprocStdout/CoprocStdin); text,
+    /// directory, marker and channel endpoints are in-memory or
+    /// symbolic and clone exactly. A `<>` pair's two arms share one
+    /// Rc (open_readwrite_pair); that sharing is preserved — the
+    /// write arm reuses the read arm's duplicate — so closing one
+    /// direction still retires the shared descriptor.
+    pub(crate) fn dup_file_endpoints(&self) -> std::io::Result<Self> {
+        let read = match &self.read {
+            Some(FdReadEndpoint::File(file)) => Some(FdReadEndpoint::File(file.duplicate()?)),
+            Some(FdReadEndpoint::CoprocStdout { pid, fd }) => Some(FdReadEndpoint::CoprocStdout {
+                pid: *pid,
+                fd: fd.duplicate()?,
+            }),
+            other => other.clone(),
+        };
+        let write = match &self.write {
+            Some(FdWriteEndpoint::File(file)) => {
+                // A `<>` pair shares ONE open file description
+                // between its arms (open_readwrite_pair mints a
+                // single Rc for both); reuse the read arm's
+                // duplicate so the saved entry preserves that
+                // sharing — closing one direction must retire the
+                // shared descriptor, as GNU's close(2) closes the
+                // whole descriptor.
+                match (&self.read, &read) {
+                    (Some(FdReadEndpoint::File(orig)), Some(FdReadEndpoint::File(dup)))
+                        if Rc::ptr_eq(orig, file) =>
+                    {
+                        Some(FdWriteEndpoint::File(dup.clone()))
+                    }
+                    _ => Some(FdWriteEndpoint::File(file.duplicate()?)),
+                }
+            }
+            Some(FdWriteEndpoint::CoprocStdin { pid, fd }) => Some(FdWriteEndpoint::CoprocStdin {
+                pid: *pid,
+                fd: fd.duplicate()?,
+            }),
+            other => other.clone(),
+        };
+        Ok(Self {
+            read,
+            write,
+            closed: self.closed,
+            dynamic: self.dynamic,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -778,7 +868,16 @@ impl FdTable {
                         closed: std::cell::Cell::new(false),
                         path: crate::fd::inherited_fd_path(0),
                     });
-                    self.open_output(0, FdWriteEndpoint::File(file), false);
+                    // rubash#3655: the adopted write arm joins the
+                    // birth read arm on the SAME inherited
+                    // description — one open_readwrite install, or
+                    // the output bind would retire the read arm.
+                    self.open_readwrite(
+                        0,
+                        FdReadEndpoint::InheritedProcessStdin,
+                        FdWriteEndpoint::File(file),
+                        false,
+                    );
                 }
             }
         }
@@ -797,10 +896,19 @@ impl FdTable {
                 closed: std::cell::Cell::new(false),
                 path: crate::fd::inherited_fd_path(fd),
             });
-            if readable {
+            if readable && writable {
+                // rubash#3655: one inherited description open in
+                // both directions — a single open_readwrite install,
+                // never two sequential binds.
+                self.open_readwrite(
+                    fd,
+                    FdReadEndpoint::File(file.clone()),
+                    FdWriteEndpoint::File(file),
+                    false,
+                );
+            } else if readable {
                 self.open_input(fd, FdReadEndpoint::File(file.clone()), false);
-            }
-            if writable {
+            } else if writable {
                 self.open_output(fd, FdWriteEndpoint::File(file), false);
             }
         }
@@ -1122,35 +1230,101 @@ impl FdTable {
         }
     }
 
+    /// rubash#3706: snapshot slot `fd` for a scope's undo record —
+    /// the entry with its kernel-backed endpoints duplicated
+    /// (`FdEntry::dup_file_endpoints`), so the descriptor the scope's
+    /// redirect is about to displace stays alive until the scope's
+    /// restore replays it. A plain clone would share the descriptor
+    /// the bind-time retire closes (retire_read_arm /
+    /// retire_write_arm, rubash#3213). Fails only when the process
+    /// cannot duplicate a descriptor (fd exhaustion) — GNU fails the
+    /// whole redirect the same way (redir.c REDIRECTION_ERROR on a
+    /// failed F_DUPFD save).
+    pub(crate) fn saved_entry(&self, fd: u32) -> std::io::Result<Option<FdEntry>> {
+        match self.entries.get(&fd) {
+            Some(entry) => Ok(Some(entry.dup_file_endpoints()?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Install a new read description on `fd` (rubash#3655): GNU
+    /// dup2 replaces the descriptor WHOLESALE — the previous
+    /// description dies in both directions (redir.c
+    /// do_redirection_internal applies each redirect with dup2 onto
+    /// its redirector). A later `14>file` must therefore retire an
+    /// earlier heredoc's read arm, or `read -u 14` would still see
+    /// the heredoc text on a write-only descriptor. The `<>`
+    /// read-write pair is the only dual-arm install and lands
+    /// through open_readwrite, never through these two.
     pub(crate) fn open_input(&mut self, fd: u32, endpoint: FdReadEndpoint, dynamic: bool) {
-        let outgoing;
+        let (outgoing_read, outgoing_write);
         {
             let entry = self.entry_mut(fd, dynamic);
-            // rubash#3213: drop the previous read endpoint BEFORE
+            // rubash#3213: drop the previous endpoints BEFORE
             // materializing the new one — dup2 onto fd closes whatever
             // descriptor held that number, and dropping the old FileFd
             // afterwards would close the new descriptor a second time.
-            outgoing = std::mem::replace(&mut entry.read, None);
+            outgoing_read = std::mem::replace(&mut entry.read, None);
+            outgoing_write = std::mem::replace(&mut entry.write, None);
             let endpoint = Self::materialize_read_endpoint(fd, endpoint);
             entry.read = Some(endpoint);
             entry.closed = false;
         }
-        self.retire_read_arm(fd, outgoing);
+        self.retire_read_arm(fd, outgoing_read);
+        self.retire_write_arm(fd, outgoing_write);
     }
 
+    /// Install a new write description on `fd` (rubash#3655): the
+    /// read-side twin of open_input — a later `14<<A` retires an
+    /// earlier `14>file` write arm the same way, so the descriptor
+    /// never carries arms from two different descriptions.
     pub(crate) fn open_output(&mut self, fd: u32, endpoint: FdWriteEndpoint, dynamic: bool) {
-        let outgoing;
+        let (outgoing_read, outgoing_write);
         {
             let entry = self.entry_mut(fd, dynamic);
-            // rubash#3213: drop the previous write endpoint BEFORE
+            // rubash#3213: drop the previous endpoints BEFORE
             // materializing the new one (see open_input).
-            outgoing = std::mem::replace(&mut entry.write, None);
+            outgoing_read = std::mem::replace(&mut entry.read, None);
+            outgoing_write = std::mem::replace(&mut entry.write, None);
             let endpoint = Self::materialize_write_endpoint(fd, endpoint);
             entry.write = Some(endpoint);
             entry.closed = false;
             self.stdout_alias_generation.remove(&fd);
         }
-        self.retire_write_arm(fd, outgoing);
+        self.retire_read_arm(fd, outgoing_read);
+        self.retire_write_arm(fd, outgoing_write);
+    }
+
+    /// Install BOTH arms of one open file description on `fd` at
+    /// once (rubash#3655: the `<>` r_input_output form — GNU
+    /// redir.c:725 redir_open opens O_RDWR, ONE descriptor serving
+    /// both directions). This is the only dual-arm install:
+    /// open_input/open_output each retire the opposite arm (dup2
+    /// wholesale), so a `<>` pair installed as two sequential calls
+    /// would end single-direction.
+    pub(crate) fn open_readwrite(
+        &mut self,
+        fd: u32,
+        read: FdReadEndpoint,
+        write: FdWriteEndpoint,
+        dynamic: bool,
+    ) {
+        let (outgoing_read, outgoing_write);
+        {
+            let entry = self.entry_mut(fd, dynamic);
+            // rubash#3213: drop the previous endpoints BEFORE
+            // materializing the new ones (see open_input).
+            outgoing_read = std::mem::replace(&mut entry.read, None);
+            outgoing_write = std::mem::replace(&mut entry.write, None);
+            let read = Self::materialize_read_endpoint(fd, read);
+            let write = Self::materialize_write_endpoint(fd, write);
+            entry.read = Some(read);
+            entry.write = Some(write);
+            entry.closed = false;
+            self.stdout_alias_generation.remove(&fd);
+        }
+        self.retire_read_arm(fd, outgoing_read);
+        self.retire_write_arm(fd, outgoing_write);
     }
 
     /// `N<&M` / `N>&M` — POSIX dup2 semantics: the descriptor is copied
@@ -1669,7 +1843,19 @@ impl FdTable {
             match crate::fd::read_some(file.handle, 8192) {
                 Ok(chunk) if chunk.is_empty() => break,
                 Ok(chunk) => buffer.extend_from_slice(&chunk),
-                Err(_) => break,
+                Err(error) => {
+                    // rubash#3777: the byte-wise loop records the first
+                    // hard read error on an otherwise empty record
+                    // (rubash#1495); the buffered loop swallowed it, so
+                    // a directory bound to the fd read as silent EOF
+                    // instead of `read: 0: read error: Is a directory`
+                    // (read.def:911). Bytes already consumed keep the
+                    // plain partial-record path, as in the byte-wise arm.
+                    if result.is_empty() && self.read_error.is_none() {
+                        self.read_error = Some(crate::posix_errors::message(&error));
+                    }
+                    break;
+                }
             }
             for (index, &byte) in buffer[scanned_from..].iter().enumerate() {
                 let absolute = scanned_from + index;
@@ -2218,5 +2404,52 @@ mod tests {
             table.input_snapshot_bytes(10).unwrap(),
             (vec![0xff, b'\n'], 0)
         );
+    }
+
+    #[test]
+    fn output_bind_retires_read_arm() {
+        // rubash#3655: dup2 wholesale — `exec 14<<A 14>file` leaves
+        // fd 14 write-only; the heredoc text must not survive as a
+        // read arm for a later `read -u 14`.
+        let mut table = FdTable::new();
+        table.open_input(14, FdReadEndpoint::text("first\n"), false);
+        assert!(table.is_open_for_read(14));
+        table.open_output(14, FdWriteEndpoint::Stdout, false);
+        assert!(!table.is_open_for_read(14));
+        assert!(table.is_open_for_write(14));
+        assert!(table.read_endpoint(14).is_none());
+    }
+
+    #[test]
+    fn input_bind_retires_write_arm() {
+        // rubash#3655: the mirror direction — `exec 14>file 14<<A`
+        // leaves fd 14 read-only on the heredoc.
+        let mut table = FdTable::new();
+        table.open_output(14, FdWriteEndpoint::Stdout, false);
+        assert!(table.is_open_for_write(14));
+        table.open_input(14, FdReadEndpoint::text("first\n"), false);
+        assert!(!table.is_open_for_write(14));
+        assert!(table.is_open_for_read(14));
+        assert!(table.output_endpoint(14).is_none());
+    }
+
+    #[test]
+    fn open_readwrite_keeps_both_arms() {
+        // rubash#3655: the `<>` pair is ONE description — the only
+        // dual-arm install — and survives as both arms.
+        let mut table = FdTable::new();
+        table.open_readwrite(
+            14,
+            FdReadEndpoint::text("first\n"),
+            FdWriteEndpoint::Stdout,
+            false,
+        );
+        assert!(table.is_open_for_read(14));
+        assert!(table.is_open_for_write(14));
+        // A later single-direction bind still retires the pair
+        // wholesale (`exec 14<>f 14>g` leaves fd 14 write-only).
+        table.open_output(14, FdWriteEndpoint::Stderr, false);
+        assert!(!table.is_open_for_read(14));
+        assert!(table.is_open_for_write(14));
     }
 }

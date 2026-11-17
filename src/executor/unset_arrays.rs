@@ -283,12 +283,34 @@ impl Executor {
                     &self.shell_state.env_vars,
                     "array_expand_once",
                 );
+                // rubash#3522: the flag-0 validity scan above runs through
+                // scan_compound_subscript, which never opens a backquote
+                // span, so `arr[`]` (a lone-backtick key) passed the gate
+                // while GNU's skipsubscript (subst.c:2086-2177: backq
+                // swallows `]` until the closing backtick) finds no
+                // balance-0 `]` and tokenize_array_reference
+                // (arrayfunc.c:1318) fails -> sh_invalidid. The element
+                // path then could not parse the operand either
+                // (parse_array_subscript, the faithful skipsubscript
+                // port) and the operand fell through to the lib re-scan,
+                // which silently succeeds for an existing array and
+                // misdiagnoses a scalar as "not an array variable".
+                // Require the quote-aware parse too whenever GNU would
+                // run the flag-0 scan: every case except an assoc base
+                // under VA_NOEXPAND, where GNU takes the first `]`
+                // verbatim (arrayfunc.c:1323-1324) and a quote-aware
+                // failure is legitimate (e.g. `dict[80's]` under
+                // array_expand_once).
+                let base = &name[..name.find('[').unwrap_or(name.len())];
+                let gnu_flag0_scan =
+                    !(noexpand && is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, base));
                 if !crate::executor::subscript_expansion::valid_array_reference_env(
                     &name,
                     noexpand,
                     false,
                     &self.shell_state.env_vars,
-                ) {
+                ) || (gnu_flag0_scan && parse_array_subscript(name).is_none())
+                {
                     if variable_only {
                         diag.error(crate::executor::builtin_diag::DiagKind::InvalidId(
                             name.to_string(),

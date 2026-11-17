@@ -215,6 +215,21 @@ pub(in crate::executor) fn fork_respawn_transport_key(key: &str) -> bool {
 /// the same round-trip the array-variable transport uses.
 pub(in crate::executor) const POSITIONAL_PARAMS_TRANSPORT: &str = "__RUBASH_POSITIONAL_PARAMS";
 
+/// Transport key for the parent's live errexit-suppression depth at
+/// spawn. GNU's fork-shaped children that execute the SAME command
+/// node (the async `&` wrapper's execute_in_subshell fork,
+/// execute_cmd.c:1576, and the coproc child's execute_coproc ->
+/// execute_in_subshell, execute_cmd.c:2546) carry the node's
+/// CMD_IGNORE_RETURN — set by `!` (execute_cmd.c:655-656) or an
+/// enclosing ignore_return propagation arm — so `set -e` inside an
+/// inverted coproc/`&` body is ignored (exec16's "reached coproc
+/// body"). A respawned `rubash -c` child has no node; this stamp
+/// seeds its suppress_errexit. process_substitute children are
+/// excluded: GNU re-parses the producer's saved command text
+/// (subst.c:6362), so no flag survives — verified
+/// `! cat < <(set -e; false; echo x)` prints nothing under 5.3.20.
+pub(in crate::executor) const SUPPRESS_ERREXIT_TRANSPORT: &str = "__RUBASH_SUPPRESS_ERREXIT";
+
 /// RAII scope for the executor's `expansion_probe_active` flag
 /// (rubash#2585); restores the prior value on drop, so a nested probe
 /// scope cannot disarm an outer one and early returns are covered —
@@ -1693,6 +1708,13 @@ impl Executor {
         for (key, value) in self.fork_context_transport_entries() {
             env_map.insert(key, value);
         }
+        // rubash#3605: the async child is the same execute_in_subshell
+        // fork the flag model travels (execute_cmd.c:1576); an
+        // inverted/exempt `&` body keeps CMD_IGNORE_RETURN
+        // (SUPPRESS_ERREXIT_TRANSPORT).
+        if self.suppress_errexit > 0 {
+            env_map.insert(SUPPRESS_ERREXIT_TRANSPORT.to_string(), "1".to_string());
+        }
         // rubash#1074: the wrapper child is one subshell level deeper than
         // this shell (execute_in_subshell's subshell_level++); carry the
         // target depth so the child's BASH_SUBSHELL starts at parent + 1.
@@ -2822,7 +2844,21 @@ impl Executor {
     /// never in the parent walk of resolve_background_stdio.
     fn background_redirect_target_is_fifo(&self, target: &str) -> bool {
         let path = self.session_path(shell_path_to_windows(target, &self.shell_state.env_vars));
-        super::shell_options::redirect_path_is_fifo(&path)
+        if super::shell_options::redirect_path_is_fifo(&path) {
+            return true;
+        }
+        // rubash#3286: the joined-path check above misses from a
+        // deleted cwd — the anchor's fstatat classifies there, and a
+        // FIFO still defers its open to the child exactly as above
+        // (rubash#1862: the parent must not take the rendezvous).
+        #[cfg(unix)]
+        {
+            let fs_operand = self.redirect_target_filesystem_path(target);
+            if fs_operand.is_relative() && self.anchor_operand_is_fifo(&fs_operand) == Some(true) {
+                return true;
+            }
+        }
+        false
     }
 
     /// Defer fds to the background child (rubash#1862): mark them
@@ -4418,6 +4454,23 @@ impl Executor {
         let saved_exit_trap_ran = self.exit_trap_ran.get();
         crate::builtins::trap::reset_for_subshell_child(&mut self.shell_state.env_vars);
         self.shell_state.subshell_depth.set(saved_depth + 1);
+        // rubash#3605: GNU execute_cmd.c:1731-1739 (execute_in_subshell)
+        // ASSIGNS stdin_redir for a user subshell — `stdin_redir =
+        // stdin_redirects(redirects) || pipe_in != NO_PIPE` — an assign,
+        // not an OR: a nested `( )` with no fd-0 redirect CLEARS the
+        // enclosing structure's flag (`{ ( cat & wait ); } <file` feeds
+        // the async cat /dev/null), while the ( )'s own `< file` or its
+        // being a pipe-fed element's own dispatch sets it even when the
+        // parent's flag was 0. `redirects` here is the ( )'s own list —
+        // the same list do_redirections is about to consume (GNU reads
+        // it before the :1759-1764 consumption). element_pipe_stdin
+        // carries the element child's `pipe_in != NO_PIPE` for exactly
+        // this dispatch; consume it so nested ( )s don't inherit the
+        // outer element's pipe.
+        let element_pipe_stdin = self.shell_state.element_pipe_stdin.replace(false);
+        self.shell_state
+            .stdin_redir
+            .set(cmd.redirects.iter().any(redirect_updates_stdin_redir) || element_pipe_stdin);
         // execute_in_subshell (execute_cmd.c:1636-1637): the region is
         // "neither login nor interactive" — record the login reset
         // alongside the depth bump; saved_state's wholesale restore
@@ -4974,7 +5027,7 @@ impl Executor {
     where
         F: FnOnce(&mut Executor) -> Result<T, ExecuteError>,
     {
-        let saved_fd_inputs = self.bind_numbered_heredoc_redirects(cmd, true);
+        let saved_fd_inputs = self.bind_numbered_heredoc_redirects(cmd, true)?;
         let result = f(self);
         self.restore_numbered_heredoc_redirects(saved_fd_inputs);
         result
@@ -4993,7 +5046,7 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
         include_stdin: bool,
-    ) -> Vec<(u32, Option<crate::executor::fd_table::FdEntry>)> {
+    ) -> Result<Vec<(u32, Option<crate::executor::fd_table::FdEntry>)>, ExecuteError> {
         let mut saved_fd_inputs = Vec::new();
         for redirect in &cmd.heredoc_redirects {
             let Some(fd) = redirect.fd else {
@@ -5014,11 +5067,26 @@ impl Executor {
             // to the heredoc expansion leaked the storage prefix into
             // the stream and lost the last line (rubash#1867).
             let body = self.expand_heredoc_redirect_text(redirect);
-            saved_fd_inputs.push((fd, self.fd_table.entries.get(&fd).cloned()));
+            // rubash#3706: the saved entry duplicates the displaced
+            // descriptor (FdTable::saved_entry) — a plain clone shares
+            // the descriptor the heredoc bind's open_input retires, so
+            // the restore would replay a dead entry. A dup failure
+            // unwinds the heredocs this call already bound (GNU
+            // undo_partial_redirects, execute_cmd.c:855) before the
+            // error propagates — the caller never sees a half-bound
+            // list.
+            let saved = match self.fd_table.saved_entry(fd) {
+                Ok(saved) => saved,
+                Err(error) => {
+                    self.restore_numbered_heredoc_redirects(std::mem::take(&mut saved_fd_inputs));
+                    return Err(ExecuteError::IoError(error));
+                }
+            };
+            saved_fd_inputs.push((fd, saved));
             self.fd_table
                 .open_input(fd, FdReadEndpoint::text(&body), true);
         }
-        saved_fd_inputs
+        Ok(saved_fd_inputs)
     }
 
     /// The restore half of bind_numbered_heredoc_redirects: each bound
@@ -5695,6 +5763,15 @@ impl Executor {
             // fork-shaped respawn (see fork_context_transport_entries).
             for (key, value) in self.fork_context_transport_entries() {
                 env_entries.push((key, value));
+            }
+            // rubash#3605: the coproc child executes the parent's
+            // flagged command node (execute_cmd.c:2546
+            // execute_coproc -> execute_in_subshell), so a `!`- or
+            // condition-suppressed coproc keeps CMD_IGNORE_RETURN
+            // and `set -e` inside is ignored
+            // (SUPPRESS_ERREXIT_TRANSPORT).
+            if self.suppress_errexit > 0 {
+                env_entries.push((SUPPRESS_ERREXIT_TRANSPORT.to_string(), "1".to_string()));
             }
             // rubash#2332: the compound body's line spans, collected
             // over the same list bash_command_sequence_text rendered
@@ -8019,13 +8096,19 @@ pub(crate) fn test_rubash_binary_from_env() -> Option<std::path::PathBuf> {
 /// dir, and the debug/release profile dirs under each ancestor of the
 /// test binary (nested/workspace layouts). Only a file literally
 /// named `rubash[.exe]` counts — a test binary is `rubash-<hash>`
-/// under `deps/` and never matches. Production behaviour is
-/// unchanged: the `deps/` gate still returns `None` outside a test
-/// binary, so a real shell keeps falling back to `current_exe()`.
+/// under `deps/` or `build/<pkg>/<fingerprint>/out/` and never
+/// matches. Production behaviour is unchanged: the test-layout gate
+/// still returns `None` outside a test binary, so a real shell keeps
+/// falling back to `current_exe()`.
 pub(crate) fn test_rubash_binary_from_current_exe() -> Option<std::path::PathBuf> {
     let current = std::env::current_exe().ok()?;
-    let deps = current.parent()?;
-    if deps.file_name().and_then(|name| name.to_str()) != Some("deps") {
+    let dir = current.parent()?;
+    // Test-binary layouts: `deps/` on the classic build dir, and
+    // `build/<pkg>/<fingerprint>/out/` on the current cargo build-dir
+    // layout (the unit-test binary for a package with a build script is
+    // placed inside the package's own out dir).
+    let dir_name = dir.file_name().and_then(|name| name.to_str());
+    if dir_name != Some("deps") && dir_name != Some("out") {
         return None;
     }
     let binary_name = if cfg!(windows) {
@@ -8034,7 +8117,7 @@ pub(crate) fn test_rubash_binary_from_current_exe() -> Option<std::path::PathBuf
         "rubash"
     };
     let mut profile_dirs: Vec<std::path::PathBuf> = Vec::new();
-    if let Some(debug_dir) = deps.parent() {
+    if let Some(debug_dir) = dir.parent() {
         profile_dirs.push(debug_dir.to_path_buf());
         if let Some(target_dir) = debug_dir.parent() {
             profile_dirs.push(target_dir.join("release"));

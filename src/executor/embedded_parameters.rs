@@ -199,6 +199,11 @@ impl Executor {
         // Snapshot the expansion-verdict latches; a false→true transition
         // inside the walk is the walk's own failure verdict.
         let bad_sub_before = self.shell_state.parameter_bad_substitution.replace(false);
+        // rubash#3499: the print budget rides with the verdict — the walk
+        // is a read-side render, so a diagnostic it prints must not spend
+        // the enclosing command's one report, and a report the enclosing
+        // command already spent must not be re-printed here.
+        let bad_sub_reported_before = self.shell_state.bad_substitution_reported.replace(false);
         let arith_err_before = self.shell_state.arithmetic_expansion_error.replace(false);
         let arith_fatal_before = self.shell_state.arithmetic_fatal_error.replace(false);
         let arith_nonfatal_before = self.shell_state.arithmetic_nonfatal_error.replace(false);
@@ -238,6 +243,11 @@ impl Executor {
                 .shell_state
                 .arithmetic_nonfatal_error
                 .replace(arith_nonfatal_before);
+        // rubash#3499: restore the print budget with the verdict (see
+        // the snapshot above).
+        self.shell_state
+            .bad_substitution_reported
+            .set(bad_sub_reported_before);
         EXPAND_DEPTH.with(|d| d.set(depth));
         if failed {
             return word.to_string();
@@ -730,6 +740,13 @@ impl Executor {
                 continue;
             }
 
+            // QUOTED_EXPANSION_SITE marks a `$` expansion the lexer saw
+            // inside `"..."` (or `'...'` groupings) — for a `${}`
+            // fragment that is GNU's `quoted` bit (subst.c `quoted` from
+            // Q_DOUBLE_QUOTES on the word), which the #3581 `#`/`%` gate
+            // consults via EXTQUOTE_NAME_QUOTED_CONTEXT. Capture it here
+            // so the `${}` dispatch below can record it.
+            let fragment_site_quoted = quoted_site;
             if quoted_site {
                 quoted_span_start = Some(output.len());
                 quoted_site = false;
@@ -937,14 +954,20 @@ impl Executor {
                         //   the message into the value — the value falls
                         //   back with the enclosing command still at 0.
                         if !terminated {
-                            self.write_diagnostic_fd2(
-                                format!(
-                                    "{}{}: bad substitution\n",
-                                    self.diagnostic_prefix(),
-                                    crate::executor::expand_word::bad_substitution_display(word)
-                                )
-                                .as_bytes(),
-                            );
+                            // rubash#3499: one diagnostic per latch
+                            // lifetime (see bad_substitution_report_first).
+                            if self.bad_substitution_report_first() {
+                                self.write_diagnostic_fd2(
+                                    format!(
+                                        "{}{}: bad substitution\n",
+                                        self.diagnostic_prefix(),
+                                        crate::executor::expand_word::bad_substitution_display(
+                                            word
+                                        )
+                                    )
+                                    .as_bytes(),
+                                );
+                            }
                             self.shell_state.parameter_bad_substitution.set(true);
                             continue;
                         }
@@ -980,15 +1003,22 @@ impl Executor {
                                         &self.expand_parameter_word(&message),
                                     )
                                 };
-                                self.write_diagnostic_fd2(
-                                    format!(
-                                        "{}{}: {}\n",
-                                        self.diagnostic_prefix(),
-                                        error_name,
-                                        message
-                                    )
-                                    .as_bytes(),
-                                );
+                                // rubash#3499: one diagnostic per latch
+                                // lifetime (see
+                                // bad_substitution_report_first) — the
+                                // first expansion failure of the word list
+                                // owns the report, whatever its class.
+                                if self.bad_substitution_report_first() {
+                                    self.write_diagnostic_fd2(
+                                        format!(
+                                            "{}{}: {}\n",
+                                            self.diagnostic_prefix(),
+                                            error_name,
+                                            message
+                                        )
+                                        .as_bytes(),
+                                    );
+                                }
                                 self.shell_state.parameter_bad_substitution.set(true);
                                 continue;
                             }
@@ -1016,14 +1046,18 @@ impl Executor {
                         && crate::executor::expand_word::resolve_dollar_quoted_parameter_name(&name)
                             .is_some()
                     {
-                        self.write_diagnostic_fd2(
-                            format!(
-                                "{}{}: bad substitution\n",
-                                self.diagnostic_prefix(),
-                                crate::executor::expand_word::bad_substitution_display(word)
-                            )
-                            .as_bytes(),
-                        );
+                        // rubash#3499: one diagnostic per latch lifetime
+                        // (see bad_substitution_report_first).
+                        if self.bad_substitution_report_first() {
+                            self.write_diagnostic_fd2(
+                                format!(
+                                    "{}{}: bad substitution\n",
+                                    self.diagnostic_prefix(),
+                                    crate::executor::expand_word::bad_substitution_display(word)
+                                )
+                                .as_bytes(),
+                            );
+                        }
                         self.shell_state.parameter_bad_substitution.set(true);
                         continue;
                     }
@@ -1036,7 +1070,7 @@ impl Executor {
                     let value =
                         crate::executor::expand_word::with_pending_diagnostic_word(word, || {
                             crate::executor::expand_word::with_extquote_name_quoted_context(
-                                in_double || double_quoted || heredoc,
+                                in_double || double_quoted || heredoc || fragment_site_quoted,
                                 || self.expand_word(&format!("${{{name}}}")),
                             )
                         });

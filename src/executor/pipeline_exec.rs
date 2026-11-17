@@ -960,7 +960,13 @@ impl Executor {
             // same way `while ... done <f` does — the check lives in
             // execute_command for the other kinds; brace groups dispatch
             // here instead.
-            if !command.redirects.is_empty() {
+            // rubash#3605: same pipe-element skip as command_execute's
+            // :826 port — a `{ }` element's own redirects were consumed
+            // by its execute_in_subshell (:1759-1764) before the inner
+            // dispatch, so GNU never assigns from them; consume the
+            // marker here so a nested structure assigns its own verdict.
+            let element_pipe_stdin = self.shell_state.element_pipe_stdin.replace(false);
+            if !command.redirects.is_empty() && !element_pipe_stdin {
                 self.shell_state
                     .stdin_redir
                     .set(command.redirects.iter().any(redirect_updates_stdin_redir));
@@ -1466,10 +1472,19 @@ impl Executor {
                 let input = fs::read_to_string(&output.path).unwrap_or_default();
                 let source = output.source.clone();
                 let plan = output.spawn_plan.clone();
-                if let Err(output_error) = self.with_procsub_spawn_plan(&plan, |executor| {
+                // rubash#3732: with_procsub_spawn_plan now returns
+                // Result<T, ExecuteError> — a dup failure while
+                // saving a plan fd's pre-bind snapshot fails the run
+                // before the consumer starts, and must surface here
+                // exactly like the consumer's own error (both layers
+                // carry the same ExecuteError).
+                match self.with_procsub_spawn_plan(&plan, |executor| {
                     executor.execute_persistent_output_process_substitution(&source, input, None)
                 }) {
-                    error = Some(output_error);
+                    Ok(Ok(())) => {}
+                    Ok(Err(output_error)) | Err(output_error) => {
+                        error = Some(output_error);
+                    }
                 }
             }
             let _ = fs::remove_file(&output.path);
@@ -1492,9 +1507,15 @@ impl Executor {
     /// with snapshot/restore; the arithmetic flag family has its own
     /// long-standing bracket (snapshot_arithmetic_error_flags) whose
     /// deliberate latch-held handoff this one must not disturb.
+    /// rubash#3499: the bad-substitution verdict rides the family too
+    /// (a speculative attempt's raise is rolled back before the
+    /// sequential stage loop re-expands the words). The print budget
+    /// (`bad_substitution_reported`) deliberately does NOT: it is held
+    /// across the decline like the arithmetic print latch, so the
+    /// re-expansion cannot print the diagnostic a second time.
     pub(in crate::executor) fn snapshot_discard_latches(
         &self,
-    ) -> (bool, Option<i32>, bool, bool, bool, bool, bool) {
+    ) -> (bool, Option<i32>, bool, bool, bool, bool, bool, bool) {
         (
             self.parameter_assignment_failure.get(),
             self.parameter_assignment_failure_prev_status.get(),
@@ -1503,12 +1524,13 @@ impl Executor {
             self.evalerror_exit_toomany_pending.get(),
             self.evalerror_subscript_pending.get(),
             self.command_expansion_failed.get(),
+            self.shell_state.parameter_bad_substitution.get(),
         )
     }
 
     pub(in crate::executor) fn restore_discard_latches(
         &self,
-        saved: &(bool, Option<i32>, bool, bool, bool, bool, bool),
+        saved: &(bool, Option<i32>, bool, bool, bool, bool, bool, bool),
     ) {
         self.parameter_assignment_failure.set(saved.0);
         self.parameter_assignment_failure_prev_status.set(saved.1);
@@ -1517,6 +1539,7 @@ impl Executor {
         self.evalerror_exit_toomany_pending.set(saved.4);
         self.evalerror_subscript_pending.set(saved.5);
         self.command_expansion_failed.set(saved.6);
+        self.shell_state.parameter_bad_substitution.set(saved.7);
     }
 
     /// rubash#1564: could expanding this element's words (or its
@@ -1737,6 +1760,50 @@ impl Executor {
         result
     }
 
+    /// Whether an ambient `2>&1` stage stderr may merge into the
+    /// pipeline's output stream (rubash#3403): the merge is GNU's dup2
+    /// snapshot only while the pipeline's output destination IS the
+    /// object fd 2 was dup'd from (redir.c:1192-1193 `2>&1 means dup2
+    /// (1, 2)` — the descriptor as it stood at dup time, in list
+    /// order per redir.c:237 do_redirections). The fd table records
+    /// that snapshot as fd 2's Stdout endpoint plus its capture
+    /// generation; the pipeline output rides the CURRENT fd 1. A later
+    /// `1>file` in the same list — or an `exec > file` inside the body
+    /// — retargets fd 1 while fd 2 still holds the snapshot, so
+    /// folding would re-resolve the dup against the LIVE fd 1:
+    /// `{ echo hi | ls /bad; } 2>&1 1>out.txt` sent the stage error
+    /// into out.txt. Only fold when fd 1 is still the same stdout
+    /// object (no entry, or a Stdout endpoint with fd 2's generation);
+    /// otherwise the bytes ride write_default_stderr, which resolves
+    /// the fd-2 snapshot itself (the concurrent drivers already do
+    /// exactly this — the snapshot comment at the intermediate-stderr
+    /// drain). The no-retarget shape (`{ ...; } 2>&1`, rubash#1552)
+    /// keeps folding: there fd 1 is still the process stdout, so the
+    /// merge and the snapshot are one object.
+    fn ambient_stderr_merges_into_pipeline_output(&self) -> bool {
+        if self.fd_table.write_endpoint(2) != Some(FdWriteEndpoint::Stdout) {
+            return false;
+        }
+        if !matches!(
+            self.fd_table.write_endpoint(1),
+            None | Some(FdWriteEndpoint::Stdout)
+        ) {
+            return false;
+        }
+        // The generation is the object identity: None is the real
+        // process stdout, Some(g) is capture g (fd_table.rs dup_entry
+        // records it at dup time; open_output clears it). An absent
+        // key and an explicit None both mean "no capture".
+        let generation = |fd: u32| {
+            self.fd_table
+                .stdout_alias_generation
+                .get(&fd)
+                .copied()
+                .flatten()
+        };
+        generation(1) == generation(2)
+    }
+
     fn execute_simple_pipeline_inner(
         &mut self,
         commands: &[CommandNode],
@@ -1889,8 +1956,9 @@ impl Executor {
                 // binding (fd 2 already on fd 1's object). Ambient bytes
                 // ride the pipeline's OUTPUT stream, not the pipe payload
                 // the remaining stages read (rubash#1552 — same fd model
-                // as the stage-loop merge below).
-                if self.fd_table.write_endpoint(2) == Some(FdWriteEndpoint::Stdout) {
+                // as the stage-loop merge below). rubash#3403: only while
+                // fd 1 is still the object fd 2 was dup'd from.
+                if self.ambient_stderr_merges_into_pipeline_output() {
                     input = prefix_output;
                     ambient_stderr.push_str(&prefix_stderr);
                 } else if !prefix_stderr.is_empty() {
@@ -2134,6 +2202,7 @@ impl Executor {
                                     &input,
                                     stage0_stdin_inherit,
                                     stage0_stdin_live,
+                                    stage_index > 0,
                                 )
                             }
                         })?
@@ -2152,6 +2221,7 @@ impl Executor {
                             &input,
                             stage0_stdin_inherit,
                             stage0_stdin_live,
+                            stage_index > 0,
                         )?
                     } else {
                         // Non-final simple pipeline stages never trigger errexit
@@ -2163,6 +2233,7 @@ impl Executor {
                                 &input,
                                 stage0_stdin_inherit,
                                 stage0_stdin_live,
+                                stage_index > 0,
                             )
                         })?
                     })
@@ -2198,8 +2269,16 @@ impl Executor {
             // do_redirections, so `echo hi >& f | cat` never creates `f`
             // (the refusal already rides `next_stderr`/`next_status`).
             let stage_restricted_refused = self.pipeline_stage_restricted_refused.replace(false);
+            // rubash#3499: a bad-substitution discard must not have
+            // its write redirects materialized by the routing walk —
+            // GNU expands the element's words before do_redirections,
+            // so `echo a=${-x} > f | cat` never creates `f`.
+            let stage_bad_sub_discarded = self
+                .pipeline_stage_bad_substitution_discarded
+                .replace(false);
             if !stage_fds_pre_wired
                 && !stage_restricted_refused
+                && !stage_bad_sub_discarded
                 && !command_is_compound_pipeline_stage(command)
                 && !in_shell_stage
             {
@@ -2230,8 +2309,9 @@ impl Executor {
             // the pipeline's own output stream: non-final stages
             // accumulate theirs in stage order, and only the final
             // stage's may join next_input — there next_input IS the
-            // pipeline output.
-            if self.fd_table.write_endpoint(2) == Some(FdWriteEndpoint::Stdout) {
+            // pipeline output. rubash#3403: only while fd 1 is still
+            // the object fd 2 was dup'd from.
+            if self.ambient_stderr_merges_into_pipeline_output() {
                 if last_stage {
                     next_input.push_str(&next_stderr);
                 } else {
@@ -2766,7 +2846,7 @@ impl Executor {
         let _ = self.apply_shell_assignment_command("read", name, value.to_string(), None);
         self.exit_code = status;
         let result = self
-            .execute_pipeline_stage(command, "", false, false)
+            .execute_pipeline_stage(command, "", false, false, false)
             .ok()
             .flatten();
         self.exit_code = saved_status;
@@ -3229,7 +3309,9 @@ impl Executor {
             // element's assignment values on this shared executor —
             // bracket it so binds land only in the child's env.
             let saved_env = self.snapshot_spec_env(&consumers[index]);
+            let prefix_arith_before = self.snapshot_arithmetic_error_flags();
             self.apply_external_environment(&consumers[index], &mut process, program);
+            let prefix_arith_status = self.take_prefix_arith_failure(&prefix_arith_before);
             self.restore_spec_env_into_process(saved_env, &mut process);
             // Consumer j's stdin is pipe[j]'s read end.
             {
@@ -3261,6 +3343,22 @@ impl Executor {
                 self.attach_ambient_text_delivery(consumers[index], &mut process);
             self.stamp_spawn_cwd(&mut process);
             suppress_orphan_console(&mut process);
+            // rubash#3456: a fatal arithmetic error in this member's
+            // prefix was already diagnosed once by the composition
+            // above; GNU discards the whole element, so the child must
+            // never spawn. Drop the process (releasing the pipe ends it
+            // took) and record the dead member, mirroring the spawn
+            // `Err` arm below — minus its diagnostic, which already
+            // printed.
+            if let Some(status) = prefix_arith_status {
+                drop(process);
+                for dup in parent_side_dups {
+                    crate::fd::close_handle(dup);
+                }
+                results[index].2 = status;
+                processes.push(None);
+                continue;
+            }
             let spawned = process.spawn();
             for dup in parent_side_dups {
                 crate::fd::close_handle(dup);
@@ -3419,6 +3517,7 @@ impl Executor {
             &stage0_input,
             stage0_stdin_inherit,
             stage0_stdin_live,
+            false,
         );
         self.pipeline_stdout_stream = saved_pipeline_stream;
         self.pipeline_stage_stderr_live = saved_stderr_live;
@@ -3450,8 +3549,14 @@ impl Executor {
         if producer_error.is_none() {
             let stage_fds_pre_wired = self.pipeline_stage_fds_pre_wired.replace(false);
             let stage_restricted_refused = self.pipeline_stage_restricted_refused.replace(false);
+            // rubash#3499: same discard-before-redirects skip as the
+            // sequential driver above, for the shell-writer producer.
+            let stage_bad_sub_discarded = self
+                .pipeline_stage_bad_substitution_discarded
+                .replace(false);
             if !stage_fds_pre_wired
                 && !stage_restricted_refused
+                && !stage_bad_sub_discarded
                 && !command_is_compound_pipeline_stage(commands[0])
             {
                 if let Err(error) = self.route_pipeline_stage_streams(
@@ -3780,10 +3885,18 @@ impl Executor {
         // rubash#1540: the latch net described at the snapshot above —
         // a DISCARD-class failure raised anywhere in this member's
         // speculative expansion voids the spec.
+        // rubash#3499: a bad substitution is the same class — without
+        // this term the spec kept the failure's empty product as argv
+        // and ran the member (`cat ${-x} | cat` spawned cat with no
+        // argument). The verdict is restored with the family on
+        // decline; the print budget stays held (it is not in the
+        // family), so the sequential re-expansion cannot print the
+        // diagnostic a second time.
         let spec_expansion_failed = (self.parameter_assignment_failure.get()
             && !spec_saved_discard.0)
             || (self.evalerror_failglob_pending.get() && !spec_saved_discard.2)
             || (self.no_closing_brace_failure.get() && !spec_saved_no_closing_brace)
+            || (self.shell_state.parameter_bad_substitution.get() && !spec_saved_discard.7)
             || (self.shell_state.arithmetic_fatal_error.get() && !spec_saved_arith.2)
             || (self.shell_state.arithmetic_nonfatal_error.get() && !spec_saved_arith.1)
             || (self.shell_state.arithmetic_nounset_error.get() && !spec_saved_arith.3);
@@ -4065,7 +4178,9 @@ impl Executor {
             // shared executor — bracket it so binds land only in the
             // child's env (see restore_spec_env_into_process).
             let saved_env = self.snapshot_spec_env(&commands[index]);
+            let prefix_arith_before = self.snapshot_arithmetic_error_flags();
             self.apply_external_environment(&commands[index], &mut process, program);
+            let prefix_arith_status = self.take_prefix_arith_failure(&prefix_arith_before);
             self.restore_spec_env_into_process(saved_env, &mut process);
 
             if index == 0 {
@@ -4109,6 +4224,23 @@ impl Executor {
                 self.attach_ambient_text_delivery(&commands[index], &mut process);
             self.stamp_spawn_cwd(&mut process);
             suppress_orphan_console(&mut process);
+            // rubash#3456: a fatal arithmetic error in this member's
+            // prefix was already diagnosed once by the composition
+            // above; GNU discards the whole element, so the child must
+            // never spawn. Drop the process (releasing the pipe ends it
+            // took) and record the dead member, mirroring the spawn
+            // `Err` arm below — minus its diagnostic, which already
+            // printed.
+            if let Some(status) = prefix_arith_status {
+                drop(process);
+                for dup in parent_side_dups {
+                    crate::fd::close_handle(dup);
+                }
+                stage_dev_ops[index].disarm_finish();
+                processes.push(None);
+                results[index].2 = status;
+                continue;
+            }
             let spawned = process.spawn();
             for dup in parent_side_dups {
                 crate::fd::close_handle(dup);
@@ -4426,7 +4558,9 @@ impl Executor {
             };
             // rubash#1564: tempenv bracket, as in spawn_wait above.
             let saved_env = self.snapshot_spec_env(commands[index]);
+            let prefix_arith_before = self.snapshot_arithmetic_error_flags();
             self.apply_external_environment(commands[index], &mut process, program);
+            let prefix_arith_status = self.take_prefix_arith_failure(&prefix_arith_before);
             self.restore_spec_env_into_process(saved_env, &mut process);
             if index == 0 {
                 if stage0_inherits {
@@ -4471,6 +4605,22 @@ impl Executor {
             let parent_side_dups = self.attach_ambient_text_delivery(commands[index], &mut process);
             self.stamp_spawn_cwd(&mut process);
             suppress_orphan_console(&mut process);
+            // rubash#3456: a fatal arithmetic error in this member's
+            // prefix was already diagnosed once by the composition
+            // above; GNU discards the whole element, so the child must
+            // never spawn. Drop the process (releasing the pipe ends it
+            // took) and record the dead member, mirroring the spawn
+            // `Err` arm below — minus its diagnostic, which already
+            // printed.
+            if let Some(status) = prefix_arith_status {
+                drop(process);
+                for dup in parent_side_dups {
+                    crate::fd::close_handle(dup);
+                }
+                statuses[index] = status;
+                processes.push(None);
+                continue;
+            }
             let spawned = process.spawn();
             for dup in parent_side_dups {
                 crate::fd::close_handle(dup);
@@ -4550,7 +4700,7 @@ impl Executor {
         let saved_stdin_stream = self.pipeline_stdin_stream;
         self.pipeline_stdin_stream = Some(tail_handle);
         self.set_current_command(tail);
-        let tail_result = self.execute_pipeline_stage(tail, "", false, false);
+        let tail_result = self.execute_pipeline_stage(tail, "", false, false, true);
         self.pipeline_stdin_stream = saved_stdin_stream;
         // Restoring fd 0 drops the File endpoint's read handle (FileFd::drop
         // -> close_handle): the producers' next write is a broken pipe.
@@ -4893,7 +5043,9 @@ impl Executor {
             };
             // rubash#1564: tempenv bracket, as in the sibling paths.
             let saved_env = self.snapshot_spec_env(command);
+            let prefix_arith_before = self.snapshot_arithmetic_error_flags();
             self.apply_external_environment(command, &mut process, program);
+            let prefix_arith_status = self.take_prefix_arith_failure(&prefix_arith_before);
             self.restore_spec_env_into_process(saved_env, &mut process);
             if index == 0 {
                 if stage0_inherits {
@@ -4926,6 +5078,22 @@ impl Executor {
             let parent_side_dups = self.attach_ambient_text_delivery(command, &mut process);
             self.stamp_spawn_cwd(&mut process);
             suppress_orphan_console(&mut process);
+            // rubash#3456: a fatal arithmetic error in this member's
+            // prefix was already diagnosed once by the composition
+            // above; GNU discards the whole element, so the child must
+            // never spawn. Drop the process (releasing the pipe ends it
+            // took) and record the dead member, mirroring the spawn
+            // `Err` arm below — minus its diagnostic, which already
+            // printed.
+            if let Some(status) = prefix_arith_status {
+                drop(process);
+                for dup in parent_side_dups {
+                    crate::fd::close_handle(dup);
+                }
+                statuses[index] = status;
+                processes.push((index, None));
+                continue;
+            }
             let spawned = process.spawn();
             for dup in parent_side_dups {
                 crate::fd::close_handle(dup);
@@ -5042,7 +5210,7 @@ impl Executor {
         let saved_stderr_live = self.pipeline_stage_stderr_live;
         self.pipeline_stage_stderr_live = self.pipeline_stage_stderr_may_stream(shell_command);
         self.set_current_command(shell_command);
-        let stage_result = self.execute_pipeline_stage(shell_command, "", false, false);
+        let stage_result = self.execute_pipeline_stage(shell_command, "", false, false, true);
         self.pipeline_stage_stderr_live = saved_stderr_live;
         self.pipeline_final_stage.set(saved_final_stage);
         self.pipeline_stdout_stream = saved_stdout_stream;
@@ -5583,9 +5751,9 @@ impl Executor {
     ///
     /// shell_execve names the filename it handed execve: the as-typed
     /// word when it carries a separator (`./pnoexec`), else the
-    /// resolved pathname the PATH walk produced (execute_cmd.c:6139;
+    /// PATH-joined form the walk produced (execute_cmd.c:6139;
     /// findcmd.c:385-387) — the same rule report_external_spawn_error
-    /// applies on the simple-command path.
+    /// applies on the simple-command path (rubash#3827).
     pub(in crate::executor) fn member_spawn_failure(
         &self,
         program: &std::path::Path,
@@ -5600,7 +5768,17 @@ impl Executor {
         let report_name = if crate::executor::path::has_path_separator(expanded_name) {
             expanded_name.to_string()
         } else {
-            program.display().to_string()
+            // rubash#3827: the same rule as report_external_spawn_error —
+            // a relative PATH entry reports the walk's as-written join
+            // (`sub/mycmd`), not the session-cwd-anchored absolute
+            // form; the shared funnel declines when the resolution did
+            // not itself produce the join, keeping the anchored display.
+            crate::executor::path::spawn_exec_name(
+                expanded_name,
+                program,
+                &self.shell_state.env_vars,
+            )
+            .unwrap_or_else(|| program.display().to_string())
         };
         let prefix = if sys_error {
             self.sys_error_prefix()
@@ -5793,10 +5971,14 @@ impl Executor {
         // bracket restores the remaining latch state); keep only the
         // arithmetic print latch as the expansions left it, so the
         // stage's re-expansion does not print the diagnostic twice.
+        // rubash#3499: a bad substitution voids the run the same way
+        // (same empty-product hazard); its print budget is likewise
+        // held, not restored, so the re-expansion stays silent.
         let spec_expansion_failed = (self.parameter_assignment_failure.get()
             && !spec_saved_discard.0)
             || (self.evalerror_failglob_pending.get() && !spec_saved_discard.2)
             || (self.no_closing_brace_failure.get() && !spec_saved_no_closing_brace)
+            || (self.shell_state.parameter_bad_substitution.get() && !spec_saved_discard.7)
             || (self.shell_state.arithmetic_fatal_error.get() && !spec_saved_arith.2)
             || (self.shell_state.arithmetic_nonfatal_error.get() && !spec_saved_arith.1)
             || (self.shell_state.arithmetic_nounset_error.get() && !spec_saved_arith.3);
@@ -5924,7 +6106,9 @@ impl Executor {
             // Same tempenv application as the os_pipe path above.
             // rubash#1564: tempenv bracket, as in spawn_wait above.
             let saved_env = self.snapshot_spec_env(&commands[index]);
+            let prefix_arith_before = self.snapshot_arithmetic_error_flags();
             self.apply_external_environment(&commands[index], &mut process, program);
+            let prefix_arith_status = self.take_prefix_arith_failure(&prefix_arith_before);
             self.restore_spec_env_into_process(saved_env, &mut process);
 
             if let Some(stdout) = previous_stdout.take() {
@@ -6013,6 +6197,24 @@ impl Executor {
                         ));
                     },
                 }
+            }
+            // rubash#3456: a fatal arithmetic error in this member's
+            // prefix was already diagnosed once by the composition
+            // above; GNU discards the whole element, so the child must
+            // never spawn. Drop the process (releasing the pipe ends it
+            // took) and record the dead member, mirroring the spawn
+            // `Err` arm below — minus its diagnostic, which already
+            // printed.
+            if let Some(status) = prefix_arith_status {
+                drop(process);
+                for dup in parent_side_dups {
+                    crate::fd::close_handle(dup);
+                }
+                dev_ops.disarm_finish();
+                stage_dev_ops.push(dev_ops);
+                processes.push(None);
+                results[index].2 = status;
+                continue;
             }
             let spawned = process.spawn();
             for dup in parent_side_dups {
@@ -6489,6 +6691,14 @@ impl Executor {
     ) -> Vec<String> {
         let mut out = Vec::new();
         for (offset, word) in command.words[first_index..].iter().enumerate() {
+            // rubash#3499: GNU abandons the word list at the first
+            // expansion failure (subst.c:4288-4296) — later words are
+            // never expanded, so their command substitutions never run
+            // and their diagnostics never print (same guard as #3019
+            // in expand_command_words).
+            if self.shell_state.parameter_bad_substitution.get() {
+                break;
+            }
             let index = offset + first_index;
             let raw = command
                 .word_metadata
@@ -6548,6 +6758,16 @@ impl Executor {
                     }
                 }
             }
+            // rubash#3499: this word's expansion raised the
+            // bad-substitution verdict — the element is discarded, so
+            // drop every argument gathered so far: a pre-failure
+            // `file` in `rm file ${-x}` must not reach the command
+            // (its side effect survives no harvest). The loop-top
+            // guard above guarantees the verdict was clear when this
+            // word started, so a set value here is this word's own.
+            if self.shell_state.parameter_bad_substitution.get() {
+                return Vec::new();
+            }
         }
         out
     }
@@ -6558,6 +6778,7 @@ impl Executor {
         input: &str,
         stdin_inherit: bool,
         live_stdin: bool,
+        stdin_is_pipe: bool,
     ) -> Result<Option<(String, String, i32)>, ExecuteError> {
         // rubash#3387: a pipeline element is a forked child (GNU
         // execute_cmd.c:2620 execute_pipeline), so its `times` reads
@@ -6663,6 +6884,15 @@ impl Executor {
         // setrlimit on unix); GNU's element child takes its limit
         // changes to its grave. Bracket the set like the mask above.
         let saved_process_rlimits = crate::builtins::ulimit::snapshot_process_rlimits();
+        // rubash#3605: the element is one more in-process GNU fork
+        // child — its `ulimit` sets must virtualize (env cells) instead
+        // of setrlimit, where a hard drop could never be restored. The
+        // env cells die with the element; an enclosing virtualized
+        // region's own cells are preserved.
+        let saved_ulimit_cells =
+            crate::builtins::ulimit::emulated_cells_snapshot(&self.shell_state.env_vars);
+        self.emulated_child_depth
+            .set(self.emulated_child_depth.get() + 1);
         // rubash#1349: GNU forks every pipeline element, and
         // execute_cmd.c's execute_subshell_builtin_or_function calls
         // without_job_control() (jobs.c: delete_all_jobs) in the child —
@@ -6709,6 +6939,28 @@ impl Executor {
         self.evalerror_failglob_pending.set(false);
         self.evalerror_pending.set(false);
         self.evalerror_exit_toomany_pending.set(false);
+        // rubash#3499: the bad-substitution verdict is cleared with the
+        // rest of the family (the element starts clean, like GNU's
+        // forked child). The print budget is NOT cleared: a speculative
+        // attempt may already have printed this element's diagnostic,
+        // and the re-expansion below must not print it again.
+        let stage_bad_sub_reported_before = self.shell_state.bad_substitution_reported.get();
+        self.shell_state.parameter_bad_substitution.set(false);
+        // rubash#3605: GNU's element child ORs the async-stdin flag
+        // with its own pipe-fed fd 0 (execute_cmd.c:4570,
+        // `stdin_redir |= (pipe_in != NO_PIPE)`, in the forked element
+        // before its inner dispatch) — a pipe-fed element's `cmd &`
+        // then inherits the pipe instead of taking the /dev/null arm
+        // at execute_cmd.c:2837. The stage runs in place on this
+        // executor, so bracket the same verdict and restore below.
+        // Stage 0 reads the shell's fd 0 (pipe_in == NO_PIPE ->
+        // stdin_is_pipe false); the lastpipe element never reaches
+        // here — GNU dispatches it with prev == NO_PIPE
+        // (execute_cmd.c:2725-2741), so it keeps the shell's flag.
+        let saved_stdin_redir = self.shell_state.stdin_redir.get();
+        if stdin_is_pipe {
+            self.shell_state.stdin_redir.set(true);
+        }
         // rubash#1564: the same fork containment for the VARIABLE
         // state — the one piece of child state the brackets above do
         // not cover. The stage's word expansions, classification
@@ -6857,6 +7109,7 @@ impl Executor {
                         stdin_inherit,
                         streaming_stdin,
                         live_stdin,
+                        stdin_is_pipe,
                     );
                     // A stage whose runner already placed its streams
                     // itself — a function stage applying redirects to
@@ -6906,6 +7159,7 @@ impl Executor {
                 stdin_inherit,
                 streaming_stdin,
                 live_stdin,
+                stdin_is_pipe,
             )
         };
         // Restore the parent's job table (rubash#1349 swap above).
@@ -6953,6 +7207,8 @@ impl Executor {
         // (after the FUNCTION_STDIN bookkeeping above has read and
         // restored its own mirror entries in the stage's table).
         self.restore_spec_variables(saved_stage_variables);
+        // rubash#3605: the element's stdin_redir verdict dies with it.
+        self.shell_state.stdin_redir.set(saved_stdin_redir);
         self.shell_state.random_state.restore_state(&saved_random);
         // rubash#2438: the element's login reset dies with the element.
         self.shell_state
@@ -6969,6 +7225,12 @@ impl Executor {
         if let Some(rlimits) = &saved_process_rlimits {
             crate::builtins::ulimit::apply_process_rlimits(rlimits);
         }
+        self.emulated_child_depth
+            .set(self.emulated_child_depth.get() - 1);
+        crate::builtins::ulimit::emulated_cells_restore(
+            &mut self.shell_state.env_vars,
+            &saved_ulimit_cells,
+        );
         // rubash#2126: the stage's dispatches stay inside the element.
         self.shell_state.last_dispatch_was_eval_or_source = saved_dispatch_tracker;
         self.shell_state.this_builtin_class = saved_builtin_classes.0;
@@ -6984,7 +7246,37 @@ impl Executor {
         let stage_toomany_raised = self.evalerror_exit_toomany_pending.get();
         let stage_arith_failed = (self.shell_state.arithmetic_fatal_error.get() && !saved.2)
             || (self.shell_state.arithmetic_nonfatal_error.get() && !saved.1);
+        // rubash#3499: a bad substitution raised while expanding this
+        // element's words (GNU subst.c:10277-10288 expand_word_error ->
+        // DISCARD, pre-set status 1, no output). Read before the
+        // restore below: the verdict was cleared at entry, so a set
+        // value here is this element's own failure — including one a
+        // speculative attempt raised and the sequential re-expansion
+        // re-raised silently under the held print budget. Unlike the
+        // arithmetic delta above this is set-at-exit, not a delta:
+        // the re-raised verdict is indistinguishable from the held
+        // one, and a held verdict always belongs to this element's
+        // own words (the driver restores the family before the loop,
+        // so no earlier element's verdict can be standing here).
+        let stage_bad_sub = self.shell_state.parameter_bad_substitution.get();
         self.restore_discard_latches(&saved_discard);
+        if stage_bad_sub {
+            // The harvest below consumes the verdict, so the print
+            // budget for this diagnostic is spent with it (the
+            // restore above put the entry verdict back; a raised
+            // verdict must not leak to the parent).
+            self.shell_state.parameter_bad_substitution.set(false);
+            self.shell_state.bad_substitution_reported.set(false);
+        } else if saved_discard.7 {
+            // The inner consumed a verdict it inherited: the
+            // diagnostic that verdict carried is spent, so the print
+            // budget dies with it instead of being restored.
+            self.shell_state.bad_substitution_reported.set(false);
+        } else {
+            self.shell_state
+                .bad_substitution_reported
+                .set(stage_bad_sub_reported_before);
+        }
         let nounset_hit = self.restore_arithmetic_error_flags(&saved);
         match result {
             Ok(Some((output, stderr, _status))) if nounset_hit => {
@@ -7021,6 +7313,25 @@ impl Executor {
             Ok(Some((_, stderr, _))) if stage_failglob_failed => {
                 Ok(Some((String::new(), stderr, 1)))
             }
+            // rubash#3499: a bad substitution in the element's words —
+            // subst.c:10277-10288 expand_word_error (DISCARD) with the
+            // pre-set status 1, no output. The diagnostic already
+            // printed once during the element's expansion (through the
+            // ambient fd 2, never the stage's captured stderr), so the
+            // captured stderr here holds only the doomed run's own
+            // noise — a `""` argv's filename error, a usage error on
+            // the dropped argv — and is discarded with the output. A
+            // pipeline element is a forked child, so even POSIX mode
+            // contains the jump at execute_cmd.c:1811 and exits 1 —
+            // the plain 1 here, not the top-level fatal mapping.
+            // GNU runs expand_words before do_redirections, so the
+            // element's redirects never apply: flag the discard so
+            // the driver's routing walk does not materialize them
+            // (a `>file` would otherwise be created).
+            Ok(Some((_, _, _))) if stage_bad_sub => {
+                self.pipeline_stage_bad_substitution_discarded.set(true);
+                Ok(Some((String::new(), String::new(), 1)))
+            }
             // rubash#1540: a no_args DISCARD (break/continue/exit/
             // return with too many arguments) raised by an inline stage
             // arm on this executor — inside the forked element the
@@ -7032,6 +7343,146 @@ impl Executor {
         }
     }
 
+    /// rubash#3456: fold a fatal arithmetic error raised while composing
+    /// a pipeline element's prefix assignments into the element's
+    /// status. `before` is the arithmetic-flag snapshot taken before the
+    /// composing region (see `snapshot_arithmetic_error_flags`); returns
+    /// `Some(1)` when the region newly raised a fatal arithmetic error —
+    /// including a `set -u` unbound variable inside `$(( ))`, whose GNU
+    /// element status is 1, not 127 — and `None` otherwise. On `Some`,
+    /// the flags are restored to `before`: the diagnostic was already
+    /// printed exactly once by the expansion itself, and the status
+    /// carries the verdict, so no latch may leak into the next command
+    /// (the concurrent spawners have no stage wrapper to restore them).
+    /// The expansion-failed latch is set so no ERR trap fires for a
+    /// stage that never ran.
+    pub(in crate::executor) fn take_prefix_arith_failure(
+        &mut self,
+        before: &(
+            bool,
+            bool,
+            bool,
+            bool,
+            Option<crate::executor::arithmetic::ArithmeticErrorCategory>,
+        ),
+    ) -> Option<i32> {
+        let nounset_hit = self.shell_state.arithmetic_nounset_error.get() && !before.3;
+        let fatal_hit = (self.shell_state.arithmetic_expansion_error.get() && !before.0)
+            || (self.shell_state.arithmetic_nonfatal_error.get() && !before.1)
+            || (self.shell_state.arithmetic_fatal_error.get() && !before.2);
+        if !nounset_hit && !fatal_hit {
+            return None;
+        }
+        self.restore_arithmetic_error_flags(before);
+        self.command_expansion_failed.set(true);
+        Some(1)
+    }
+
+    /// rubash#3456: the sequential-external-stage variant of
+    /// `take_prefix_arith_failure`. The host channel
+    /// (`invoke_host_external_command`) already expanded this prefix
+    /// once with the non-consuming `expand_assignment_value_with_raw`
+    /// before the sequential stage's own composition loop, so a
+    /// snapshot-delta taken here would miss the failure — the flags
+    /// were already set on entry. The three arithmetic flags are
+    /// therefore read absolutely: between the stage's post-scan
+    /// adjudication (which returns early on a fatal word error) and
+    /// this loop, only the prefix expansion can set them, and a set
+    /// flag means GNU discards the element whether the failure came
+    /// from the prefix or (hypothetically) a re-expanded word. The
+    /// nounset flag still uses the delta: a word-scan nounset is the
+    /// words' own failure, adjudicated by the wrapper, not the prefix's.
+    pub(in crate::executor) fn take_prefix_arith_failure_absolute(
+        &mut self,
+        before: &(
+            bool,
+            bool,
+            bool,
+            bool,
+            Option<crate::executor::arithmetic::ArithmeticErrorCategory>,
+        ),
+    ) -> Option<i32> {
+        let nounset_hit = self.shell_state.arithmetic_nounset_error.get() && !before.3;
+        let fatal_hit = self.shell_state.arithmetic_expansion_error.get()
+            || self.shell_state.arithmetic_nonfatal_error.get()
+            || self.shell_state.arithmetic_fatal_error.get();
+        if !nounset_hit && !fatal_hit {
+            return None;
+        }
+        self.restore_arithmetic_error_flags(before);
+        self.command_expansion_failed.set(true);
+        Some(1)
+    }
+
+    /// rubash#3456: probe a pipeline element's prefix assignments for a
+    /// fatal arithmetic expansion error, without binding anything. GNU
+    /// expands the assignments during expand_words, before dispatch
+    /// (subst.c expand_word_list_internal -> assign_in_env): a fatal
+    /// `$(( ))` error prints once and discards the whole element with
+    /// status 1. The inline slot arms below never expand the assignments
+    /// at all, so `x=$((1/0)) echo hi | cat` ran echo with status 0 and
+    /// no diagnostic. Expand each RHS once here — the diagnostic prints
+    /// once through the expansion itself — and return the discard status
+    /// (`Some(1)`); `None` when the prefix expands clean. Expansion
+    /// stops at the first failure, matching GNU's DISCARD mid-expansion.
+    /// The probe runs on the shared executor, so every variable write it
+    /// performs is rolled back afterwards: GNU ran the expansion in the
+    /// forked child and the parent never sees it. The expanded VALUES
+    /// are discarded — the inline arms expand their arguments against
+    /// the outer environment, exactly as GNU expands the command's words
+    /// before the prefix binds. Only call where the stage has committed
+    /// to an inline arm: the builtin/function/external routes expand the
+    /// prefix themselves, and a probe there would print the diagnostic a
+    /// second time.
+    pub(in crate::executor) fn pipeline_prefix_arith_status(
+        &mut self,
+        command: &CommandNode,
+    ) -> Option<i32> {
+        if command.assignments.is_empty() {
+            return None;
+        }
+        let saved_env_vars = self.shell_state.env_vars.clone();
+        let saved_variables = self.shell_state.variables.clone();
+        let saved_exit_code = self.exit_code;
+        let arith_before = self.snapshot_arithmetic_error_flags();
+        let raws_aligned = command.assignment_raws.len() == command.assignments.len();
+        let mut status = None;
+        for (index, (name, value)) in command.assignments.iter().enumerate() {
+            let raw = raws_aligned
+                .then(|| command.assignment_raws.get(index))
+                .flatten()
+                .map(String::as_str);
+            let result = self.expand_assignment_value_result_with_raw(name, value, raw);
+            // A `set -u` unbound variable inside `$(( ))` is reported
+            // through arithmetic_nounset_error, which the _result_
+            // variant does not consume — and it also sets
+            // arithmetic_error, so test it first. Only a flag newly set
+            // by THIS rhs counts: a stale flag from the word scan is the
+            // words' own failure, adjudicated by the wrapper.
+            if self.shell_state.arithmetic_nounset_error.get() && !arith_before.3 {
+                self.shell_state.arithmetic_nounset_error.set(false);
+                status = Some(1);
+                break;
+            }
+            if result.arithmetic_error || result.arithmetic_nonfatal_error {
+                status = Some(1);
+                break;
+            }
+        }
+        // Roll back the probe's writes (GNU ran this expansion in the
+        // forked child) and restore the arithmetic flags to the
+        // pre-probe snapshot — the verdict is carried by `status`, and
+        // no probe latch may leak into the stage or the next command.
+        self.shell_state.env_vars = saved_env_vars;
+        self.shell_state.variables = saved_variables;
+        self.exit_code = saved_exit_code;
+        self.restore_arithmetic_error_flags(&arith_before);
+        if status.is_some() {
+            self.command_expansion_failed.set(true);
+        }
+        status
+    }
+
     fn execute_pipeline_stage_inner(
         &mut self,
         command: &CommandNode,
@@ -7039,6 +7490,7 @@ impl Executor {
         stdin_inherit: bool,
         streaming_stdin: bool,
         live_stdin: bool,
+        stdin_is_pipe: bool,
     ) -> Result<Option<(String, String, i32)>, ExecuteError> {
         // rubash#3324: an inline arm records its ordered output
         // chunks here for the driver's merge (see the field doc); a
@@ -7054,10 +7506,18 @@ impl Executor {
         // restore side).
         let inner_saved_arith = self.snapshot_arithmetic_error_flags();
         let inner_saved_no_closing_brace = self.no_closing_brace_failure.get();
+        // rubash#3499: entry value for the delta adjudication below
+        // (same shape as the no-closing-brace latch).
+        let inner_saved_bad_substitution = self.shell_state.parameter_bad_substitution.get();
         if let Some(time_command) = &command.time_command {
             let started = time_command_started();
-            let Some((output, stderr, status)) =
-                self.execute_pipeline_stage(&time_command.command, input, false, live_stdin)?
+            let Some((output, stderr, status)) = self.execute_pipeline_stage(
+                &time_command.command,
+                input,
+                false,
+                live_stdin,
+                stdin_is_pipe,
+            )?
             else {
                 return Ok(None);
             };
@@ -7079,7 +7539,13 @@ impl Executor {
 
         if command_is_compound_pipeline_stage(command) {
             return self
-                .execute_compound_pipeline_stage(command, input, streaming_stdin, live_stdin)
+                .execute_compound_pipeline_stage(
+                    command,
+                    input,
+                    streaming_stdin,
+                    live_stdin,
+                    stdin_is_pipe,
+                )
                 .map(Some);
         }
 
@@ -7092,7 +7558,13 @@ impl Executor {
         // runs the mixed-statement arm.
         if mixed_assignment_statement_admission(command) {
             return self
-                .execute_compound_pipeline_stage(command, input, streaming_stdin, live_stdin)
+                .execute_compound_pipeline_stage(
+                    command,
+                    input,
+                    streaming_stdin,
+                    live_stdin,
+                    stdin_is_pipe,
+                )
                 .map(Some);
         }
 
@@ -7204,7 +7676,13 @@ impl Executor {
         let command = &command;
         let Some(name) = command.words.first().map(String::as_str) else {
             return self
-                .execute_compound_pipeline_stage(command, input, streaming_stdin, live_stdin)
+                .execute_compound_pipeline_stage(
+                    command,
+                    input,
+                    streaming_stdin,
+                    live_stdin,
+                    stdin_is_pipe,
+                )
                 .map(Some);
         };
 
@@ -7374,15 +7852,30 @@ impl Executor {
         // $TMPDIR/null-redir-e` reports `0 -- 3 0`, not 127). A quoted
         // empty word ("") survives as one empty field and keeps the
         // command-not-found path below.
-        let stage_expands_to_no_fields = !command.words.is_empty()
-            && command.words.iter().enumerate().all(|(index, word)| {
-                let raw = command
-                    .word_metadata
-                    .get(index)
-                    .map(|metadata| metadata.raw.as_str());
-                self.expand_command_word(command, index, word, raw)
-                    .is_empty()
-            });
+        // rubash#3499: GNU subst.c:4288-4296 abandons the word list at
+        // the FIRST expansion failure — later words are never expanded
+        // (their command substitutions never run). The scan expands
+        // every word to test the no-fields shape, so stop it at the
+        // first bad substitution instead of expanding the rest (the
+        // loop mirrors the #3019 guard in expand_command_words).
+        let mut stage_expands_to_no_fields = !command.words.is_empty();
+        for (index, word) in command.words.iter().enumerate() {
+            if self.shell_state.parameter_bad_substitution.get() {
+                stage_expands_to_no_fields = false;
+                break;
+            }
+            let raw = command
+                .word_metadata
+                .get(index)
+                .map(|metadata| metadata.raw.as_str());
+            if !self
+                .expand_command_word(command, index, word, raw)
+                .is_empty()
+            {
+                stage_expands_to_no_fields = false;
+                break;
+            }
+        }
         if stage_expands_to_no_fields {
             return Ok(Some((String::new(), String::new(), 0)));
         }
@@ -7437,6 +7930,17 @@ impl Executor {
             || (self.shell_state.arithmetic_nonfatal_error.get() && !inner_saved_arith.1)
             || (self.no_closing_brace_failure.get() && !inner_saved_no_closing_brace)
         {
+            return Ok(Some((String::new(), String::new(), 1)));
+        }
+        // rubash#3499: a bad substitution raised while expanding this
+        // element's words (subst.c:10277-10288 expand_word_error ->
+        // DISCARD, status 1, no output). Delta-checked like the
+        // no-closing-brace arm: the wrapper clears the verdict at
+        // entry, so in practice the saved value is false and any raise
+        // during this element's expansion adjudicates here. The verdict
+        // is deliberately NOT consumed here — the wrapper owns the
+        // harvest and the print-budget settle, so leave both for it.
+        if self.shell_state.parameter_bad_substitution.get() && !inner_saved_bad_substitution {
             return Ok(Some((String::new(), String::new(), 1)));
         }
         if self.evalerror_failglob_pending.get() {
@@ -7686,6 +8190,25 @@ impl Executor {
         // (rubash#2036 S4); the restricted-guard claims (`.`, cd,
         // command, exec, source) never reach this match — they were
         // judged by restricted_command_error above.
+        // rubash#3456: the never-declining inline arms (echo/printf/:/false)
+        // never expand the element's prefix assignments, so a fatal
+        // arithmetic error there was swallowed whole. Probe the prefix
+        // now — the arms below that decline to the builtin/external
+        // routes probe at their own commit points instead, so a declined
+        // stage is never expanded twice.
+        if matches!(
+            pipeline_stage_slot(name),
+            Some(
+                PipelineSlot::TrueColon
+                    | PipelineSlot::False
+                    | PipelineSlot::Echo
+                    | PipelineSlot::Printf
+            )
+        ) {
+            if let Some(status) = self.pipeline_prefix_arith_status(command) {
+                return Ok(Some((String::new(), String::new(), status)));
+            }
+        }
         match pipeline_stage_slot(name) {
             Some(PipelineSlot::TrueColon) => Ok(Some((String::new(), String::new(), 0))),
             Some(PipelineSlot::False) => Ok(Some((String::new(), String::new(), 1))),
@@ -7775,6 +8298,10 @@ impl Executor {
                         live_stdin,
                     );
                 }
+                // rubash#3456: committed to the inline arm — probe the prefix.
+                if let Some(status) = self.pipeline_prefix_arith_status(command) {
+                    return Ok(Some((String::new(), String::new(), status)));
+                }
                 let args = command.words[1..]
                     .iter()
                     .map(|word| self.expand_word(word))
@@ -7852,6 +8379,10 @@ impl Executor {
                 let Some(spec) = parse_head_line_count(&args) else {
                     return self.execute_external_pipeline_stage(command, input, stdin_inherit);
                 };
+                // rubash#3456: committed to the inline arm — probe the prefix.
+                if let Some(status) = self.pipeline_prefix_arith_status(command) {
+                    return Ok(Some((String::new(), String::new(), status)));
+                }
                 let output = spec.apply(input);
                 // rubash#2029: the arm consumed exactly the prefix it printed,
                 // through the stage's payload COPY. Report the amount so the
@@ -7905,6 +8436,10 @@ impl Executor {
                     }
                     CatParsed::Options { options, operands } => (options, operands),
                 };
+                // rubash#3456: committed to the inline arm — probe the prefix.
+                if let Some(status) = self.pipeline_prefix_arith_status(command) {
+                    return Ok(Some((String::new(), String::new(), status)));
+                }
                 // Pathname-expand the operands the way
                 // execute_simple_command does, or `cat f*` opens the
                 // literal name "f*" and reports it as missing (probe
@@ -8100,6 +8635,10 @@ impl Executor {
                 if find_user_command("sed", &self.shell_state.env_vars).is_some() {
                     return self.execute_external_pipeline_stage(command, input, stdin_inherit);
                 }
+                // rubash#3456: committed to the inline arm — probe the prefix.
+                if let Some(status) = self.pipeline_prefix_arith_status(command) {
+                    return Ok(Some((String::new(), String::new(), status)));
+                }
                 if let Some(output) = apply_simple_sed_args(input, &args) {
                     // rubash#2029: the arm transformed the whole payload
                     // copy — report the full consumption so the driver
@@ -8127,6 +8666,10 @@ impl Executor {
                 let Some(spec) = inline_grep_args(&args) else {
                     return self.execute_external_pipeline_stage(command, input, stdin_inherit);
                 };
+                // rubash#3456: committed to the inline arm — probe the prefix.
+                if let Some(status) = self.pipeline_prefix_arith_status(command) {
+                    return Ok(Some((String::new(), String::new(), status)));
+                }
                 let mut selected = 0usize;
                 let mut line_number = 0usize;
                 let mut output = String::new();
@@ -8199,6 +8742,10 @@ impl Executor {
                 // here would abort the whole pipeline with the misleading
                 // "pipeline command could not execute" diagnostic.
                 if args.len() == 1 {
+                    // rubash#3456: committed to the inline arm — probe the prefix.
+                    if let Some(status) = self.pipeline_prefix_arith_status(command) {
+                        return Ok(Some((String::new(), String::new(), status)));
+                    }
                     let value = match args[0].as_str() {
                         "-c" => {
                             crate::executor::substitution_metadata::shell_text_to_raw_bytes(input)
@@ -8221,6 +8768,10 @@ impl Executor {
                 }
                 // Default (no operands) matches GNU wc: lines, words, bytes.
                 if args.is_empty() {
+                    // rubash#3456: committed to the inline arm — probe the prefix.
+                    if let Some(status) = self.pipeline_prefix_arith_status(command) {
+                        return Ok(Some((String::new(), String::new(), status)));
+                    }
                     let lines = input.bytes().filter(|byte| *byte == b'\n').count();
                     let words = inline_wc_word_count(input);
                     let bytes =
@@ -8249,6 +8800,10 @@ impl Executor {
                 if args.iter().any(|arg| arg.starts_with('-')) {
                     self.execute_external_pipeline_stage(command, input, stdin_inherit)
                 } else if args.len() == 2 && matches!(args[0].as_str(), "\\n" | "\n") {
+                    // rubash#3456: committed to the inline arm — probe the prefix.
+                    if let Some(status) = self.pipeline_prefix_arith_status(command) {
+                        return Ok(Some((String::new(), String::new(), status)));
+                    }
                     // rubash#2029: full consumer — fold report (see wc).
                     self.pipeline_stdin_consumed.set(Some(input.len()));
                     Ok(Some((input.replace('\n', &args[1]), String::new(), 0)))
@@ -8256,6 +8811,10 @@ impl Executor {
                     && inline_expand_tr_set(&args[0]).is_some()
                     && inline_expand_tr_set(&args[1]).is_some()
                 {
+                    // rubash#3456: committed to the inline arm — probe the prefix.
+                    if let Some(status) = self.pipeline_prefix_arith_status(command) {
+                        return Ok(Some((String::new(), String::new(), status)));
+                    }
                     // rubash#2029: full consumer — fold report (see wc).
                     self.pipeline_stdin_consumed.set(Some(input.len()));
                     Ok(Some((

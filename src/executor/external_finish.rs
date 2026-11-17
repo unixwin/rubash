@@ -455,7 +455,45 @@ impl Executor {
         } else {
             String::new()
         };
-        let source = fs::read_to_string(script_path)?;
+        let script_bytes = fs::read(script_path)?;
+        // GNU general.c:739 check_binary_file is the only image gate:
+        // an 80-byte sample (shell.c:1659-1692 open_shell_script;
+        // execute_cmd.c:6237-6260 shell_execve's ENOEXEC tail) refuses
+        // ELF magic or a NUL in the first line (two under `#!`) with
+        // exit(EX_BINARY_FILE = 126). The diagnostic differs by entry
+        // face, verified against GNU 5.3.20:
+        //   - same-shell script child (`bash file` shape): $0 is
+        //     already bound to the filename, so internal_error's
+        //     "%s: %s" prints it twice —
+        //     `/bin/sh: /bin/sh: cannot execute binary file`.
+        //   - ENOEXEC fallback (`./x` a corrupt binary): $0 is still
+        //     the invoking shell —
+        //     `bash: line 1: ./x: cannot execute binary file: Exec
+        //     format error` (execute_cmd.c:6228 appends
+        //     strerror(ENOEXEC)).
+        // Refusing here keeps the parent's reader alive with status
+        // 126, where the raw UTF-8 read failure below would misreport
+        // the binary as a text decode error. Bytes that pass the gate
+        // decode as script text (raw-byte markers for invalid UTF-8
+        // sequences, rubash#132), never read_to_string's refusal.
+        if crate::script_driver::check_binary_file(&script_bytes[..script_bytes.len().min(80)]) {
+            let mut stderr = Vec::new();
+            if contain_child_signals {
+                let _ = writeln!(
+                    &mut stderr,
+                    "{script}: {script}: cannot execute binary file"
+                );
+            } else {
+                let _ = writeln!(
+                    &mut stderr,
+                    "{}{script}: cannot execute binary file: Exec format error",
+                    self.error_prefix_for_line(cmd.line.unwrap_or(1)),
+                );
+            }
+            self.finish_external_error(cmd, &stderr, 126)?;
+            return Ok(());
+        }
+        let source = crate::script_driver::bytes_to_script_text(&script_bytes);
         // bashhist.c pre_process_line: a fresh `bash script` child expands
         // history per input line, so an in-process THIS_SH child whose
         // script enables history must run the grouped history driver rather
@@ -514,7 +552,7 @@ impl Executor {
         // dup still resolves against the pre-command stdin; fd-0
         // heredocs stay with the command-input scope (include_stdin
         // false). A failed later bind unwinds the earlier ones.
-        let saved_numbered_heredocs = self.bind_numbered_heredoc_redirects(cmd, false);
+        let saved_numbered_heredocs = self.bind_numbered_heredoc_redirects(cmd, false)?;
         // rubash#2310: the numbered inputs bind in segments split
         // at the command's `{var}` entries, applying each such
         // entry's dup/close effect at its list position — the
@@ -781,6 +819,19 @@ impl Executor {
         // expanded shell path) must not leak into child diagnostics
         // (nameref8.sub warnings reported `rubash.exe:` prologs).
         let saved_assignment_command_name = self.assignment_command_name.take();
+        // The EXIT-trap latch and the exec-replacement latch are
+        // per-process too: trap.c:1128 run_exit_trap's once-only flag and
+        // the exec.def replacement unwind both die with the real child
+        // process (shell.c exit_shell). Without this bracket, a child
+        // script's `trap ... EXIT` fire latched the shared Executor — the
+        // next in-process child's `( trap T 0; ... )` subshell found the
+        // latch set and skipped its own EXIT trap (execscript's
+        // exec3.sub `trap 'echo EXIT' EXIT` silenced exec12.sub's
+        // `exit code: 1`), and a child's successful in-process `exec`
+        // leaked exec_replaced into the parent's trap adjudication.
+        // Both latches start clear in the fresh child.
+        let saved_exit_trap_ran = self.exit_trap_ran.replace(false);
+        let saved_exec_replaced = std::mem::replace(&mut self.exec_replaced, false);
 
         // The fd table is a process boundary too: a child's persistent
         // `exec 2>/dev/null` (redir.c do_redirection_internal without undo)
@@ -851,7 +902,6 @@ impl Executor {
             FileFd::open_read(path).ok().map(|file| (file, None))
         });
         if let Some((file, write_end)) = file_stdin {
-            self.set_fd_input_file(0, file, false);
             if let Some((write_file, target)) = write_end {
                 // rubash#2261: the write half of the `<>` pair plus
                 // the fd-0 output env bookkeeping set_fd_readwrite_file
@@ -862,12 +912,27 @@ impl Executor {
                 // and are restored after the child runs — the same
                 // save/restore contract the function face spells out
                 // per binding (FunctionCallStdinBinding).
-                self.fd_table
-                    .open_output(0, FdWriteEndpoint::File(write_file), false);
+                // rubash#3655: one O_RDWR description — a single
+                // open_readwrite install, not an input bind followed
+                // by an output bind (the second would retire the
+                // first). The mirror lines are the set_fd_input_file
+                // lines the pair replaces, plus the output ledger.
+                self.fd_table.open_readwrite(
+                    0,
+                    FdReadEndpoint::File(file),
+                    FdWriteEndpoint::File(write_file),
+                    false,
+                );
+                self.shell_state.env_vars.remove(&fd_closed_key(0));
+                self.shell_state.env_vars.remove(&fd_stdin_key(0));
+                self.shell_state.env_vars.remove(&fd_stdin_offset_key(0));
+                self.shell_state.env_vars.remove(&fd_dynamic_input_key(0));
                 self.shell_state
                     .env_vars
                     .remove(&fd_output_process_substitution_key(0));
                 self.shell_state.env_vars.insert(fd_output_key(0), target);
+            } else {
+                self.set_fd_input_file(0, file, false);
             }
             self.shell_state.env_vars.remove(FUNCTION_STDIN);
             self.shell_state.env_vars.remove(FUNCTION_STDIN_OFFSET);
@@ -1100,6 +1165,22 @@ impl Executor {
         let saved_fd_var_external_undo = std::mem::take(&mut self.fd_var_external_undo);
         let saved_fd_var_pending_closes = std::mem::take(&mut self.fd_var_pending_closes);
         let saved_fd_var_close_restore = std::mem::take(&mut self.fd_var_close_restore);
+        // GNU trap.c:1045-1050 run_exit_trap keys on sigmodes[EXIT_TRAP]:
+        // a fresh `bash script` process starts with SIG_INPROGRESS clear
+        // and its run sets SIG_TRAPPED|SIG_INPROGRESS on its own trap
+        // table — the parent's sigmodes are untouched across the process
+        // boundary. The in-process emulation's exit_trap_ran is executor
+        // state shared across it: a fresh-shell child whose end-of-script
+        // run below fired the latch read back to the parent as "the exit
+        // trap already ran", and a trap the parent armed AFTER the child
+        // was then silently dropped (trap.tests: ${THIS_SH} ./trap6.sub
+        // then `trap 'echo exiting' 0; exit` printed nothing). Park the
+        // parent's latch, let the child start clear like a fresh process,
+        // and hand it back at the restore block below.
+        let saved_exit_trap_ran = self.exit_trap_ran.get();
+        if fresh_shell {
+            self.exit_trap_ran.set(false);
+        }
         // GNU shell.c:722 run_startup_files in the fresh process: a
         // fresh shell runs the startup chain before the script body —
         // for this non-interactive child that is the env-file step
@@ -1111,6 +1192,13 @@ impl Executor {
         // (rubash#2393). An `exit` in the env file ends the child
         // here, before the body; the EXIT-trap arm below still runs,
         // as exit_shell's would.
+        // rubash#3605: the whole child run — its env file, its body,
+        // and its EXIT trap — is one in-process GNU fork child; mark
+        // the depth so `ulimit` inside virtualizes instead of moving
+        // this process's real rlimits (a child's hard drop could not
+        // be restored below).
+        self.emulated_child_depth
+            .set(self.emulated_child_depth.get() + 1);
         let startup_exit = if fresh_shell {
             self.run_fresh_child_startup_env_file(cmd)
         } else {
@@ -1170,6 +1258,11 @@ impl Executor {
                 status = trap_status;
             }
         }
+        // trap.c:1045-1050: the child's own sigmodes[EXIT_TRAP] died with
+        // its run — hand the parent back the latch parked above so a
+        // trap the parent armed after this child still fires at the
+        // parent's real exit.
+        self.exit_trap_ran.set(saved_exit_trap_ran);
         // rubash#2236: collect this child's adjudicated signal death
         // (set when its trap table judged an untrapped delivery) and
         // end the shell_pid swap — the EXIT trap above still ran as
@@ -1230,6 +1323,10 @@ impl Executor {
                 crate::builtins::ulimit::apply_process_rlimits(rlimits);
             }
         }
+        // rubash#3605: the in-process child's mark ends here — its
+        // env cells already died with the env restore above.
+        self.emulated_child_depth
+            .set(self.emulated_child_depth.get() - 1);
         self.shell_state.coproc_names = saved_coproc_names;
         self.shell_state.last_background_pid = saved_last_background_pid;
         self.shell_state.job_table = saved_job_table;
@@ -1318,6 +1415,12 @@ impl Executor {
             .set(saved_parameter_assignment_failure_prev_status);
         self.evalerror_exec_depth.set(saved_evalerror_exec_depth);
         self.assignment_command_name = saved_assignment_command_name;
+        // The child's EXIT-trap fire and exec-replacement unwind latched
+        // the shared Executor — hand the parent's own latches back so a
+        // later child or `( )` subshell adjudicates with the parent's
+        // state, not the dead child's (see the entry saves above).
+        self.exit_trap_ran.set(saved_exit_trap_ran);
+        self.exec_replaced = saved_exec_replaced;
         self.shell_state.cwd = saved_cwd;
         self.exit_code = status;
         // rubash#2236: the child died by an untrapped signal and the

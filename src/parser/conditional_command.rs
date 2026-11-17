@@ -241,7 +241,22 @@ pub(super) fn conditional_syntax_error_spec(
         }
         _ => None,
     };
-    Some(fail.encode(args, follower.as_deref(), source_extra))
+    // rubash#3227: a virtual-newline offender's near token comes from
+    // the raw line, not the collected args (see
+    // virtual_newline_source_near); the args-only walk stays the
+    // fallback when the source text is unavailable.
+    let source_near = match (&fail.offending, diagnostic_text) {
+        (CondOffending::VirtualNewline(anchor), Some(text)) => {
+            virtual_newline_source_near(args, *anchor, text, source_line_offset)
+        }
+        _ => None,
+    };
+    Some(fail.encode(
+        args,
+        follower.as_deref(),
+        source_extra,
+        source_near.as_deref(),
+    ))
 }
 
 /// The line of the `\n' token GNU's cond reader reports: a newline ending
@@ -303,6 +318,7 @@ impl CondFail {
         args: &[CondArg],
         follower: Option<&str>,
         source_extra: Option<char>,
+        source_near: Option<&str>,
     ) -> (String, Option<usize>) {
         let sep = crate::executor::markers::PARSE_ERROR_FIELD_SEP;
         let last_line = args.last().map(|(_, _, _, line)| *line).unwrap_or(1);
@@ -396,7 +412,13 @@ impl CondFail {
             CondOffending::VirtualNewline(anchor) => {
                 let last = (*anchor).min(args.len()).saturating_sub(1);
                 (
-                    walk_back_near_token(args, last, None),
+                    // rubash#3227: when the raw line carries the near
+                    // token (a `#` comment swallowed it before
+                    // tokenization), prefer it over the args-only walk
+                    // — the walk below can only see collected fragments.
+                    source_near
+                        .map(str::to_string)
+                        .unwrap_or_else(|| walk_back_near_token(args, last, None)),
                     newline_line(args, *anchor),
                     newline_line(args, *anchor),
                 )
@@ -711,6 +733,46 @@ fn source_char_after_arg(
     let end = search_from + line_text[search_from..].find(span)? + span.len();
     let c = line_text[end..].chars().next()?;
     (!matches!(c, ' ' | '\n' | '\t' | ';' | '|' | '&')).then_some(c)
+}
+
+/// The near token for a virtual-newline offender, read off the raw
+/// source line the way error_token_from_text does (parse.y:6772-6808).
+///
+/// Same root-cause family as #3031/t0416's `source_char_after_arg` (a
+/// `#` comment swallows text before tokenization, so the collected
+/// arguments cannot see it), but a different landing point: t0416
+/// borrows ONE character glued to a real offending argument, while
+/// here the offender IS the virtual newline and the whole near token
+/// comes from the raw line tail. GNU's reader, on hitting the `#`
+/// comment branch (parse.y:3630-3643), discards to EOL and returns the
+/// `\n` with `shell_input_line_index` sitting AT it, so
+/// error_token_from_text backs over the newline and the non-break run
+/// behind it — comment text included: `[[ a == #x ]]` names `]]`,
+/// `[[ a == #x` names `#x`, `[[ -n #x ]]` names `]]` (rubash#3227).
+/// A plain newline with no swallowed text walks to the same token the
+/// args-only walk names (`[[ a ==` names `==`), so this replaces
+/// nothing — it only supplies what the args cannot see. Returns None
+/// when the line is unavailable or carries no token (all whitespace),
+/// leaving the args-only walk as the fallback.
+fn virtual_newline_source_near(
+    args: &[CondArg],
+    anchor: usize,
+    text: &str,
+    source_line_offset: usize,
+) -> Option<String> {
+    let line = newline_line(args, anchor);
+    let line_text = line
+        .checked_sub(source_line_offset)
+        .and_then(|in_text| super::parse_loop::source_line_by_number(text, in_text))?;
+    // error_token_from_text first backs over trailing whitespace and
+    // the newline (parse.y:6787-6793); trimming here makes
+    // walk_back_over_text's end-anchored walk identical to that scan.
+    let trimmed = line_text.trim_end();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let near = walk_back_over_text(trimmed);
+    (!near.is_empty()).then_some(near)
 }
 
 /// error_token_from_text (parse.y:6772-6808): the reported token is the

@@ -1,4 +1,5 @@
 use super::*;
+use crate::executor::fd_table::{FdRecordScan, FdScanAction};
 use crate::executor::substitution_metadata::bytes_to_shell_text;
 
 /// Re-emit a consumed stdin unit to the terminal while a one-char console
@@ -20,43 +21,6 @@ fn echo_stdin_unit(guard: &Option<crate::fd::ConsoleOnecharGuard>, unit: &StdinU
                 guard.echo_byte(byte);
             }
         }
-    }
-}
-
-/// Escape-state tracker for byte-wise record loops that ask, per
-/// byte, whether a delimiter match at that byte is suppressed
-/// because the byte is escaped (read.def: the escape introducer
-/// quotes the next byte). Stateful: feed bytes in stream order.
-/// Moved here from fd_table when the fd-table readers adopted the
-/// unified FdRecordScan replay; the coproc loop still drives it.
-pub(in crate::executor) struct ReadEscapeTracker {
-    escape_aware: bool,
-    escaped: bool,
-}
-
-impl ReadEscapeTracker {
-    pub(in crate::executor) fn new(escape_aware: bool) -> Self {
-        Self {
-            escape_aware,
-            escaped: false,
-        }
-    }
-
-    /// Whether a delimiter match on `byte` is suppressed (the byte
-    /// is the escape introducer itself or is quoted by one).
-    pub(in crate::executor) fn suppresses_match(&mut self, byte: u8) -> bool {
-        if !self.escape_aware {
-            return false;
-        }
-        if self.escaped {
-            self.escaped = false;
-            return true;
-        }
-        if byte == b'\\' {
-            self.escaped = true;
-            return true;
-        }
-        false
     }
 }
 
@@ -256,6 +220,70 @@ impl Executor {
         }
     }
 
+    /// GNU read.def:482 `input_is_pipe = fd_ispipe (fd)`: whether the
+    /// descriptor the read will consume is a FIFO/pipe — the
+    /// classification that opens GNU's reap window. A `read` on a
+    /// pipe blocks: during that window the SIGCHLD handler's waitchld
+    /// records a dead coproc's status (jobs.c:4173 coproc_pidchk ->
+    /// execute_cmd.c:2323 coproc_setstatus sets COPROC_DEAD) and the
+    /// cleanup that follows disposes it (jobs.c:1342
+    /// cleanup_dead_jobs -> execute_cmd.c:2225 coproc_reap), so
+    /// `coproc xcase ...; read <&${COPROC[0]}` leaves `${COPROC[@]}`
+    /// empty at the next command (coproc.tests, rubash#3633). A read
+    /// of a regular file has no such window: `read -t 1 </dev/null`
+    /// leaves the array bound (GNU 5.3.20 probes).
+    fn read_source_is_pipe(&self, cmd: &CommandNode, read_fd: Option<u32>) -> bool {
+        let fd = read_fd.unwrap_or(0);
+        if fd == 0 {
+            if let Some(redirect) = &cmd.redirect_in {
+                let target = self.expand_redirect_target(redirect);
+                // `<&N` dup: fd_ispipe answers for the SOURCE
+                // descriptor's open file description.
+                if let Some((source, _)) = redirect_target_fd_and_move(&target) {
+                    return self.fd_read_endpoint_is_pipe(source);
+                }
+                // `<(cmd)` binds a process-substitution pipe.
+                if target.starts_with("<(") {
+                    return true;
+                }
+                // A plain `< path` may not be bound in the table at
+                // this point — a FIFO path classifies as a pipe the
+                // same way the fd probe below would.
+                if !target.starts_with('&') && !is_closed_redirect_target(&target) {
+                    let path = self.session_path(crate::executor::path::windows_operand_file_path(
+                        shell_path_to_windows(&target, &self.shell_state.env_vars),
+                        &self.shell_state.env_vars,
+                    ));
+                    return std::fs::metadata(&path)
+                        .map(|m| {
+                            #[cfg(unix)]
+                            {
+                                std::os::unix::fs::FileTypeExt::is_fifo(&m.file_type())
+                            }
+                            #[cfg(not(unix))]
+                            {
+                                m.is_file()
+                            }
+                        })
+                        .unwrap_or(false);
+                }
+            }
+        }
+        self.fd_read_endpoint_is_pipe(fd)
+    }
+
+    fn fd_read_endpoint_is_pipe(&self, fd: u32) -> bool {
+        match self.fd_table.read_endpoint(fd) {
+            Some(FdReadEndpoint::CoprocStdout { .. })
+            | Some(FdReadEndpoint::ProcessSubstitution(_)) => true,
+            Some(FdReadEndpoint::File(file)) => crate::fd::is_pipe_handle(file.handle),
+            Some(FdReadEndpoint::InheritedProcessStdin) => {
+                crate::fd::is_pipe_handle(crate::fd::process_std_handle(0))
+            }
+            _ => false,
+        }
+    }
+
     pub(in crate::executor) fn read_input_for_command(
         &mut self,
         cmd: &CommandNode,
@@ -267,6 +295,16 @@ impl Executor {
         escape_aware: bool,
         raw: bool,
     ) -> Option<String> {
+        // GNU read.def:482 input_is_pipe: a read whose descriptor is a
+        // pipe is where a blocking builtin hands the SIGCHLD handler a
+        // synchronous window — the dead coproc's reap (record) lands in
+        // that window and the cleanup after the command disposes it.
+        // The foreground-wait mark makes the next command-boundary
+        // refresh run the same retire-observed-coprocs step
+        // (flush_pending_coproc_retirements).
+        if self.read_source_is_pipe(cmd, read_fd) {
+            self.note_foreground_wait();
+        }
         // GNU builtins/read.def: NUL bytes in the input are skipped as
         // the record is read — they never reach the assigned value,
         // the IFS field splitting, or a -a array (rubash#1419:
@@ -693,6 +731,24 @@ impl Executor {
                     return None;
                 }
             }
+        }
+        // rubash#3774: the command's OWN redirect list may leave the
+        // read descriptor write-only (`read x 0>out2.txt`,
+        // `read -u 3 x 3>file`). GNU applies the list before the
+        // builtin runs (redir.c:237 do_redirections), so the
+        // descriptor IS open — sh_validfd passes — and the read
+        // itself fails EBADF (read.def:911). execute_read never binds
+        // the own list into the fd table (builtin_redirects.rs), so
+        // the ambient entry still shows the readable process stdin
+        // and every transport below reads it to a silent EOF. Judge
+        // the list's winner here, before any serve: an output-class
+        // winner records the hard read error the builtin renders,
+        // and no transport runs.
+        if self.own_list_leaves_fd_write_only(cmd, read_fd.unwrap_or(0)) {
+            if self.fd_table.read_error.is_none() {
+                self.fd_table.read_error = Some("Bad file descriptor".to_string());
+            }
+            return None;
         }
         // rubash#2339: `read -e`/`-E` with a terminal behind the read
         // descriptor acquires through the line editor instead of the
@@ -1224,7 +1280,17 @@ impl Executor {
                 match self.open_net_redirect(&expanded_target) {
                     Ok(file) => {
                         let file = FileFd::from_file(file, expanded_target.clone().into());
-                        let saved = self.fd_table.entries.get(&0).cloned();
+                        // rubash#3728: snapshot fd 0 with a kernel dup
+                        // (saved_entry), not a bare Rc clone — the bind
+                        // below retires the displaced descriptor
+                        // (rubash#3213), so a cloned save would restore
+                        // a dead entry (same hazard as #3706). A dup
+                        // failure fails this read (GNU REDIRECTION_ERROR
+                        // on a failed F_DUPFD save, redir.c:965).
+                        let saved = match self.fd_table.saved_entry(0) {
+                            Ok(saved) => saved,
+                            Err(_) => return None,
+                        };
                         self.fd_table
                             .open_input(0, FdReadEndpoint::File(file), false);
                         let line = self.read_virtual_fd_stdin(
@@ -1330,7 +1396,13 @@ impl Executor {
                     return None;
                 };
                 let file = FileFd::from_file(server, path.clone());
-                let saved = self.fd_table.entries.get(&0).cloned();
+                // rubash#3728: kernel-dup snapshot of fd 0 (see the
+                // /dev/tcp arm above) — the bind below retires the
+                // displaced descriptor (rubash#3213).
+                let saved = match self.fd_table.saved_entry(0) {
+                    Ok(saved) => saved,
+                    Err(_) => return None,
+                };
                 self.fd_table
                     .open_input(0, FdReadEndpoint::File(file), false);
                 let line = self.read_virtual_fd_stdin(
@@ -1385,7 +1457,13 @@ impl Executor {
                 }) else {
                     return None;
                 };
-                let saved = self.fd_table.entries.get(&0).cloned();
+                // rubash#3728: kernel-dup snapshot of fd 0 (see the
+                // /dev/tcp arm above) — the bind below retires the
+                // displaced descriptor (rubash#3213).
+                let saved = match self.fd_table.saved_entry(0) {
+                    Ok(saved) => saved,
+                    Err(_) => return None,
+                };
                 self.fd_table
                     .open_input(0, FdReadEndpoint::File(file), false);
                 let line = self.read_virtual_fd_stdin(
@@ -1784,20 +1862,23 @@ impl Executor {
         };
         let _ = pid;
         let mut bytes = Vec::new();
-        let mut consumed_chars = 0usize;
+        let mut consumed = false;
         let mut ended = false;
         // rubash#2892: EOF (empty read or a read error) ends the loop
         // exactly like a deadline break — in no case does the read
         // close the descriptor (read.def keeps the fd across builtin
         // calls; see the note at the end of this function).
-        // rubash#1300: escaped bytes never terminate the record.
-        let mut escapes = ReadEscapeTracker::new(escape_aware);
-        // Post-escape counting state for the char limit (rubash#1328).
-        let mut escaped = false;
-        // read.def:731-738: a record that is just the delimiter is served
-        // (empty line, GNU rc 0) — tracked so the empty check below cannot
-        // conflate it with EOF (niubash#275).
-        let mut delimiter_found = false;
+        // rubash#3305: the same FdRecordScan replay of GNU's read loop the
+        // fd-table serves drive (read.def:834 delimiter compare against the
+        // `-d` word's FIRST byte, only at a read_mbchar unit start;
+        // read.def:884-886 the -n/-N budget counted per completed unit,
+        // post-escape; an escaped unit and the escape introducer never
+        // terminate, rubash#1300/#1328). The old per-byte compare matched
+        // the delimiter's lead byte inside the record, cut -n units at an
+        // invalid sequence's first byte, and let a continuation-byte
+        // delimiter fire mid-character.
+        let mut scan = FdRecordScan::new(delimiter, char_limit, exact_char_limit, raw);
+        let _ = escape_aware;
 
         // Bash keeps the coprocess descriptor open across read builtin calls.
         // Read only one logical input record (or the requested character
@@ -1814,29 +1895,15 @@ impl Executor {
                     break;
                 }
                 Ok(buf) => {
+                    consumed = true;
                     bytes.push(buf[0]);
-                    let was_escaped = escaped;
-                    if escaped {
-                        if buf[0] != b'\n' {
-                            consumed_chars += 1;
-                        }
-                        escaped = false;
-                    } else if !raw && buf[0] == b'\\' {
-                        escaped = true;
-                    } else {
-                        consumed_chars += 1;
-                    }
-                    let suppressed = escapes.suppresses_match(buf[0]);
-                    if !suppressed
-                        && !was_escaped
-                        && delimiter_byte_matches(buf[0], delimiter)
-                        && !exact_char_limit
-                    {
-                        delimiter_found = true;
-                        break;
-                    }
-                    if let Some(limit) = char_limit {
-                        if consumed_chars >= limit && !escaped {
+                    let seq_end = scan.sequence_ending_at(&bytes, bytes.len());
+                    match scan.on_byte(buf[0], seq_end) {
+                        FdScanAction::Data => {}
+                        FdScanAction::DataLimit => break,
+                        FdScanAction::Delimiter { drop } => {
+                            // Consumed, never returned.
+                            bytes.truncate(bytes.len() - drop);
                             break;
                         }
                     }
@@ -1849,21 +1916,10 @@ impl Executor {
         }
 
         // read.def:949 eof: the pipe drained (or errored) before the
-        // delimiter arrived; a timeout break is not EOF.
-        if ended && !self.read_timed_out && !bytes.is_empty() {
-            self.read_eof_no_delimiter = if escape_aware {
-                // Replay the escape state: an escaped delimiter byte is
-                // record data, not a found delimiter (rubash#1300).
-                let mut replay = ReadEscapeTracker::new(true);
-                !bytes.iter().any(|byte| {
-                    let suppressed = replay.suppresses_match(*byte);
-                    !suppressed && delimiter_byte_matches(*byte, delimiter)
-                })
-            } else {
-                !bytes
-                    .iter()
-                    .any(|byte| delimiter_byte_matches(*byte, delimiter))
-            };
+        // delimiter arrived; a timeout break is not EOF. A delimiter or
+        // budget stop never reaches `ended`.
+        if ended && !self.read_timed_out && consumed {
+            self.read_eof_no_delimiter = true;
         }
         // rubash#2892: EOF on a coproc read end does NOT close the
         // descriptor — GNU's read builtin (builtins/read.def) never
@@ -1875,8 +1931,10 @@ impl Executor {
         // the input here, so the second read failed with
         // "Bad file descriptor".)
         // EOF before any byte: no record. A delimiter-only record (empty
-        // line) IS a record — served as the empty string (niubash#275).
-        if bytes.is_empty() && !delimiter_found {
+        // line, read.def:731-738) IS a record — served as the empty string
+        // (niubash#275); `consumed` keeps the two apart now that the
+        // delimiter byte is dropped from `bytes`.
+        if !consumed {
             return None;
         }
         Some(trim_read_input(
@@ -2073,6 +2131,27 @@ impl Executor {
             if self.fd_table.is_closed(fd) {
                 return None;
             }
+        }
+        // GNU builtins/read.def:911 — a descriptor that is open but
+        // not readable (write-only) fails the read with EBADF; it is
+        // not EOF. The `-u` arm diagnoses this before the transports
+        // (read_fd_is_available consults is_open_for_read), but a
+        // plain `read` reaches this funnel with no such gate: after
+        // `exec 0<<A 0>out.txt` #3655 retires fd 0's read arm, so the
+        // table owns a write-only fd 0 and every transport below
+        // returns None silently (rubash#3770). Record the hard
+        // failure for the read builtin's error arm — the same channel
+        // the EISDIR endpoint (rubash#1495) and hard read failures in
+        // read_file_bytes use. `is_open` without `is_open_for_read`
+        // is exactly "open, read arm absent": an entry with no read
+        // arm at all (a pipeline stage's fd 0) has is_open false, so
+        // the transports below still own it, and a read arm present
+        // but exhausted is a real EOF, not an error.
+        if !self.fd_table.is_open_for_read(fd)
+            && self.fd_table.is_open(fd)
+            && self.fd_table.read_error.is_none()
+        {
+            self.fd_table.read_error = Some("Bad file descriptor".to_string());
         }
         // Coprocess readers are stream endpoints, not text mirrors. Once the
         // pipe reaches EOF, do not interpret the legacy environment adapter
