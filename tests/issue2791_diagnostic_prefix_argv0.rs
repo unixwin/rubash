@@ -77,7 +77,7 @@ fn invalid_option_prefixes_follow_argv0() {
     assert_case(
         &run_c("pwd -z"),
         "",
-        "zimsh: line 1: pwd: -z: invalid option\npwd: usage: pwd [-LP]\n",
+        "zimsh: line 1: pwd: -z: invalid option\npwd: usage: pwd [-LPW]\n",
         2,
     );
     assert_case(
@@ -219,7 +219,7 @@ fn script_form_prefixes_use_the_script_name() {
     assert_case(
         &run_script_file("pwd", "pwd -z\n"),
         "",
-        "probe.sh: line 1: pwd: -z: invalid option\npwd: usage: pwd [-LP]\n",
+        "probe.sh: line 1: pwd: -z: invalid option\npwd: usage: pwd [-LPW]\n",
         2,
     );
     assert_case(
@@ -253,7 +253,7 @@ fn comsub_trap_and_eval_prefixes_follow_argv0() {
     assert_case(
         &run_c("eval \"pwd -z\""),
         "",
-        "zimsh: line 1: pwd: -z: invalid option\npwd: usage: pwd [-LP]\n",
+        "zimsh: line 1: pwd: -z: invalid option\npwd: usage: pwd [-LPW]\n",
         2,
     );
 }
