@@ -1885,6 +1885,23 @@ impl From<std::process::Child> for SpawnedChild {
     }
 }
 
+impl SpawnedChild {
+    /// Wrap an already-owned process handle as a Whitelisted child
+    /// (rubash#3467): the foreground-stop arm duplicates a live
+    /// `std::process::Child`'s handle so the stopped process stays
+    /// waitable after the caller drops the `Child` that waited on it.
+    /// The duplicate carries the same access as the source handle, so
+    /// `try_wait`/`wait`/`kill` behave exactly like the Std form.
+    pub fn from_owned_handle(handle: std::os::windows::io::OwnedHandle, pid: u32) -> Self {
+        Self {
+            inner: SpawnedChildInner::Whitelisted {
+                process: handle,
+                pid,
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

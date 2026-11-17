@@ -323,6 +323,18 @@ pub const SIGCONT_NUMBER: i32 = libc::SIGCONT;
 #[cfg(not(unix))]
 pub const SIGCONT_NUMBER: i32 = 18;
 
+/// The platform's SIGTSTP number. GNU's stop class is stable across
+/// the platforms bash models (20 on Linux and Darwin/BSD); the
+/// non-unix value keeps the Windows file-mailbox wire format's Linux
+/// numbering by contract (see SIGNALS above). Used by the Windows
+/// foreground-stop arm (rubash#3467), which matches the 128+20
+/// verdict by number.
+#[cfg(unix)]
+pub const SIGTSTP_NUMBER: i32 = libc::SIGTSTP;
+/// Non-unix (Windows mailbox wire format, Linux numbering by contract).
+#[cfg(not(unix))]
+pub const SIGTSTP_NUMBER: i32 = 20;
+
 /// The platform's SIGQUIT number for dispatch paths that special-case the
 /// shell-policy ignore (sig.c:333 sets SIGQUIT to SIG_IGN in every shell,
 /// before the interactive-only SIGINT/SIGTERM installs). Linux: 3; Darwin/
@@ -1003,6 +1015,32 @@ pub(crate) fn note_console_ctrl_c() {
     {
         // Linux mailbox wire format: SIGINT = 2.
         queue_self_signal(2);
+    }
+}
+
+/// Record a console `CTRL_Z` (the host's ^Z keypress) into this
+/// process's self-signal queue — the TSTP twin of
+/// [`note_console_ctrl_c`] (rubash#3467, companion to niubash#877).
+///
+/// The niubash host owns the console input on Windows: ^Z is a
+/// keypress, not a console control event, so no kernel delivery
+/// exists for it — the host's watch thread calls the driver face
+/// (`script_driver::inject_console_ctrl_z`) and this hook queues
+/// signal 20 the same way a mailbox SIGTSTP from another process
+/// would arrive. The foreground waits observe it through
+/// `observe_signals_while_blocked` and stop the job instead of
+/// ending it at 128+20; a trapped TSTP is re-queued there exactly
+/// like a trapped SIGINT, so the trap runs and the command is not
+/// stopped (GNU: a trapped SIGTSTP does not stop the shell).
+///
+/// Unix: no-op — the kernel delivers SIGTSTP to the foreground
+/// process group itself and waitpid reports the stop; a second
+/// injection would double-dispatch.
+pub(crate) fn note_console_ctrl_z() {
+    #[cfg(not(unix))]
+    {
+        // Linux mailbox wire format: SIGTSTP = 20.
+        queue_self_signal(20);
     }
 }
 
