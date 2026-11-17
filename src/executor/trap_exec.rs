@@ -8467,55 +8467,75 @@ impl Executor {
         // inputs bind before outputs, as the passes were ordered
         // before; across segments the walk is exact.
         let mut saved_outputs: Vec<super::command_input_scope::SavedOutputFd> = Vec::new();
-        let mut start = 0usize;
-        for position in 0..cmd.redirects.len() {
-            if cmd.redirects[position].fd_var.is_none() {
-                continue;
+        // rubash#3733: GNU's do_redirections registers an undo save
+        // per entry and undo_partial_redirects (execute_cmd.c:855)
+        // replays them when a later entry fails, so a mid-walk
+        // failure leaves the fd table exactly as the list found it.
+        // Run the walk inside a closure whose Err arm restores every
+        // slot this walk already touched — the numbered input/output
+        // snapshots accumulated above and the `{var}` closes
+        // apply_script_fd_var_entry performed — before the error
+        // propagates, mirroring the in-shell scope's unwind order
+        // (outputs, then inputs, then the dynamic close pass).
+        let mut walk = |executor: &mut Self| -> Result<(), ExecuteError> {
+            let mut start = 0usize;
+            for position in 0..cmd.redirects.len() {
+                if cmd.redirects[position].fd_var.is_none() {
+                    continue;
+                }
+                // rubash#2612 (repair): this face's binds stand in for a
+                // forked child's (see the fn's #2310 doc), so a fixed
+                // move's source close must be restored with the rest of
+                // the segment — MoveSourceSave::RestoreAlways, not the
+                // in-shell undoable rule.
+                executor.open_compound_numbered_input_redirects_in(
+                    cmd,
+                    start,
+                    position,
+                    &mut saved,
+                    super::command_input_scope::MoveSourceSave::RestoreAlways,
+                )?;
+                executor.open_compound_output_redirects_in(
+                    cmd,
+                    start,
+                    position,
+                    &mut saved_outputs,
+                    super::command_input_scope::MoveSourceSave::RestoreAlways,
+                )?;
+                executor.apply_script_fd_var_entry(
+                    cmd,
+                    position,
+                    &mut pending_closes,
+                    &mut performed_closes,
+                    &saved,
+                    &saved_outputs,
+                    heredoc_saved,
+                )?;
+                start = position + 1;
             }
-            // rubash#2612 (repair): this face's binds stand in for a
-            // forked child's (see the fn's #2310 doc), so a fixed
-            // move's source close must be restored with the rest of
-            // the segment — MoveSourceSave::RestoreAlways, not the
-            // in-shell undoable rule.
-            self.open_compound_numbered_input_redirects_in(
+            executor.open_compound_numbered_input_redirects_in(
                 cmd,
                 start,
-                position,
+                cmd.redirects.len(),
                 &mut saved,
                 super::command_input_scope::MoveSourceSave::RestoreAlways,
             )?;
-            self.open_compound_output_redirects_in(
+            executor.open_compound_output_redirects_in(
                 cmd,
                 start,
-                position,
+                cmd.redirects.len(),
                 &mut saved_outputs,
                 super::command_input_scope::MoveSourceSave::RestoreAlways,
             )?;
-            self.apply_script_fd_var_entry(
-                cmd,
-                position,
-                &mut pending_closes,
-                &mut performed_closes,
-                &saved,
-                &saved_outputs,
-                heredoc_saved,
-            )?;
-            start = position + 1;
+            Ok(())
+        };
+        if let Err(error) = walk(self) {
+            self.restore_compound_output_redirects(std::mem::take(&mut saved_outputs));
+            self.restore_compound_numbered_input_redirects(std::mem::take(&mut saved));
+            let close_restore = std::mem::take(&mut self.fd_var_close_restore);
+            self.restore_fd_var_close_snapshots(close_restore);
+            return Err(error);
         }
-        self.open_compound_numbered_input_redirects_in(
-            cmd,
-            start,
-            cmd.redirects.len(),
-            &mut saved,
-            super::command_input_scope::MoveSourceSave::RestoreAlways,
-        )?;
-        self.open_compound_output_redirects_in(
-            cmd,
-            start,
-            cmd.redirects.len(),
-            &mut saved_outputs,
-            super::command_input_scope::MoveSourceSave::RestoreAlways,
-        )?;
         Ok((saved, saved_outputs))
     }
 

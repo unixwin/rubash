@@ -1372,13 +1372,21 @@ impl Executor {
         cmd: &CommandNode,
     ) -> Result<Vec<SavedNumberedFd>, ExecuteError> {
         let mut saved: Vec<SavedNumberedFd> = Vec::new();
-        self.open_compound_numbered_input_redirects_in(
+        if let Err(error) = self.open_compound_numbered_input_redirects_in(
             cmd,
             0,
             cmd.redirects.len(),
             &mut saved,
             MoveSourceSave::GnuUndoable,
-        )?;
+        ) {
+            // GNU undo_partial_redirects (execute_cmd.c:855 via
+            // redir.c's undo list, add_undo_redirect:1326): a
+            // mid-list failure unwinds every bind the walk already
+            // applied. Restore the pre-list entries before the
+            // error propagates (rubash#3733).
+            self.restore_compound_numbered_input_redirects(saved);
+            return Err(error);
+        }
         Ok(saved)
     }
 
