@@ -1417,11 +1417,15 @@ impl Executor {
         texts.extend(cmd.assignment_values().map(String::as_str));
         for text in texts {
             for body in speculative_arithmetic_bodies(text) {
-                let (value, _writes, _category) =
+                // Probe mirrors the arithsub evalexp window: NULL
+                // this_command_name (rubash#3295).
+                let (value, _writes, _category) = {
+                    let _arith_label = crate::executor::arithmetic::arith_eval_label_scope(None);
                     crate::executor::arithmetic::eval_conditional_arith_value_categorized_with_writes(
                         &body,
                         &self.shell_state.env_vars,
-                    );
+                    )
+                };
                 if value.is_none() {
                     return true;
                 }

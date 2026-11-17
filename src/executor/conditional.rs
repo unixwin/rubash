@@ -1780,19 +1780,27 @@ impl Executor {
         // (expr.c:1502-1510), hence no_expand inside the parser.
         let left_eval = self.expand_arith_indexed_subscripts(&left_expanded);
         let left_dynamic = self.arith_dynamic_context();
-        let (Some(left_val), _) = eval_mutable_arith_value_with_random_flags(
-            &left_eval,
-            &mut self.shell_state.env_vars,
-            Some(&self.shell_state.random_state),
-            Some(&left_dynamic),
-            true,
-            Some(&self.shell_state.variables),
-        ) else {
-            self.flush_arith_diags(Some("[["));
+        // GNU execute_cmd.c:4164 execute_cond_command sets
+        // this_command_name = "[[" for the whole conditional; the
+        // arithcomp evalexp diagnostics carry that label
+        // (rubash#3295).
+        let (Some(left_val), _) = ({
+            let _arith_label =
+                crate::executor::arithmetic::arith_eval_label_scope(Some("[[".to_string()));
+            eval_mutable_arith_value_with_random_flags(
+                &left_eval,
+                &mut self.shell_state.env_vars,
+                Some(&self.shell_state.random_state),
+                Some(&left_dynamic),
+                true,
+                Some(&self.shell_state.variables),
+            )
+        }) else {
+            self.flush_arith_diags();
             self.report_conditional_arithmetic_error(&left_eval);
             return 1;
         };
-        self.flush_arith_diags(Some("[["));
+        self.flush_arith_diags();
         // rubash#404: GNU test.c:357-372 arithcomp -> evalexp binds the
         // operand's assignment side effects into the one variable store, so
         // the next parameter expansion sees them (`n=1; x='n+=2';
@@ -1805,19 +1813,23 @@ impl Executor {
         }
         let right_eval = self.expand_arith_indexed_subscripts(&right_expanded);
         let right_dynamic = self.arith_dynamic_context();
-        let (Some(right_val), _) = eval_mutable_arith_value_with_random_flags(
-            &right_eval,
-            &mut self.shell_state.env_vars,
-            Some(&self.shell_state.random_state),
-            Some(&right_dynamic),
-            true,
-            Some(&self.shell_state.variables),
-        ) else {
-            self.flush_arith_diags(Some("[["));
+        let (Some(right_val), _) = ({
+            let _arith_label =
+                crate::executor::arithmetic::arith_eval_label_scope(Some("[[".to_string()));
+            eval_mutable_arith_value_with_random_flags(
+                &right_eval,
+                &mut self.shell_state.env_vars,
+                Some(&self.shell_state.random_state),
+                Some(&right_dynamic),
+                true,
+                Some(&self.shell_state.variables),
+            )
+        }) else {
+            self.flush_arith_diags();
             self.report_conditional_arithmetic_error(&right_eval);
             return 1;
         };
-        self.flush_arith_diags(Some("[["));
+        self.flush_arith_diags();
         super::arithmetic::sync_arith_writes(self);
         i32::from(!conditional_numeric_matches(left_val, op, right_val))
     }

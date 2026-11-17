@@ -588,7 +588,10 @@ impl Executor {
                 // `$name` expansion — `${a[$((RANDOM%3))]}` advances the
                 // same RNG state as `$((RANDOM%3))` (rubash#299).
                 let dynamic_values = self.arith_dynamic_context();
-                let (result, writes, actual_category) =
+                // GNU arrayfunc.c:1373-1377 array_expand_index clears
+                // this_command_name around evalexp (rubash#3295).
+                let (result, writes, actual_category) = {
+                    let _arith_label = crate::executor::arithmetic::arith_eval_label_scope(None);
                     eval_conditional_arith_value_categorized_with_writes_and_state(
                         &expr,
                         &overlaid,
@@ -599,7 +602,8 @@ impl Executor {
                         } else {
                             None
                         },
-                    );
+                    )
+                };
                 if !writes.is_empty() {
                     crate::executor::expand_braced_indices::PENDING_SUBSCRIPT_WRITES.with(|w| {
                         w.borrow_mut().extend(writes);
