@@ -137,13 +137,13 @@ impl Executor {
                 self.expand_redirect_target(redirect),
                 redirect.clobber,
                 false,
-                Some(redirect),
+                Some(&**redirect),
             ),
             (None, Some(append)) => (
                 self.expand_redirect_target(append),
                 true,
                 true,
-                Some(append),
+                Some(&**append),
             ),
             (None, None) => return Ok(None),
         };
