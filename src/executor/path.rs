@@ -909,6 +909,9 @@ fn path_scan_scaffold(
         let dirs = split_shell_path(env_vars.get("PATH").map(String::as_str).unwrap_or_default())
             .into_iter()
             .map(|dir| {
+                // rubash#3826: GNU findcmd.c:544 — expand a `~`-leading
+                // PATH element at lookup time (unless POSIX mode).
+                let dir = expand_path_element_tilde(&dir, env_vars);
                 // rubash#3104: fold a raw-byte pair in the element
                 // before the listing scan, like the unix walk; on
                 // Windows the folded string is already the WTF-8
@@ -1152,9 +1155,15 @@ fn memoized_miss_still_absent(
     env_vars: &HashMap<String, String>,
     _fingerprint: &str,
 ) -> bool {
+    // rubash#3826: the probe must expand a `~`-leading element exactly
+    // like the walk does, or a memoized miss would be served for a
+    // command that is findable via the expanded element.
     !split_shell_path(env_vars.get("PATH").map(String::as_str).unwrap_or_default())
         .iter()
-        .any(|dir| shell_path_to_windows(dir, env_vars).join(name).is_file())
+        .any(|dir| {
+            let dir = expand_path_element_tilde(dir, env_vars);
+            shell_path_to_windows(&dir, env_vars).join(name).is_file()
+        })
 }
 
 #[cfg_attr(unix, allow(unused_variables))]
@@ -1258,6 +1267,26 @@ fn find_user_command_uncached(
     None
 }
 
+/// GNU findcmd.c:544 `find_in_path_element`: a PATH element starting
+/// with `~` is tilde-expanded at lookup time — `xpath =
+/// (posixly_correct == 0 && *path == '~') ? bash_tilde_expand (path, 0)
+/// : path`. The expansion happens per element, inside the walk, so
+/// `command -v` / `hash -t` print the expanded path (rubash#3826).
+/// The `~` is NOT expanded when PATH is assigned (that is the
+/// assignment layer's business) and NOT in POSIX mode
+/// (`posixly_correct == 0` gate). Reuses the assignment-layer tilde
+/// helper: `~`/`~/...` via $HOME, `~+`/`~-`/`~N` via the dirstack,
+/// `~user[/rest]` via getpwnam; an unresolvable user stays verbatim.
+pub(crate) fn expand_path_element_tilde(dir: &str, env_vars: &HashMap<String, String>) -> String {
+    if !dir.starts_with('~') {
+        return dir.to_string();
+    }
+    if crate::builtins::set::shell_option_enabled(env_vars, "posix") {
+        return dir.to_string();
+    }
+    crate::expand::tilde::tilde::expand_tilde_segment(dir, env_vars)
+}
+
 /// The unix PATH-element walk behind `find_user_command_uncached`,
 /// returning the winning candidate in two forms: the session-cwd-anchored
 /// path the executor opens/spawns, and the as-written join of the PATH
@@ -1279,6 +1308,11 @@ fn find_in_path_walk_unix(
 ) -> Option<(PathBuf, String)> {
     let mut file_to_lose_on: Option<(PathBuf, String)> = None;
     for dir in split_shell_path(env_vars.get("PATH").map(String::as_str).unwrap_or_default()) {
+        // rubash#3826: GNU findcmd.c:544 — expand a `~`-leading PATH
+        // element at lookup time (unless POSIX mode), before the
+        // fold/probe, so the element the walk joins is the expanded
+        // home path.
+        let dir = expand_path_element_tilde(&dir, env_vars);
         // rubash#3104: a PATH element carrying a raw-byte pair must be
         // folded before the probe — GNU findcmd.c:623 walks with the
         // element bytes verbatim, and the unfolded pair spelling never
