@@ -3746,7 +3746,7 @@ impl Executor {
                     target.clone().into(),
                 );
                 if matches!(
-                    crate::special_paths::classify_special_path(target),
+                    crate::special_paths::classify_special_path(&target),
                     crate::special_paths::SpecialPathClass::Filesystem
                 ) {
                     state
