@@ -364,8 +364,13 @@ impl Executor {
             {
                 return Some(values);
             }
-            if let Some((var_name, offset, length)) = self.parse_parameter_substring(name) {
+            if let Some(((var_name, offset, length), writes)) =
+                self.parse_parameter_substring_with_writes(name)
+            {
                 if var_name == "@" {
+                    // rubash#3649: this parse's result is the expansion,
+                    // so commit its offset/length arithmetic writes.
+                    self.queue_pending_subscript_writes(writes);
                     return Some(positional_parameter_substring_with_zero(
                         self.shell_state.positional_window(),
                         &self.script_name_value(),
@@ -374,6 +379,9 @@ impl Executor {
                     ));
                 }
                 if var_name == "*" {
+                    // rubash#3649: this parse's result is the expansion,
+                    // so commit its offset/length arithmetic writes.
+                    self.queue_pending_subscript_writes(writes);
                     let values = positional_parameter_substring_with_zero(
                         self.shell_state.positional_window(),
                         &self.script_name_value(),
@@ -597,10 +605,15 @@ impl Executor {
     /// embedded and standalone slices share byte-identical slicing
     /// semantics (GNU subst.c:9050 parameter_brace_substring).
     pub(in crate::executor) fn at_slice_segment_values(&self, inner: &str) -> Vec<String> {
-        let Some((var_name, offset, length)) = self.parse_parameter_substring(inner) else {
+        let Some(((var_name, offset, length), writes)) =
+            self.parse_parameter_substring_with_writes(inner)
+        else {
             return Vec::new();
         };
         if var_name == "@" {
+            // rubash#3649: this parse's result is the segment values, so
+            // commit its offset/length arithmetic writes.
+            self.queue_pending_subscript_writes(writes);
             return positional_parameter_substring_with_zero(
                 self.shell_state.positional_window(),
                 &self.script_name_value(),
@@ -610,6 +623,9 @@ impl Executor {
         }
         if let Some(base) = var_name.strip_suffix("[@]") {
             if is_shell_name(base) {
+                // rubash#3649: this parse's result is the segment values,
+                // so commit its offset/length arithmetic writes.
+                self.queue_pending_subscript_writes(writes);
                 return self
                     .array_subscript_range_values(base, offset, length)
                     .unwrap_or_default();
@@ -657,7 +673,7 @@ impl Executor {
     }
 
     pub(in crate::executor) fn quoted_positional_at_word_values_with_raw(
-        &self,
+        &mut self,
         word: &str,
         raw: Option<&str>,
         kind: Option<&TokenKind>,
@@ -669,13 +685,33 @@ impl Executor {
         // skipped mixed words like `${foo}"$@"`, collapsing the positional
         // words into one field under a null IFS (array6.sub
         // `recho ${foo}"$@"` with IFS=).
-        if let Some(values) = raw.and_then(|raw| {
+        if let Some(segments) = raw.and_then(|raw| {
             quoted_positional_at_segments(raw, &self.shell_state.env_vars, &|name| {
                 self.nameref_target_name(name)
             })
-            .map(|segments| {
+        }) {
+            // Embedded `${name OP rhs}` alternates resolve to a word list
+            // that splices into this word; the expansion needs `&mut self`,
+            // so precompute the fields and let the shared-Fn resolve_list
+            // closure hand them out in segment order.
+            let mut alternate_fields: Vec<Vec<String>> = Vec::new();
+            for segment in &segments {
+                if let QuotedPositionalAtSegment::BracedAlternate(inner, _) = segment {
+                    let inner = inner.clone();
+                    let fields = match self.embedded_braced_alternate_fields(&inner) {
+                        Some(fields) => fields,
+                        // A body the parts-parser declines still expands as
+                        // ordinary `${...}` text — never dropped.
+                        None => vec![self.expand_embedded_parameters(&format!("${{{inner}}}"))],
+                    };
+                    alternate_fields.push(fields);
+                }
+            }
+            let alternate_slot = std::cell::Cell::new(0usize);
+            let values = {
+                let segments = &segments;
                 expand_quoted_positional_at_segments(
-                    &segments,
+                    segments,
                     self.shell_state.env_vars.get("IFS").map(String::as_str),
                     |segment| match segment {
                         QuotedPositionalAtSegment::PositionalAt(_) => {
@@ -697,14 +733,18 @@ impl Executor {
                             .array_subscript_range_values(name, 0, None)
                             .unwrap_or_default()
                             .join(&self.ifs_first_char_separator())],
+                        QuotedPositionalAtSegment::BracedAlternate(..) => {
+                            let slot = alternate_slot.get();
+                            alternate_slot.set(slot + 1);
+                            alternate_fields.get(slot).cloned().unwrap_or_default()
+                        }
                         QuotedPositionalAtSegment::Literal { .. }
                         | QuotedPositionalAtSegment::LiteralInAtSpan { .. }
                         | QuotedPositionalAtSegment::VerbatimQuoted(_) => Vec::new(),
                     },
                     |literal| self.expand_embedded_parameters(literal),
                 )
-            })
-        }) {
+            };
             return Some(values);
         }
 
@@ -1444,6 +1484,14 @@ enum QuotedPositionalAtSegment {
     /// the `quoted` split rule; resolution reuses the whole-word
     /// per-element operator helpers.
     AtModified(String, bool),
+    /// An embedded `"pre${name OP rhs}post"` alternate (`-`/`+` family)
+    /// whose rhs carries a `$@`-class list source (GNU
+    /// parameter_brace_expand_rhs, subst.c:7960-8070 ->
+    /// expand_string_for_rhs subst.c:4462-4501): the rhs word list
+    /// splices into the enclosing quoted word exactly like a `$@` list,
+    /// affixes attaching to the first/last field. Carries the inner
+    /// `${...}` body plus the `quoted` split rule.
+    BracedAlternate(String, bool),
     /// A `"${name[*]}"`-class span reached through indirection (`${!name}`
     /// whose value is `arr[*]`, or a `$ref` nameref to `arr[*]`): GNU
     /// joins the elements with IFS[0] into one word (subst.c
@@ -2164,6 +2212,23 @@ fn quoted_body_positional_at_segments(
                                 piece_start = index;
                                 continue;
                             }
+                            // Embedded alternate rhs word-list source
+                            // (`"pre${v- x:"$@" }post"`, rubash#3605):
+                            // parameter_brace_expand_rhs splices the rhs
+                            // fields into the enclosing quoted word.
+                            if super::command_prepare::embedded_braced_alternate_parts(true_inner)
+                                .is_some()
+                            {
+                                push_body_piece(&mut segments, &body[piece_start..index], true)?;
+                                segments.push(QuotedPositionalAtSegment::BracedAlternate(
+                                    true_inner.to_string(),
+                                    true,
+                                ));
+                                saw_positional_at = true;
+                                index += 2 + rest[..=end_byte].chars().count();
+                                piece_start = index;
+                                continue;
+                            }
                             index += 2 + rest[..=end_byte].chars().count();
                         }
                         None => return None,
@@ -2447,6 +2512,7 @@ where
                             | Some(QuotedPositionalAtSegment::ArrayAtSlice(..))
                             | Some(QuotedPositionalAtSegment::PositionalAtSlice(..))
                             | Some(QuotedPositionalAtSegment::AtModified(..))
+                            | Some(QuotedPositionalAtSegment::BracedAlternate(..))
                     )
                 {
                     // Only an unquoted literal directly after $@ emulates the
@@ -2480,6 +2546,7 @@ where
             | QuotedPositionalAtSegment::ArrayAtSlice(_, quoted)
             | QuotedPositionalAtSegment::PositionalAtSlice(_, quoted)
             | QuotedPositionalAtSegment::AtModified(_, quoted)
+            | QuotedPositionalAtSegment::BracedAlternate(_, quoted)
             | QuotedPositionalAtSegment::ArrayStar(_, quoted) => {
                 saw_positional_at = true;
                 let mut values = resolve_list(segment);

@@ -5485,6 +5485,57 @@ fn issue863_gap13_register_binding_reads_back_through_bind_view() {
     assert_eq!(issue863_gap3_entry(&view, r"\C-b").keymap, "vi-movement");
 }
 
+// rubash#3013: the view carries a keymap-valued kind — a
+// `prefix-meta` registration reads back as `BindKindView::Keymap`
+// with its real target map, and the kind round-trips through
+// `register_binding` verbatim.
+#[test]
+fn issue3013_keymap_kind_round_trips_through_the_view() {
+    let mut session = issue863_gap3_session();
+    // The old-style keyname arm is the one GNU's PREFIX_META_HACK
+    // intercepts (bind.c:1845-1855): it binds the key to the
+    // emacs-meta KEYMAP (ISKMAP), not to a function name.
+    issue863_gap3_run(&mut session, r#"bind 'Control-v: prefix-meta'"#);
+    let view = session.bind_view();
+    let entry = view
+        .entries
+        .iter()
+        .find(|entry| matches!(entry.kind, BindKindView::Keymap { .. }))
+        .expect("a Keymap entry registered");
+    match &entry.kind {
+        BindKindView::Keymap { name } => {
+            assert_eq!(name, "emacs-meta");
+        }
+        _ => unreachable!(),
+    }
+    // The ISKMAP slot keeps its raw-byte keyseq form.
+    assert_eq!(entry.bytes, vec![0x16]);
+    // GNU's dumper still prints the ISKMAP slot as `prefix-meta`.
+    assert!(
+        entry.dump.ends_with(": prefix-meta"),
+        "dump={:?}",
+        entry.dump
+    );
+
+    // The write face accepts the kind too (GAP-13 register path).
+    session.register_binding(
+        r"\C-w",
+        BindKindView::Keymap {
+            name: "vi-insert".to_string(),
+        },
+        Some("emacs"),
+    );
+    let view = session.bind_view();
+    let entry = issue863_gap3_entry(&view, r"\C-w");
+    assert_eq!(entry.keymap, "emacs-standard");
+    assert_eq!(
+        entry.kind,
+        BindKindView::Keymap {
+            name: "vi-insert".to_string()
+        }
+    );
+}
+
 #[test]
 fn issue863_gap13_reregister_replaces_in_place_and_bumps_generation_once() {
     let mut session = issue863_gap13_session();

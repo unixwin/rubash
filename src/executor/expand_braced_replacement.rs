@@ -116,6 +116,18 @@ impl Executor {
             );
         }
         if let Ok(index) = var_name.parse::<usize>() {
+            // GNU patsub_replacement (subst.c:9424-9428) looks the target up
+            // by name first: `0` is the special parameter $0 (shell name),
+            // not positional_window[0] — `${0/0/x}` rewrites the script
+            // name, and `${!x/0/Q}` with x=0 does too.
+            if index == 0 {
+                return Some(self.replace_patsub_pattern(
+                    &self.script_name_value(),
+                    &pattern,
+                    &replacement,
+                    global,
+                ));
+            }
             return Some(
                 self.shell_state
                     .positional_window()
@@ -476,6 +488,26 @@ impl Executor {
         let indirect_name = var_name.strip_prefix('!')?;
         if let Some(target_name) = self.nameref_target_name(indirect_name) {
             return Some(self.replace_patsub_pattern(&target_name, pattern, replacement, global));
+        }
+
+        // VALID_INDIR_PARAM specials and positional digits
+        // (subst.c:7839-7881 parameter_brace_find_indir): t is the
+        // parameter the source VALUE names and the patsub applies to
+        // that parameter — `${!?/a/Q}` with $?=0 is `${0/a/Q}`. An env
+        // lookup of `?` sees no cell, so the generic path below would
+        // return NULL and render empty.
+        if indirect_name.len() == 1 && matches!(indirect_name, "#" | "?" | "@" | "*")
+            || !indirect_name.is_empty() && indirect_name.chars().all(|c| c.is_ascii_digit())
+        {
+            let Some(t) = self.indirect_holder_target_name(indirect_name) else {
+                return Some(String::new());
+            };
+            if !Self::is_valid_indirect_target(&t) {
+                return Some(String::new());
+            }
+            let rep = if global { "//" } else { "/" };
+            let inner = format!("{t}{rep}{pattern}/{replacement}");
+            return self.expand_braced_replacement_parameter(&inner);
         }
 
         let target_expr = self.shell_state.env_vars.get(indirect_name)?;
