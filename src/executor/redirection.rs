@@ -379,6 +379,19 @@ struct OutputFdState {
     /// fd an alias chain resolves to): the handle the first alias's
     /// flush opened, reused by every other alias of the same binding.
     path_handle_cache: std::cell::RefCell<HashMap<u32, std::rc::Rc<std::fs::File>>>,
+    /// rubash#3828: the walk's own opens, by redirect-list position —
+    /// the FileFd each plain-file output entry opened (the SharedFile
+    /// arm below). GNU opens each redirect target exactly once per
+    /// entry (redir.c do_redirections); a consumer that must bind the
+    /// target a second time (the external spawn, whose preflight IS
+    /// this walk) takes the description from here instead of
+    /// re-opening by path — a target created with a mode lacking
+    /// owner-write fails the second open with EACCES although the
+    /// single open succeeds. Only plain filesystem targets record
+    /// here (fd-alias / synthetic / device arms keep their own
+    /// opens); routing walks ignore the map (their state is
+    /// discarded).
+    preopened: HashMap<usize, std::rc::Rc<crate::executor::fd_table::FileFd>>,
 }
 
 impl Executor {
@@ -1808,14 +1821,29 @@ impl Executor {
         Ok(Some((stdout, stderr)))
     }
 
-    pub(in crate::executor) fn command_output_redirect_fails(
+    /// rubash#3828: the external spawn's preflight walk, handing
+    /// back the walk's own opens, by redirect-list position (see
+    /// `OutputFdState::preopened`): the external spawn's preflight
+    /// IS this walk, so the spawn binds these descriptions instead
+    /// of re-opening each target by path — a target created with a
+    /// mode lacking owner-write fails the second open with EACCES
+    /// although the single open succeeds (GNU redir.c
+    /// do_redirections opens once per entry).
+    pub(in crate::executor) fn command_output_redirect_fails_with_preopened(
         &mut self,
         cmd: &CommandNode,
-    ) -> Result<bool, ExecuteError> {
+    ) -> Result<
+        (
+            bool,
+            HashMap<usize, std::rc::Rc<crate::executor::fd_table::FileFd>>,
+        ),
+        ExecuteError,
+    > {
         self.command_output_redirect_fails_impl(cmd, false)
     }
 
-    /// Pipeline-stage twin of [`Self::command_output_redirect_fails`]:
+    /// Pipeline-stage twin of
+    /// [`Self::command_output_redirect_fails_with_preopened`]:
     /// GNU binds the element's fd 1 to the stage pipe BEFORE its
     /// do_redirections run (execute_cmd.c execute_pipeline; the dup2
     /// order redir.c:1169-1170), so a `/dev/fd/1` / `/dev/stdout`
@@ -1844,7 +1872,7 @@ impl Executor {
         // applies, judges, and undoes — the same order the plain
         // funnel's gates see (applier first, gate second).
         if !command_has_dynamic_fd_var_redirects(cmd) {
-            return self.command_output_redirect_fails_impl(cmd, true);
+            return Ok(self.command_output_redirect_fails_impl(cmd, true)?.0);
         }
         // rubash#2629: this bracket is a verdict-only pass on the
         // PARENT executor — the stage element's own applier run is
@@ -1856,7 +1884,9 @@ impl Executor {
         let fd_var_walk_undoable = self.redirect_walk_is_undoable(cmd);
         let verdict = match self.apply_dynamic_fd_var_redirects(cmd, true, fd_var_walk_undoable) {
             Ok(false) => {
-                let result = self.command_output_redirect_fails_impl(cmd, true);
+                let result = self
+                    .command_output_redirect_fails_impl(cmd, true)
+                    .map(|(failed, _)| failed);
                 self.undo_child_fd_var_redirects();
                 result
             }
@@ -1877,7 +1907,13 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
         pipeline_stage: bool,
-    ) -> Result<bool, ExecuteError> {
+    ) -> Result<
+        (
+            bool,
+            HashMap<usize, std::rc::Rc<crate::executor::fd_table::FileFd>>,
+        ),
+        ExecuteError,
+    > {
         let mut state = self.command_output_fd_state();
         if pipeline_stage {
             state.defer_stdout_writes = true;
@@ -1888,9 +1924,9 @@ impl Executor {
             state.preflight_stage_stdio = true;
         }
         if !self.apply_ordered_output_redirects(cmd, &mut state)? {
-            return Ok(false);
+            return Ok((false, state.preopened));
         }
-        Ok(state.redirect_failed)
+        Ok((state.redirect_failed, state.preopened))
     }
 
     /// The redirect in `cmd`'s parse-order list whose open(2) failure
@@ -2599,6 +2635,7 @@ impl Executor {
             first_open_error: std::cell::RefCell::new(None),
             shared_with: HashMap::new(),
             path_handle_cache: std::cell::RefCell::new(HashMap::new()),
+            preopened: HashMap::new(),
         };
         state.fds.insert(1, OutputTarget::Stdout);
         state.fds.insert(2, OutputTarget::Stderr);
@@ -3698,14 +3735,25 @@ impl Executor {
             } else if let Some(file) = open_file {
                 // rubash#3828: the flush writes through the walk's
                 // own open — never re-opens by path (see the
-                // open_result match above).
-                state.fds.insert(
-                    fd,
-                    OutputTarget::SharedFile(crate::executor::fd_table::FileFd::from_file(
-                        file,
-                        target.clone().into(),
-                    )),
+                // open_result match above). A plain filesystem
+                // target's description is also recorded by list
+                // position for a consumer that must bind it again
+                // (the external spawn, whose preflight IS this walk);
+                // every other class keeps its own open (the spawn
+                // re-opens it as today).
+                let file_fd = crate::executor::fd_table::FileFd::from_file(
+                    file,
+                    target.clone().into(),
                 );
+                if matches!(
+                    crate::special_paths::classify_special_path(target),
+                    crate::special_paths::SpecialPathClass::Filesystem
+                ) {
+                    state
+                        .preopened
+                        .insert(index, std::rc::Rc::clone(&file_fd));
+                }
+                state.fds.insert(fd, OutputTarget::SharedFile(file_fd));
             } else {
                 state.fds.insert(fd, OutputTarget::Path(target));
             }

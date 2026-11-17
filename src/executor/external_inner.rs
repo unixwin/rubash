@@ -830,11 +830,11 @@ impl Executor {
             }
             process.current_dir(directory);
         }
-        self.apply_external_redirects(cmd, &mut process)?;
+        self.apply_external_redirects(cmd, &mut process, None)?;
         // rubash#1832: the environment was composed to finality by
         // the env emulation above — the seam must not stamp SHLVL
         // over it (env_composed_final).
-        self.spawn_external_process(cmd, &program, process, used_shell, dev_ops, true)
+        self.spawn_external_process(cmd, &program, process, used_shell, dev_ops, true, None)
     }
 
     fn parse_env_command_args(
@@ -1335,7 +1335,12 @@ impl Executor {
             return Ok(());
         }
 
-        if self.command_output_redirect_fails(cmd)? {
+        // rubash#3828: the gate's own opens ride along — the spawn
+        // binds them instead of re-opening each target by path (GNU
+        // redir.c do_redirections opens once per entry).
+        let (redirect_failed, mut preopened) =
+            self.command_output_redirect_fails_with_preopened(cmd)?;
+        if redirect_failed {
             return Ok(());
         }
 
@@ -1608,7 +1613,7 @@ impl Executor {
         // G-02: children are born in the session cwd, not the process cwd.
         self.stamp_spawn_cwd(&mut process);
         self.apply_external_environment(cmd, &mut process, &spawn_program);
-        self.apply_external_redirects(cmd, &mut process)?;
+        self.apply_external_redirects(cmd, &mut process, Some(&mut preopened))?;
         // A retargeted ENOEXEC spawn takes the find_shell spawn
         // shape (used_shell = true, bookkeeping keyed on the script):
         // the prepared Command's payload is this binary, not
@@ -1623,6 +1628,7 @@ impl Executor {
             used_shell || enoexec_lead.is_some(),
             dev_ops,
             false,
+            Some(&mut preopened),
         )
     }
 
@@ -3468,8 +3474,14 @@ impl Executor {
         cmd: &CommandNode,
         process: &mut Command,
         stage_stdio: Option<&StageStdioContext>,
+        preopened: Option<
+            &mut std::collections::HashMap<
+                usize,
+                std::rc::Rc<crate::executor::fd_table::FileFd>,
+            >,
+        >,
     ) -> Vec<crate::fd::HANDLE> {
-        let delivery = self.collect_external_fd_delivery(cmd, process, stage_stdio, None);
+        let delivery = self.collect_external_fd_delivery(cmd, process, stage_stdio, preopened);
         delivery.pins.register(process);
         delivery.parent_side_dups
     }
@@ -4990,12 +5002,24 @@ impl Executor {
         // fact; the direct disk-command path composes from shell
         // state and passes false.
         env_composed_final: bool,
+        // rubash#3828: descriptions the caller's preflight walk
+        // already opened for this list, by redirect position (see
+        // `OutputFdState::preopened`) — the fd>=3 delivery adopts
+        // them instead of re-opening by path. None when no preflight
+        // ran (the `env` leg, the async spawn paths).
+        preopened: Option<
+            &mut std::collections::HashMap<
+                usize,
+                std::rc::Rc<crate::executor::fd_table::FileFd>,
+            >,
+        >,
     ) -> Result<(), ExecuteError> {
         // rubash#2255: the fd delivery (ambient table stamps, the
         // command's own numbered redirects, the unix pin
         // registration) is shared with the sequential pipeline stage
         // spawner — see apply_external_fd_delivery.
-        let parent_side_dups = self.apply_external_fd_delivery(cmd, &mut process, None);
+        let parent_side_dups =
+            self.apply_external_fd_delivery(cmd, &mut process, None, preopened);
         // rubash#2398: the job-control channel (see job_control_wait)
         // claims a plain interactive foreground spawn end to end —
         // the child leads its own process group (pre_exec below), the
@@ -5485,7 +5509,7 @@ impl Executor {
                                 // the record moves into the recursive
                                 // spawn below, still armed.)
                                 if let Err(error) =
-                                    self.apply_external_redirects(cmd, &mut exe_process)
+                                    self.apply_external_redirects(cmd, &mut exe_process, None)
                                 {
                                     dev_ops.disarm_finish();
                                     return Err(error);
@@ -5497,6 +5521,7 @@ impl Executor {
                                     true,
                                     dev_ops,
                                     env_composed_final,
+                                    None,
                                 );
                             }
                         }
@@ -5513,7 +5538,9 @@ impl Executor {
                         // rubash#2602: same disarm as the re-entry
                         // spawn above — a redirect-setup failure means
                         // no child ever ran.
-                        if let Err(error) = self.apply_external_redirects(cmd, &mut shell_process) {
+                        if let Err(error) =
+                            self.apply_external_redirects(cmd, &mut shell_process, None)
+                        {
                             dev_ops.disarm_finish();
                             return Err(error);
                         }
@@ -5524,6 +5551,7 @@ impl Executor {
                             true,
                             dev_ops,
                             env_composed_final,
+                            None,
                         );
                     }
                 }

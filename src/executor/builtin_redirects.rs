@@ -99,7 +99,7 @@ impl Executor {
         cmd: &CommandNode,
         created: Option<&mut Vec<std::path::PathBuf>>,
     ) -> Result<bool, ExecuteError> {
-        if let Some(error) = self.redirect_setup_open_error(cmd, created)? {
+        if let Some(error) = self.redirect_setup_open_error(cmd, created, None)? {
             let mut line = Vec::new();
             let _ = writeln!(
                 &mut line,
@@ -160,9 +160,10 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
         mut created: Option<&mut Vec<std::path::PathBuf>>,
+        mut opened_positions: Option<&mut std::collections::HashSet<usize>>,
     ) -> Result<Option<io::Error>, ExecuteError> {
         use crate::parser::RedirectKind;
-        for redirect in &cmd.redirects {
+        for (position, redirect) in cmd.redirects.iter().enumerate() {
             if redirect.fd_var.is_some()
                 || crate::executor::support_names::is_injected_group_redirect(redirect)
             {
@@ -274,23 +275,48 @@ impl Executor {
                     }
                     // On a FIFO the create probe is a no-op whose
                     // open consumes the bind's rendezvous pairing
-                    // (rubash#1820) — probe_output_redirect carves
-                    // that out.
-                    crate::executor::shell_options::probe_output_redirect(
+                    // (rubash#1820) — probe_output_redirect_file
+                    // carves that out. The File-returning twin runs
+                    // the same probe; Some(File) marks a plain
+                    // filesystem target the probe really opened, so
+                    // the mirror below skips its own re-open of this
+                    // position (rubash#3828).
+                    match crate::executor::shell_options::probe_output_redirect_file(
                         self,
                         &target,
                         redirect.clobber,
-                    )
+                    ) {
+                        Ok(Some(_file)) => {
+                            if let Some(positions) = opened_positions.as_deref_mut() {
+                                positions.insert(position);
+                            }
+                            Ok(())
+                        }
+                        Ok(None) => Ok(()),
+                        Err(error) => Err(error),
+                    }
                 }
                 RedirectKind::Append | RedirectKind::CombinedAppend => {
                     if !plain_file_target {
                         continue;
                     }
-                    crate::executor::shell_options::probe_output_redirect_append(
+                    // Same File-returning twin as the truncating arm
+                    // above: Some(File) marks a plain filesystem
+                    // target the probe really opened (rubash#3828).
+                    match crate::executor::shell_options::probe_output_redirect_append_file(
                         self,
                         Some(redirect),
                         &target,
-                    )
+                    ) {
+                        Ok(Some(_file)) => {
+                            if let Some(positions) = opened_positions.as_deref_mut() {
+                                positions.insert(position);
+                            }
+                            Ok(())
+                        }
+                        Ok(None) => Ok(()),
+                        Err(error) => Err(error),
+                    }
                 }
                 RedirectKind::Input => {
                     if !plain_file_target {
@@ -315,9 +341,29 @@ impl Executor {
                     } else if !plain_file_target {
                         continue;
                     } else {
-                        self.probe_input_redirect_readwrite(&target)
-                            .map_err(|e| crate::posix_errors::path_error(&target, e))
-                            .map(|_| ())
+                        // rubash#3828: a plain filesystem target the
+                        // probe really opened is recorded so the
+                        // mirror below skips its own re-probe of this
+                        // position; every other class (devices,
+                        // synthetic /proc, fd aliases) keeps its own
+                        // probe — the mirror's re-probe of those
+                        // cannot fail EACCES on a created file.
+                        match self.probe_input_redirect_readwrite(&target) {
+                            Ok(_file) => {
+                                if matches!(
+                                    crate::special_paths::classify_special_path(&target),
+                                    crate::special_paths::SpecialPathClass::Filesystem
+                                ) {
+                                    if let Some(positions) = opened_positions.as_deref_mut() {
+                                        positions.insert(position);
+                                    }
+                                }
+                                Ok(())
+                            }
+                            Err(error) => {
+                                Err(crate::posix_errors::path_error(&target, error))
+                            }
+                        }
                     }
                 }
                 _ => continue,
@@ -659,13 +705,23 @@ impl Executor {
         // external-file paths use, FIRST, so list order decides which
         // failure is fatal: an earlier entry's side effect stands and a
         // later entry is never opened. The walk's opens of the fd 0/1/2
-        // entries are repeated by the mirror code below; a repeated
-        // truncate/probe is unobservable, and redirect targets are
-        // memoized per command, so no expansion runs twice. The error is
-        // already path_error-shaped, so it joins the IoError channel the
-        // mirror failures use and every caller renders and marks it
-        // exactly like an fd 0/1/2 failure.
-        if let Some(error) = self.redirect_setup_open_error(cmd, None)? {
+        // entries are NOT repeated by the mirror code below when the
+        // walk really opened the plain file (rubash#3828): the walk's
+        // open IS the entry's one open, and a second open of a target
+        // created without owner-write fails EACCES although the single
+        // open succeeds — so the mirror skips its own open at every
+        // recorded position and only re-opens the entries the walk
+        // did not open (FIFO/net/special classes, whose mirror open
+        // is the single pairing open; input entries, whose mirror
+        // probe may resolve a different in-list binding). Redirect
+        // targets are memoized per command, so no expansion runs
+        // twice. The error is already path_error-shaped, so it joins
+        // the IoError channel the mirror failures use and every caller
+        // renders and marks it exactly like an fd 0/1/2 failure.
+        let mut opened_positions = std::collections::HashSet::new();
+        if let Some(error) =
+            self.redirect_setup_open_error(cmd, None, Some(&mut opened_positions))?
+        {
             return Err(ExecuteError::IoError(error));
         }
         let redirect_failed = false;
@@ -706,9 +762,12 @@ impl Executor {
                 // fd alias / synthetic /proc by write class), plain
                 // files through the same raw open as before
                 // (rubash#1935/#1963/#1964) — with the same
-                // path_error shaping.
-                self.probe_input_redirect_readwrite(&target)
-                    .map_err(|e| crate::posix_errors::path_error(&target, e))?;
+                // path_error shaping. Skipped when the walk above
+                // already opened this plain-file position (rubash#3828).
+                if !opened_positions.contains(&self.redirect_list_position(cmd, redirect)) {
+                    self.probe_input_redirect_readwrite(&target)
+                        .map_err(|e| crate::posix_errors::path_error(&target, e))?;
+                }
             } else {
                 // rubash#2329: positional — a spelling target's
                 // source may be bound by this command's own list.
@@ -748,7 +807,11 @@ impl Executor {
                 let path = target.strip_prefix('&').unwrap_or(&target);
                 self.create_redirect_output_for(Some(redirect), path, redirect.clobber)?;
             } else {
-                self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?;
+                // Skipped when the walk above already opened this
+                // plain-file position (rubash#3828).
+                if !opened_positions.contains(&self.redirect_list_position(cmd, redirect)) {
+                    self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?;
+                }
             }
         }
 
@@ -768,9 +831,13 @@ impl Executor {
                 // error needs the same path_error shaping as the truncating
                 // open, or the renderer's message-only text drops the word
                 // (issue #518 background/append repro). The open itself
-                // classifies through the registry (rubash#1964).
-                self.open_append_target_for(Some(redirect), &target)
-                    .map_err(|e| crate::posix_errors::path_error(&target, e))?;
+                // classifies through the registry (rubash#1964). Skipped
+                // when the walk above already opened this plain-file
+                // position (rubash#3828).
+                if !opened_positions.contains(&self.redirect_list_position(cmd, redirect)) {
+                    self.open_append_target_for(Some(redirect), &target)
+                        .map_err(|e| crate::posix_errors::path_error(&target, e))?;
+                }
             }
         }
 
@@ -787,7 +854,11 @@ impl Executor {
                 && !is_null_device(&target)
                 && redirect_target_fd(&target).is_none()
             {
-                self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?;
+                // Skipped when the walk above already opened this
+                // plain-file position (rubash#3828).
+                if !opened_positions.contains(&self.redirect_list_position(cmd, redirect)) {
+                    self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?;
+                }
             }
         }
 
@@ -802,9 +873,13 @@ impl Executor {
             if redirect.fd_var.is_some() {
             } else if !is_closed_redirect_target(&target) && redirect_target_fd(&target).is_none() {
                 // Classified append open (rubash#1964), same
-                // path_error shaping as the fd-1 arm above.
-                self.open_append_target_for(Some(redirect), &target)
-                    .map_err(|e| crate::posix_errors::path_error(&target, e))?;
+                // path_error shaping as the fd-1 arm above. Skipped
+                // when the walk above already opened this plain-file
+                // position (rubash#3828).
+                if !opened_positions.contains(&self.redirect_list_position(cmd, redirect)) {
+                    self.open_append_target_for(Some(redirect), &target)
+                        .map_err(|e| crate::posix_errors::path_error(&target, e))?;
+                }
             }
         }
 
@@ -843,7 +918,15 @@ impl Executor {
                     } else if let Some(source_fd) = dup_spelling_source_fd(&target) {
                         self.validate_builtin_dup_source(cmd, index, source_fd)?;
                     } else if !target.starts_with("<(") && !target.starts_with(">(") {
-                        self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?;
+                        // Skipped when the walk above already opened
+                        // this plain-file position (rubash#3828).
+                        if !opened_positions.contains(&index) {
+                            self.create_redirect_output_for(
+                                Some(redirect),
+                                &target,
+                                redirect.clobber,
+                            )?;
+                        }
                     }
                 }
                 crate::parser::RedirectKind::Append => {
@@ -856,8 +939,12 @@ impl Executor {
                         // session_path anchoring the fd-1 arm always
                         // had applies here too — the previous raw
                         // fallback opened against the process cwd.
-                        self.open_append_target_for(Some(redirect), &target)
-                            .map_err(|e| crate::posix_errors::path_error(&target, e))?;
+                        // Skipped when the walk above already opened
+                        // this plain-file position (rubash#3828).
+                        if !opened_positions.contains(&index) {
+                            self.open_append_target_for(Some(redirect), &target)
+                                .map_err(|e| crate::posix_errors::path_error(&target, e))?;
+                        }
                     }
                 }
                 crate::parser::RedirectKind::Input => {
@@ -884,8 +971,12 @@ impl Executor {
                         // entries by their write class
                         // (rubash#1935/#1963). `&N` dup spellings stay
                         // excluded: they name no file to open.
-                        self.probe_input_redirect_readwrite(&target)
-                            .map_err(|e| crate::posix_errors::path_error(&target, e))?;
+                        // Skipped when the walk above already opened
+                        // this plain-file position (rubash#3828).
+                        if !opened_positions.contains(&index) {
+                            self.probe_input_redirect_readwrite(&target)
+                                .map_err(|e| crate::posix_errors::path_error(&target, e))?;
+                        }
                     }
                 }
                 crate::parser::RedirectKind::DuplicateInput

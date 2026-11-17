@@ -5216,30 +5216,16 @@ pub(in crate::executor) fn probe_output_redirect_file(
     executor.create_redirect_output(target, clobber).map(Some)
 }
 
-/// Append-arm twin of [`probe_output_redirect`]. The open itself
-/// classifies through the registry (Executor::open_append_target,
-/// rubash#1964): the probe IS an append open, so it must succeed and
-/// fail for exactly the shapes the bind's open does — a net target
-/// connects, a synthetic /proc entry answers by write class, a
-/// closed fd alias fails ENOENT.
+/// rubash#3828: Append-arm twin of [`probe_output_redirect_file`]
+/// — same contract: Some(File) only for plain filesystem targets;
+/// None for the FIFO/net carve-outs and every other special class
+/// (the probe still runs for its error surfacing; the bind
+/// re-opens the class as today). The open classifies through the
+/// registry (Executor::open_append_target, rubash#1964).
 ///
 /// `redirect` is the node being probed: with it, both opens (the FIFO
 /// stat and the append open) resolve the node's own recorded transport
 /// spelling instead of the plain string funnel (rubash#3372).
-pub(in crate::executor) fn probe_output_redirect_append(
-    executor: &Executor,
-    redirect: Option<&crate::parser::Redirect>,
-    target: &str,
-) -> std::io::Result<()> {
-    probe_output_redirect_append_file(executor, redirect, target).map(|_| ())
-}
-
-/// rubash#3828: File-returning twin of
-/// [`probe_output_redirect_append`] — same contract as
-/// [`probe_output_redirect_file`]: Some(File) only for plain
-/// filesystem targets; None for the FIFO/net carve-outs and every
-/// other special class (the probe still runs for its error
-/// surfacing; the bind re-opens the class as today).
 pub(in crate::executor) fn probe_output_redirect_append_file(
     executor: &Executor,
     redirect: Option<&crate::parser::Redirect>,

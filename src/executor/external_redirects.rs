@@ -186,6 +186,12 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
         process: &mut Command,
+        preopened: Option<
+            &mut std::collections::HashMap<
+                usize,
+                std::rc::Rc<crate::executor::fd_table::FileFd>,
+            >,
+        >,
     ) -> Result<(), ExecuteError> {
         self.apply_external_stdin_redirect(cmd, process)?;
         // niubash#144: for EXTERNAL children the merged-output family gets
@@ -199,7 +205,7 @@ impl Executor {
         // rubash#2235: a fresh command recomputes its own numbered
         // input bindings (see Executor::own_input_bindings).
         self.own_input_bindings.clear();
-        match self.plan_external_stdio(cmd)? {
+        match self.plan_external_stdio(cmd, preopened)? {
             Some(plan) => {
                 let ExternalStdioPlan {
                     stdout,
@@ -484,6 +490,12 @@ impl Executor {
     fn plan_external_stdio(
         &mut self,
         cmd: &CommandNode,
+        mut preopened: Option<
+            &mut std::collections::HashMap<
+                usize,
+                std::rc::Rc<crate::executor::fd_table::FileFd>,
+            >,
+        >,
     ) -> Result<Option<ExternalStdioPlan>, ExecuteError> {
         use crate::parser::RedirectKind;
 
@@ -711,7 +723,12 @@ impl Executor {
                 RedirectKind::CombinedOutput | RedirectKind::CombinedAppend => {
                     // `&>file` / `&>>file` (make_cmd.c r_err_and_out family):
                     // one open, fd 2 dups it (redir.c:1030-1037).
-                    let Some(file) = self.open_external_combined_target(&target, redirect)? else {
+                    let Some(file) = self.adopt_preopened_combined_target(
+                        position,
+                        preopened.as_deref_mut(),
+                        &target,
+                        redirect,
+                    )? else {
                         return Ok(None);
                     };
                     let stderr = file.try_clone().ok().map(ExternalStdioSlot::Handle);
@@ -781,7 +798,12 @@ impl Executor {
                             // precheck; do not open "" here.
                             return Ok(None);
                         }
-                        let Some(file) = self.open_external_combined_target(word, redirect)? else {
+                        let Some(file) = self.adopt_preopened_combined_target(
+                            position,
+                            preopened.as_deref_mut(),
+                            word,
+                            redirect,
+                        )? else {
                             return Ok(None);
                         };
                         let stderr = file.try_clone().ok().map(ExternalStdioSlot::Handle);
@@ -888,7 +910,12 @@ impl Executor {
                         tracked_high_fds.insert(fd, ExternalStdioSlot::EnvChannelFile);
                         continue;
                     }
-                    let Some(file) = self.open_external_combined_target(&target, redirect)? else {
+                    let Some(file) = self.adopt_preopened_combined_target(
+                        position,
+                        preopened.as_deref_mut(),
+                        &target,
+                        redirect,
+                    )? else {
                         return Ok(None);
                     };
                     let slot = ExternalStdioSlot::Handle(file);
@@ -995,6 +1022,39 @@ impl Executor {
             capture_generation,
             closed_fds,
         }))
+    }
+
+    /// rubash#3828: adopt the gate's own open for this list position
+    /// when the preflight recorded one (see
+    /// `OutputFdState::preopened`) — the walk already opened this
+    /// plain-file target, so a second open by path would fail EACCES
+    /// when the created mode lacks owner-write, although GNU opens
+    /// each redirect target exactly once per entry (redir.c
+    /// do_redirections). The adopted description is duplicated (the
+    /// gate keeps its own handle); a position with no recorded open
+    /// falls through to `open_external_combined_target` unchanged
+    /// (fd-alias / synthetic / device targets, and callers whose
+    /// preflight never ran).
+    fn adopt_preopened_combined_target(
+        &self,
+        position: usize,
+        mut preopened: Option<
+            &mut std::collections::HashMap<
+                usize,
+                std::rc::Rc<crate::executor::fd_table::FileFd>,
+            >,
+        >,
+        target: &str,
+        redirect: &Redirect,
+    ) -> Result<Option<File>, ExecuteError> {
+        if let Some(file_fd) = preopened
+            .as_deref_mut()
+            .and_then(|opened| opened.remove(&position))
+        {
+            let dup = crate::fd::duplicate_handle(file_fd.handle)?;
+            return Ok(Some(crate::fd::handle_to_file(dup)));
+        }
+        self.open_external_combined_target(target, redirect)
     }
 
     /// Opens one output target for the external stdio plan: `/dev/null` maps

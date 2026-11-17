@@ -3315,7 +3315,8 @@ impl Executor {
     /// order and stops at the first failing step (redir.c:255-260): the
     /// first `M>&N`/`M<&N` (or `M>&N-`/`M<&N-` move) whose source fd N is
     /// not open — judged with the same opened/closed tracking as the
-    /// simple-command preflight (`command_output_redirect_fails` /
+    /// simple-command preflight
+    /// (`command_output_redirect_fails_with_preopened` /
     /// `dup_source_fd_open`) — returns `(index, diagnostic name)`. Pure:
     /// opens nothing, dups nothing.
     ///
