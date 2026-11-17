@@ -9,7 +9,8 @@ use crate::executor::{
     is_shell_name_char, mark_env_name, next_random_from_state, next_srandom_from_state,
     parse_array_subscript, resolve_indexed_array_subscript, set_process_env,
     sync_shell_assignment_process_env, unmark_env_name, ARRAY_VARS, ASSOC_128_VARS, ASSOC_VARS,
-    NAMEREF_VARS, READONLY_VARS, SECONDS_OFFSET, SHELL_START_EPOCH, UNSET_DYNAMIC_VARS,
+    DECLARED_UNSET_VARS, NAMEREF_VARS, READONLY_VARS, SECONDS_OFFSET, SHELL_START_EPOCH,
+    UNSET_DYNAMIC_VARS,
 };
 
 impl ConditionalArithParser<'_> {
@@ -148,12 +149,48 @@ impl ConditionalArithParser<'_> {
         }
     }
 
+    /// GNU expr.c:1183-1190 expr_streval: the variable cell is looked up
+    /// first — for an array reference (`e == ']'`) `array_variable_part`
+    /// finds the ARRAY variable before any subscript is evaluated — and
+    /// `v == 0 || invisible_p (v)` under `set -u` raises `err_unboundvar`
+    /// naming the variable (`array_variable_name` for a reference). Absent, or declared without a
+    /// value (`declare -a e` / `declare -A h`: att_invisible, rubash
+    /// `DECLARED_UNSET_VARS` over an empty mirror), is unbound; an
+    /// assigned empty array (`h=()`) is visible and reads its element
+    /// as 0. Returns true (category + name recorded) on a trap.
+    fn trap_unbound_variable_cell(&mut self, name: &str) -> bool {
+        let unbound = match self.env_vars.get(name) {
+            None => {
+                super::super::arithmetic_name_is_unbound(name, self.env_vars)
+                    && std::env::var(name).is_err()
+            }
+            Some(value) => {
+                value.is_empty() && is_marked_var(self.env_vars, DECLARED_UNSET_VARS, name)
+            }
+        };
+        if unbound && crate::builtins::set::shell_option_enabled(self.env_vars, "nounset") {
+            self.error_category = Some(super::super::ArithmeticErrorCategory::UnboundVariable);
+            super::super::record_arith_unbound_name(name.to_string());
+            return true;
+        }
+        false
+    }
+
     pub(super) fn lvalue_value(&mut self, lvalue: &ArithLValue) -> Option<i128> {
         // GNU expr.c:1164-1167 expr_streval: under noeval the whole read
         // (array lookup, subscript evaluation, dynamic special variables)
         // short-circuits to 0 before any side effect runs.
         if self.noeval > 0 {
             return Some(0);
+        }
+        if let ArithLValue::Indexed { name, .. }
+        | ArithLValue::IndexedRaw { name, .. }
+        | ArithLValue::Assoc { name, .. }
+        | ArithLValue::AssocEmptyKey { name, .. } = lvalue
+        {
+            if self.trap_unbound_variable_cell(name) {
+                return None;
+            }
         }
         match lvalue {
             ArithLValue::Scalar { name, .. } => self.variable_value(name),
@@ -283,13 +320,24 @@ impl ConditionalArithParser<'_> {
         if stripped.trim().is_empty() {
             return Some(0);
         }
-        let (value, _cat) = eval_mutable_arith_value_with_random(
+        let (value, category) = eval_mutable_arith_value_with_random(
             &stripped,
             self.env_vars,
             self.random_state,
             self.dynamic_values,
             self.cells,
         );
+        // GNU expr.c:1190-1216 expr_streval: an unbound read inside the
+        // subscript's own evalexp frame does not evalerror — it
+        // err_unboundvar()s and jumps to top level (FORCE_EOF) straight
+        // out of every enclosing frame, so array_expand_index never
+        // sees a failed subscript. Carry the category out unchanged
+        // (the name already rides ARITH_UNBOUND_NAME) instead of
+        // turning it into a subscript evalerror.
+        if category == Some(super::super::ArithmeticErrorCategory::UnboundVariable) {
+            self.error_category = category;
+            return None;
+        }
         self.adopt_error(super::super::take_arith_eval_error());
         // Nested-frame diagnostics already sit in the shared
         // evaluation-order event log at their production points
@@ -522,6 +570,12 @@ impl ConditionalArithParser<'_> {
         // must NOT fall through to the serialized storage text, which is
         // not an expression (niubash#508: `a=(); $((a))` reported
         // `error token is "()"`).
+        // GNU expr.c:1190 for a bare name: find_variable's cell is
+        // `invisible_p` when declared without a value (`declare -a e`),
+        // which traps under nounset exactly like an absent name.
+        if self.trap_unbound_variable_cell(name) {
+            return None;
+        }
         if is_marked_var(self.env_vars, ARRAY_VARS, name) {
             return match self
                 .env_vars
