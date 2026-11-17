@@ -263,11 +263,16 @@ fn skip_backtick(chars: &[char], mut cursor: usize) -> usize {
 fn skip_parenthesized(chars: &[char], mut cursor: usize) -> usize {
     let mut depth = 1usize;
     let mut quote = None;
+    // GNU read_token (parse.y:3630-3643): `#` introduces a comment only
+    // at a token boundary — after whitespace, a separator (`;&|()<>`),
+    // or at the start (here, just after the `(` that opened this unit).
+    let mut token_boundary = true;
     while cursor < chars.len() {
         let ch = chars[cursor];
         cursor += 1;
         if ch == '\\' {
             cursor = cursor.saturating_add(1);
+            token_boundary = false;
             continue;
         }
         if let Some(active) = quote {
@@ -278,15 +283,38 @@ fn skip_parenthesized(chars: &[char], mut cursor: usize) -> usize {
             }
             continue;
         }
+        // GNU parse.y:3631-3645 shell_getc: `#` at a token boundary
+        // discards to EOL; a quote character inside the comment is inert.
+        // Without this, the `'` in `# don't` opened a phantom quote that
+        // swallowed the closing `)` and the scan ran to EOF, so the
+        // enclosing `${...}` scan returned None and its closing `}` leaked
+        // into the default word (rubash#3823 d1). Deliberately
+        // comment-only: a heredoc inside this unit is left to the
+        // corrected paren scanner (`skip_parenthesized_unit_corrected`),
+        // which the word/expansion paths use; this minimal scanner must
+        // not grow a second heredoc implementation.
+        if ch == '#' && token_boundary {
+            while cursor < chars.len() && chars[cursor] != '\n' {
+                cursor += 1;
+            }
+            continue;
+        }
         if ch == char::from_u32(39).unwrap() || ch == char::from_u32(34).unwrap() {
             quote = Some(ch);
+            token_boundary = false;
         } else if ch == '(' {
             depth += 1;
+            token_boundary = true;
         } else if ch == ')' {
             depth -= 1;
             if depth == 0 {
                 return cursor;
             }
+            token_boundary = true;
+        } else if matches!(ch, ' ' | '\t' | '\n' | '\r' | ';' | '&' | '|' | '<' | '>') {
+            token_boundary = true;
+        } else {
+            token_boundary = false;
         }
     }
     chars.len()
@@ -375,6 +403,16 @@ mod tests {
     #[test]
     fn skips_opaque_command_and_arithmetic_substitutions() {
         let input = "${x:-$(printf '}') $((1 + 2)) `printf '}'`}";
+        let scan = scan_braced_parameter(input, PLAIN).unwrap();
+        assert_eq!(scan.end, input.len());
+    }
+
+    #[test]
+    fn comment_quote_inside_nested_comsub_does_not_swallow_closing_brace() {
+        // rubash#3823 d1: a `#` comment carrying an apostrophe inside a
+        // `$(...)` nested in `${...}` must not open a phantom quote — the
+        // scan must find the `${...}` closer, not run to EOF.
+        let input = "${x:-$(echo hi # don't\n)}";
         let scan = scan_braced_parameter(input, PLAIN).unwrap();
         assert_eq!(scan.end, input.len());
     }

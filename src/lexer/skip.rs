@@ -423,9 +423,22 @@ impl<'a> Lexer<'a> {
             // `( )` subshell.
             let mut term = true;
             let mut paren_depth = 0usize;
+            // Shell_getc token-boundary state for `#` comment recognition
+            // (parse.y:3631-3645): true at the body start and after a
+            // blank, newline, or operator (`;` `&` `|` `(` `)` `<` `>`);
+            // false inside a word. `term` above answers a different
+            // question (is `}` a group closer here) — after `echo hi `
+            // it is false while a `#` still comments — so the comment arm
+            // needs its own state, kept in lockstep with skip_funsub_body's
+            // `at_word_start` (#3813) and skip_cmd_subst's token_boundary.
+            // Without it an apostrophe inside a comment (`# don't`) opened
+            // a phantom single-quote that swallowed the rest of the input
+            // (rubash#3823 f1).
+            let mut token_boundary = true;
             while let Some(c) = self.advance() {
                 if escaped {
                     escaped = false;
+                    token_boundary = false;
                     continue;
                 }
                 if c == '\\' && !single {
@@ -433,6 +446,7 @@ impl<'a> Lexer<'a> {
                     if !double {
                         term = false;
                     }
+                    token_boundary = false;
                     continue;
                 }
                 if single {
@@ -445,6 +459,17 @@ impl<'a> Lexer<'a> {
                     if c == '"' {
                         double = false;
                     }
+                    continue;
+                }
+                // parse.y:3631 shell_getc: `#` at a token start discards to
+                // EOL; a quote character inside the comment is inert. The
+                // newline itself is left for the next iteration (the
+                // `;`/`&`/`|`/`\n` arm), which restores command position.
+                if c == '#' && token_boundary {
+                    while self.peek().is_some_and(|ch| ch != '\n') {
+                        self.advance();
+                    }
+                    token_boundary = true;
                     continue;
                 }
                 match c {
@@ -508,28 +533,40 @@ impl<'a> Lexer<'a> {
                         // (`X${...}Y', `$(x)y'); a terminator only a
                         // following `;'/`&'/newline can set.
                         term = false;
+                        token_boundary = false;
                     }
                     '\'' => {
                         single = true;
                         term = false;
+                        token_boundary = false;
                     }
                     '"' => {
                         double = true;
                         term = false;
+                        token_boundary = false;
                     }
                     '(' => {
                         paren_depth += 1;
                         term = false;
+                        token_boundary = true;
                     }
                     ')' if paren_depth > 0 => {
                         paren_depth -= 1;
                         // A closed outermost `( ... )` is a complete command.
                         term = paren_depth == 0;
+                        token_boundary = true;
+                    }
+                    // A bare `)` (no open subshell) is a metacharacter, not
+                    // word text: the next token starts after it.
+                    ')' => {
+                        term = false;
+                        token_boundary = true;
                     }
                     '{' if term && paren_depth == 0 => {
                         depth += 1;
                         // A command follows the opening brace.
                         term = true;
+                        token_boundary = true;
                     }
                     '}' if term && paren_depth == 0 => {
                         // parse.y:5407-5416 read_token_word: a word BEGINNING
@@ -544,13 +581,69 @@ impl<'a> Lexer<'a> {
                             // another separator (`${ { echo x; } }`).
                             depth -= 1;
                             term = true;
+                            token_boundary = true;
                             continue;
                         }
                         return;
                     }
-                    ';' | '&' | '|' | '\n' if paren_depth == 0 => term = true,
-                    ' ' | '\t' | '\r' => {}
-                    _ => term = false,
+                    // `<<<` is a herestring, not a heredoc: consume all
+                    // three `<` as the operator (same as skip_cmd_subst);
+                    // the word after it starts fresh.
+                    '<' if self.peek() == Some('<') && self.peek_after(1) == Some('<') => {
+                        self.advance();
+                        self.advance();
+                        token_boundary = true;
+                        term = false;
+                    }
+                    // Heredoc bodies are raw lines (make_cmd.c:512): a `}`
+                    // or a quote character inside the body must not move
+                    // this scan (rubash#3823 h2/h3). The helper consumes
+                    // the header, the body lines through the delimiter,
+                    // and (for an exact delimiter line) its newline, so
+                    // the next character begins a fresh token — and, at
+                    // funsub level, a `}` there is the body's closer.
+                    // `term` stays false inside a subshell (an inner
+                    // group's `}` must not read as this funsub's closer),
+                    // mirroring skip_funsub_body (#3813).
+                    '<' if self.peek() == Some('<') => {
+                        let _header_closes = self.skip_heredoc_in_command_substitution();
+                        token_boundary = true;
+                        if paren_depth == 0 {
+                            term = true;
+                        }
+                        continue;
+                    }
+                    // A redirection operator ends the previous word: the
+                    // target word starts here, so a `#` there comments
+                    // (parse.y:3631; `echo >#f` is a comment in GNU,
+                    // #2033). `term` is untouched — a `}` right after `>`
+                    // is the redirect's target word, not this body's
+                    // closer.
+                    '<' | '>' => {
+                        term = false;
+                        token_boundary = true;
+                    }
+                    // A separator is a token boundary at any depth (`#`
+                    // after `;` comments even inside `( ... )`), but it
+                    // restores command position only at funsub level —
+                    // `term` stays false inside a subshell (an inner
+                    // group's `}` must not read as this funsub's closer),
+                    // mirroring skip_funsub_body (#3813).
+                    ';' | '&' | '|' | '\n' if paren_depth == 0 => {
+                        term = true;
+                        token_boundary = true;
+                    }
+                    ';' | '&' | '|' | '\n' => {
+                        term = false;
+                        token_boundary = true;
+                    }
+                    ' ' | '\t' | '\r' => {
+                        token_boundary = true;
+                    }
+                    _ => {
+                        term = false;
+                        token_boundary = false;
+                    }
                 }
             }
             return;
