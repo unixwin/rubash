@@ -5844,6 +5844,7 @@ mod issue_1976 {
         assert_eq!(stdout, "rc=142\nline=[]\n", "stderr:\n{stderr}");
     }
 }
+#[cfg(unix)]
 mod issue_1584 {
     use super::*;
 
@@ -6003,6 +6004,7 @@ mod issue_1584 {
     }
 }
 
+#[cfg(unix)]
 mod issue_1582 {
     use super::*;
 

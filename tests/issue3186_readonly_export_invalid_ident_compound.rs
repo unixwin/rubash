@@ -18,9 +18,11 @@
 //!   stays `` `a[]': not a valid identifier ``, `declare -p 'a[]=x'`
 //!   stays `a[]=x: not found`, and export/readonly `a[]=x` stay
 //!   InvalidId (setattr.def does not split subscripts).
-//! - Residual (a), captain to rule: unquoted `declare -a 9bad=(x)` is a
-//!   GNU PARSE-time syntax error; rubash reports builtin InvalidId
-//!   (same rc=1, different text). The nail locks the InvalidId interim.
+//! - Residual (a), resolved by rubash#3495: unquoted `declare -a 9bad=(x)`
+//!   is a GNU PARSE-time syntax error (rc=2, whole script dies); the nail
+//!   below now expects that form. The InvalidId interim it used to lock is
+//!   gone — quoted `'9bad=(x)'` and paren-less `9bad=x` still report
+//!   InvalidId (rc=1, script continues), nailed in tests/issue3495_*.
 //! - Known remaining gap (REPORT §6): GNU also creates the empty array
 //!   (`declare -a a=()`) after the bad-subscript failure; this fix only
 //!   repairs the diagnostic, not the creation side effect.
@@ -128,13 +130,20 @@ fn declare_a_invalid_compound_subject_is_plain_word() {
 }
 
 #[test]
-fn declare_a_digit_leading_compound_unquoted_is_invalid_id() {
+fn declare_a_digit_leading_compound_unquoted_is_parse_error() {
+    // rubash#3495: the #3464 nail locked the InvalidId interim (rc=1, same
+    // diagnostic as the quoted form). GNU is a parse-time syntax error
+    // (rc=2, whole script dies), and the lexer now splits the word at the
+    // `(` (word.rs compound_assignment_start requires a legal-variable-
+    // starter first character, parse.y:5270 token_is_assignment via
+    // general.c:480 assignment()), so the parser reports it — the `echo`
+    // never runs.
     let dir = scratch("digit");
     let (stdout, stderr) = run_script(&dir, "declare -a 9bad=(x)\necho \"rc=$?\"\n");
-    assert_eq!(stdout, "rc=1\n");
+    assert_eq!(stdout, "");
     assert_eq!(
         stderr,
-        "SCRIPT: line 1: declare: `9bad=(x)': not a valid identifier\n"
+        "SCRIPT: line 1: syntax error near unexpected token `('\nSCRIPT: line 1: `declare -a 9bad=(x)'\n"
     );
 }
 

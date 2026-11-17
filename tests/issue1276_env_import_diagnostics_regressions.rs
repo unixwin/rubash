@@ -16,7 +16,10 @@
 //!
 //! Expectations verified byte-for-byte against GNU bash 5.3.20.
 
-use std::process::{Command, Stdio};
+use std::process::Command;
+
+#[cfg(unix)]
+use std::process::Stdio;
 
 /// Facet (1): the two GNU import warnings appear on stderr, nothing
 /// is injected, and calling the name is a plain 127.
