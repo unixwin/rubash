@@ -3531,6 +3531,16 @@ impl Executor {
     /// parse-error latch keeps the driver's own reporting stood down,
     /// so the execution screen never double-reports if the unit is
     /// reached anyway. Returns the abort status on a hit.
+    /// rubash#3306: whether the freshly parsed unit already carries a
+    /// hard command-substitution body error — the read-time verdict
+    /// GNU's parse_comsub reaches at the `)` that closed the
+    /// substitution (parse.y:4549-4555). The unclosed-input router and
+    /// the interactive pending check consult this so a doomed body
+    /// reports through the screen instead of the generic EOF route.
+    pub fn comsub_body_error_pending(&self, commands: &[CommandNode]) -> bool {
+        read_time_body_error(commands, 0).is_some()
+    }
+
     pub fn screen_comsub_bodies_at_read(&mut self, commands: &[CommandNode]) -> Option<i32> {
         let (command, body_text) = read_time_body_error(commands, 0)?;
         self.report_comsub_body_parse_error(&command, Some(&body_text));

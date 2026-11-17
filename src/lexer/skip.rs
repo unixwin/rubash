@@ -48,6 +48,17 @@ impl<'a> Lexer<'a> {
         // the paren depth it is never reset by a `|` or by a region re-arm,
         // only consumed by a `)`.
         let mut case_pattern_opener_depth = 0usize;
+        // rubash#3306: paren depth opened inside a case context while
+        // the pattern region is disarmed (clause body or `case … in`
+        // preamble) — GNU's `)` is the substitution's shell_eof_token
+        // only at body paren depth zero (parse.y:4519-4521).
+        let mut case_body_paren_depth = 0usize;
+        // rubash#3306: a `;;`/`;&`/`;;&` seen while the pattern region
+        // is armed is fatal in GNU's grammar — the clause terminator
+        // is only legal after a clause BODY. Once seen the case can
+        // never complete, so the next top-level `)` closes the
+        // substitution for the body parser's verdict.
+        let mut case_clause_terminator_in_pattern = false;
         // rubash#380: the last significant unquoted char fed to the case
         // word machine — the previous-token witness for the `esac`
         // pattern-text rule (parse.y:3181/3183).
@@ -162,7 +173,14 @@ impl<'a> Lexer<'a> {
                             case_pattern_content = true;
                         }
                     }
-                    ';' => {}
+                    ';' => {
+                        // rubash#3306: `;;`/`;&`/`;;&` while the pattern
+                        // region is armed is a clause terminator in
+                        // pattern position — fatal in GNU's grammar.
+                        if case_pattern_paren_depth == 0 && matches!(next, Some(';') | Some('&')) {
+                            case_clause_terminator_in_pattern = true;
+                        }
+                    }
                     c if c.is_whitespace() => {}
                     _ => case_pattern_content = true,
                 }
@@ -192,16 +210,30 @@ impl<'a> Lexer<'a> {
                 // rubash#3307: or while the armed pattern region has
                 // no content yet (the gate's reclassification
                 // predicate); a pending opener owns the `)` instead.
+                // rubash#3306: or at body paren depth zero with the
+                // pattern region disarmed (a clause body or the
+                // `case … in` preamble — GNU's shell_eof_token,
+                // parse.y:4519-4521), or inside a case already doomed
+                // by a pattern-position clause terminator.
                 ')' if (case_depth == 0
                     || matches!(case_in_stage, 1 | 2)
                     || (case_in_stage == 3 && !case_pattern_seen)
-                    || (region_before && !content_before))
+                    || (region_before && !content_before)
+                    || (case_depth > 0
+                        && case_body_paren_depth == 0
+                        && (!region_before || case_clause_terminator_in_pattern)))
                     && opener_depth_before == 0 =>
                 {
                     depth -= 1;
                     if depth == 0 {
                         break;
                     }
+                }
+                '(' if case_depth > 0 && !region_before => {
+                    case_body_paren_depth += 1;
+                }
+                ')' if case_depth > 0 && !region_before => {
+                    case_body_paren_depth = case_body_paren_depth.saturating_sub(1);
                 }
                 '$' if self.peek() == Some('\'') => {
                     self.advance();
@@ -2071,6 +2103,17 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
     // the paren depth it is never reset by a `|` or by a region re-arm,
     // only consumed by a `)`.
     let mut case_pattern_opener_depth = 0usize;
+    // rubash#3306: paren depth opened inside a case context while the
+    // pattern region is disarmed (clause body or `case … in`
+    // preamble) — GNU's `)` is the substitution's shell_eof_token
+    // only at body paren depth zero (parse.y:4519-4521).
+    let mut case_body_paren_depth = 0usize;
+    // rubash#3306: a `;;`/`;&`/`;;&` seen while the pattern region
+    // is armed is fatal in GNU's grammar — the clause terminator
+    // is only legal after a clause BODY. Once seen the case can
+    // never complete, so the next top-level `)` closes the
+    // substitution for the body parser's verdict.
+    let mut case_clause_terminator_in_pattern = false;
     // rubash#380: previous significant unquoted char fed to the case
     // word machine (the `esac` previous-token witness,
     // parse.y:3181/3183).
@@ -2228,7 +2271,14 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
                         case_pattern_content = true;
                     }
                 }
-                ';' => {}
+                ';' => {
+                    // rubash#3306: `;;`/`;&`/`;;&` while the pattern
+                    // region is armed is a clause terminator in
+                    // pattern position — fatal in GNU's grammar.
+                    if case_pattern_paren_depth == 0 && matches!(next, Some(';') | Some('&')) {
+                        case_clause_terminator_in_pattern = true;
+                    }
+                }
                 ch if ch.is_whitespace() => {}
                 _ => case_pattern_content = true,
             }
@@ -2328,16 +2378,30 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
             // rubash#3307: or while the armed pattern region has no
             // content yet (the gate's reclassification predicate); a
             // pending opener owns the `)` instead.
+            // rubash#3306: or at body paren depth zero with the
+            // pattern region disarmed (a clause body or the
+            // `case … in` preamble — GNU's shell_eof_token,
+            // parse.y:4519-4521), or inside a case already doomed
+            // by a pattern-position clause terminator.
             ')' if (case_depth == 0
                 || matches!(case_in_stage, 1 | 2)
                 || (case_in_stage == 3 && !case_pattern_seen)
-                || (region_before && !content_before))
+                || (region_before && !content_before)
+                || (case_depth > 0
+                    && case_body_paren_depth == 0
+                    && (!region_before || case_clause_terminator_in_pattern)))
                 && opener_depth_before == 0 =>
             {
                 depth = depth.saturating_sub(1);
                 if depth == 0 {
                     return Some(index + 1);
                 }
+            }
+            '(' if case_depth > 0 && !region_before => {
+                case_body_paren_depth += 1;
+            }
+            ')' if case_depth > 0 && !region_before => {
+                case_body_paren_depth = case_body_paren_depth.saturating_sub(1);
             }
             _ => {}
         }
