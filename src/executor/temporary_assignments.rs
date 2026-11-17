@@ -2178,6 +2178,10 @@ impl Executor {
                 // (Materialize the small scalar text: the checked eval
                 // takes &mut self, so the borrowed mirror cannot be held
                 // across it. This arm is scalar-only by construction.)
+                // The sum itself is intmax_t (variables.c:2936-2946
+                // `rval += lval; retval = itos (rval)`), so it wraps at
+                // INT64_MAX instead of storing the out-of-range i128
+                // decimal (rubash#3782).
                 let current = current.to_string();
                 let Some(current) = self.eval_integer_assignment_checked(&current) else {
                     return false;
@@ -2185,7 +2189,7 @@ impl Executor {
                 let Some(value) = self.eval_integer_assignment_checked(&value) else {
                     return false;
                 };
-                (current + value).to_string()
+                crate::executor::arithmetic::intmax_append_sum(current, value).to_string()
             } else {
                 append_scalar_value(current, &value)
             }

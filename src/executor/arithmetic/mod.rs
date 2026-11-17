@@ -4616,6 +4616,20 @@ fn bash_arith(value: i128) -> i128 {
     value as i64 as i128
 }
 
+/// GNU `make_variable_value` (third_party/bash/variables.c:2905-2946):
+/// an integer append evaluates both sides with evalexp (intmax_t) and
+/// adds them as intmax_t before storing via itos — the sum wraps at
+/// INT64_MAX (third_party/bash/expr.c:22: "All arithmetic is done as
+/// intmax_t integers with no checking for overflow"). The evaluator hands
+/// back i128 values already narrowed by `bash_arith`, but the append
+/// addition itself runs outside the evaluator, so the narrowing must
+/// happen at the addition: a plain i128 `+` stored the out-of-range
+/// decimal "9223372036854775808" instead of wrapping to INT64_MIN
+/// (rubash#3782).
+pub(crate) fn intmax_append_sum(lval: i128, rval: i128) -> i64 {
+    (lval as i64).wrapping_add(rval as i64)
+}
+
 fn checked_arithmetic_pow(base: i128, exponent: i128) -> Option<i128> {
     let exponent = u32::try_from(exponent).ok()?;
     let mut value = 1i128;
