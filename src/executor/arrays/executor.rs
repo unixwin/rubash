@@ -1229,6 +1229,11 @@ impl Executor {
             if let Some(prefix) = word
                 .strip_prefix("${!")
                 .and_then(|word| word.strip_suffix("@}"))
+                // GNU subst.c:9974-9975 gates the `${!prefix@}` list form
+                // on `legal_variable_starter(name[1])`; the name scanner
+                // also stops at an operator byte, so `${!#%@}` is the `%`
+                // removal on `${!#}`, never a name list (rubash#3784).
+                .filter(|prefix| !prefix.is_empty() && is_shell_name(prefix))
             {
                 let mut names = self
                     .shell_state
@@ -1247,6 +1252,10 @@ impl Executor {
             if let Some(prefix) = word
                 .strip_prefix("${!")
                 .and_then(|word| word.strip_suffix("*}"))
+                // Same GNU gate as the @ form above: `${!#%*}` ends in `*`
+                // but its name head is the `%` operator, so the word is a
+                // suffix removal, not `${!prefix*}` (rubash#3784).
+                .filter(|prefix| !prefix.is_empty() && is_shell_name(prefix))
             {
                 let mut names = self
                     .shell_state

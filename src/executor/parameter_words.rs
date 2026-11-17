@@ -209,7 +209,17 @@ fn parameter_assignment_target_form(name: &str) -> bool {
     if is_shell_name(bare) {
         return true;
     }
-    matches!(parse_array_subscript(bare), Some((base, _)) if is_shell_name(base))
+    if matches!(parse_array_subscript(bare), Some((base, _)) if is_shell_name(base)) {
+        return true;
+    }
+    // GNU parameter_brace_expand_rhs with an indirect parameter binds the
+    // parameter the SOURCE VALUE names (subst.c:8529 get_var_and_type ->
+    // parameter_brace_find_indir, subst.c:8151 bind_variable), so a
+    // positional/special source is an assignment form too:
+    // `${!0:=d}` binds the parameter $0 names (rubash#3784).
+    name.starts_with('!')
+        && (!bare.is_empty() && bare.chars().all(|c| c.is_ascii_digit())
+            || matches!(bare, "#" | "?" | "@" | "*"))
 }
 
 /// Whether a `${...}` body is side-effect-free to evaluate during the
@@ -1856,7 +1866,17 @@ impl Executor {
         if self.nameref_target_name(indirect_name).is_some() {
             return false;
         }
-        let Some(target_name) = self.shell_state.env_vars.get(indirect_name).cloned() else {
+        let Some(target_name) = (match self.shell_state.env_vars.get(indirect_name) {
+            Some(target_name) => Some(target_name.clone()),
+            // GNU parameter_brace_find_indir (subst.c:7839-7881): a
+            // positional/special source resolves to the parameter NAME
+            // its value holds, so `${!0:=d}` binds $0's target
+            // (rubash#3784).
+            None if !is_shell_name(indirect_name) => {
+                self.indirect_holder_target_name(indirect_name)
+            }
+            None => None,
+        }) else {
             return false;
         };
         if self.apply_array_element_parameter_assignment(&target_name, value.clone()) {
