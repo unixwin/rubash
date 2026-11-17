@@ -717,16 +717,55 @@ impl Executor {
                             return Err(());
                         }
                     } else if nested_readonly {
-                        // GNU declare.def make_local_variable path surfaces
-                        // through sh_readonly (builtin_error family): the
-                        // line segment never gates, so this keeps the
-                        // ungated prefix (verified: `local l=(...)` in a
-                        // function reports `line N:` under gnu_errfmt).
-                        eprintln!(
-                            "{}{lhs}: readonly variable",
-                            self.diagnostic_prefix()
-                        );
-                        if self.shell_state.function_depth == 0 {
+                        // rubash#2658: two prolog classes split by which
+                        // layer refuses the readonly bind. When the operand
+                        // replays attribute letters through a nested
+                        // declare (subst.c:12949 expand_declaration_argument
+                        // -> subst.c:12792 make_internal_declare) the
+                        // refusal is declare's own sh_readonly
+                        // (declare.def:876) -> builtin_error, whose
+                        // this_command_name is the enclosing FUNCTION name
+                        // at expansion time (builtins/common.c:83-105 —
+                        // execute_cmd.c:4800 installs the builtin name only
+                        // after expand_words) — `f() { local r=(4); }` on
+                        // readonly r prints `f: r: readonly variable`. That
+                        // class covers declare/typeset/local always (a
+                        // local-scope declare of a readonly global fails)
+                        // and export/readonly ONLY when -a/-A replay:
+                        // setattr.def:231-251 turns `readonly -a r=(6)` into
+                        // `declare -gra r`, whose attr-set refusal prints
+                        // `f: r:`, while flagless `readonly r=(4)` reduces
+                        // to `declare -g r` — a scope-only no-op that
+                        // succeeds — so its refusal arrives later from the
+                        // bind layer's err_readonly (error.c:453
+                        // report_error), which prints the bare variable
+                        // name with no this_command_name segment. The
+                        // operand's expansion-time bind failure is a real
+                        // DISCARD for the special builtins
+                        // (subst.c:13033 exp_jump_to_top_level): inside a
+                        // function the body is abandoned after the single
+                        // line, before the builtin runs
+                        // (probe: `f() { readonly r=(4); declare -p r; }`
+                        // prints `r: readonly variable` once, f's tail
+                        // never runs, the caller continues at top level).
+                        if declare_family || array_hint || assoc_hint {
+                            match self.shell_state.function_name_stack.first() {
+                                Some(func) => eprintln!(
+                                    "{}{func}: {lhs}: readonly variable",
+                                    self.diagnostic_prefix()
+                                ),
+                                None => eprintln!(
+                                    "{}{lhs}: readonly variable",
+                                    self.diagnostic_prefix()
+                                ),
+                            }
+                        } else {
+                            eprintln!(
+                                "{}{lhs}: readonly variable",
+                                self.diagnostic_prefix()
+                            );
+                        }
+                        if self.shell_state.function_depth == 0 || !declare_family {
                             // Same subst.c:13033 DISCARD for the nested
                             // readonly bind (GNU probe run401/nro.sh:
                             // `declare ro=() 2> E1; echo same-line` skips the
@@ -1001,7 +1040,25 @@ impl Executor {
                     // hard failure; execute_declare's Err(()) arm returns 1
                     // with the reader-level discard already armed.
                     Err(partial) => {
-                        if self.evalerror_failglob_pending.get() {
+                        // rubash#3613: an evalerror from a subscript's
+                        // nested expansion (expr.c evalerror -> DISCARD)
+                        // abandons the whole declaration before the bind —
+                        // the name keeps the flags' attribute mark but
+                        // stays unset (`declare -a b=([${x}]=v)` with
+                        // x='$y', y='`echo 1`' reports `declare -a b`),
+                        // unlike the err_badarraysub break which still
+                        // materializes the array. Same arm as the failglob
+                        // gate above.
+                        if self.evalerror_failglob_pending.get()
+                            || self.evalerror_pending.get()
+                        {
+                            let attr = if assoc { ASSOC_VARS } else { ARRAY_VARS };
+                            mark_env_name(&mut self.shell_state.env_vars, attr, lhs);
+                            mark_env_name(
+                                &mut self.shell_state.env_vars,
+                                DECLARED_UNSET_VARS,
+                                lhs,
+                            );
                             return Err(());
                         }
                         partial
@@ -1541,8 +1598,23 @@ impl Executor {
         let skip_builtin = dirstack_routed && local_names(&args).is_empty();
 
         let result = (|| -> Result<i32, ExecuteError> {
-            let mut stdout = Vec::new();
-            let mut stderr = Vec::new();
+            // rubash#3408: a print request (`declare -p NAME...`)
+            // interleaves per-name listings (stdout) with `not found`
+            // diagnostics (stderr) in operand order — GNU's per-name
+            // sequential emission (builtins/setattr.def
+            // `set_or_show_attributes`). The pair route
+            // (`write_buffered_builtin_output`: whole stdout block,
+            // then whole stderr block) cannot express that order, so
+            // the builtin runs against one OrderedOutputLog and the
+            // chunks flush in log order — the same route `type`,
+            // `command -v` and `printf` already take (rubash#2699 /
+            // #3324). Every other declare shape has at most one
+            // stream non-empty, so the chunk route renders it exactly
+            // like the pair route (and falls back to the pair blocks
+            // when the walk declines).
+            let log = super::trap_stack_builtins::OrderedOutputLog::new();
+            let mut stdout = log.stdout_writer();
+            let mut stderr = log.stderr_writer();
             // rubash#2424: the DIRSTACK router's builtin-phase
             // diagnostics (readonly refusals, a standalone bad
             // subscript) — written here so the command's redirections
@@ -1758,10 +1830,13 @@ impl Executor {
                                 "BASH_MONOSECONDS",
                                 "LINENO",
                                 "BASH_SUBSHELL",
-                                // BASH_ARGV0 is a table cell (an
-                                // att_invisible one, rendered by the
-                                // builtin's invisible rule); it has no
-                                // dynamic view (rubash#2973).
+                                // BASH_ARGV0's table cell is only
+                                // valueless — never att_invisible in
+                                // GNU — so it joins the registry once
+                                // a by-name read stores into it; the
+                                // cell view answers None before that
+                                // (rubash#3026).
+                                "BASH_ARGV0",
                                 "BASH_COMMAND",
                             ] {
                                 push_registry(name);
@@ -1854,7 +1929,7 @@ impl Executor {
                     // Flush here: this early return skips the normal
                     // buffered-output flush below, which would swallow the
                     // diagnostic (rubash#635).
-                    self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+                    self.write_buffered_builtin_output_chunks(cmd, &log)?;
                     return Ok(1);
                 }
                 if local_blocked.is_empty() && noassign_blocked.is_empty() {
@@ -1872,7 +1947,7 @@ impl Executor {
             // earlier guard dropped the buffered stderr whenever
             // stdout_capture was active (bashdb hardening, no GNU anchor),
             // which swallowed the diagnostic entirely (rubash#189).
-            self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+            self.write_buffered_builtin_output_chunks(cmd, &log)?;
             Ok(status)
         })();
         // PIPESTATUS cell-shape transitions for this declare's operands
@@ -2071,6 +2146,10 @@ impl Executor {
             return Ok(());
         }
         self.exit_code = self.execute_declare(cmd)?;
+        // GNU variables.c:5820/6257-6266 sv_strict_posix: a declare/
+        // typeset bind of POSIXLY_CORRECT re-derives the mode
+        // (rubash#3661).
+        self.sync_posix_mode_if_assignment_operands(&cmd.words[1..]);
         Ok(())
     }
 
@@ -2175,6 +2254,30 @@ impl Executor {
             let status =
                 self.execute_declare_functions("local", &cmd.words[1..], &mut stdout, &mut stderr)?;
             (status, Vec::new())
+        } else if declare_args_request_print(&cmd.words[1..])
+            && !local_operands(&cmd.words[1..]).is_empty()
+        {
+            // rubash#3529: `local -p NAME...` is one in-order walk over
+            // the operands (declare.def:389-406 ->
+            // setattr.def:555 show_localname_attributes); see
+            // execute_local_print_operands.
+            let written_args = self.expand_declare_assignment_args(&cmd.words[1..]);
+            let args = match self.rewrite_declare_operand_subscripts(
+                &written_args,
+                &cmd.word_metadata,
+                "local",
+            ) {
+                Ok(args) => args,
+                Err(()) => return Ok(1),
+            };
+            let mut written_hints = declare_written_operand_hints(&written_args, &args);
+            let status = self.execute_local_print_operands(
+                &args,
+                &mut written_hints,
+                &mut stdout,
+                &mut stderr,
+            )?;
+            (status, args)
         } else {
             let written_args = self.expand_declare_assignment_args(&cmd.words[1..]);
             let mut args = match self.rewrite_declare_operand_subscripts(
@@ -2275,48 +2378,6 @@ impl Executor {
                 } else {
                     args.clear();
                 }
-            }
-            // GNU setattr.def:555-570 show_localname_attributes:
-            // `local -p name` reports the operand only when it is a local at
-            // the CURRENT variable context (local_p && var->context ==
-            // variable_context) — an outer frame's local is "not found", so
-            // `local -p s` inside a function that declared no s reports an
-            // error even when the caller's local s is dynamically visible
-            // (varenv25.sub init_vars).
-            let mut print_missing: Vec<String> = Vec::new();
-            if declare_args_request_print(&args) && !local_names(&args).is_empty() {
-                let innermost = self.shell_state.local_var_scopes.last();
-                args.retain(|arg| {
-                    // GNU setattr.def:564-568: a `-` operand to `local -p`
-                    // prints `local -` when the frame holds the option-snapshot
-                    // local (created by `local -` above).
-                    if arg == "-" {
-                        let found = innermost.is_some_and(|scope| scope.contains_key("-"));
-                        if found {
-                            writeln!(stdout, "local -").ok();
-                            dash_printed = true;
-                        } else {
-                            print_missing.push("-".to_string());
-                        }
-                        return false;
-                    }
-                    if arg.starts_with('-') || arg.starts_with('+') {
-                        return true;
-                    }
-                    let (base, _) = assignment_name_and_append(arg);
-                    let found = innermost.is_some_and(|scope| scope.contains_key(base));
-                    if !found {
-                        print_missing.push(base.to_string());
-                    }
-                    found
-                });
-            }
-            for name in &print_missing {
-                writeln!(
-                    stderr,
-                    "{}local: {name}: not found",
-                    self.diagnostic_prefix()
-                )?;
             }
             // GNU variables.c:2651-2665 (make_local_variable): readonly
             // global bindings reject local creation — drop those operands
@@ -2424,14 +2485,10 @@ impl Executor {
                 && (had_dash_operand
                     || dash_printed
                     || !local_blocked.is_empty()
-                    || !noassign_blocked.is_empty()
-                    || !print_missing.is_empty())
+                    || !noassign_blocked.is_empty())
             {
                 (
-                    if local_blocked.is_empty()
-                        && noassign_blocked.is_empty()
-                        && print_missing.is_empty()
-                    {
+                    if local_blocked.is_empty() && noassign_blocked.is_empty() {
                         0
                     } else {
                         1
@@ -2489,10 +2546,7 @@ impl Executor {
                     &mut written_hints,
                 )?;
                 diag.flush_with(|| prolog.build(&self.shell_state.env_vars));
-                let status = if local_blocked.is_empty()
-                    && noassign_blocked.is_empty()
-                    && print_missing.is_empty()
-                {
+                let status = if local_blocked.is_empty() && noassign_blocked.is_empty() {
                     builtin_status
                 } else {
                     builtin_status.max(1)
@@ -2681,8 +2735,130 @@ impl Executor {
             }
             stdout = stripped.into_bytes();
         }
+        // GNU variables.c:5820/6257-6266 sv_strict_posix: a local bind
+        // of POSIXLY_CORRECT re-derives the mode for the frame (the
+        // frame pop re-derives it back in restore_function_locals,
+        // rubash#3661).
+        self.sync_posix_mode_if_assignment_operands(&final_args);
         let stderr = local_stderr_from_declare(stderr);
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+        Ok(status)
+    }
+
+    /// `local -p NAME...` (rubash#3529): GNU builtins/declare.def:389-406
+    /// walks the operands ONCE, in order, calling setattr.def:555
+    /// show_localname_attributes on each word verbatim. A word naming a
+    /// local of the CURRENT variable context (`local_p (var) &&
+    /// var->context == variable_context`) is printed — `local -` for the
+    /// option-snapshot local — and every other word (a missing or outer
+    /// name, an option-shaped word after the first operand, a valued or
+    /// subscripted word) is reported `not found` and fails the command.
+    /// `-g` does not enter the lookup. Consecutive found names render
+    /// through one declare-printer call, so each stream keeps operand
+    /// order.
+    fn execute_local_print_operands(
+        &mut self,
+        args: &[String],
+        written_hints: &mut crate::builtins::declare::WrittenOperandHints,
+        stdout: &mut Vec<u8>,
+        stderr: &mut Vec<u8>,
+    ) -> Result<i32, ExecuteError> {
+        let operands: Vec<String> = local_operands(args)
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        // The operands are the suffix after the option region; a `--`
+        // terminator is dropped (the printer only receives names, which
+        // never start with '-').
+        let option_words: Vec<String> = args[..args.len() - operands.len()]
+            .iter()
+            .filter(|word| *word != "--")
+            .cloned()
+            .collect();
+        let found: Vec<bool> = {
+            let innermost = self.shell_state.local_var_scopes.last();
+            operands
+                .iter()
+                .map(|word| innermost.is_some_and(|scope| scope.contains_key(word.as_str())))
+                .collect()
+        };
+        let mut status = 0;
+        let mut run: Vec<String> = Vec::new();
+        for (word, found) in operands.iter().zip(found) {
+            if found && word != "-" {
+                run.push(word.clone());
+                continue;
+            }
+            status = status.max(self.local_print_run(
+                &option_words,
+                &mut run,
+                written_hints,
+                stdout,
+                stderr,
+            )?);
+            if found {
+                writeln!(stdout, "local -")?;
+            } else {
+                writeln!(
+                    stderr,
+                    "{}local: {word}: not found",
+                    self.diagnostic_prefix()
+                )?;
+                status = 1;
+            }
+        }
+        status = status.max(self.local_print_run(
+            &option_words,
+            &mut run,
+            written_hints,
+            stdout,
+            stderr,
+        )?);
+        Ok(status)
+    }
+
+    /// Render one run of frame-local names through the declare printer
+    /// (the same core call the non-print route makes), then clear it.
+    fn local_print_run(
+        &mut self,
+        option_words: &[String],
+        run: &mut Vec<String>,
+        written_hints: &mut crate::builtins::declare::WrittenOperandHints,
+        stdout: &mut Vec<u8>,
+        stderr: &mut Vec<u8>,
+    ) -> Result<i32, ExecuteError> {
+        if run.is_empty() {
+            return Ok(0);
+        }
+        let mut core_args = option_words.to_vec();
+        core_args.append(run);
+        let dynamic_views: Vec<crate::builtins::declare::DynamicDeclarationView> = core_args
+            [option_words.len()..]
+            .iter()
+            .filter_map(|name| self.dynamic_view(name))
+            .collect();
+        let underlay = self.tempenv_listing_underlay();
+        let dynamic_set_views = self.dynamic_set_views();
+        let row = crate::executor::builtin_table::builtin_table_row("local").expect("local row");
+        let mut diag = crate::executor::builtin_diag::Diag::new(row, stderr);
+        let prolog = self.diagnostic_prolog_parts();
+        let mut oob_word = None;
+        let status = crate::builtins::declare::execute_with_io_named_in_context(
+            "local",
+            &core_args,
+            &mut self.shell_state.env_vars,
+            stdout,
+            &mut diag,
+            &prolog,
+            true,
+            &[],
+            &dynamic_views,
+            &dynamic_set_views,
+            &underlay,
+            &mut oob_word,
+            written_hints,
+        )?;
+        diag.flush_with(|| prolog.build(&self.shell_state.env_vars));
         Ok(status)
     }
 

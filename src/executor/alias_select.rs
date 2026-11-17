@@ -48,7 +48,11 @@ impl Executor {
         } else {
             self.expand_aliases(&command.words)
         };
-        if words.first().map(String::as_str) != Some("select") {
+        // rubash#3557: same literal-head rule — a quoted `select` word is a
+        // command name, not loop syntax (parse.y:3249).
+        if words.first().map(String::as_str) != Some("select")
+            || command.words.first().map(String::as_str) == Some("select")
+        {
             return Ok(None);
         }
         if words.len() < 2 {

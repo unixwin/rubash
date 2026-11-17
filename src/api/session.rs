@@ -491,8 +491,22 @@ impl Session {
         let posix = self.posix_mode();
         let unclosed = crate::lexer::has_unclosed_input_syntax_posix(source, posix)
             || script_driver::heredoc_delimiter_unclosed_quote(source).is_some();
-        let alias_live =
-            self.executor.alias_expansion_enabled() && !self.executor.aliases_snapshot().is_empty();
+        // rubash#3605 class B (Session::run): the live flag is the
+        // whole admission — the same answer run_command_string_with_init
+        // computes as `alias_live_at_start` (main.rs). GNU's reader is
+        // incremental (evalstring.c parse_and_execute) and the alias
+        // gate is consulted on every token (parse.y:5759), so
+        // expand_aliases-on at reader start — a non-interactive posix
+        // shell (shell.c:1853 init_noninteractive: expand_aliases =
+        // posixly_correct) or `-O expand_aliases` — needs the grouped
+        // driver even with an EMPTY alias table: `alias for=echo` on
+        // line 1 must sit in the table when `al for` is read on line 2.
+        // Requiring a non-empty table sent that shape to the
+        // whole-source route, whose word-level alias fallback expands
+        // reserved words without parse.y:5751-5769's posix ordering —
+        // `niu -o posix -c 'alias for=echo\nal for f in v\ndo ...'`
+        // printed `f in v` + a syntax error where GNU runs the loop.
+        let alias_live = self.executor.alias_expansion_enabled();
         let (status, flow, mut classification, diagnostics) = if !unclosed
             && (options.interactive
                 || script_driver::script_uses_history(source)

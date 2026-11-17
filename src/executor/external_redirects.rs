@@ -141,6 +141,36 @@ fn attach_child_stdio_closes(process: &mut Command, closed_fds: &[u32]) {
 /// simulation) or the open fails, the binding stays unresolvable
 /// here and the caller declines to the legacy route, keeping the
 /// #1898 sink contract for the in-shell faces.
+/// rubash#2533/#3312: the spawn-side open of a `/dev/full` output
+/// target. GNU redir_open (redir.c:725) consults only its special
+/// filename list (/dev/fd, /dev/std*, /dev/tcp|udp) and opens
+/// anything else — /dev/full included — with a plain open(2); the
+/// forked or exec'd image inherits that device, its write fails
+/// ENOSPC inside the child, and the child diagnoses itself and
+/// exits nonzero. Where the platform has the kernel device, open
+/// it; None (no such class, the Windows simulation, or a failed
+/// open) leaves the caller on the #1898 stand-in sink, which only
+/// serves the faces that need the open itself to succeed.
+pub(in crate::executor) fn open_spawn_full_device(target: &str, append: bool) -> Option<File> {
+    if !crate::special_paths::is_full_device(target) {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        let opened = if append {
+            OpenOptions::new().write(true).append(true).open(target)
+        } else {
+            OpenOptions::new().write(true).open(target)
+        };
+        if let Ok(file) = opened {
+            return Some(file);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = append;
+    None
+}
+
 fn full_device_stdio_slot() -> Option<ExternalStdioSlot> {
     #[cfg(unix)]
     {
@@ -1005,18 +1035,8 @@ impl Executor {
         // wrong for a spawn. On unix the device is a kernel object —
         // open it directly; where that open fails, the sink contract
         // below stands.
-        if crate::special_paths::is_full_device(target) {
-            #[cfg(unix)]
-            {
-                let opened = if redirect.append {
-                    OpenOptions::new().write(true).append(true).open(target)
-                } else {
-                    OpenOptions::new().write(true).open(target)
-                };
-                if let Ok(file) = opened {
-                    return Ok(Some(file));
-                }
-            }
+        if let Some(file) = open_spawn_full_device(target, redirect.append) {
+            return Ok(Some(file));
         }
         let file = if redirect.append {
             // The append open error must carry the target word like every
@@ -1025,7 +1045,7 @@ impl Executor {
             // `$FIX/b` from `$FIX/b: No such file or directory`. The open
             // classifies through the registry (rubash#1964) — a net
             // target connects instead of raw-opening its mapped name.
-            self.open_append_target(target)
+            self.open_append_target_for(Some(redirect), target)
                 .map_err(|e| crate::posix_errors::path_error(target, e))?
         } else {
             self.create_redirect_output_for(Some(redirect), target, redirect.clobber)?
@@ -1064,7 +1084,7 @@ impl Executor {
                 // One classified append open shared by both streams
                 // (rubash#1964), mirroring the truncating pair above.
                 let file = self
-                    .open_append_target(&stdout_target)
+                    .open_append_target_for(Some(stdout_redirect), &stdout_target)
                     .map_err(|e| crate::posix_errors::path_error(&stdout_target, e))?;
                 process.stderr(Stdio::from(file.try_clone()?));
                 process.stdout(Stdio::from(file));
@@ -1173,7 +1193,7 @@ impl Executor {
                     // failed /dev/tcp targets with a bare ENOENT that
                     // dropped the target word.
                     let file = self
-                        .open_append_target(&target)
+                        .open_append_target_for(Some(redirect), &target)
                         .map_err(|e| crate::posix_errors::path_error(&target, e))?;
                     process.stdout(Stdio::from(file));
                 }
@@ -1392,7 +1412,7 @@ impl Executor {
                     // Classified append open (rubash#1964), the fd-2
                     // twin of the stdout arm above.
                     let file = self
-                        .open_append_target(&target)
+                        .open_append_target_for(Some(redirect), &target)
                         .map_err(|e| crate::posix_errors::path_error(&target, e))?;
                     process.stderr(Stdio::from(file));
                 }

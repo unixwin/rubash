@@ -1156,6 +1156,12 @@ fn copy_dollar_paren_body_raw_cursor<'a>(out: &mut String, rest: &'a str) -> &'a
     // issue #513): a boundary `#` comment runs to end of line and its `)`
     // never closes the body; the copy still carries the bytes.
     let mut token_boundary = true;
+    // rubash#3605: paren depth of a `$(` nested inside the case context
+    // (`$(case $(w) in e) ...`) — arm-for-arm with the parser
+    // extractor (parser/command_substitution.rs nested_case_subst).
+    // Counted in `depth` unconditionally below; this counter only
+    // marks how many `)`s the nested substitution owns.
+    let mut nested_case_subst = 0usize;
     let mut idx = 0usize;
     while idx < rest.len() {
         let ch = rest[idx..].chars().next().unwrap();
@@ -1220,6 +1226,30 @@ fn copy_dollar_paren_body_raw_cursor<'a>(out: &mut String, rest: &'a str) -> &'a
                 idx += 1;
                 out.push('(');
                 depth += 1;
+                if case_depth > 0 {
+                    nested_case_subst += 1;
+                }
+                // rubash#3605: feed the skipped `(` to the case word
+                // machine — `(` ends a token, so `case` right after `$(`
+                // is a command-position keyword; otherwise `$(case` never
+                // armed the tracker and the pattern `)` closed the body
+                // one `)` early.
+                super::skip::update_command_substitution_case_depth(
+                    '(',
+                    false,
+                    false,
+                    &mut word,
+                    &mut case_depth,
+                    &mut word_boundary,
+                    &mut current_word_boundary,
+                    rest[idx..].chars().next(),
+                    &mut case_in_stage,
+                    &mut case_pattern_region,
+                    prev_sig,
+                );
+                if crate::lexer::skip::esac_prev_token_char('(') {
+                    prev_sig = Some('(');
+                }
                 token_boundary = false;
             }
             '\'' => {
@@ -1241,15 +1271,21 @@ fn copy_dollar_paren_body_raw_cursor<'a>(out: &mut String, rest: &'a str) -> &'a
                 word_boundary = false;
                 token_boundary = false;
             }
-            '(' if case_depth == 0 => {
+            '(' if case_depth == 0 || nested_case_subst > 0 => {
                 depth += 1;
+                if nested_case_subst > 0 {
+                    nested_case_subst += 1;
+                }
                 token_boundary = true;
             }
-            ')' if case_depth == 0 => {
+            ')' if case_depth == 0 || nested_case_subst > 0 => {
                 // Plain subtraction like the original: an unbalanced `)`
                 // underflows/wraps identically (never observed on real
                 // scripts; the case_depth tracker owns pattern parens).
                 depth -= 1;
+                if nested_case_subst > 0 {
+                    nested_case_subst -= 1;
+                }
                 if depth == 0 {
                     return &rest[idx..];
                 }
@@ -2080,7 +2116,7 @@ fn copy_braced_parameter_with_ansi_c_cursor<'a>(out: &mut String, rest: &'a str)
 /// an empty slice). Trigger bytes inside double quotes: `"`, `$`, `\`, `'`,
 /// the glob set `* ? [ @ + !`, and `` ` `` when backtick bodies must be
 /// preserved.
-fn remove_double_quoted_into_cursor<'a>(
+pub(crate) fn remove_double_quoted_into_cursor<'a>(
     out: &mut String,
     rest: &'a str,
     preserve_backticks: bool,
@@ -2755,6 +2791,10 @@ fn copy_dollar_paren_body_raw(
     // token recognition, so a `)` inside it does not close the body
     // (issue #513). The verbatim copy still carries the comment bytes.
     let mut token_boundary = true;
+    // rubash#3605: paren depth of a `$(` nested inside the case context
+    // — arm-for-arm with copy_dollar_paren_body_raw_cursor and the
+    // parser extractor (nested_case_subst).
+    let mut nested_case_subst = 0usize;
     while let Some(ch) = chars.next() {
         out.push(ch);
         if ch == '\\' {
@@ -2814,6 +2854,30 @@ fn copy_dollar_paren_body_raw(
                 chars.next();
                 out.push('(');
                 depth += 1;
+                if case_depth > 0 {
+                    nested_case_subst += 1;
+                }
+                // rubash#3605: feed the skipped `(` to the case word
+                // machine — `(` ends a token, so `case` right after `$(`
+                // is a command-position keyword; otherwise `$(case` never
+                // armed the tracker and the pattern `)` closed the body
+                // one `)` early.
+                super::skip::update_command_substitution_case_depth(
+                    '(',
+                    false,
+                    false,
+                    &mut word,
+                    &mut case_depth,
+                    &mut word_boundary,
+                    &mut current_word_boundary,
+                    chars.peek().copied(),
+                    &mut case_in_stage,
+                    &mut case_pattern_region,
+                    prev_sig,
+                );
+                if crate::lexer::skip::esac_prev_token_char('(') {
+                    prev_sig = Some('(');
+                }
                 token_boundary = false;
             }
             '\'' => {
@@ -2834,12 +2898,18 @@ fn copy_dollar_paren_body_raw(
                 word_boundary = false;
                 token_boundary = false;
             }
-            '(' if case_depth == 0 => {
+            '(' if case_depth == 0 || nested_case_subst > 0 => {
                 depth += 1;
+                if nested_case_subst > 0 {
+                    nested_case_subst += 1;
+                }
                 token_boundary = true;
             }
-            ')' if case_depth == 0 => {
+            ')' if case_depth == 0 || nested_case_subst > 0 => {
                 depth = depth.saturating_sub(1);
+                if nested_case_subst > 0 {
+                    nested_case_subst -= 1;
+                }
                 if depth == 0 {
                     break;
                 }

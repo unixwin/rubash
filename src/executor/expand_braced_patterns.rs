@@ -4,11 +4,12 @@ impl Executor {
     pub(in crate::executor) fn expand_braced_pattern_or_transform_parameter(
         &self,
         name: &str,
+        quoted: bool,
     ) -> Option<String> {
         if let Some(value) = self.expand_braced_replacement_parameter(name) {
             return Some(value);
         }
-        if let Some(value) = self.expand_braced_pattern_parameter(name) {
+        if let Some(value) = self.expand_braced_pattern_parameter(name, quoted) {
             return Some(value);
         }
         if let Some(value) = self.expand_braced_transform_parameter(name) {
@@ -17,7 +18,7 @@ impl Executor {
         self.expand_braced_case_parameter(name)
     }
 
-    fn expand_braced_pattern_parameter(&self, name: &str) -> Option<String> {
+    fn expand_braced_pattern_parameter(&self, name: &str, quoted: bool) -> Option<String> {
         let (var_name, pattern, operation) = split_top_level_pattern_operator(name)?;
         // Bash's parameter scanner closes `${...}` at the `}` inside `[}]`.
         // The trailing `]}` is consequently literal text, rather than part
@@ -32,7 +33,7 @@ impl Executor {
         }
         if operation == PatternRemoval::LongestPrefix && pattern == "*/" {
             let basename = self
-                .expand_parameter_pattern_removal(var_name, pattern, operation)
+                .expand_parameter_pattern_removal(var_name, pattern, operation, quoted)
                 .unwrap_or_default();
             return Some(if var_name == "THIS_SH" && basename == "rubash-wrapper" {
                 "bash".to_string()
@@ -47,24 +48,28 @@ impl Executor {
                 pattern,
                 operation,
                 MatchLength::Longest,
+                quoted,
             ),
             PatternRemoval::ShortestPrefix => self.expand_prefix_pattern_parameter(
                 var_name,
                 pattern,
                 operation,
                 MatchLength::Shortest,
+                quoted,
             ),
             PatternRemoval::LongestSuffix => self.expand_suffix_pattern_parameter(
                 var_name,
                 pattern,
                 operation,
                 MatchLength::Longest,
+                quoted,
             ),
             PatternRemoval::ShortestSuffix => self.expand_suffix_pattern_parameter(
                 var_name,
                 pattern,
                 operation,
                 MatchLength::Shortest,
+                quoted,
             ),
         })
     }
@@ -75,8 +80,11 @@ impl Executor {
         pattern: &str,
         operation: PatternRemoval,
         match_length: MatchLength,
+        quoted: bool,
     ) -> String {
-        if let Some(value) = self.expand_parameter_pattern_removal(var_name, pattern, operation) {
+        if let Some(value) =
+            self.expand_parameter_pattern_removal(var_name, pattern, operation, quoted)
+        {
             return value;
         }
         if is_shell_name(var_name) {
@@ -102,8 +110,11 @@ impl Executor {
         pattern: &str,
         operation: PatternRemoval,
         match_length: MatchLength,
+        quoted: bool,
     ) -> String {
-        if let Some(value) = self.expand_parameter_pattern_removal(var_name, pattern, operation) {
+        if let Some(value) =
+            self.expand_parameter_pattern_removal(var_name, pattern, operation, quoted)
+        {
             return value;
         }
         if is_shell_name(var_name) {
@@ -211,7 +222,7 @@ impl Executor {
         // GNU subst.c:9604-9608 parameter_brace_casemod: the same
         // `if (value == 0) return NULL` gate as patsub — an unset parameter
         // word never expands its pattern (rubash#3501).
-        if self.pattern_word_is_silent(var_name, false) {
+        if self.pattern_word_is_silent(var_name, false, false) {
             return Some(String::new());
         }
         let pattern = self.expand_embedded_parameters(pattern);
