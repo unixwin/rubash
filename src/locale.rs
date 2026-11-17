@@ -596,6 +596,20 @@ pub fn simple_case_lower(ch: char) -> char {
     }
 }
 
+/// Whole-string form of [`simple_case_upper`]: GNU sh_modcase
+/// (lib/sh/casemod.c) maps each character through the locale's
+/// towupper, so a bind-time case conversion (variables.c:2970-2986
+/// make_variable_value) is a per-character simple mapping, never
+/// Rust's `str::to_uppercase` full mapping (rubash#3790).
+pub fn simple_uppercase(value: &str) -> String {
+    value.chars().map(simple_case_upper).collect()
+}
+
+/// Whole-string form of [`simple_case_lower`] (rubash#3790).
+pub fn simple_lowercase(value: &str) -> String {
+    value.chars().map(simple_case_lower).collect()
+}
+
 /// Byte offsets of the GNU multibyte character boundaries in `bytes`.
 ///
 /// This is the ADVANCE_CHAR walk of `include/shmbutil.h:114-147`: a valid

@@ -369,17 +369,19 @@ pub(super) fn apply_declare_attrs(
                 if let Some(value) = variables.get(name).cloned() {
                     let convert = |value: &str| -> String {
                         if eff_uppercase {
-                            value.to_uppercase()
+                            crate::locale::simple_uppercase(value)
                         } else if eff_lowercase {
-                            value.to_lowercase()
+                            crate::locale::simple_lowercase(value)
                         } else {
-                            // GNU capitalize: first character uppercased, rest
-                            // lowercased (variables.c capcase, casemod.tests:99-103).
+                            // GNU sh_modcase CASE_CAPITALIZE (lib/sh/casemod.c):
+                            // first character simple-uppercased, the rest
+                            // simple-lowercased (variables.c capcase,
+                            // casemod.tests:99-103; rubash#3790).
                             let mut chars = value.chars();
                             match chars.next() {
                                 Some(first) => {
-                                    first.to_uppercase().collect::<String>()
-                                        + &chars.as_str().to_lowercase()
+                                    crate::locale::simple_case_upper(first).to_string()
+                                        + &crate::locale::simple_lowercase(chars.as_str())
                                 }
                                 None => value.to_string(),
                             }

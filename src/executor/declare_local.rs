@@ -1375,9 +1375,12 @@ impl Executor {
                     }
                     new_value = self.eval_integer_assignment_value(&new_value).to_string();
                 } else if opt_upper {
-                    new_value = new_value.to_uppercase();
+                    // GNU sh_modcase simple mapping (rubash#3790): the
+                    // DIRSTACK bind runs through the same
+                    // make_variable_value conversion as any other bind.
+                    new_value = crate::locale::simple_uppercase(&new_value);
                 } else if opt_lower {
-                    new_value = new_value.to_lowercase();
+                    new_value = crate::locale::simple_lowercase(&new_value);
                 }
                 crate::builtins::pushd::set_stack_value(
                     &mut self.shell_state.env_vars,

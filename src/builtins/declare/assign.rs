@@ -937,14 +937,19 @@ fn declare_case_convert(
     name: &str,
 ) -> String {
     if variables.is_marked(UPPERCASE_VARS, name) {
-        value.to_uppercase()
+        crate::locale::simple_uppercase(value)
     } else if variables.is_marked(LOWERCASE_VARS, name) {
-        value.to_lowercase()
+        crate::locale::simple_lowercase(value)
     } else if variables.is_marked(CAPCASE_VARS, name) {
+        // GNU sh_modcase CASE_CAPITALIZE (lib/sh/casemod.c): first
+        // character simple-uppercased, the rest simple-lowercased —
+        // the same conversion variable_state::capitalize_value runs
+        // on the executor paths (rubash#3790).
         let mut chars = value.chars();
         match chars.next() {
             Some(first) => {
-                first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase()
+                crate::locale::simple_case_upper(first).to_string()
+                    + &crate::locale::simple_lowercase(chars.as_str())
             }
             None => value.to_string(),
         }

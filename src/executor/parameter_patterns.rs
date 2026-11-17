@@ -863,9 +863,9 @@ impl Executor {
             value
         };
         let value = if is_marked_var(&self.shell_state.env_vars, UPPERCASE_VARS, array_name) {
-            value.to_uppercase()
+            crate::locale::simple_uppercase(&value)
         } else if is_marked_var(&self.shell_state.env_vars, LOWERCASE_VARS, array_name) {
-            value.to_lowercase()
+            crate::locale::simple_lowercase(&value)
         } else {
             value
         };

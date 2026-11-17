@@ -440,14 +440,17 @@ fn printf_attribute_value(
             .to_string();
     }
     if is_marked(env_vars, "__RUBASH_UPPERCASE_VARS", name) {
-        output.to_uppercase()
+        crate::locale::simple_uppercase(&output)
     } else if is_marked(env_vars, "__RUBASH_LOWERCASE_VARS", name) {
-        output.to_lowercase()
+        crate::locale::simple_lowercase(&output)
     } else if is_marked(env_vars, "__RUBASH_CAPCASE_VARS", name) {
+        // GNU sh_modcase CASE_CAPITALIZE: first character
+        // simple-uppercased, the rest simple-lowercased (rubash#3790).
         let mut chars = output.chars();
         match chars.next() {
             Some(first) => {
-                first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase()
+                crate::locale::simple_case_upper(first).to_string()
+                    + &crate::locale::simple_lowercase(chars.as_str())
             }
             None => output,
         }
