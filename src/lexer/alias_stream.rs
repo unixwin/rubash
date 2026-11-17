@@ -1092,7 +1092,7 @@ fn splice_substitution_body(
 /// reserved_word_acceptable): after `;', `&', `|', a newline, or a closed
 /// `{ }'/`( )' command construct, and with a word-breaking char (or end
 /// of input) following. Returns the index just past the closing `}`.
-fn skip_funsub_body(chars: &[char], open: usize) -> Option<usize> {
+pub(super) fn skip_funsub_body(chars: &[char], open: usize) -> Option<usize> {
     let mut depth = 1usize;
     let mut index = open + 1;
     let mut single = false;
@@ -1285,6 +1285,21 @@ fn skip_dollar_paren(buf: &[char], pos: usize) -> usize {
 
 fn skip_dollar_brace(buf: &[char], mut pos: usize) -> usize {
     pos += 2;
+    // Bash 5.3 funsub (parser.h:85 FUNSUB_CHAR, parse.y:5506): `${ ` /
+    // `${|` opens a command list, not a parameter form — its body is
+    // scanned by the funsub extent scanner (the same one
+    // `expand_comsub_alias_bodies` uses), whose `#`-comment and heredoc
+    // arms keep quotes inside them opaque. Without this branch the naive
+    // depth count below treats a `'` in a comment or heredoc body as a
+    // real quote and swallows the rest of the input, hiding every later
+    // alias from the main scan (rubash#3823 f1/h2/h3: the closing alias
+    // `E` never expanded).
+    if buf
+        .get(pos)
+        .is_some_and(|c| matches!(c, ' ' | '\t' | '\n' | '|'))
+    {
+        return skip_funsub_body(buf, pos - 1).unwrap_or(buf.len());
+    }
     let mut depth = 1usize;
     while pos < buf.len() && depth > 0 {
         match buf[pos] {

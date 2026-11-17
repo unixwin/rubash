@@ -2057,12 +2057,24 @@ impl Executor {
         let mut closed = false;
         let mut term = true;
         let mut paren_depth = 0usize;
+        // Shell_getc token-boundary state for `#` comment recognition
+        // (parse.y:3631-3645): true at the body start and after a blank,
+        // newline, or operator (`;` `&` `|` `(` `)` `<` `>`); false inside
+        // a word. `term` above answers a different question (is `}` a
+        // group closer here) — after `echo hi ` it is false while a `#`
+        // still comments — so the comment arm needs its own state, the
+        // same split as extract_funsub_body_tail's `at_word_start`
+        // (command_substitution.rs, rubash#3823). Without it an apostrophe
+        // inside a comment (`# don't`) opened a phantom single-quote that
+        // swallowed the closing `}`.
+        let mut at_word_start = true;
         // `while let` (not `for ... in chars.by_ref()`): the lone-`}` check
         // needs chars.peek() while the loop owns the iterator.
         while let Some(source_ch) = chars.next() {
             if escaped {
                 source.push(source_ch);
                 escaped = false;
+                at_word_start = false;
                 continue;
             }
             if source_ch == '\\' && !single {
@@ -2071,6 +2083,7 @@ impl Executor {
                 if !double {
                     term = false;
                 }
+                at_word_start = false;
                 continue;
             }
             if single {
@@ -2087,6 +2100,23 @@ impl Executor {
                 source.push(source_ch);
                 continue;
             }
+            // parse.y:3631 shell_getc: `#` at a token start discards to
+            // EOL; a quote character inside the comment is inert. The
+            // comment is pushed verbatim into the body (the re-parse in
+            // expand_current_shell_command_substitution is the real
+            // parser, which recognizes it); only the extent scan must not
+            // quote-track through it. The newline itself is left for the
+            // next iteration's separator arm, which restores command
+            // position.
+            if source_ch == '#' && at_word_start {
+                source.push(source_ch);
+                while chars.peek().is_some_and(|&next| next != '\n') {
+                    if let Some(c) = chars.next() {
+                        source.push(c);
+                    }
+                }
+                continue;
+            }
             let mut word_text = false;
             match source_ch {
                 '$' => {
@@ -2098,24 +2128,35 @@ impl Executor {
                     source.push(source_ch);
                     super::command_substitution::consume_nested_dollar_unit(chars, &mut source);
                     term = false;
+                    at_word_start = false;
                     continue;
                 }
                 '\'' => {
                     single = true;
                     term = false;
+                    at_word_start = false;
                 }
                 '"' => {
                     double = true;
                     term = false;
+                    at_word_start = false;
                 }
                 '(' => {
                     paren_depth += 1;
                     term = false;
+                    at_word_start = true;
                 }
                 ')' if paren_depth > 0 => {
                     paren_depth -= 1;
                     // A closed outermost `( ... )` is a complete command.
                     term = paren_depth == 0;
+                    at_word_start = true;
+                }
+                // A bare `)` (no open subshell) is a metacharacter, not
+                // word text: the next token starts after it.
+                ')' => {
+                    term = false;
+                    at_word_start = true;
                 }
                 '{' if term && paren_depth == 0 => {
                     depth += 1;
@@ -2134,17 +2175,72 @@ impl Executor {
                         // separator.
                         depth -= 1;
                         term = true;
+                        at_word_start = true;
                     } else {
                         closed = true;
                         break;
                     }
                 }
-                ';' | '&' | '|' | '\n' if paren_depth == 0 => term = true,
-                ' ' | '\t' | '\r' => {}
+                // Heredoc bodies are raw lines (make_cmd.c:512): a `}` or
+                // a quote character inside the body must not move this
+                // scan (rubash#3823 h2/h3). A second `<` starts the
+                // heredoc (the helper copies the header and body lines
+                // verbatim); a third `<` makes `<<<`, a herestring with
+                // no body to skip, and stays for the next iteration's
+                // plain `<` arm.
+                '<' if chars.peek() == Some(&'<') => {
+                    source.push(source_ch);
+                    if let Some(second) = chars.next() {
+                        source.push(second);
+                    }
+                    if chars.peek() == Some(&'<') {
+                        // `<<<` herestring: mid-operator, not a token start.
+                        at_word_start = false;
+                        term = false;
+                        continue;
+                    }
+                    super::command_substitution::push_funsub_heredoc(chars, &mut source);
+                    // A heredoc terminator ends on its own line, so the
+                    // next character begins a fresh token — and, at funsub
+                    // level, a `}` there is the body's closer. `term`
+                    // stays false inside a subshell (an inner group's `}`
+                    // must not read as this funsub's closer), mirroring
+                    // extract_funsub_body_tail (#3823).
+                    at_word_start = true;
+                    if paren_depth == 0 {
+                        term = true;
+                    }
+                    continue;
+                }
+                // A redirection operator ends the previous word: the
+                // target word starts here, so a `#` there comments
+                // (parse.y:3631; `echo >#f` is a comment in GNU, #2033).
+                // `term` is untouched — a `}` right after `>` is the
+                // redirect's target word, not this body's closer.
+                '<' | '>' => {
+                    term = false;
+                    at_word_start = true;
+                }
+                ';' | '&' | '|' | '\n' => {
+                    // A separator is a token boundary at any depth (`#`
+                    // after `;` comments even inside `( ... )`), but it
+                    // restores command position only at funsub level —
+                    // `term` stays false inside a subshell (an inner
+                    // group's `}` must not read as this funsub's closer),
+                    // mirroring extract_funsub_body_tail (#3823).
+                    if paren_depth == 0 {
+                        term = true;
+                    }
+                    at_word_start = true;
+                }
+                ' ' | '\t' | '\r' => {
+                    at_word_start = true;
+                }
                 _ => word_text = true,
             }
             if word_text {
                 term = false;
+                at_word_start = false;
             }
             source.push(source_ch);
         }
