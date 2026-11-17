@@ -3935,9 +3935,16 @@ fn file_is_executable(path: &Path) -> bool {
 
 /// GNU hashcmd.c phash_search: `hash -t` resolves a stored relative path
 /// through its `./`-prefixed form when that form is executable.
+/// GNU findcmd.c:214-223 `executable_file` requires FS_EXECABLE **and**
+/// not a directory: a bare access(X_OK) admits every directory (search
+/// permission), which made `phash_search_spelling` return `"./"` for a
+/// stored empty path (rubash#3824) and let `hash`/`type -a` accept
+/// non-executable files (rubash#3825). `is_dir` stats through symlinks,
+/// matching file_status's stat: a symlink to a directory is out, a
+/// symlink to an executable file is in, a dangling symlink fails access.
 #[cfg(unix)]
 pub(crate) fn is_executable_file(path: &Path) -> bool {
-    file_is_executable(path)
+    !path.is_dir() && file_is_executable(path)
 }
 
 #[cfg(not(unix))]
