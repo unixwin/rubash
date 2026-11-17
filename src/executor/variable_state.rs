@@ -308,8 +308,12 @@ impl Executor {
                     .find_map(|(key, entry)| (key == "0").then_some(entry.clone()))
                     .unwrap_or_default();
                 let element = if append && integer {
-                    (self.eval_integer_assignment_value(&existing)
-                        + self.eval_integer_assignment_value(&value))
+                    // The sum is intmax_t (variables.c:2936-2946), so it
+                    // wraps at INT64_MAX (rubash#3782).
+                    crate::executor::arithmetic::intmax_append_sum(
+                        self.eval_integer_assignment_value(&existing),
+                        self.eval_integer_assignment_value(&value),
+                    )
                     .to_string()
                 } else if append {
                     format!("{existing}{value}")
@@ -338,8 +342,12 @@ impl Executor {
                 let mut entries = super::arrays::indexed_array_entries(&saved);
                 let existing = entries.get(&0).cloned().unwrap_or_default();
                 let element = if append && integer {
-                    (self.eval_integer_assignment_value(&existing)
-                        + self.eval_integer_assignment_value(&value))
+                    // The sum is intmax_t (variables.c:2936-2946), so it
+                    // wraps at INT64_MAX (rubash#3782).
+                    crate::executor::arithmetic::intmax_append_sum(
+                        self.eval_integer_assignment_value(&existing),
+                        self.eval_integer_assignment_value(&value),
+                    )
                     .to_string()
                 } else if append {
                     format!("{existing}{value}")
