@@ -2328,6 +2328,17 @@ impl Executor {
         // The raw wait status knows whether the child died by a
         // signal; the flattened status does not. Record it so the
         // jobs listing prints the signal description (rubash#1256).
+        //
+        // rubash#3802: Windows wait statuses never carry WIFSIGNALED —
+        // this shell's own `kill` encodes the death as
+        // `TerminateProcess (128 + signal)` (builtins/kill.rs
+        // signal_process), so 137/143 alone cannot be told from a
+        // plain `exit 137`. The delivery record fills the gap so
+        // printable_job_status (jobs.c:1969-1985, `j_strsignal
+        // (WTERMSIG (p->status))`) renders `Killed` / `Terminated`;
+        // a job that simply exited keeps `Exit 137`.
+        let term_signal =
+            term_signal.or_else(|| self.shell_state.job_table.take_delivered_signal(pid));
         if let Some(signal) = term_signal {
             self.shell_state.job_table.note_term_signal(pid, signal);
         }
