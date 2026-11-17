@@ -1186,9 +1186,22 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                 return TokenAction::Continue;
             }
 
-            if token.value == "}" && command_is_empty(&state.current_cmd) {
+            if token.value == "}"
+                && (command_is_empty(&state.current_cmd)
+                    || command_is_pending_inversion(&state.current_cmd))
+            {
                 // GNU parse.y: `}' is a reserved word, and at command position
-                // with no open brace group it is a fatal syntax error. A
+                // with no open brace group it is a fatal syntax error. That
+                // holds behind a pending `!' too: a lone `}' is never a valid
+                // command word after BANG (`! }`, `! } { }`, `{ ! } }` are all
+                // `syntax error near unexpected token `}'`, rc 2 -- rubash#3648).
+                // Before this the `!` arm had already toggled `inverted`, so
+                // command_is_empty was false and the `}' fell through to word
+                // handling, ran as a command name, and the `!' flipped the
+                // not-found failure to rc 0. A group-closing `}' never reaches
+                // this arm (parse_brace_group_command consumes it), and a
+                // second `!' toggles the inversion back off, so `! ! }` was
+                // already an error via the empty arm. A
                 // leftover `}' is exactly what parse_matched_pair's
                 // P_FIRSTCLOSE|P_DOLBRACE scan leaves behind when a bare `{`
                 // does not nest inside `${...}` (parse.y:3974-3980), e.g. the
