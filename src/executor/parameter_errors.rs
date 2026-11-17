@@ -2991,6 +2991,28 @@ impl Executor {
                     1,
                 ));
             }
+            // GNU subst.c:10053 parameter_brace_expand ->
+            // valid_brace_expansion_word (subst.c:7583): the extracted
+            // parameter name must be all digits, a single special
+            // parameter, a valid array reference, or an identifier —
+            // anything else (`${-x}`, `${(M)y}`, `${1a}`) is the
+            // subst.c:10276-10288 `bad substitution` default reported
+            // with the whole word being expanded. The real expansion
+            // applies the same gate (expand_word.rs
+            // braced_name_is_bad_substitution); the scan needs it so a
+            // bad substitution inside an operator word part surfaces as
+            // the INNER error — GNU's expand_string longjmps out of
+            // parameter_brace_expand_error (subst.c:8224-8228) before the
+            // outer `name: word` report can run (rubash#3502:
+            // `${v:?${-x}}` prints only `${-x}: bad substitution`,
+            // never `v: `).
+            if crate::executor::expand_word::braced_name_is_bad_substitution(inner) {
+                return Some((
+                    crate::executor::expand_word::bad_substitution_display(word),
+                    "bad substitution".to_string(),
+                    1,
+                ));
+            }
             if let Some((name, message, require_non_empty)) =
                 parse_parameter_error_operator(inner, self.posix_mode_enabled())
             {
