@@ -1092,7 +1092,7 @@ fn splice_substitution_body(
 /// reserved_word_acceptable): after `;', `&', `|', a newline, or a closed
 /// `{ }'/`( )' command construct, and with a word-breaking char (or end
 /// of input) following. Returns the index just past the closing `}`.
-fn skip_funsub_body(chars: &[char], open: usize) -> Option<usize> {
+pub(super) fn skip_funsub_body(chars: &[char], open: usize) -> Option<usize> {
     let mut depth = 1usize;
     let mut index = open + 1;
     let mut single = false;

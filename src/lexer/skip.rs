@@ -5715,6 +5715,16 @@ fn db_scan_dolbrace_body(
     mut line: usize,
     root_line: usize,
 ) -> (DbScan, usize, usize) {
+    // Bash 5.3 funsub (parser.h:85 FUNSUB_CHAR, parse.y:5506): `${` +
+    // blank/newline/`|` opens a command list, not a P_FIRSTCLOSE parameter
+    // body — `#` comments and heredoc bodies inside are opaque and the
+    // `}` closes only in command position (parse.y:3631 shell_getc,
+    // make_cmd.c:512, parse.y:5400-5416). Without this arm a `'` in a
+    // comment (`# don't`) or a `}` inside a heredoc body owned the EOF
+    // verdict (rubash#3823 f1/h2/h3).
+    if matches!(chars.get(i), Some(' ' | '\t' | '\n' | '|')) {
+        return db_scan_funsub_body(chars, i, line, root_line);
+    }
     let mut escaped = false;
     while i < chars.len() {
         let ch = chars[i];
@@ -5798,6 +5808,232 @@ fn db_scan_dolbrace_body(
                 return (DbScan::Closed, i + 1, line);
             }
             _ => {
+                i += 1;
+            }
+        }
+    }
+    (DbScan::Defer, i, line)
+}
+
+/// A `${ command; }` funsub body scan (parse.y:5506 FUNSUB_CHAR ->
+/// parse_comsub PST_FUNSUBST): the body is command text, so `#`
+/// comments at token boundaries and heredoc bodies are opaque
+/// (parse.y:3631 shell_getc, make_cmd.c:512) and the body closes at a
+/// `}` that is a lone word in command position (parse.y:5400-5416),
+/// not the first unquoted `}`. The term/paren model mirrors
+/// alias_stream::skip_funsub_body and extract_funsub_body_tail. Same
+/// DbScan contract as db_scan_comsub_body: a `$[` hunt opened inside
+/// owns the EOF.
+fn db_scan_funsub_body(
+    chars: &[char],
+    mut i: usize,
+    mut line: usize,
+    root_line: usize,
+) -> (DbScan, usize, usize) {
+    let mut depth = 1usize;
+    let mut paren_depth = 0usize;
+    // Command position: true at body start and after a command
+    // terminator (`;` `&` `|` newline) or a closed `{ }` group /
+    // `( )` subshell — only at funsub level, never inside `( ... )`.
+    let mut term = true;
+    // shell_getc token boundary for `#` comment recognition
+    // (parse.y:3631-3645): false inside a word, true after blanks,
+    // separators and operators at any depth.
+    let mut at_word_start = true;
+    let mut escaped = false;
+    while i < chars.len() {
+        let ch = chars[i];
+        if escaped {
+            escaped = false;
+            at_word_start = false;
+            i += 1;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            at_word_start = false;
+            i += 1;
+            continue;
+        }
+        if ch == '\n' {
+            line += 1;
+            if paren_depth == 0 {
+                term = true;
+            }
+            at_word_start = true;
+            i += 1;
+            continue;
+        }
+        // parse.y:3631 shell_getc: `#` at a token start discards to EOL;
+        // a quote character inside the comment is inert. The newline is
+        // left for the next iteration, which restores command position.
+        if ch == '#' && at_word_start {
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        // Heredoc bodies are raw lines (make_cmd.c:512): a `}` or a
+        // quote character inside the body must not move this scan.
+        // `<<<` is a herestring — no body to skip.
+        if ch == '<' && chars.get(i + 1) == Some(&'<') && chars.get(i + 2) != Some(&'<') {
+            let (next, _closure) =
+                super::heredoc_scan::skip_heredoc_in_chars_with_closure(chars, i);
+            if next > i {
+                line += chars[i..next].iter().filter(|c| **c == '\n').count();
+                i = next;
+                at_word_start = true;
+                if paren_depth == 0 {
+                    term = true;
+                }
+                continue;
+            }
+        }
+        if ch == '<' && chars.get(i + 1) == Some(&'<') && chars.get(i + 2) == Some(&'<') {
+            i += 3;
+            at_word_start = true;
+            term = false;
+            continue;
+        }
+        match ch {
+            '\'' | '"' | '`' => {
+                let quote = ch;
+                let (event, next, next_line) = db_scan_quote_unit(chars, i, line, quote, false);
+                match event {
+                    DbScan::Closed => {
+                        i = next;
+                        line = next_line;
+                    }
+                    DbScan::Defer => return (DbScan::Defer, i, line),
+                    DbScan::Report(mut report) => {
+                        report.construct_line = root_line;
+                        return (DbScan::Report(report), i, line);
+                    }
+                }
+                term = false;
+                at_word_start = false;
+            }
+            '$' if chars.get(i + 1) == Some(&'\'') => {
+                let (event, next, next_line) = db_scan_quote_unit(chars, i + 1, line, '\'', true);
+                match event {
+                    DbScan::Closed => {
+                        i = next;
+                        line = next_line;
+                    }
+                    DbScan::Defer => return (DbScan::Defer, i, line),
+                    DbScan::Report(report) => return (DbScan::Report(report), i, line),
+                }
+                term = false;
+                at_word_start = false;
+            }
+            '$' if chars.get(i + 1) == Some(&'[') => {
+                let (event, next, next_line) =
+                    db_scan_bracket_hunt(chars, i + 2, line, line, root_line);
+                return match event {
+                    DbScan::Closed => (DbScan::Closed, next, next_line),
+                    DbScan::Defer => (DbScan::Defer, i, line),
+                    DbScan::Report(report) => (DbScan::Report(report), i, line),
+                };
+            }
+            '$' if chars.get(i + 1) == Some(&'(') => {
+                if chars.get(i + 2) == Some(&'(') {
+                    // `$((` arithmetic command: its own scan owns any EOF
+                    // (`)' — a1); skip opaquely when it balances.
+                    match db_skip_dparen_span(chars, i + 2, line) {
+                        Some((next, next_line)) => {
+                            i = next;
+                            line = next_line;
+                            term = false;
+                            at_word_start = false;
+                            continue;
+                        }
+                        None => return (DbScan::Defer, i, line),
+                    }
+                }
+                let (event, next, next_line) = db_scan_comsub_body(chars, i + 2, line, root_line);
+                match event {
+                    DbScan::Closed => {
+                        i = next;
+                        line = next_line;
+                    }
+                    DbScan::Defer => return (DbScan::Defer, i, line),
+                    DbScan::Report(report) => return (DbScan::Report(report), i, line),
+                }
+                term = false;
+                at_word_start = false;
+            }
+            '$' if chars.get(i + 1) == Some(&'{') => {
+                let (event, next, next_line) = db_scan_dolbrace_body(chars, i + 2, line, root_line);
+                match event {
+                    DbScan::Closed => {
+                        i = next;
+                        line = next_line;
+                    }
+                    DbScan::Defer => return (DbScan::Defer, i, line),
+                    DbScan::Report(report) => return (DbScan::Report(report), i, line),
+                }
+                term = false;
+                at_word_start = false;
+            }
+            '(' => {
+                paren_depth += 1;
+                term = false;
+                at_word_start = true;
+                i += 1;
+            }
+            ')' if paren_depth > 0 => {
+                paren_depth -= 1;
+                term = paren_depth == 0;
+                at_word_start = true;
+                i += 1;
+            }
+            // A bare `)` (no open subshell) is a metacharacter, not word
+            // text: the next token starts after it.
+            ')' => {
+                term = false;
+                at_word_start = true;
+                i += 1;
+            }
+            '{' if term && paren_depth == 0 => {
+                depth += 1;
+                term = true;
+                at_word_start = true;
+                i += 1;
+            }
+            '}' if term && paren_depth == 0 => {
+                // parse.y:5407-5416: a word beginning with `}` in command
+                // position terminates the substitution; term==false
+                // covers mid-word `}` (`a}b`, `\"}`) as word text.
+                if depth > 1 {
+                    depth -= 1;
+                    term = true;
+                    at_word_start = true;
+                    i += 1;
+                    continue;
+                }
+                return (DbScan::Closed, i + 1, line);
+            }
+            ';' | '&' | '|' => {
+                // A separator is a token boundary at any depth, but it
+                // restores command position only at funsub level.
+                if paren_depth == 0 {
+                    term = true;
+                }
+                at_word_start = true;
+                i += 1;
+            }
+            ' ' | '\t' | '\r' => {
+                at_word_start = true;
+                i += 1;
+            }
+            '<' | '>' => {
+                at_word_start = true;
+                term = false;
+                i += 1;
+            }
+            _ => {
+                term = false;
+                at_word_start = false;
                 i += 1;
             }
         }

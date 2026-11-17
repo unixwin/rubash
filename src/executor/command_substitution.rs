@@ -3088,7 +3088,9 @@ pub(in crate::executor) fn extract_funsub_body(
 /// the line comparison — quoting inside it makes metacharacters literal
 /// (a quoted `)` is delimiter text, not a closer). An empty delimiter
 /// copies nothing further (the `<<` was not a heredoc after all).
-fn push_funsub_heredoc(
+/// Shared with the mut walker's funsub collector
+/// (`expand_current_shell_braced_substitution`, embedded_mutations.rs).
+pub(in crate::executor) fn push_funsub_heredoc(
     chars: &mut std::iter::Peekable<impl Iterator<Item = char>>,
     body: &mut String,
 ) {

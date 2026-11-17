@@ -116,6 +116,24 @@ fn scan_braced_chars_from(
     if chars.get(start) != Some(&'$') || chars.get(start + 1) != Some(&'{') {
         return None;
     }
+    // Bash 5.3 funsub (parser.h:85 FUNSUB_CHAR, parse.y:5506): `${` +
+    // blank/newline/`|` opens a command list, not a parameter form. Its
+    // `}` closes only in command position and `#` comments / heredoc
+    // bodies inside are opaque (parse.y:3631 shell_getc, make_cmd.c:512);
+    // the parameter state machine below would instead read the body's
+    // first `}` — even one inside a heredoc line — or a `'` in a comment
+    // as structure (rubash#3823 f1/h2/h3: the residual gates truncated
+    // the logical line inside the funsub body). Delegate to the shared
+    // funsub extent scanner so this scan agrees with the word lexer
+    // (skip.rs skip_braced) and the alias pre-scan.
+    if matches!(chars.get(start + 2), Some(' ' | '\t' | '\n' | '|')) {
+        let end = super::alias_stream::skip_funsub_body(chars, start + 1)?;
+        return Some(BracedScan {
+            end,
+            final_state: DolbraceState::Param,
+            quote_events: Vec::new(),
+        });
+    }
     let mut cursor = start + 2usize;
     let mut depth = 1usize;
     let mut state = options.initial_state;
