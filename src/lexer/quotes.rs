@@ -2721,6 +2721,24 @@ pub(super) fn decode_ansi_c_span(chars: &mut std::iter::Peekable<std::str::Chars
 /// has_unclosed_command_substitution) cannot mistake it for a live
 /// command-substitution opener (rubash#215: `x=$'a`b$(echo z)'`).
 pub(crate) fn escape_decoded_ansi_c_quotes(decoded: &str) -> String {
+    escape_decoded_ansi_c_quotes_impl(decoded, true)
+}
+
+/// [`escape_decoded_ansi_c_quotes`] without the CTLESC glob protection for
+/// `*`/`?`/`[` (and extglob introducers). The protection is only needed
+/// when the decoded bytes are emitted into an UNQUOTED region, where the
+/// glob engine would read them as pattern syntax. The preserve-quotes
+/// caller wraps the result in the synthetic single-quoted span GNU's
+/// `sh_single_quote` produces (parse.y:5564-5571), so the bytes are
+/// already quoted data — prefixing them with CTLESC there leaves the
+/// carrier inside the quoted span, where the escape pair is data, and it
+/// leaked as a literal `\x11` into the stored element
+/// (`A=([0]=$'\[a\]')`).
+pub(crate) fn escape_decoded_ansi_c_quotes_unprotected(decoded: &str) -> String {
+    escape_decoded_ansi_c_quotes_impl(decoded, false)
+}
+
+fn escape_decoded_ansi_c_quotes_impl(decoded: &str, protect_glob: bool) -> String {
     let chars: Vec<char> = decoded.chars().collect();
     let mut out = String::with_capacity(decoded.len());
     let mut index = 0usize;
@@ -2754,12 +2772,12 @@ pub(crate) fn escape_decoded_ansi_c_quotes(decoded: &str) -> String {
             // skip-pair carrier (glob.rs contains_glob_or_extglob), the
             // assignment boundary's dequote_ctlesc_pairs removes the pair
             // before storage, and materialize strips it at argv.
-            '*' | '?' | '[' => {
+            '*' | '?' | '[' if protect_glob => {
                 out.push_str(crate::executor::markers::CTLESC_STR);
                 out.push(ch);
             }
             // Extglob introducers as decoded data must not open a group.
-            '@' | '+' | '!' if chars.get(index + 1) == Some(&'(') => {
+            '@' | '+' | '!' if protect_glob && chars.get(index + 1) == Some(&'(') => {
                 out.push_str(crate::executor::markers::CTLESC_STR);
                 out.push(ch);
             }

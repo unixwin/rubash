@@ -1933,9 +1933,11 @@ impl Executor {
                                 // tagging keeps decoded quotes from closing
                                 // the synthetic span.
                                 output.push('\'');
-                                output.push_str(&crate::lexer::escape_decoded_ansi_c_quotes(
-                                    &decoded,
-                                ));
+                                output.push_str(
+                                    &crate::lexer::escape_decoded_ansi_c_quotes_unprotected(
+                                        &decoded,
+                                    ),
+                                );
                                 output.push('\'');
                             } else {
                                 // Tag decoded quotes with E010/E011 markers so

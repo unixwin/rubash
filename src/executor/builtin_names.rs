@@ -12,12 +12,11 @@ pub(in crate::executor) fn format_redirect(operator: &str, redirect: &Redirect) 
             None => format!("{op}&{fd_target}"),
         };
     }
+    let target = super::command_text::redirect_target_source_text(redirect);
     match redirect.fd {
-        Some(_) if operator.starts_with(char::is_numeric) => {
-            format!("{operator} {}", redirect.target)
-        }
-        Some(fd) => format!("{fd}{operator} {}", redirect.target),
-        None => format!("{operator} {}", redirect.target),
+        Some(_) if operator.starts_with(char::is_numeric) => format!("{operator} {target}"),
+        Some(fd) => format!("{fd}{operator} {target}"),
+        None => format!("{operator} {target}"),
     }
 }
 
