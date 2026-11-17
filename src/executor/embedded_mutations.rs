@@ -671,7 +671,20 @@ impl Executor {
         while let Some(ch) = chars.next() {
             if let Some(span_start) = quoted_span_start.take() {
                 let ifs = self.current_ifs();
-                crate::executor::markers::protect_ifs_chars_in_span(&mut output, span_start, ifs);
+                // subst.c:11535/12103-12107 — a word carrying W_SPLITSPACE
+                // (the sentinel an unquoted $*/${*} piece emitted under a
+                // set-null IFS) splits on " ": a quoted-site span's ' ' is
+                // CTLESC-protected data in GNU, so it joins the protected
+                // set exactly like a literal IFS char.
+                let splitspace = crate::executor::markers::contains_split_on_spaces_sentinel(
+                    &output[..span_start.min(output.len())],
+                );
+                let ifs = if splitspace {
+                    format!("{ifs} ")
+                } else {
+                    ifs.to_string()
+                };
+                crate::executor::markers::protect_ifs_chars_in_span(&mut output, span_start, &ifs);
             }
             let was_literal_escape = prev_literal_escape;
             prev_literal_escape = ch == crate::executor::markers::LITERAL_CHAR_ESCAPE;
@@ -1212,20 +1225,28 @@ impl Executor {
                 }
                 Some('@') => {
                     chars.next();
-                    // Same string_list_dollar_at separator rule as the
-                    // &self walker (subst.c:2975-3000): ifs_firstchar,
-                    // ' ' under PF_ASSIGNRHS; quoted "$@" protects element
-                    // internals outside assignment context.
+                    // GNU string_list_dollar_at (subst.c:2975-3000): element
+                    // boundaries follow IFS[0] — ' ' under PF_ASSIGNRHS or a
+                    // set-but-empty IFS. A quoted `"$@"` outside assignment
+                    // context keeps each element's internal IFS bytes
+                    // protected (rubash#3605 family A). An unquoted `$@`
+                    // produced under a set-null IFS carries W_SPLITSPACE
+                    // (subst.c:10665-10668 -> 11535 -> 12103-12107): element
+                    // whitespace is CTLESC-protected and the assembled word
+                    // splits on " " regardless of a later mid-word IFS bind.
                     let assign_rhs = self.inside_assignment_rhs.get()
                         || super::expand_braced_replacement::ASSIGNMENT_RHS.with(|flag| flag.get());
-                    let ifs = self.shell_state.env_vars.get("IFS").map(String::as_str);
-                    let separator = if assign_rhs {
-                        " ".to_string()
-                    } else {
-                        self.ifs_first_char_separator()
-                    };
-                    let value = if in_double && !assign_rhs {
-                        self.shell_state
+                    let no_split =
+                        super::expand_braced_replacement::NO_SPLIT_DOLLAR_STAR.with(|f| f.get());
+                    let ifs_value = self.shell_state.env_vars.get("IFS");
+                    let ifs_is_null = ifs_value.is_some_and(|ifs| ifs.is_empty());
+                    if in_double && !assign_rhs {
+                        // HEAD (family A): quoted "$@" protects element IFS
+                        // bytes so the ambient splitter recovers boundaries.
+                        let ifs = ifs_value.map(String::as_str);
+                        let separator = self.ifs_first_char_separator();
+                        let value = self
+                            .shell_state
                             .positional_window()
                             .iter()
                             .map(|element| {
@@ -1234,29 +1255,120 @@ impl Executor {
                                 )
                             })
                             .collect::<Vec<_>>()
-                            .join(&separator)
+                            .join(&separator);
+                        let value = protect_rhs_value(
+                            &value,
+                            protect_rhs_data || protect_expansion_results,
+                        );
+                        if expansion_ws_marked(alternate, preserve_quotes, in_double) {
+                            output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
+                        } else {
+                            output.push_str(&value);
+                        }
                     } else {
-                        self.shell_state.positional_window().join(&separator)
-                    };
-                    let value =
-                        protect_rhs_value(&value, protect_rhs_data || protect_expansion_results);
-                    if expansion_ws_marked(alternate, preserve_quotes, in_double) {
-                        output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
-                    } else {
+                        // Unquoted / assignment-RHS path: element-wise model
+                        // (GNU subst.c:12054-12153, 2957-3010).
+                        let ifs_first = if assign_rhs {
+                            ' '
+                        } else {
+                            ifs_value.and_then(|ifs| ifs.chars().next()).unwrap_or(' ')
+                        }
+                        .to_string();
+                        let value = self
+                            .shell_state
+                            .positional_window()
+                            .iter()
+                            .map(|element| {
+                                let element = protect_rhs_value(
+                                    element,
+                                    protect_rhs_data || protect_expansion_results,
+                                );
+                                if (ifs_is_null && !no_split) || preserve_quotes {
+                                    std::borrow::Cow::Owned(mark_expansion_whitespace(
+                                        &element,
+                                        preserve_quotes,
+                                    ))
+                                } else {
+                                    element
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(&ifs_first);
+                        if ifs_is_null && !assign_rhs && !no_split && !preserve_quotes {
+                            output.push(crate::executor::markers::SPLIT_ON_SPACES_SENTINEL);
+                        }
                         output.push_str(&value);
                     }
                 }
                 Some('*') => {
                     chars.next();
-                    // Bash joins `$*` with the first IFS character (not a space).
-                    let value = self.positional_params_star_joined();
-                    let value =
-                        protect_rhs_value(&value, protect_rhs_data || protect_expansion_results);
-                    if expansion_ws_marked(alternate, preserve_quotes, in_double) {
-                        output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
-                    } else {
-                        output.push_str(&value);
+                    // Same element model as `@` above, but unquoted `$*`
+                    // outside an assignment RHS dispatches to
+                    // string_list_dollar_at (Posix interp 888,
+                    // subst.c:10662-10670): separator ' ' when IFS is unset
+                    // or set-but-null, ifs[0] otherwise. Assignment RHS
+                    // takes string_list_dollar_star (subst.c:10612-10660),
+                    // where a set-but-empty IFS joins with no separator
+                    // (`IFS='' x=$*` concatenates).
+                    let star_assign_rhs = self.inside_assignment_rhs.get()
+                        || super::expand_braced_replacement::ASSIGNMENT_RHS.with(|f| f.get());
+                    // expand_no_split_dollar_star (subst.c:237,
+                    // expand_string_for_pat at subst.c:4518): no-split
+                    // contexts take string_list_dollar_star like the
+                    // assignment-RHS arm (subst.c:3048, 10612-10660).
+                    let star_no_split =
+                        super::expand_braced_replacement::NO_SPLIT_DOLLAR_STAR.with(|f| f.get());
+                    // A quoted piece (`"$*"` inside the word, a
+                    // DoubleQuoted/HereDocument walk) takes
+                    // string_list_dollar_star like the no-split contexts —
+                    // concat under a null IFS, no W_SPLITSPACE
+                    // (subst.c:10612-10660 vs 10662-10670).
+                    let piece_quoted = in_double
+                        || !matches!(context, SubstitutionQuoteContext::Unquoted)
+                        || fragment_site_quoted;
+                    let dollar_star = star_assign_rhs || star_no_split || piece_quoted;
+                    let star_ifs_value = self.shell_state.env_vars.get("IFS");
+                    let ifs_is_null = star_ifs_value.is_some_and(|ifs| ifs.is_empty());
+                    let ifs_first = match star_ifs_value {
+                        Some(ifs) => {
+                            ifs.chars()
+                                .next()
+                                .map(|c| c.to_string())
+                                .unwrap_or_else(|| {
+                                    if dollar_star {
+                                        String::new()
+                                    } else {
+                                        " ".to_string()
+                                    }
+                                })
+                        }
+                        None => " ".to_string(),
+                    };
+                    let value = self
+                        .shell_state
+                        .positional_window()
+                        .iter()
+                        .map(|element| {
+                            let element = protect_rhs_value(
+                                element,
+                                protect_rhs_data || protect_expansion_results,
+                            );
+                            if (ifs_is_null && !star_no_split && !piece_quoted) || preserve_quotes {
+                                std::borrow::Cow::Owned(mark_expansion_whitespace(
+                                    &element,
+                                    preserve_quotes,
+                                ))
+                            } else {
+                                element
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(&ifs_first);
+                    // W_SPLITSPACE (subst.c:10665-10668 -> 11535 -> 12103-12107).
+                    if ifs_is_null && !dollar_star && !preserve_quotes {
+                        output.push(crate::executor::markers::SPLIT_ON_SPACES_SENTINEL);
                     }
+                    output.push_str(&value);
                 }
                 Some('#') => {
                     chars.next();
@@ -2026,7 +2138,20 @@ impl Executor {
         // character follows the expansion).
         if let Some(span_start) = quoted_span_start.take() {
             let ifs = self.current_ifs();
-            crate::executor::markers::protect_ifs_chars_in_span(&mut output, span_start, ifs);
+            // subst.c:11535/12103-12107 — a word carrying W_SPLITSPACE
+            // (the sentinel an unquoted $*/${*} piece emitted under a
+            // set-null IFS) splits on " ": a quoted-site span's ' ' is
+            // CTLESC-protected data in GNU, so it joins the protected
+            // set exactly like a literal IFS char.
+            let splitspace = crate::executor::markers::contains_split_on_spaces_sentinel(
+                &output[..span_start.min(output.len())],
+            );
+            let ifs = if splitspace {
+                format!("{ifs} ")
+            } else {
+                ifs.to_string()
+            };
+            crate::executor::markers::protect_ifs_chars_in_span(&mut output, span_start, &ifs);
         }
 
         output

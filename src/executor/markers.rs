@@ -479,6 +479,22 @@ pub(crate) const QUOTED_EXPANSION_SITE: char = '\u{E31B}';
 /// `&str` companion of QUOTED_EXPANSION_SITE.
 pub(crate) const QUOTED_EXPANSION_SITE_STR: &str = "\u{E31B}";
 
+/// GNU `W_SPLITSPACE` port (command.h:79 "Split this word on ' '
+/// regardless of IFS"): an unquoted `$*`/`$@`/`${*}`/`${@}` piece produced
+/// while IFS was set-but-null marks the WHOLE word for a final split on
+/// spaces — `list_string(istring, " ", 1)` when IFS is set (including
+/// set-null), `" \t\n"` when unset (subst.c:11305 accumulate at :11535,
+/// final split at :12103-12107) — regardless of what a mid-word
+/// `${IFS:=...}` bind set IFS to afterwards (dollar-star7 family).
+/// Producers: embedded_parameters.rs `@`/`*` arms; consumers:
+/// arrays.rs field_split_values_with_ifs (split-charset override) and
+/// command_prepare.rs strip_ifs_protection_markers (non-split paths drop
+/// it). U+E31C continues the registry zone; a bare codepoint in transport
+/// is always protocol (typed `$'\uE31C'` arrives E400-escaped at entry).
+pub(crate) const SPLIT_ON_SPACES_SENTINEL: char = '\u{E31C}';
+/// `&str` companion of SPLIT_ON_SPACES_SENTINEL.
+pub(crate) const SPLIT_ON_SPACES_SENTINEL_STR: &str = "\u{E31C}";
+
 /// Injected tag marking a group-command redirect that the executor added
 /// (support_names.rs) — `\x1e`-prefixed so it sorts into the carrier family.
 pub(crate) const GROUP_REDIRECT_INJECTED_MARK: &str = "\u{1e}group-redirect";
@@ -1090,6 +1106,12 @@ pub(crate) const MARKERS: &[MarkerInfo] = &[
         user_reachable: false,
     },
     MarkerInfo {
+        name: "SPLIT_ON_SPACES_SENTINEL",
+        code: SPLIT_ON_SPACES_SENTINEL as u32,
+        boundaries: &[],
+        user_reachable: false,
+    },
+    MarkerInfo {
         name: "GROUP_REDIRECT_INJECTED_MARK",
         code: 0x1E,
         boundaries: &[],
@@ -1339,6 +1361,19 @@ pub(crate) fn replace_ansi_c_ifs_guard(value: &str, replacement: &str) -> String
 }
 
 /// Drop bare ANSI_C_IFS_GUARD markers, preserving E400-escaped user U+E401.
+/// Whether the word carries a SPLIT_ON_SPACES_SENTINEL — the marker-lint
+/// reviewed contains-site (pair-aware: the sentinel is stripped, never
+/// dequoted as data, by `strip_split_on_spaces_sentinel`).
+pub(crate) fn contains_split_on_spaces_sentinel(value: &str) -> bool {
+    contains_bare_sentinel(value, SPLIT_ON_SPACES_SENTINEL)
+}
+
+/// Remove every SPLIT_ON_SPACES_SENTINEL (including E400-escaped pairs) —
+/// the marker is a word-level directive, never field data.
+pub(crate) fn strip_split_on_spaces_sentinel(value: &str) -> String {
+    restore_bare_sentinels(value, &[(SPLIT_ON_SPACES_SENTINEL, "")])
+}
+
 pub(crate) fn strip_ansi_c_ifs_guard(value: &str) -> String {
     replace_ansi_c_ifs_guard(value, "")
 }
@@ -1823,6 +1858,10 @@ mod tests {
             // Parse-time site marker for ${...} quoting decisions;
             // consumed during parse, never enters stored/output text.
             "QUOTED_EXPANSION_SITE",
+            // Word-level W_SPLITSPACE port: consumed by the field
+            // splitter's charset override (or stripped on non-split
+            // paths); never stored or emitted.
+            "SPLIT_ON_SPACES_SENTINEL",
             // Prefix of the executor's group-redirect state string;
             // an internal state encoding read back by the same
             // subsystem, not a value/output carrier.

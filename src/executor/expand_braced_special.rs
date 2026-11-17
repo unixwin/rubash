@@ -11,7 +11,44 @@ impl Executor {
             // GNU string_list_dollar_star: `*` joins with IFS[0] in scalar
             // contexts; `@` stays space-joined.
             "@" => return Some(self.shell_state.positional_window().join(" ")),
-            "*" => return Some(self.positional_params_star_joined()),
+            "*" => {
+                // Posix interp 888: an unquoted ${*} produced while IFS is
+                // set-but-null dispatches to the dollar_at word list
+                // (subst.c:10662-10668) — ' '-joined elements whose internal
+                // spaces stay protected (quote_spaces, subst.c:4636), and
+                // W_SPLITSPACE marks the assembled word to split on " "
+                // regardless of a later mid-word IFS bind
+                // (subst.c:11535 → 12103-12107). Quoted and assignment-RHS
+                // contexts keep string_list_dollar_star's ifs_firstc join
+                // (concat under a null IFS, subst.c:2902-2930).
+                let assign_rhs = self.inside_assignment_rhs.get()
+                    || super::expand_braced_replacement::ASSIGNMENT_RHS.with(|f| f.get());
+                if unquoted
+                    && !assign_rhs
+                    && !crate::executor::expand_word::extquote_name_quoted_context()
+                    && !super::expand_braced_replacement::NO_SPLIT_DOLLAR_STAR.with(|f| f.get())
+                    && self
+                        .shell_state
+                        .env_vars
+                        .get("IFS")
+                        .is_some_and(|ifs| ifs.is_empty())
+                {
+                    let joined = self
+                        .shell_state
+                        .positional_window()
+                        .iter()
+                        .map(|element| {
+                            crate::executor::embedded_mutations::mark_alternate_whitespace(element)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    return Some(format!(
+                        "{}{joined}",
+                        crate::executor::markers::SPLIT_ON_SPACES_SENTINEL
+                    ));
+                }
+                return Some(self.positional_params_star_joined());
+            }
             "?" => return Some(self.dollar_question_status().to_string()),
             "$" => return Some(self.shell_pid_value().to_string()),
             "!" => return Some(self.last_background_pid_value()),

@@ -27,6 +27,27 @@ thread_local! {
     pub(in crate::executor) static ASSIGNMENT_RHS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+// The W_NOSPLIT2 / expand_string_for_pat arm of expand_no_split_dollar_star
+// (subst.c:237, set at subst.c:4518-4523 for pattern expansion): in a
+// no-split context an unquoted `$*` with a null IFS takes
+// string_list_dollar_star (concatenating join, subst.c:3048) instead of the
+// string_list_dollar_at ' '-join + W_SPLITSPACE marking
+// (subst.c:10662-10668). Set by expand_parameter_pattern_word while the
+// pattern text is being expanded (`${x#$*}` removes the concatenated
+// prefix "ab", never the ' '-joined "a b").
+thread_local! {
+    pub(in crate::executor) static NO_SPLIT_DOLLAR_STAR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `f` with [`NO_SPLIT_DOLLAR_STAR`] set (save/restore for nesting).
+pub(in crate::executor) fn with_no_split_dollar_star<T>(f: impl FnOnce() -> T) -> T {
+    let old = NO_SPLIT_DOLLAR_STAR.with(|f| f.get());
+    NO_SPLIT_DOLLAR_STAR.with(|f| f.set(true));
+    let result = f();
+    NO_SPLIT_DOLLAR_STAR.with(|f| f.set(old));
+    result
+}
+
 /// Scalar values of the single-char special parameters usable as pattern
 /// substitution names (subst.c:9837-9852 VALID_SPECIAL_LENGTH_PARAM plus
 /// `$`/`0`/`!`). `@`/`*` are handled by the positional-list arm above.
