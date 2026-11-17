@@ -764,6 +764,38 @@ impl Executor {
         Ok(())
     }
 
+    /// rubash#3828: [`Self::set_fd_output_file`] for a File the caller
+    /// already opened — the probe's open IS the entry's one open (GNU
+    /// redir.c do_redirection_internal / redir_open: one open per
+    /// redirect entry), so the bind adopts it instead of opening the
+    /// target by path a second time. A target created with a mode
+    /// lacking owner-write (umask masking 0200) fails the second open
+    /// with EACCES although the kernel-level single open succeeds.
+    /// Callers pass a File only for plain filesystem targets
+    /// (`probe_output_redirect_file` returns None for the FIFO / net /
+    /// special carve-outs, which keep the plain bind path). The open
+    /// mode the File carries (truncate vs append) is the caller's; no
+    /// `append` parameter rides this bind.
+    pub(in crate::executor) fn set_fd_output_file_from_file(
+        &mut self,
+        fd: u32,
+        target: String,
+        dynamic: bool,
+        file: std::fs::File,
+    ) -> std::io::Result<()> {
+        let file_fd = FileFd::from_file(file, target.clone().into());
+        self.fd_table
+            .open_output(fd, FdWriteEndpoint::File(file_fd), dynamic);
+        self.shell_state.env_vars.remove(&fd_closed_key(fd));
+        self.shell_state
+            .env_vars
+            .remove(&fd_output_process_substitution_key(fd));
+        self.shell_state.env_vars.insert(fd_output_key(fd), target);
+        // rubash#3655: the output bind retires the fd's read arm.
+        self.clear_input_fd_mirrors(fd);
+        Ok(())
+    }
+
     /// GNU `r_err_and_out`/`r_append_err_and_out` (redir.c:832-838,
     /// do_redirection_internal): `>&word`/`&>word` open the file once and
     /// dup2 it onto fd 2 — both descriptors refer to the same open file
@@ -6276,19 +6308,36 @@ impl Executor {
                         && redirect_target_fd(&target).is_none()
                     {
                         let path = target.strip_prefix('&').unwrap_or(&target).to_string();
-                        if !is_null_device(&path) {
-                            // Validation only — never a throwaway real
-                            // open (rubash#2880: see the plain-file arm
-                            // below; a dropped open of a FIFO consumes
-                            // the rendezvous pairing).
-                            crate::executor::shell_options::probe_output_redirect(
+                        // rubash#3828: the probe's open IS the entry's
+                        // one open (GNU redir.c do_redirection_internal
+                        // / redir_open) — adopt its File as the bind
+                        // instead of opening the target by path again
+                        // (a target created with a mode lacking
+                        // owner-write fails the second open EACCES). A
+                        // FIFO / net / special target probes to None and
+                        // keeps the plain bind below, whose open is its
+                        // single pairing open (rubash#2880).
+                        let probed = if !is_null_device(&path) {
+                            crate::executor::shell_options::probe_output_redirect_file(
                                 self,
                                 &path,
                                 redirect.clobber,
-                            )?;
-                        }
+                            )?
+                        } else {
+                            None
+                        };
                         self.flush_persistent_output_process_substitution(1)?;
-                        self.set_fd_output_file(1, path.clone(), false, false)?;
+                        match probed {
+                            Some(file) => self.set_fd_output_file_from_file(
+                                1,
+                                path.clone(),
+                                false,
+                                file,
+                            )?,
+                            None => {
+                                self.set_fd_output_file(1, path.clone(), false, false)?
+                            }
+                        }
                         self.flush_persistent_output_process_substitution(2)?;
                         self.share_fd_output_file(1, 2, &path, false);
                         continue;
@@ -6336,35 +6385,47 @@ impl Executor {
                         crate::parser::RedirectKind::Append
                             | crate::parser::RedirectKind::CombinedAppend
                     );
-                    if !is_null_device(&target) && !append {
-                        // Validation only — never a throwaway real open.
-                        // GNU opens a redirect target exactly once
-                        // (redir.c do_redirection_internal); a FIFO
-                        // opened here and dropped consumes the rendezvous
-                        // pairing, the reader takes EOF in the
-                        // zero-writer gap and exits, and the real open in
-                        // set_fd_output_file below then blocks forever
-                        // (rubash#2880 — the same consumption the
-                        // rubash#1820 / #1868 carve-outs removed from the
-                        // builtin faces). probe_output_redirect is the
-                        // shared validation entry: create/truncate side
-                        // effect and noclobber diagnostics for regular
-                        // files, access-only for FIFOs (GNU
-                        // noclobber_open, redir.c:676, refuses only
-                        // regular files), resolution-only for net
-                        // targets; the bind open below is the one real
-                        // open.
-                        crate::executor::shell_options::probe_output_redirect(
+                    // rubash#3828: the probe's open IS the entry's one
+                    // open (GNU redir.c do_redirection_internal /
+                    // redir_open: one open per redirect entry) — keep
+                    // its File for the bind below instead of opening
+                    // the target by path again (a target created with
+                    // a mode lacking owner-write fails the second open
+                    // EACCES). The probe still validates first: a FIFO
+                    // opened here and dropped consumes the rendezvous
+                    // pairing, the reader takes EOF in the zero-writer
+                    // gap and exits, and the bind open below then blocks
+                    // forever (rubash#2880 — the same consumption the
+                    // rubash#1820 / #1868 carve-outs removed from the
+                    // builtin faces), so FIFOs probe to None and the
+                    // plain bind below is their single pairing open;
+                    // net targets likewise resolve only (rubash#1967).
+                    // The append arm skips the probe: its bind open in
+                    // set_fd_output_file is already the single open.
+                    let probed = if !is_null_device(&target) && !append {
+                        crate::executor::shell_options::probe_output_redirect_file(
                             self,
                             &target,
                             redirect.clobber,
-                        )?;
-                    }
+                        )?
+                    } else {
+                        None
+                    };
                     // Rebinding closes the descriptor's previous
                     // description first in GNU; run a pending process
                     // substitution's deferred body (rubash#1336).
                     self.flush_persistent_output_process_substitution(fd)?;
-                    self.set_fd_output_file(fd, target.clone(), fd >= 10, append)?;
+                    match probed {
+                        Some(file) => self.set_fd_output_file_from_file(
+                            fd,
+                            target.clone(),
+                            fd >= 10,
+                            file,
+                        )?,
+                        None => {
+                            self.set_fd_output_file(fd, target.clone(), fd >= 10, append)?
+                        }
+                    }
                     if matches!(
                         redirect.kind,
                         crate::parser::RedirectKind::CombinedOutput
@@ -6406,19 +6467,31 @@ impl Executor {
                         // GNU redir.c:832-838 r_duplicating_output_word
                         // translation (see above).
                         let path = target.strip_prefix('&').unwrap_or(&target).to_string();
-                        if !is_null_device(&path) {
-                            // Validation only — never a throwaway real
-                            // open (rubash#2880: see the plain-file arm
-                            // above; a dropped open of a FIFO consumes
-                            // the rendezvous pairing).
-                            crate::executor::shell_options::probe_output_redirect(
+                        // rubash#3828: the probe's open IS the entry's
+                        // one open — adopt its File as the bind (see the
+                        // fixed-fd arm above); a FIFO / net / special
+                        // target probes to None and keeps the plain bind.
+                        let probed = if !is_null_device(&path) {
+                            crate::executor::shell_options::probe_output_redirect_file(
                                 self,
                                 &path,
                                 redirect.clobber,
-                            )?;
-                        }
+                            )?
+                        } else {
+                            None
+                        };
                         self.flush_persistent_output_process_substitution(1)?;
-                        self.set_fd_output_file(1, path.clone(), false, false)?;
+                        match probed {
+                            Some(file) => self.set_fd_output_file_from_file(
+                                1,
+                                path.clone(),
+                                false,
+                                file,
+                            )?,
+                            None => {
+                                self.set_fd_output_file(1, path.clone(), false, false)?
+                            }
+                        }
                         self.flush_persistent_output_process_substitution(2)?;
                         self.share_fd_output_file(1, 2, &path, false);
                         continue;
@@ -9309,24 +9382,30 @@ impl Executor {
                     }
                     let _ = source;
                 }
-                if redirect.kind != crate::parser::RedirectKind::Append {
-                    // Validation only — never a throwaway real open
-                    // (rubash#2880: same pairing consumption as the
-                    // fixed-fd exec arm; probe_output_redirect is the
-                    // shared validation entry, set_fd_output_file's
-                    // open is the one real open).
-                    crate::executor::shell_options::probe_output_redirect(
+                // rubash#3828: the probe's open IS the entry's one
+                // open — adopt its File as the bind (see the fixed-fd
+                // exec arm); the append arm skips the probe and its
+                // bind open is already the single open.
+                let probed = if redirect.kind != crate::parser::RedirectKind::Append {
+                    crate::executor::shell_options::probe_output_redirect_file(
                         self,
                         &target,
                         redirect.clobber,
-                    )?;
+                    )?
+                } else {
+                    None
+                };
+                match probed {
+                    Some(file) => {
+                        self.set_fd_output_file_from_file(fd, target.clone(), true, file)?
+                    }
+                    None => self.set_fd_output_file(
+                        fd,
+                        target,
+                        true,
+                        redirect.kind == crate::parser::RedirectKind::Append,
+                    )?,
                 }
-                self.set_fd_output_file(
-                    fd,
-                    target,
-                    true,
-                    redirect.kind == crate::parser::RedirectKind::Append,
-                )?;
                 if !self.set_dynamic_fd_variable(name, fd) {
                     self.close_persistent_fd(fd)?;
                     return Err(ExecuteError::IoError(std::io::Error::new(
