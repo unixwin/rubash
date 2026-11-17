@@ -32,7 +32,7 @@
 #![cfg(unix)]
 
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 /// How the shell under test is launched.
@@ -124,29 +124,40 @@ fn make_tree(tag: &str, ctx: &Ctx) -> Tree {
     ] {
         let dir = work.join(name);
         std::fs::create_dir(&dir).expect("create dir");
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode))
-            .expect("chmod dir");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode)).expect("chmod dir");
     }
     // Nested shape: a searchable parent holding an unsearchable leaf,
     // and a searchable nested pair for the success control.
     std::fs::create_dir_all(work.join("sub/inner")).expect("create sub/inner");
     std::fs::set_permissions(work.join("sub"), std::fs::Permissions::from_mode(0o755))
         .expect("chmod sub");
-    std::fs::set_permissions(work.join("sub/inner"), std::fs::Permissions::from_mode(0o000))
-        .expect("chmod sub/inner");
+    std::fs::set_permissions(
+        work.join("sub/inner"),
+        std::fs::Permissions::from_mode(0o000),
+    )
+    .expect("chmod sub/inner");
     std::fs::create_dir_all(work.join("sub2/inner2")).expect("create sub2/inner2");
     std::fs::set_permissions(work.join("sub2"), std::fs::Permissions::from_mode(0o755))
         .expect("chmod sub2");
-    std::fs::set_permissions(work.join("sub2/inner2"), std::fs::Permissions::from_mode(0o555))
-        .expect("chmod sub2/inner2");
+    std::fs::set_permissions(
+        work.join("sub2/inner2"),
+        std::fs::Permissions::from_mode(0o555),
+    )
+    .expect("chmod sub2/inner2");
     // CDPATH shapes: an unsearchable first unit and a searchable
     // second unit holding the same name.
     std::fs::create_dir_all(work.join("else1/d000")).expect("create else1/d000");
-    std::fs::set_permissions(work.join("else1/d000"), std::fs::Permissions::from_mode(0o000))
-        .expect("chmod else1/d000");
+    std::fs::set_permissions(
+        work.join("else1/d000"),
+        std::fs::Permissions::from_mode(0o000),
+    )
+    .expect("chmod else1/d000");
     std::fs::create_dir_all(work.join("else2/d000")).expect("create else2/d000");
-    std::fs::set_permissions(work.join("else2/d000"), std::fs::Permissions::from_mode(0o555))
-        .expect("chmod else2/d000");
+    std::fs::set_permissions(
+        work.join("else2/d000"),
+        std::fs::Permissions::from_mode(0o555),
+    )
+    .expect("chmod else2/d000");
     std::os::unix::fs::symlink("real", work.join("link")).expect("create link");
     std::fs::write(work.join("afile"), "x").expect("write afile");
     for dir in [&base, &work] {
@@ -180,10 +191,14 @@ impl Drop for Tree {
 fn run_script(ctx: &Ctx, tree: &Tree, script: &str) -> (String, String, Option<i32>) {
     let case = tree.base.join("case.sh");
     std::fs::write(&case, script).expect("write fixture");
-    std::fs::set_permissions(&case, std::fs::Permissions::from_mode(0o644))
-        .expect("chmod fixture");
+    std::fs::set_permissions(&case, std::fs::Permissions::from_mode(0o644)).expect("chmod fixture");
     let shell = env!("CARGO_BIN_EXE_rubash");
-    let mut cmd = Command::new(&ctx.prefix.first().cloned().unwrap_or_else(|| shell.to_string()));
+    let mut cmd = Command::new(
+        &ctx.prefix
+            .first()
+            .cloned()
+            .unwrap_or_else(|| shell.to_string()),
+    );
     if !ctx.prefix.is_empty() {
         cmd.args(&ctx.prefix[1..]).arg(shell);
     }
@@ -204,13 +219,20 @@ fn run_script(ctx: &Ctx, tree: &Tree, script: &str) -> (String, String, Option<i
 
 /// A failed move leaves everything alone: rc 1, the diagnostic, the
 /// cwd and $PWD still the work dir.
-fn assert_refused(stdout: &str, stderr: &str, code: Option<i32>, work: &str, builtin: &str, operand: &str) {
+fn assert_refused(
+    stdout: &str,
+    stderr: &str,
+    code: Option<i32>,
+    work: &str,
+    builtin: &str,
+    operand: &str,
+) {
     let mut lines = stdout.lines();
     assert_eq!(lines.next(), Some("rc=1"), "stdout was: {stdout:?}");
     assert_eq!(lines.next(), Some(work), "stdout was: {stdout:?}");
     assert_eq!(
         lines.next(),
-        Some(&format!("PWD={work}")),
+        Some(format!("PWD={work}").as_str()),
         "stdout was: {stdout:?}"
     );
     assert_eq!(code, Some(0), "script rc was: {code:?}");
@@ -274,11 +296,19 @@ fn issue3788_cd_no_search_permission_refused() {
         );
         let expect = format!("{work}/{operand}");
         let mut lines = stdout.lines();
-        assert_eq!(lines.next(), Some("rc=0"), "{label}: stdout was: {stdout:?}");
-        assert_eq!(lines.next(), Some(expect.as_str()), "{label}: stdout was: {stdout:?}");
         assert_eq!(
             lines.next(),
-            Some(&format!("PWD={expect}")),
+            Some("rc=0"),
+            "{label}: stdout was: {stdout:?}"
+        );
+        assert_eq!(
+            lines.next(),
+            Some(expect.as_str()),
+            "{label}: stdout was: {stdout:?}"
+        );
+        assert_eq!(
+            lines.next(),
+            Some(format!("PWD={expect}").as_str()),
             "{label}: stdout was: {stdout:?}"
         );
         assert_eq!(code, Some(0), "{label}: script rc was: {code:?}");
@@ -286,7 +316,10 @@ fn issue3788_cd_no_search_permission_refused() {
     }
 
     // Adjacent failures stay failures: missing dir, plain file.
-    for (operand, want) in [("/no/such/dir", "No such file"), ("afile", "Not a directory")] {
+    for (operand, want) in [
+        ("/no/such/dir", "No such file"),
+        ("afile", "Not a directory"),
+    ] {
         let (stdout, stderr, code) = run_script(
             &ctx,
             &tree,
@@ -321,11 +354,19 @@ fn issue3788_pushd_no_search_permission_refused() {
         // pushd prints no dirs listing on failure: the first line is
         // the rc, the second the unchanged stack (just the work dir).
         let mut lines = stdout.lines();
-        assert_eq!(lines.next(), Some("rc=1"), "{label}: stdout was: {stdout:?}");
-        assert_eq!(lines.next(), Some(work.as_str()), "{label}: stdout was: {stdout:?}");
         assert_eq!(
             lines.next(),
-            Some(&format!("PWD={work}")),
+            Some("rc=1"),
+            "{label}: stdout was: {stdout:?}"
+        );
+        assert_eq!(
+            lines.next(),
+            Some(work.as_str()),
+            "{label}: stdout was: {stdout:?}"
+        );
+        assert_eq!(
+            lines.next(),
+            Some(format!("PWD={work}").as_str()),
             "{label}: stdout was: {stdout:?}"
         );
         assert_eq!(code, Some(0), "{label}: script rc was: {code:?}");
@@ -347,20 +388,29 @@ fn issue3788_pushd_no_search_permission_refused() {
     assert_eq!(lines.next(), Some("rc=1"), "stdout was: {stdout:?}");
     assert_eq!(lines.next(), Some(work.as_str()), "stdout was: {stdout:?}");
     assert_eq!(code, Some(0), "script rc was: {code:?}");
-    assert!(stderr.contains("Permission denied"), "stderr was: {stderr:?}");
+    assert!(
+        stderr.contains("Permission denied"),
+        "stderr was: {stderr:?}"
+    );
 
     // Success controls.
     for (operand, label) in [(ok, "pushd-ok-mode"), ("d555", "pushd-555")] {
         let (stdout, stderr, code) = run_script(
             &ctx,
             &tree,
-            &format!("pushd {operand} >/dev/null; echo \"rc=$?\"; popd >/dev/null; echo \"PWD=$PWD\"\n"),
+            &format!(
+                "pushd {operand} >/dev/null; echo \"rc=$?\"; popd >/dev/null; echo \"PWD=$PWD\"\n"
+            ),
         );
         let mut lines = stdout.lines();
-        assert_eq!(lines.next(), Some("rc=0"), "{label}: stdout was: {stdout:?}");
         assert_eq!(
             lines.next(),
-            Some(&format!("PWD={work}")),
+            Some("rc=0"),
+            "{label}: stdout was: {stdout:?}"
+        );
+        assert_eq!(
+            lines.next(),
+            Some(format!("PWD={work}").as_str()),
             "{label}: stdout was: {stdout:?}"
         );
         assert_eq!(code, Some(0), "{label}: script rc was: {code:?}");
@@ -385,12 +435,20 @@ fn issue3788_cdpath_skips_unsearchable_candidate() {
     );
     let expect = format!("{work}/else2/d000");
     let mut lines = stdout.lines();
-    assert_eq!(lines.next(), Some(expect.as_str()), "stdout was: {stdout:?}");
-    assert_eq!(lines.next(), Some("rc=0"), "stdout was: {stdout:?}");
-    assert_eq!(lines.next(), Some(expect.as_str()), "stdout was: {stdout:?}");
     assert_eq!(
         lines.next(),
-        Some(&format!("PWD={expect}")),
+        Some(expect.as_str()),
+        "stdout was: {stdout:?}"
+    );
+    assert_eq!(lines.next(), Some("rc=0"), "stdout was: {stdout:?}");
+    assert_eq!(
+        lines.next(),
+        Some(expect.as_str()),
+        "stdout was: {stdout:?}"
+    );
+    assert_eq!(
+        lines.next(),
+        Some(format!("PWD={expect}").as_str()),
         "stdout was: {stdout:?}"
     );
     assert_eq!(code, Some(0), "script rc was: {code:?}");
@@ -415,12 +473,20 @@ fn issue3788_cdable_vars_tried_after_unsearchable_operand() {
     );
     let expect = format!("{work}/d555");
     let mut lines = stdout.lines();
-    assert_eq!(lines.next(), Some(expect.as_str()), "stdout was: {stdout:?}");
-    assert_eq!(lines.next(), Some("rc=0"), "stdout was: {stdout:?}");
-    assert_eq!(lines.next(), Some(expect.as_str()), "stdout was: {stdout:?}");
     assert_eq!(
         lines.next(),
-        Some(&format!("PWD={expect}")),
+        Some(expect.as_str()),
+        "stdout was: {stdout:?}"
+    );
+    assert_eq!(lines.next(), Some("rc=0"), "stdout was: {stdout:?}");
+    assert_eq!(
+        lines.next(),
+        Some(expect.as_str()),
+        "stdout was: {stdout:?}"
+    );
+    assert_eq!(
+        lines.next(),
+        Some(format!("PWD={expect}").as_str()),
         "stdout was: {stdout:?}"
     );
     assert_eq!(code, Some(0), "script rc was: {code:?}");
@@ -447,7 +513,7 @@ fn issue3788_comsub_cd_pwd_fast_path_refused() {
     assert_eq!(lines.next(), Some(work.as_str()), "stdout was: {stdout:?}");
     assert_eq!(
         lines.next(),
-        Some(&format!("PWD={work}")),
+        Some(format!("PWD={work}").as_str()),
         "stdout was: {stdout:?}"
     );
     assert_eq!(code, Some(0), "script rc was: {code:?}");
@@ -486,7 +552,7 @@ fn issue3788_pushd_rotation_onto_unsearchable_entry_refused() {
     assert_eq!(lines.next(), Some(d111.as_str()), "stdout was: {stdout:?}");
     assert_eq!(
         lines.next(),
-        Some(&format!("PWD={d111}")),
+        Some(format!("PWD={d111}").as_str()),
         "stdout was: {stdout:?}"
     );
     assert_eq!(code, Some(0), "script rc was: {code:?}");
@@ -507,7 +573,7 @@ fn issue3788_pushd_rotation_onto_unsearchable_entry_refused() {
     assert_eq!(lines.next(), Some(d111.as_str()), "stdout was: {stdout:?}");
     assert_eq!(
         lines.next(),
-        Some(&format!("PWD={d111}")),
+        Some(format!("PWD={d111}").as_str()),
         "stdout was: {stdout:?}"
     );
     assert_eq!(code, Some(0), "script rc was: {code:?}");
