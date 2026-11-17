@@ -323,6 +323,14 @@ impl Executor {
         // unset/empty PATH are exactly its arms.)
         if let Some(path_value) = self.shell_state.env_vars.get("PATH") {
             for dir in split_shell_path(path_value) {
+                // rubash#3826: GNU findcmd.c:544 — expand a `~`-leading
+                // PATH element at lookup time (unless POSIX mode), so
+                // `type -a` / `command -v -a` enumerate the expanded
+                // element.
+                let dir = crate::executor::path::expand_path_element_tilde(
+                    &dir,
+                    &self.shell_state.env_vars,
+                );
                 let candidate = shell_path_to_windows(&dir, &self.shell_state.env_vars).join(name);
                 // rubash#3147: the existence probe resolves against
                 // the SESSION cwd, exactly like the single-match walk
