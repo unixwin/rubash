@@ -61,6 +61,73 @@ fn run_script(tag: &str, body: &str) -> (String, String, Option<i32>) {
     )
 }
 
+// ---------------------------------------------------------------------
+// Consumer flavor gate for the pipeline pins (issue #3792, REPORT
+// §10.4).
+//
+// The pipeline pins below pin TWO contracts at once:
+//   1. the shell-side contract — rubash delivers the write-only dup
+//      onto the stage's fd 0, superseding the pipe, so the pipe
+//      payload is never served; and
+//   2. the consumer-side contract — a GNU coreutils consumer whose
+//      stdin is that write-only fd fails its own read, reports its
+//      own EBADF diagnostic, and exits nonzero (cat/wc/tr).
+//
+// Contract 2 is a property of the CONSUMER binary, not of rubash.
+// On the CI census runner, `cat`/`wc`/`tr` resolve to uutils
+// coreutils, which silently exits 0 on a write-only regular-file
+// stdin instead of failing the read; under GNU bash in the same
+// environment the same divergence appears, so the consumer half of
+// these pins cannot discriminate there (full evidence chain in
+// REPORT §10.4). Where the consumer is not GNU coreutils, the four
+// affected pins therefore assert only contract 1 (the payload must
+// not be served) and say so on stderr; they do NOT encode the
+// non-GNU rc/counts as expected behavior. Wherever GNU coreutils
+// is present — developer hosts, the WSL oracle environment — the
+// pins run at full strength with both contracts asserted.
+// ---------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConsumerFlavor {
+    Gnu,
+    Uutils,
+    Unrecognized,
+}
+
+/// Probe `<name> --version` once per consumer and classify it by
+/// the version text ("GNU coreutils" vs "uutils"). The probe
+/// resolves through this test process's PATH, which is the PATH
+/// the rubash child inherits in `run_script`, so the
+/// classification describes the binary the pipeline stage will
+/// actually spawn.
+fn consumer_flavor(name: &str) -> ConsumerFlavor {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, ConsumerFlavor>>,
+    > = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Some(flavor) = cache.lock().expect("consumer flavor cache").get(name) {
+        return *flavor;
+    }
+    let flavor = match Command::new(name).arg("--version").output() {
+        Ok(output) => {
+            let text = String::from_utf8_lossy(&output.stdout);
+            if text.contains("GNU coreutils") {
+                ConsumerFlavor::Gnu
+            } else if text.contains("uutils") {
+                ConsumerFlavor::Uutils
+            } else {
+                ConsumerFlavor::Unrecognized
+            }
+        }
+        Err(_) => ConsumerFlavor::Unrecognized,
+    };
+    cache
+        .lock()
+        .expect("consumer flavor cache")
+        .insert(name.to_owned(), flavor);
+    flavor
+}
+
 #[test]
 fn dup_write_only_fd_cat_empty() {
     let (stdout, stderr, code) = run_script("cat-empty", "exec 3>f1; cat <&3; echo \"rc=$?\"\n");
@@ -140,11 +207,28 @@ fn dup_write_only_fd_cat_in_pipeline() {
         "cat-pipe",
         "exec 3>f1; printf 'x\\n' | cat <&3; echo \"rc=$?\"\n",
     );
-    assert_eq!(stdout, "rc=1\n", "stderr: {stderr}");
-    assert!(
-        stderr.contains("cat:") && stderr.contains("Bad file descriptor"),
-        "expected the child's own cat EBADF diagnostic, got: {stderr}"
-    );
+    let flavor = consumer_flavor("cat");
+    if flavor == ConsumerFlavor::Gnu {
+        assert_eq!(stdout, "rc=1\n", "stderr: {stderr}");
+        assert!(
+            stderr.contains("cat:") && stderr.contains("Bad file descriptor"),
+            "expected the child's own cat EBADF diagnostic, got: {stderr}"
+        );
+    } else {
+        // Non-GNU consumer (REPORT §10.4): its silent rc=0 on a
+        // write-only stdin is the consumer's divergence, not the
+        // shell's — assert only the delivery contract.
+        eprintln!(
+            "note: `cat` is {flavor:?}, not GNU coreutils; skipping the consumer-behavior \
+             assertions (rc=1 and cat's own EBADF diagnostic) and asserting only the \
+             shell-side delivery contract (REPORT §10.4)"
+        );
+        assert!(
+            !stdout.contains("x\n"),
+            "the write-only dup must supersede the pipe: payload must not be served, \
+             got stdout: {stdout}"
+        );
+    }
     assert_eq!(code, Some(0));
 }
 
@@ -223,11 +307,23 @@ fn dup_write_only_fd_cat_in_pipeline_stage0() {
         "cat-pipe-stage0",
         "exec 3>f1; cat <&3 | wc -c; echo \"rc=$?\"\n",
     );
+    // The stdout assertion is the shell-side delivery contract in
+    // every flavor: the dup supersedes cat's stdin, cat emits
+    // nothing, and the downstream `wc -c` counts an empty pipe.
     assert_eq!(stdout, "0\nrc=0\n", "stderr: {stderr}");
-    assert!(
-        stderr.contains("cat:") && stderr.contains("Bad file descriptor"),
-        "expected cat's own EBADF diagnostic, got: {stderr}"
-    );
+    let flavor = consumer_flavor("cat");
+    if flavor == ConsumerFlavor::Gnu {
+        assert!(
+            stderr.contains("cat:") && stderr.contains("Bad file descriptor"),
+            "expected cat's own EBADF diagnostic, got: {stderr}"
+        );
+    } else {
+        eprintln!(
+            "note: `cat` is {flavor:?}, not GNU coreutils; skipping the consumer-behavior \
+             assertion (cat's own EBADF diagnostic) — the stdout assertion above already \
+             pins the shell-side delivery contract (REPORT §10.4)"
+        );
+    }
     assert_eq!(code, Some(0));
 }
 
@@ -258,11 +354,31 @@ fn dup_write_only_fd_wc_in_pipeline() {
         "wc-pipe",
         "exec 3>f1; printf 'x\\n' | wc -c <&3; echo \"rc=$?\"\n",
     );
-    assert_eq!(stdout, "0\nrc=1\n", "stderr: {stderr}");
-    assert!(
-        stderr.contains("wc:") && stderr.contains("Bad file descriptor"),
-        "expected wc's own EBADF diagnostic, got: {stderr}"
-    );
+    let flavor = consumer_flavor("wc");
+    if flavor == ConsumerFlavor::Gnu {
+        assert_eq!(stdout, "0\nrc=1\n", "stderr: {stderr}");
+        assert!(
+            stderr.contains("wc:") && stderr.contains("Bad file descriptor"),
+            "expected wc's own EBADF diagnostic, got: {stderr}"
+        );
+    } else {
+        // Non-GNU consumer (REPORT §10.4): assert only the
+        // delivery contract — wc counted zero bytes, i.e. the
+        // payload ("x\n", 2 bytes) was not served. The zero count
+        // is the shell-side invariant (GNU wc prints it too, before
+        // erroring); the rc is the consumer's and is deliberately
+        // not asserted here.
+        eprintln!(
+            "note: `wc` is {flavor:?}, not GNU coreutils; skipping the consumer-behavior \
+             assertions (rc=1 and wc's own EBADF diagnostic) and asserting only the \
+             shell-side delivery contract (REPORT §10.4)"
+        );
+        assert!(
+            stdout.starts_with("0\n"),
+            "wc must count 0 bytes when the write-only dup wins fd 0 (payload not \
+             served), got stdout: {stdout}"
+        );
+    }
     assert_eq!(code, Some(0));
 }
 
@@ -273,11 +389,28 @@ fn dup_write_only_fd_tr_in_pipeline() {
         "tr-pipe",
         "exec 3>f1; printf 'x\\n' | tr a b <&3; echo \"rc=$?\"\n",
     );
-    assert_eq!(stdout, "rc=1\n", "stderr: {stderr}");
-    assert!(
-        stderr.contains("tr:") && stderr.contains("Bad file descriptor"),
-        "expected tr's own EBADF diagnostic, got: {stderr}"
-    );
+    let flavor = consumer_flavor("tr");
+    if flavor == ConsumerFlavor::Gnu {
+        assert_eq!(stdout, "rc=1\n", "stderr: {stderr}");
+        assert!(
+            stderr.contains("tr:") && stderr.contains("Bad file descriptor"),
+            "expected tr's own EBADF diagnostic, got: {stderr}"
+        );
+    } else {
+        // Non-GNU consumer (REPORT §10.4): its silent rc=0 on a
+        // write-only stdin is the consumer's divergence, not the
+        // shell's — assert only the delivery contract.
+        eprintln!(
+            "note: `tr` is {flavor:?}, not GNU coreutils; skipping the consumer-behavior \
+             assertions (rc=1 and tr's own EBADF diagnostic) and asserting only the \
+             shell-side delivery contract (REPORT §10.4)"
+        );
+        assert!(
+            !stdout.contains("x\n"),
+            "the write-only dup must supersede the pipe: payload must not be served, \
+             got stdout: {stdout}"
+        );
+    }
     assert_eq!(code, Some(0));
 }
 
