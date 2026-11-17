@@ -557,7 +557,20 @@ impl Executor {
                 } else {
                     None
                 };
-                return self.execute_empty_words_command(cmd, vanished_status);
+                // rubash#2761: GNU's words==0 check
+                // (execute_cmd.c:4626-4640) runs on the EXPANDED word
+                // list, which is empty here — but `cmd` still carries
+                // the raw words, and the null-command path decides
+                // on them (the heredoc fork classifier reads the
+                // effective word). Hand it the node as GNU sees it:
+                // wordless, so `$EMPTY 3<<EOF` classifies under
+                // execute_null_command's force-fork rule (no fd-0
+                // redirect -> the body expands in the shell and
+                // `:=` persists) instead of as an external
+                // command's forked expansion.
+                let mut vanished_cmd = cmd.clone();
+                vanished_cmd.words.clear();
+                return self.execute_empty_words_command(&vanished_cmd, vanished_status);
             }
             if let Some(status) = self.last_command_substitution_status.get() {
                 self.exit_code = status;
