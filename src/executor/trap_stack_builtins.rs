@@ -150,7 +150,10 @@ impl Executor {
         // reject gate's Input probe and the setup walk), so this
         // pass owns exactly the registry classes those passes skip:
         // net targets (probed through the classified ladder — the
-        // probe's netopen is the command's one open), fd aliases
+        // probe's netopen is the command's one open when no bind ran;
+        // when the funnel's bind already connected the entry,
+        // buffered_builtin_input_redirect_error skips it, rubash#3798),
+        // fd aliases
         // (judged against the fd table, no drain), and synthetic
         // /proc targets (served by their ladder). A failure routes
         // its diagnostic through the command's fd-2 binding, drops
@@ -278,6 +281,28 @@ impl Executor {
                 continue;
             }
             let write = redirect.kind == RedirectKind::ReadWrite;
+            // rubash#3798: a net `<>` entry the funnel's bind already
+            // connected (its fd is in dispatch_net_bound_fds) must not
+            // be re-probed here — the bind performed this entry's one
+            // open (GNU redir.c do_redirections opens each entry
+            // once, r_input_output included), and the probe's
+            // classified open would connect a SECOND socket and drop
+            // it (the #1950 hazard the input probe already avoids).
+            // A refused connect was already adjudicated by the bind,
+            // so skipping loses no failure verdict. The skip is
+            // net-only: synthetic /proc and link entries have no
+            // bind, so their probe still runs.
+            if write
+                && matches!(
+                    crate::special_paths::classify_special_path(&target),
+                    crate::special_paths::SpecialPathClass::NetRedirect
+                )
+                && self
+                    .dispatch_net_bound_fds
+                    .contains(&redirect.fd.unwrap_or(0))
+            {
+                continue;
+            }
             let result = match crate::special_paths::classify_special_path(&target) {
                 crate::special_paths::SpecialPathClass::NetRedirect
                 | crate::special_paths::SpecialPathClass::SyntheticProc
