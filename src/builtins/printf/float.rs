@@ -147,9 +147,15 @@ fn format_fixed(mant: u64, exp: i32, precision: usize) -> String {
     let mut digits: Vec<u8> = Vec::with_capacity(int_s.len() + precision + 1);
     digits.extend(int_s.bytes().map(|b| b - b'0'));
     digits.extend(frac_s.bytes().map(|b| b - b'0'));
-    // Exact expansion, so the tail past the guard digit is all zeros.
-    digits.resize(int_s.len() + precision + 1, 0);
-    round_half_even(&mut digits, int_s.len() + precision, false);
+    // The exact tail past the guard digit is the long-double value's
+    // excess above the decimal half (e.g. 1.2345 sits 2.6e-21 above it);
+    // fold it into the sticky bit BEFORE the resize truncates it, or
+    // the value reads as an exact tie and rounds down (rubash#3786).
+    // Same shape as significant_digits (%e/%g), which was already right.
+    let keep = int_s.len() + precision;
+    let sticky = digits.len() > keep + 1 && digits[keep + 1..].iter().any(|&d| d != 0);
+    digits.resize(keep + 1, 0);
+    round_half_even(&mut digits, keep, sticky);
     let int_len = digits.len() - precision;
     let mut rendered = digits[..int_len]
         .iter()

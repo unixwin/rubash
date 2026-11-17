@@ -558,7 +558,12 @@ impl Executor {
             }
         }
 
-        if let Some((var_name, offset, length)) = self.parse_parameter_substring(name) {
+        if let Some(((var_name, offset, length), writes)) =
+            self.parse_parameter_substring_with_writes(name)
+        {
+            // rubash#3649: this parse's result is the expansion, so commit
+            // its offset/length arithmetic writes.
+            self.queue_pending_subscript_writes(writes);
             // `${#:offset}` / `${#?:0}` slice the special parameter value,
             // not a length expansion. expand_braced_substring_parameter does
             // not resolve special-parameter names, so fetch the value here.
@@ -649,7 +654,7 @@ impl Executor {
             }
         }
 
-        if let Some(value) = self.expand_braced_pattern_or_transform_parameter(name) {
+        if let Some(value) = self.expand_braced_pattern_or_transform_parameter(name, true) {
             return value;
         }
 
@@ -1002,14 +1007,18 @@ impl Executor {
         // on the `bad substitution` default. Mirror of the same check in
         // expand_braced_parameter_word for the `\x1d`/whole-word entry.
         if crate::executor::expand_word::braced_name_ends_on_quote(name) {
-            self.write_diagnostic_fd2(
-                format!(
-                    "{}{}: bad substitution\n",
-                    self.diagnostic_prefix(),
-                    crate::executor::expand_word::bad_substitution_display(&diagnostic_word)
-                )
-                .as_bytes(),
-            );
+            // rubash#3499: one diagnostic per latch lifetime (see
+            // bad_substitution_report_first).
+            if self.bad_substitution_report_first() {
+                self.write_diagnostic_fd2(
+                    format!(
+                        "{}{}: bad substitution\n",
+                        self.diagnostic_prefix(),
+                        crate::executor::expand_word::bad_substitution_display(&diagnostic_word)
+                    )
+                    .as_bytes(),
+                );
+            }
             self.shell_state.parameter_bad_substitution.set(true);
             return String::new();
         }
@@ -1019,14 +1028,18 @@ impl Executor {
         // runs at its whole-word entry, for words that arrive here without
         // passing a walker `${` arm.
         if crate::executor::expand_word::braced_name_is_bad_substitution(name) {
-            self.write_diagnostic_fd2(
-                format!(
-                    "{}{}: bad substitution\n",
-                    self.diagnostic_prefix(),
-                    crate::executor::expand_word::bad_substitution_display(&diagnostic_word)
-                )
-                .as_bytes(),
-            );
+            // rubash#3499: one diagnostic per latch lifetime (see
+            // bad_substitution_report_first).
+            if self.bad_substitution_report_first() {
+                self.write_diagnostic_fd2(
+                    format!(
+                        "{}{}: bad substitution\n",
+                        self.diagnostic_prefix(),
+                        crate::executor::expand_word::bad_substitution_display(&diagnostic_word)
+                    )
+                    .as_bytes(),
+                );
+            }
             self.shell_state.parameter_bad_substitution.set(true);
             return String::new();
         }
@@ -1300,7 +1313,14 @@ impl Executor {
             }
         }
 
-        if let Some(value) = self.expand_braced_pattern_or_transform_parameter(name) {
+        // rubash#3581: the routed entry already records the quote context
+        // (DoubleQuoted | HereDocument) in EXTQUOTE_NAME_QUOTED_CONTEXT —
+        // the flag GNU `quoted` corresponds to for the `#`/`%` gate
+        // (heredoc bodies count: GNU diagnoses `"${a[*]#bad}"` there too).
+        if let Some(value) = self.expand_braced_pattern_or_transform_parameter(
+            name,
+            crate::executor::expand_word::extquote_name_quoted_context(),
+        ) {
             if apfae_trace_enabled() {
                 eprintln!("[EQPWM-tail-pattern] name={name:?}");
             }
@@ -1343,7 +1363,22 @@ impl Executor {
         super::expand_braced_replacement::ASSIGNMENT_RHS.with(|f| f.set(true));
         let result = self.expand_assignment_alternate_mut_inner(value, double_quoted);
         super::expand_braced_replacement::ASSIGNMENT_RHS.with(|f| f.set(old));
-        result
+        // The `=`/`:=` rhs never carries a quoted null. GNU emits CTLNUL
+        // only when (W_NOSPLIT|W_EXPANDRHS|W_ASSIGNRHS) == W_EXPANDRHS
+        // (subst.c:11843, subst.c:11905); the `=` word flags include
+        // W_ASSIGNRHS (subst.c:4495), so the gate fails and the empty
+        // ""'' span is discarded by the NOSPLIT2 branch (subst.c:11853,
+        // subst.c:11921). A quoted null spliced in from a nested
+        // `${x- ""}` dies in list_string's remove_quoted_nulls
+        // (subst.c:3181-3192), and dequote_string runs on the remainder
+        // (subst.c:8085). Net: the assigned and substituted value is
+        // CTLNUL-free, so `${v= "$x" }` field-splits to zero words where
+        // the `-`/`+` alternates anchor one empty field.
+        // E400-aware (rubash#2882): a typed `$''` is user data.
+        crate::executor::markers::restore_bare_sentinels(
+            &result,
+            &[(crate::executor::markers::QUOTED_NULL_MARKER, "")],
+        )
     }
 
     fn expand_assignment_alternate_mut_inner(

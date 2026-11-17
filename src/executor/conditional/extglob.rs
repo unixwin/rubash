@@ -85,15 +85,85 @@ pub(in crate::executor) fn extglob_group_end(pattern: &[char], open_idx: usize) 
                 }
             }
             '[' => {
-                i += 1;
-                while i < pattern.len() && pattern[i] != ']' {
-                    i += 1;
-                }
+                // PATSCAN `case L('[')` (lib/glob/sm_loop.c:709-722): the
+                // bracket's contents — any `(`/`)`/`|` included — are
+                // opaque to the group scan until its closing `]`.
+                i = extglob_bracket_scan_end(pattern, i);
             }
-            '\\' if i + 1 < pattern.len() => {
+            // GNU PATSCAN `case L('\\')` (sm_loop.c:698-700): an escaped
+            // character is one opaque unit — never a group delimiter.
+            // Quoted characters inside a group reach this scan
+            // CTLESC-protected (parse.y:5694-5706 got_escaped_character;
+            // the case pattern is glob-quoted per execute_cmd.c:3724),
+            // and CTLESC is this port's spelling of the same escape:
+            // `CTLESC [` is a literal `[`, `CTLESC (` a literal `(`,
+            // `CTLESC )` a literal `)`. Without the CTLESC arm a quoted
+            // `[` opened the bracket half-scan and ran past the group
+            // end, and a quoted `(`/`)` moved the depth, so `@("a[b")`
+            // never found its `)` (rubash#3189).
+            '\\' | crate::executor::markers::CTLESC if i + 1 < pattern.len() => {
                 i += 1;
             }
             _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Advance past the bracket expression opened at `pattern[open] == '['`,
+/// returning the index of its closing `]`, or `pattern.len()` when the
+/// bracket never closes (GNU keeps bnest set through the end, which is
+/// the same outcome for every caller). This is the PATSCAN `case L('[')`
+/// half-scan (lib/glob/sm_loop.c:709-737): a `]` in first member
+/// position (after an optional `!`/`^`) is a literal member, an escaped
+/// character (`\`, and in this port CTLESC, plus the next char) is one
+/// opaque unit, and a POSIX `[.`/`[:`/`[=` subbracket may hide a `]`
+/// (PARSE_SUBBRACKET, sm_loop.c:383-394). GNU also aborts a subbracket
+/// scan at `/` under FNM_PATHNAME; these matchers run in string-match
+/// context (no FNM_PATHNAME), so `/` is data here.
+fn extglob_bracket_scan_end(pattern: &[char], open: usize) -> usize {
+    let mut i = open + 1;
+    if i < pattern.len() && matches!(pattern[i], '!' | '^') {
+        i += 1;
+    }
+    // `]` in first member position is a literal member (sm_loop.c:731,
+    // `s != bfirst`).
+    if i < pattern.len() && pattern[i] == ']' {
+        i += 1;
+    }
+    while i < pattern.len() {
+        match pattern[i] {
+            ']' => return i,
+            '\\' | crate::executor::markers::CTLESC if i + 1 < pattern.len() => i += 2,
+            '[' if i + 1 < pattern.len() && matches!(pattern[i + 1], '.' | ':' | '=') => {
+                match extglob_subbracket_end(pattern, i + 1) {
+                    Some(close) => i = close + 1,
+                    // GNU treats the `[` as an ordinary member when the
+                    // subbracket is malformed (PARSE_SUBBRACKET NULL).
+                    None => i += 1,
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    i
+}
+
+/// PARSE_SUBBRACKET port (sm_loop.c:383-394): `type_idx` names the char
+/// after the inner `[` (`.`, `:` or `=`). Returns the index of the
+/// subbracket's closing `]` — the scan looks for `type`+`]`. A
+/// collating symbol (`.` type) may itself contain `]`, so only `type`
+/// + `]` ends it; the `:`/`=` types abort at a bare `]`.
+fn extglob_subbracket_end(pattern: &[char], type_idx: usize) -> Option<usize> {
+    let ty = pattern[type_idx];
+    let mut i = type_idx + 1;
+    while i < pattern.len() {
+        if pattern[i] == ']' && ty != '.' {
+            return None;
+        }
+        if pattern[i] == ty && i + 1 < pattern.len() && pattern[i + 1] == ']' {
+            return Some(i + 1);
         }
         i += 1;
     }
@@ -211,12 +281,31 @@ pub(in crate::executor) fn extglob_split_alternatives(inner: &[char]) -> Vec<Vec
             // characters inside a group reach the pattern in this
             // escaped spelling (pathexp.c:212 quote_string_for_globbing),
             // so `\|` is literal text and `\(`/`\)` are literal parens
-            // (rubash#3231). extglob_group_end above already skips pairs
-            // the same way; this splitter must agree with it.
-            '\\' if i + 1 < inner.len() => {
+            // (rubash#3231). The same holds for the CTLESC spelling of a
+            // quoted char (parse.y:5694-5706): `CTLESC |` is one literal
+            // `|` — splitting there left a dangling CTLESC and a broken
+            // alternative (rubash#3189). extglob_group_end above skips
+            // pairs the same way; this splitter must agree with it.
+            '\\' | crate::executor::markers::CTLESC if i + 1 < inner.len() => {
                 current.push(ch);
                 current.push(inner[i + 1]);
                 i += 1;
+            }
+            // PATSCAN requires bnest == 0 for both the `|` split
+            // (sm_loop.c:749-751) and paren counting (sm_loop.c:739-746):
+            // a `|` inside a bracket expression is member data, not an
+            // alternative boundary, and parens inside a bracket do not
+            // move the depth. Copy the whole bracket span as data.
+            '[' => {
+                let close = extglob_bracket_scan_end(inner, i);
+                let end = if close < inner.len() {
+                    close + 1
+                } else {
+                    close
+                };
+                current.extend_from_slice(&inner[i..end]);
+                i = end;
+                continue;
             }
             '(' => {
                 depth += 1;

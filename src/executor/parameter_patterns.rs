@@ -274,11 +274,23 @@ impl Executor {
     /// empty), false for `/` and `^`/`,`/`~` (absent only). Callers return
     /// the empty expansion when this is true — every arm's skip-case
     /// result is "" — and expand the pattern otherwise.
+    /// `quoted` is true when the `${}` expansion appears inside double
+    /// quotes: GNU then marks a quoted-null LIST element QUOTED_NULL
+    /// (subst.c:10133-10140 `temp` construction), so the removal gate's
+    /// `*value == '\0'` test (subst.c:10320-10327) sees a non-empty word
+    /// and expands the pattern — `"${a[*]#${-y}}"` with a=("") diagnoses
+    /// where unquoted is silent (rubash#3581). Quoting only defeats the
+    /// EMPTY half of the gate for list subjects (`@`, `*`, `name[@]`,
+    /// `name[*]`); a scalar or element "" stays silent quoted or not
+    /// (no QUOTED_NULL is produced), and an absent list stays silent
+    /// either way.
     pub(in crate::executor) fn pattern_word_is_silent(
         &self,
         var_name: &str,
         empty_is_silent: bool,
+        quoted: bool,
     ) -> bool {
+        let list_empty_is_silent = empty_is_silent && !quoted;
         // Indirect (`!name`): the value word is the target's value word
         // (subst.c:7883 parameter_brace_expand_indir). A nameref holder's
         // value is the target NAME itself, never absent. A holder with no
@@ -315,7 +327,7 @@ impl Executor {
                 .strip_suffix("[@]")
                 .or_else(|| target_expr.strip_suffix("[*]"))
             {
-                return self.pattern_subject_array_word_is_empty(array_name, empty_is_silent);
+                return self.pattern_subject_array_word_is_empty(array_name, list_empty_is_silent);
             }
             let values = self.indirect_target_values(target_expr);
             if values.is_empty() {
@@ -331,7 +343,7 @@ impl Executor {
         if matches!(var_name, "@" | "*") {
             let window = self.shell_state.positional_window();
             return window.is_empty()
-                || (empty_is_silent && window.len() == 1 && window[0].is_empty());
+                || (list_empty_is_silent && window.len() == 1 && window[0].is_empty());
         }
         // Single-char specials. "0" is special AND numeric, so this must
         // precede the numeric arm (subst.c:9837 VALID_SPECIAL_LENGTH_PARAM).
@@ -371,7 +383,7 @@ impl Executor {
             .strip_suffix("[@]")
             .or_else(|| var_name.strip_suffix("[*]"))
         {
-            return self.pattern_subject_array_word_is_empty(array_name, empty_is_silent);
+            return self.pattern_subject_array_word_is_empty(array_name, list_empty_is_silent);
         }
         // A subscripted reference the element fetch could not resolve is
         // an absent value word.
@@ -436,11 +448,13 @@ impl Executor {
         var_name: &str,
         pattern: &str,
         operation: PatternRemoval,
+        quoted: bool,
     ) -> Option<String> {
         // GNU subst.c:10320-10327 (`case '#': case '%':`): removal skips
         // the pattern expansion entirely when the parameter word is absent
-        // or empty (rubash#3501).
-        let silent = self.pattern_word_is_silent(var_name, true);
+        // or empty (rubash#3501). Quoted, a list subject's QUOTED_NULL
+        // element keeps the word non-empty (rubash#3581).
+        let silent = self.pattern_word_is_silent(var_name, true, quoted);
         if silent {
             return Some(String::new());
         }
@@ -840,7 +854,7 @@ impl Executor {
         if matches!(resolved.as_str(), "@" | "*") || resolved.trim().is_empty() {
             return false;
         }
-        let index = match self.eval_indexed_subscript_expression(&resolved) {
+        let index = match self.eval_indexed_subscript_expression(&resolved, false) {
             Some(index) => index,
             None => {
                 self.report_indexed_subscript_error_unless_nounset(&resolved);

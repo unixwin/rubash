@@ -1396,6 +1396,50 @@ pub(in crate::executor) fn restore_command_substitution_output(value: &str) -> S
         .replace(crate::executor::markers::DATA_SQUOTE, "'")
 }
 
+/// E400-escape bare DEFERRED_COMPOUND_BODY (0x03) data bytes in
+/// command-substitution dispatcher output (rubash#3650).
+///
+/// GNU keeps a substitution's raw output bytes intact (subst.c:7143
+/// command_substitute hands the child's bytes to expand_word_internal),
+/// so a 0x03 the child printed is DATA. But the char-level decode below
+/// (locale::decode_to_visible_text) consumes a bare 0x03 as the live
+/// DEFERRED_COMPOUND_BODY marker, so the byte never reached the caller's
+/// protect step and `read`/`mapfile` bound values silently lost it —
+/// heredoc and here-string bodies alike, while `echo "$(...)"` and
+/// assignments kept it (their fragment path never runs that decode).
+/// Live 0x03 markers never reach this boundary: the parser pushes them
+/// into source text, and dispatcher output is child stdout bytes (or
+/// in-process function text), where 0x03 is always data. 0x03 is also
+/// the only bare byte the drop arm can eat here: every other C0 member
+/// of that arm (0x13/0x1b/0x1c/0x1d) is an assignment-carrier byte the
+/// capture already tagged as an E000 pair, and the PUA members arrive
+/// E400-escaped. The literal-char escape is the decoder's own data idiom
+/// (its E400 arm emits the escaped char verbatim), so the byte survives
+/// to the caller's protect step, which re-encodes it as the E319
+/// payload. A 0x03 already covered by an E400 escape is left alone —
+/// the decoder already restores that pair verbatim — which is decided
+/// by the parity of the E400 run immediately before it.
+fn escape_deferred_compound_body_data(value: &str) -> std::borrow::Cow<'_, str> {
+    // Registry const, not a raw literal (marker lint, rubash#2885 E7);
+    // single pass with no needle operation on the const, so no L3 hit.
+    let escape = crate::executor::markers::LITERAL_CHAR_ESCAPE;
+    let deferred = crate::executor::markers::DEFERRED_COMPOUND_BODY;
+    let mut output = String::with_capacity(value.len());
+    let mut escape_run = 0usize;
+    for ch in value.chars() {
+        if ch == escape {
+            escape_run += 1;
+        } else {
+            if ch == deferred && escape_run % 2 == 0 {
+                output.push(escape);
+            }
+            escape_run = 0;
+        }
+        output.push(ch);
+    }
+    std::borrow::Cow::Owned(output)
+}
+
 /// The command-substitution dispatchers return transport text; a body that
 /// ran the real parser/executor path can still carry marker pairs and C0
 /// DATA_* sentinels. A consumer materializing final text (heredoc bodies,
@@ -1404,6 +1448,9 @@ pub(in crate::executor) fn restore_command_substitution_output(value: &str) -> S
 /// re-protecting for its own downstream boundary, or the carriers leak
 /// into the output (e.g. `cat <<EOF` with `` `echo '\`'` ``).
 pub(in crate::executor) fn substitution_result_visible_text(value: &str) -> String {
+    // rubash#3650: shield data 0x03 bytes from the char-level decode
+    // below (see escape_deferred_compound_body_data).
+    let value = escape_deferred_compound_body_data(value);
     // The dispatcher's output can nest the raw-byte marker pair inside
     // literal-char escapes (E400+E000/E4xx), which the char-level decoder
     // resolves to a live E000+payload pair again.
@@ -1414,7 +1461,7 @@ pub(in crate::executor) fn substitution_result_visible_text(value: &str) -> Stri
     // be re-tagged by bytes_to_shell_text so no later carrier restore claims
     // it (unicode1.sub `$(printf '\x15')` in a heredoc body printed `\` —
     // the decoded 0x15 was read as PROTECTED_BACKSLASH).
-    let restored = restore_command_substitution_output(value);
+    let restored = restore_command_substitution_output(&value);
     // GNU keeps a command substitution's raw output bytes intact through
     // word expansion into assignment storage: subst.c:7143
     // command_substitute hands the child's bytes to expand_word_internal,

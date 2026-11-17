@@ -35,6 +35,51 @@ pub(crate) fn exit_status_signal(status: &std::process::ExitStatus) -> Option<i3
     }
 }
 
+/// The 128+signal exit-code decode of a reaped child, or None.
+///
+/// Windows-only in effect (unix returns None: the kernel wait status
+/// is authoritative there). Windows has no WTERMSIG, but rubash's own
+/// kills already encode 128+signal in the exit code
+/// (builtins/kill.rs `signal_process` → TerminateProcess(128+signal)),
+/// and the boundary reap already decodes exactly this convention
+/// (job_builtins.rs `apply_job_completion`: `status > 128` →
+/// `status - 128`). A `wait` that reaps the child itself needs the same
+/// decode (rubash#3803): the immediate-wait face
+/// (`sleep 30 & kill -9 %1; wait %1`) loses the race in the boundary
+/// sweep — the sweep's `try_wait` runs microseconds after the kill, the
+/// poll loop below does the reap — and with `exit_status_signal`
+/// returning None on Windows the notice was never queued, so `wait`
+/// printed nothing while GNU prints the death notice (jobs.c:3385
+/// `wait_for` → `notify_and_cleanup`, jobs.c:4625
+/// `notify_of_job_status`).
+///
+/// Deliberately NOT folded into `exit_status_signal`: the other
+/// callers of that helper (jobs-table `term_signal`, the SIGINT-unwind
+/// sites, the #1604 `fresh_fatal` gate) must keep seeing None on
+/// Windows — their Windows wording/timing faces are separate issues,
+/// and decoding there would silently re-render the jobs table
+/// (`Exit 137` → `Killed`) and re-time the #1604 stash. Only the
+/// wait-reap notice path uses this decode, mirroring the boundary
+/// reap's already-established convention — including its accepted
+/// ambiguity (a natural `exit 137` reads as signal 9, exactly as the
+/// boundary reap already reports it).
+pub(crate) fn exit_code_signal(status: &std::process::ExitStatus) -> Option<i32> {
+    #[cfg(unix)]
+    {
+        let _ = status;
+        None
+    }
+    #[cfg(not(unix))]
+    {
+        let code = status.code()?;
+        if code > 128 {
+            Some(code - 128)
+        } else {
+            None
+        }
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;

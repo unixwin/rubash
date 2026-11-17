@@ -27,6 +27,12 @@
 //! a resolved name reports its PATH file, an unresolvable one is
 //! not found — so §3.1 below pins the file answers for the claim
 //! names too. Dispatch claims and stand-down behavior are unchanged.
+//!
+//! #2642 update (2026-11-12): the same adjudication reaches the one
+//! builtin-table row GNU does not have — `env`, the extension
+//! builtin. On unix it describes as its PATH file like every other
+//! name; the Windows builtin answer is pinned in
+//! `issue2036_s2_introspection_windows`.
 
 #![cfg(unix)]
 
@@ -140,8 +146,13 @@ fn head_abs() -> String {
 // ------------------------------------------------------------ §4 shape 1
 
 /// Shape 1 (audit §4): plain call, script fake first on PATH.
-/// stty and sleep are answered by the engine even though a resolvable
-/// body exists (existence gate, not yield-to-real). The cat leg of
+/// stty is answered by the engine even though a resolvable body
+/// exists (existence gate, not yield-to-real); sleep yields to the
+/// PATH fake — the #3488 user ruling (2026-11-14, #3510) flipped the
+/// unix simple-command face's sleep stand-down from Replace to Yield
+/// so a real child exists for external timeout-killers
+/// (rubash#2995), which is also the GNU shape (bash has no sleep
+/// builtin — `sleep 0.01` forks the PATH entry). The cat leg of
 /// this shape is a PIPELINE form (`cat f1.txt | head -1`): its yield
 /// to the fake is the pipeline planner's, not the simple face's —
 /// attribution corrected by the S4 four-quadrant re-measurement
@@ -150,7 +161,7 @@ fn head_abs() -> String {
 /// via the concurrent direct-spawn planner. The audit's original
 /// "simple face yields to a script fake" reading compared this
 /// pipeline leg against a simple-form leg and is superseded.
-/// WART (stty/sleep): S3/S4 stand-down adjudication.
+/// WART (stty): S3/S4 stand-down adjudication.
 #[test]
 fn issue2036_shape1_plain_script_fake() {
     let rig = rig("s1");
@@ -165,8 +176,8 @@ fn issue2036_shape1_plain_script_fake() {
     assert!(out.stdout.contains(IOCTL), "got: {}", out.stdout);
     let out = run(&rig.root, &rig.fake_path, "sleep 0.01; echo rc=$?");
     assert_eq!(
-        out.stdout, "rc=0\n",
-        "fake sleep must not run: {}",
+        out.stdout, "FAKE-sleep\nrc=0\n",
+        "yield flips sleep to the PATH fake (GNU shape): {}",
         out.stdout
     );
 }
@@ -520,24 +531,25 @@ fn issue2036_introspection_emulated_names_report_file() {
     assert!(out.stdout.contains("rc=1"), "{}", out.stdout);
 }
 
-/// §3.1: `env` is the one honest exception — a real (rubash-extension)
-/// builtin, reported as such on every introspection face.
+/// §3.1 as adjudicated by #2642 (2026-11-12, completing #2514): `env`
+/// is rubash's one extension builtin (no GNU counterpart), but on unix
+/// the describe faces follow GNU `describe_command`
+/// (builtins/type.def:211) exactly — a resolved name reports its PATH
+/// file. The builtin registration and dispatch are untouched: the bare
+/// name still runs the in-process env, `enable -n env` still disables
+/// it to the PATH body, and `compgen -b` still lists it.
 #[test]
-fn issue2036_introspection_env_reports_builtin() {
+fn issue2036_introspection_env_reports_file_on_unix() {
     let dir = scratch("introenv");
     let path = std::env::var("PATH").unwrap_or_default();
     let out = run(
         &dir,
         &path,
-        "type env; echo t=$(type -t env); echo v=$(command -v env)",
+        "type env; echo t=$(type -t env); echo v=$(command -v env); command -V env",
     );
-    assert!(
-        out.stdout.contains("env is a shell builtin"),
-        "{}",
-        out.stdout
-    );
-    assert!(out.stdout.contains("t=builtin"), "{}", out.stdout);
-    assert!(out.stdout.contains("v=env"), "{}", out.stdout);
+    assert!(out.stdout.contains("env is /"), "{}", out.stdout);
+    assert!(out.stdout.contains("t=file"), "{}", out.stdout);
+    assert!(out.stdout.contains("v=/"), "{}", out.stdout);
 }
 
 /// §3.1 + audit M23, as adjudicated by S2 (KD-1 closed): `compgen -b`
