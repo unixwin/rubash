@@ -2746,7 +2746,7 @@ impl Executor {
         // boundary; GNU has it for free from fork() (subst.c:7143
         // command_substitute -> the child's do_redirections die with the
         // child).
-        let saved_fd_table = self.fd_table.clone();
+        let saved_fd_table = self.fd_table.saved_table();
         // The body is fresh parser input whose alias expansion GNU applies
         // at its read (subst.c:7143 parse_and_execute); it already ran at
         // stream level in comsub_body_alias_splice above, so mark the inner
@@ -3005,7 +3005,7 @@ impl Executor {
         // with the child, so snapshot the whole table here: an
         // `exec 2>/dev/null` inside the function must not silence the
         // caller's stderr after the substitution returns.
-        let saved_fd_table = self.fd_table.clone();
+        let saved_fd_table = self.fd_table.saved_table();
         let saved_fd1 = self.fd_table.entries.insert(
             1,
             crate::executor::fd_table::FdEntry {

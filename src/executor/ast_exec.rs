@@ -1202,7 +1202,7 @@ impl Executor {
                         .insert("__RUBASH_CURRENT_COMMAND".to_string(), region_text);
                 }
                 subshell_state = Some(self.shell_state.clone_for_child_save());
-                subshell_fd_table = Some(self.fd_table.clone());
+                subshell_fd_table = Some(self.fd_table.saved_table());
                 subshell_timed_stdin = Some(self.timed_stdin.clone());
                 // rubash#2851: bank the enclosing loop depth across
                 // the boundary (see the field doc on ShellState): the

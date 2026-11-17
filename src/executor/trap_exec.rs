@@ -4238,7 +4238,7 @@ impl Executor {
         // stores and roll back on EX_BADUSAGE.
         if self.exec_has_no_command_operand_after_expansion(cmd) {
             let saved_env_vars = self.shell_state.env_vars.clone();
-            let saved_fd_table = self.fd_table.clone();
+            let saved_fd_table = self.fd_table.saved_table();
             self.execute_stdio_only_exec_redirect_scoped(cmd)?;
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
@@ -5832,7 +5832,7 @@ impl Executor {
         if self.builtin_wrapper_depth == 0 {
             return self.execute_stdio_only_exec_redirect(cmd);
         }
-        let saved_fd_table = self.fd_table.clone();
+        let saved_fd_table = self.fd_table.saved_table();
         let mut saved_env: Vec<(String, Option<String>)> = Vec::new();
         let mut fds: Vec<u32> = cmd
             .redirects

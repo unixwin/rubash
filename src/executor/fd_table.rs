@@ -1270,6 +1270,32 @@ impl FdTable {
         }
     }
 
+    /// rubash#3814: whole-table fork-boundary snapshot — the
+    /// save/restore half of GNU's forked-child descriptor copies
+    /// (execute_cmd.c:1576 execute_in_subshell; subst.c:7143
+    /// command_substitute). A plain `clone()` shares every
+    /// `Rc<FileFd>`, so a close inside the region
+    /// (`( : ) 8<&-`) retires the kernel descriptor the parent's
+    /// restored entry still names — the parent then reads EBADF.
+    /// Duplicate each kernel-backed endpoint exactly like
+    /// `saved_entry` does per slot; the duplicate shares the open
+    /// file description (dup(2)), so offset and write visibility
+    /// behave as GNU's inherited descriptors do, while the closed
+    /// flag and descriptor number stay region-local. Symbolic
+    /// endpoints (Text / ProcessSubstitution / markers) carry no
+    /// kernel handle and clone as before. A descriptor that cannot
+    /// be duplicated (fd exhaustion) keeps its shared entry — the
+    /// pre-fix behaviour for that slot only.
+    pub(crate) fn saved_table(&self) -> Self {
+        let mut table = self.clone();
+        for entry in table.entries.values_mut() {
+            if let Ok(dup) = entry.dup_file_endpoints() {
+                *entry = dup;
+            }
+        }
+        table
+    }
+
     /// Install a new read description on `fd` (rubash#3655): GNU
     /// dup2 replaces the descriptor WHOLESALE — the previous
     /// description dies in both directions (redir.c

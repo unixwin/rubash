@@ -4461,7 +4461,7 @@ impl Executor {
         // so `( exec 3<&- )` cannot close the parent's fd 3. Rc-shared
         // entries still alias the same open file description — reads in the
         // subshell advance the shared offset, matching fork().
-        let saved_fd_table = self.fd_table.clone();
+        let saved_fd_table = self.fd_table.saved_table();
         let saved_depth = self.shell_state.subshell_depth.get();
         // GNU execute_cmd.c runs `( list )` via execute_in_subshell ->
         // make_child: the forked child owns its own cwd, so a `cd` in the

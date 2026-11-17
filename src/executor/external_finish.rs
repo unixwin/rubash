@@ -843,7 +843,7 @@ impl Executor {
         // the file_stdin install below: GNU applies `< file` in the CHILD
         // (do_redirections after fork), so the parent's fd 0 slot is the
         // pre-redirect state — restoring it also unwinds our emulation.
-        let saved_fd_table = self.fd_table.clone();
+        let saved_fd_table = self.fd_table.saved_table();
         // GNU execute_cmd.c redirects before the child runs: `< file` puts
         // the open file on the child's fd 0, so `exec 3<&0` inside the child
         // dups the file (shared offset). Install a real File endpoint on
