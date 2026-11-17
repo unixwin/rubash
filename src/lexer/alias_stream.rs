@@ -1101,12 +1101,25 @@ fn skip_funsub_body(chars: &[char], open: usize) -> Option<usize> {
     // (`;` `&` `|` newline) or a closed `{ }` group / `( )` subshell.
     let mut term = true;
     let mut paren_depth = 0usize;
+    // Shell_getc token-boundary state for `#` comment recognition
+    // (parse.y:3631-3645): true at the body start and after a blank,
+    // newline, or operator (`;` `&` `|` `(` `)` `<` `>`); false inside
+    // a word. `term` above answers a different question (is `}` a group
+    // closer here) — after `echo hi ` it is false while a `#` still
+    // comments — so the comment arm needs its own state, kept in
+    // lockstep with the batch walkers (expand_comsub_alias_bodies) and
+    // with skip_parenthesized_unit_corrected's token_boundary. Without
+    // it an apostrophe inside a comment (`# don't`) opened a phantom
+    // single-quote that swallowed the rest of the input (rubash#3813,
+    // same class as #2033's pre-pass walkers).
+    let mut at_word_start = true;
     while index < chars.len() {
         let ch = chars[index];
         if ch == '\\' && !single {
             if !double {
                 term = false;
             }
+            at_word_start = false;
             index += 2;
             continue;
         }
@@ -1154,23 +1167,28 @@ fn skip_funsub_body(chars: &[char], open: usize) -> Option<usize> {
                     }
                 };
                 term = false;
+                at_word_start = false;
                 continue;
             }
             '\'' => {
                 single = true;
                 term = false;
+                at_word_start = false;
             }
             '"' => {
                 double = true;
                 term = false;
+                at_word_start = false;
             }
             '(' => {
                 paren_depth += 1;
                 term = false;
+                at_word_start = true;
             }
             ')' if paren_depth > 0 => {
                 paren_depth -= 1;
                 term = paren_depth == 0;
+                at_word_start = true;
             }
             '{' if term && paren_depth == 0 => {
                 depth += 1;
@@ -1183,43 +1201,86 @@ fn skip_funsub_body(chars: &[char], open: usize) -> Option<usize> {
                 if depth > 1 {
                     depth -= 1;
                     term = true;
+                    at_word_start = true;
                     index += 1;
                     continue;
                 }
                 return Some(index + 1);
             }
-            ';' | '&' | '|' | '\n' if paren_depth == 0 => term = true,
-            ' ' | '\t' | '\r' => {}
-            _ => term = false,
+            ';' | '&' | '|' | '\n' => {
+                // `term` stays false inside a subshell (an inner group's
+                // `}` must not read as this funsub's closer), but the
+                // token boundary is real at any depth: `#` after `;`
+                // comments even inside `( ... )`.
+                if paren_depth == 0 {
+                    term = true;
+                }
+                at_word_start = true;
+            }
+            ' ' | '\t' | '\r' => at_word_start = true,
+            // parse.y:3631 shell_getc: `#` at a token start discards to
+            // EOL; a quote character inside the comment is inert, so an
+            // apostrophe (`# don't`) must not open a phantom quote that
+            // swallows the rest of the input (rubash#3813). The newline
+            // itself is left for the next iteration (`;`/`&`/`|`/`\n`
+            // arm), which restores command position.
+            '#' if at_word_start => {
+                while index + 1 < chars.len() && chars[index + 1] != '\n' {
+                    index += 1;
+                }
+            }
+            // Heredoc bodies are raw lines (make_cmd.c:512): a `}` or a
+            // quote character inside the body must not move this scan
+            // (rubash#3813: a `}` line ended the funsub early, an
+            // apostrophe swallowed it). `<<<` is a herestring — no body
+            // to skip — and falls through to the plain `<`/`>` arm.
+            '<' if chars.get(index + 1) == Some(&'<') && chars.get(index + 2) != Some(&'<') => {
+                let (next, _closes) =
+                    super::heredoc_scan::skip_heredoc_in_chars_with_closure(chars, index);
+                index = next;
+                // A heredoc terminator ends on its own line, so the next
+                // character begins a fresh token — and, at funsub level,
+                // a `}` there is the body's closer.
+                at_word_start = true;
+                if paren_depth == 0 {
+                    term = true;
+                }
+                continue;
+            }
+            '<' | '>' => {
+                // A redirection operator ends the previous word: the
+                // target word starts here, so a `#` there comments
+                // (parse.y:3631; `echo >#f` is a comment in GNU, #2033).
+                // `term` is untouched — a `}` right after `>` is the
+                // redirect's target word, not this body's closer.
+                at_word_start = true;
+                term = false;
+            }
+            _ => {
+                term = false;
+                at_word_start = false;
+            }
         }
         index += 1;
     }
     None
 }
 
-/// Skip `$( ... )` honoring nested parens and quoting. Case patterns with
-/// unbalanced `)` inside the substitution are approximated by depth only.
-fn skip_dollar_paren(buf: &[char], mut pos: usize) -> usize {
-    pos += 2;
-    let mut depth = 1usize;
-    while pos < buf.len() && depth > 0 {
-        match buf[pos] {
-            '\\' => pos = (pos + 2).min(buf.len()),
-            '\'' => pos = skip_single_quote(buf, pos),
-            '"' => pos = skip_double_quote(buf, pos),
-            '`' => pos = skip_backtick(buf, pos),
-            '(' => {
-                depth += 1;
-                pos += 1;
-            }
-            ')' => {
-                depth -= 1;
-                pos += 1;
-            }
-            _ => pos += 1,
-        }
-    }
-    pos
+/// Skip `$( ... )` to just past its matching `)`, or to end of input when
+/// unbalanced. Delegates to the corrected paren scanner
+/// (`skip_parenthesized_unit_corrected`, skip.rs): the previous local
+/// depth-only scan treated quote characters inside `#` comments and
+/// heredoc bodies as real quotes, so an apostrophe in a comment
+/// (`# don't`) opened a phantom single-quote that swallowed the rest of
+/// the input — and every alias after the substitution with it
+/// (rubash#3813: alias `E='}; }'` never expanded, leaving the
+/// alias-introduced `{` unclosed). The corrected scanner skips comments
+/// at token boundaries and heredoc bodies as opaque (parse.y:3631
+/// shell_getc; parse.y:4451 parse_comsub), and resolves case-pattern
+/// `)` like the body parser instead of closing at the first paren.
+/// Unbalanced input still swallows to EOF, exactly as before.
+fn skip_dollar_paren(buf: &[char], pos: usize) -> usize {
+    crate::lexer::skip_parenthesized_unit_corrected(buf, pos + 1).unwrap_or(buf.len())
 }
 
 fn skip_dollar_brace(buf: &[char], mut pos: usize) -> usize {
@@ -1230,6 +1291,16 @@ fn skip_dollar_brace(buf: &[char], mut pos: usize) -> usize {
             '\\' => pos = (pos + 2).min(buf.len()),
             '\'' => pos = skip_single_quote(buf, pos),
             '"' => pos = skip_double_quote(buf, pos),
+            // A nested `$(...)` inside `${...}` is a command list of its
+            // own: its `#` comments and heredoc bodies are opaque, so a
+            // quote character inside them must not leak into this brace
+            // scan (rubash#3813: `${x:-$(echo hi # don't\n)}` swallowed
+            // the rest of the input the same way). Delegate to the
+            // corrected paren scanner. `#` itself stays an operator
+            // here — no comment arm: `${x:-a # b}` must keep passing.
+            '$' if buf.get(pos + 1) == Some(&'(') => {
+                pos = skip_dollar_paren(buf, pos);
+            }
             '{' => {
                 depth += 1;
                 pos += 1;
@@ -2620,6 +2691,32 @@ mod stream_tests {
         assert_stream_matches_batch("foo bar'\nfoo baz\n", lookup, false);
         // Value-introduced redirection operator takes the next word as target.
         assert_stream_matches_batch("ec a2 c file\n", lookup, false);
+    }
+
+    /// rubash#3813: the streaming phases must agree with the batch
+    /// expander on the alias-introduced group whose comsub body holds a
+    /// `#` comment with an odd number of apostrophes — the batch twin
+    /// used to swallow the closing alias `E` behind a phantom quote,
+    /// and the streaming pre-pass (which already skips comments via
+    /// skip_parenthesized_unit_corrected) must not diverge from it.
+    #[test]
+    fn stream_matches_batch_comsub_comment_quote() {
+        let mut raw = std_table();
+        raw.insert("T", ("{ f() {", false));
+        raw.insert("E", ("}; }", false));
+        let table = lookup_for(raw);
+        let lookup = &table as &AliasLookup<'_>;
+        assert_stream_matches_batch(
+            "T\n  v=$(echo hi # don't\n)\n  echo \"v=[$v]\"\nE\nf\necho done\n",
+            lookup,
+            false,
+        );
+        // Funsub twin: the `${ ... }` body with the same comment shape.
+        assert_stream_matches_batch(
+            "T\n  v=${ echo hi # don't\n}\n  echo \"v=[$v]\"\nE\nf\necho done\n",
+            lookup,
+            false,
+        );
     }
 
     /// rubash#2653: a multi-line alias DEFINITION read while the

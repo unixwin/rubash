@@ -2698,7 +2698,15 @@ impl Executor {
                 super::read_helpers::note_reaped_child_cpu(&child);
                 // rubash#229: queue the signal-death notice (the job entry
                 // still exists here, so its command text is available).
-                if let Some(signal) = crate::executor::wait_status::exit_status_signal(&done) {
+                // rubash#3803: on Windows `exit_status_signal` is always
+                // None (no WTERMSIG), so fall back to the 128+signal
+                // exit-code decode — the same convention the boundary
+                // reap already uses. Without it the wait's own reap
+                // never queues the notice and the immediate-wait face
+                // (`kill -9 %1; wait %1`) prints nothing.
+                if let Some(signal) = crate::executor::wait_status::exit_status_signal(&done)
+                    .or_else(|| crate::executor::wait_status::exit_code_signal(&done))
+                {
                     let command = self
                         .shell_state
                         .job_table

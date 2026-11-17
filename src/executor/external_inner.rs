@@ -5480,11 +5480,13 @@ impl Executor {
         // (error_prolog(0), no line segment — rubash#2755).
         // GNU shell_execve (execute_cmd.c:6126-6159) reports the execve
         // failure against the filename it handed to execve: the
-        // RESOLVED pathname for PATH shapes (findcmd.c file_to_lose_on
-        // fallback included) — `noexec.sh` found via PATH prints the
-        // full candidate path (rubash#231) — and the typed word itself
-        // for a slash-bearing name, which is never searched
-        // (findcmd.c:385-387 savestring(pathname)).
+        // PATH-joined form the walk built (findcmd.c sh_makepath;
+        // file_to_lose_on fallback included) — `noexec.sh` found via
+        // an absolute PATH entry prints the absolute candidate path
+        // (rubash#231), but a relative PATH entry prints the joined
+        // relative form, e.g. `sub/mycmd` (rubash#3827) — and the
+        // typed word itself for a slash-bearing name, which is never
+        // searched (findcmd.c:385-387 savestring(pathname)).
         //
         // The status is NOT uniformly EX_NOEXEC: shell_execve sets
         // last_command_exit_value = (errno == ENOENT) ? EX_NOTFOUND (127)
@@ -5509,7 +5511,15 @@ impl Executor {
         let report_name = if crate::executor::path::has_path_separator(word) {
             crate::executor::substitution_metadata::fold_literal_char_escapes(word)
         } else {
-            program.display().to_string()
+            // rubash#3827: the execve filename is the walk's as-written
+            // join, so a relative PATH entry reports `sub/mycmd`, never
+            // the session-cwd-anchored absolute form. Derive it through
+            // the shared funnel (rubash#2378/#2442); it declines (None)
+            // when the resolution did not itself produce the join (a
+            // hash-table hit, an empty-element bare name), keeping the
+            // anchored display for those shapes.
+            crate::executor::path::spawn_exec_name(word, program, &self.shell_state.env_vars)
+                .unwrap_or_else(|| program.display().to_string())
         };
         writeln!(&mut stderr, "{}{}: {}", prefix, report_name, message)?;
         self.finish_external_error(cmd, &stderr, status)

@@ -1472,10 +1472,19 @@ impl Executor {
                 let input = fs::read_to_string(&output.path).unwrap_or_default();
                 let source = output.source.clone();
                 let plan = output.spawn_plan.clone();
-                if let Err(output_error) = self.with_procsub_spawn_plan(&plan, |executor| {
+                // rubash#3732: with_procsub_spawn_plan now returns
+                // Result<T, ExecuteError> — a dup failure while
+                // saving a plan fd's pre-bind snapshot fails the run
+                // before the consumer starts, and must surface here
+                // exactly like the consumer's own error (both layers
+                // carry the same ExecuteError).
+                match self.with_procsub_spawn_plan(&plan, |executor| {
                     executor.execute_persistent_output_process_substitution(&source, input, None)
                 }) {
-                    error = Some(output_error);
+                    Ok(Ok(())) => {}
+                    Ok(Err(output_error)) | Err(output_error) => {
+                        error = Some(output_error);
+                    }
                 }
             }
             let _ = fs::remove_file(&output.path);
@@ -5696,9 +5705,9 @@ impl Executor {
     ///
     /// shell_execve names the filename it handed execve: the as-typed
     /// word when it carries a separator (`./pnoexec`), else the
-    /// resolved pathname the PATH walk produced (execute_cmd.c:6139;
+    /// PATH-joined form the walk produced (execute_cmd.c:6139;
     /// findcmd.c:385-387) — the same rule report_external_spawn_error
-    /// applies on the simple-command path.
+    /// applies on the simple-command path (rubash#3827).
     pub(in crate::executor) fn member_spawn_failure(
         &self,
         program: &std::path::Path,
@@ -5713,7 +5722,17 @@ impl Executor {
         let report_name = if crate::executor::path::has_path_separator(expanded_name) {
             expanded_name.to_string()
         } else {
-            program.display().to_string()
+            // rubash#3827: the same rule as report_external_spawn_error —
+            // a relative PATH entry reports the walk's as-written join
+            // (`sub/mycmd`), not the session-cwd-anchored absolute
+            // form; the shared funnel declines when the resolution did
+            // not itself produce the join, keeping the anchored display.
+            crate::executor::path::spawn_exec_name(
+                expanded_name,
+                program,
+                &self.shell_state.env_vars,
+            )
+            .unwrap_or_else(|| program.display().to_string())
         };
         let prefix = if sys_error {
             self.sys_error_prefix()

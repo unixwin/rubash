@@ -1165,6 +1165,22 @@ impl Executor {
         let saved_fd_var_external_undo = std::mem::take(&mut self.fd_var_external_undo);
         let saved_fd_var_pending_closes = std::mem::take(&mut self.fd_var_pending_closes);
         let saved_fd_var_close_restore = std::mem::take(&mut self.fd_var_close_restore);
+        // GNU trap.c:1045-1050 run_exit_trap keys on sigmodes[EXIT_TRAP]:
+        // a fresh `bash script` process starts with SIG_INPROGRESS clear
+        // and its run sets SIG_TRAPPED|SIG_INPROGRESS on its own trap
+        // table — the parent's sigmodes are untouched across the process
+        // boundary. The in-process emulation's exit_trap_ran is executor
+        // state shared across it: a fresh-shell child whose end-of-script
+        // run below fired the latch read back to the parent as "the exit
+        // trap already ran", and a trap the parent armed AFTER the child
+        // was then silently dropped (trap.tests: ${THIS_SH} ./trap6.sub
+        // then `trap 'echo exiting' 0; exit` printed nothing). Park the
+        // parent's latch, let the child start clear like a fresh process,
+        // and hand it back at the restore block below.
+        let saved_exit_trap_ran = self.exit_trap_ran.get();
+        if fresh_shell {
+            self.exit_trap_ran.set(false);
+        }
         // GNU shell.c:722 run_startup_files in the fresh process: a
         // fresh shell runs the startup chain before the script body —
         // for this non-interactive child that is the env-file step
@@ -1242,6 +1258,11 @@ impl Executor {
                 status = trap_status;
             }
         }
+        // trap.c:1045-1050: the child's own sigmodes[EXIT_TRAP] died with
+        // its run — hand the parent back the latch parked above so a
+        // trap the parent armed after this child still fires at the
+        // parent's real exit.
+        self.exit_trap_ran.set(saved_exit_trap_ran);
         // rubash#2236: collect this child's adjudicated signal death
         // (set when its trap table judged an untrapped delivery) and
         // end the shell_pid swap — the EXIT trap above still ran as

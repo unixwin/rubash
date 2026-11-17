@@ -652,6 +652,22 @@ impl Executor {
         }
     }
 
+    /// rubash#3649: commit arithmetic writes a substring offset/length
+    /// evaluation produced. The `&self` substring parse evaluates the
+    /// offset against a snapshot env, so its writes ride with the parse
+    /// result (`parse_parameter_substring_with_writes`); only the caller
+    /// that actually USES the parsed result may call this -- a probe
+    /// that discards the result must never commit them, or the real
+    /// expansion's re-evaluation would apply the write twice.
+    pub(in crate::executor) fn queue_pending_subscript_writes(
+        &self,
+        writes: Vec<(String, String)>,
+    ) {
+        if !writes.is_empty() {
+            PENDING_SUBSCRIPT_WRITES.with(|pending| pending.borrow_mut().extend(writes));
+        }
+    }
+
     /// rubash#2558: mark the deferred-write queue before a command-level
     /// `:?`/`?` pre-scan pass, and roll the queue back to the mark when
     /// the scan reaches no error verdict.
@@ -729,7 +745,12 @@ impl Executor {
         // name before the colon, so the length forms (`${#arr[@]}`,
         // `${#?}`, `${#v}`) — none of which carry a top-level colon
         // after a bare `#` — still fall through to the arms below.
-        if let Some((var_name, offset, length)) = self.parse_parameter_substring(name) {
+        if let Some(((var_name, offset, length), writes)) =
+            self.parse_parameter_substring_with_writes(name)
+        {
+            // rubash#3649: this parse's result is the expansion, so commit
+            // its offset/length arithmetic writes.
+            self.queue_pending_subscript_writes(writes);
             return Some(self.expand_braced_substring_parameter(var_name, offset, length));
         }
         if let Some(array_name) = name.strip_prefix('#').and_then(|name| {
