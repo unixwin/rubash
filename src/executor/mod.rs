@@ -9,7 +9,7 @@ pub(crate) mod types;
 pub(crate) mod wait_status;
 use arithmetic::{
     arithmetic_division_by_zero_token, arithmetic_unbound_variable, eval_conditional_arith_value,
-    eval_conditional_arith_value_categorized, eval_conditional_arith_value_categorized_with_writes,
+    eval_conditional_arith_value_categorized_with_writes,
     eval_conditional_arith_value_categorized_with_writes_and_state,
     eval_conditional_arith_value_with_writes,
 };
@@ -1245,6 +1245,14 @@ pub struct Executor {
     /// (print_pipeline JLIST_STANDARD), everything else is silent.
     /// (pid, signal, command text, foreground).
     pending_signal_notices: std::cell::RefCell<Vec<(u32, i32, String, bool)>>,
+    /// rubash#3637: pids a `wait` resolved through the already-completed
+    /// arm of wait_for_background_pid. Their signal-death notices were
+    /// queued at an earlier boundary, so execute_wait drains them for
+    /// exactly these pids (GNU jobs.c:3385 wait_for's
+    /// notify_and_cleanup(job) for the waited job); other jobs' notices
+    /// keep the boundary route. Cleared at each wait's entry, read at
+    /// its exit.
+    wait_notice_pids: Vec<u32>,
     /// Depth of `with_traps_suspended` scopes currently active. GNU has no
     /// notion of host housekeeping commands: when an embedding host runs
     /// internal commands through execute_ast (startup/shutdown hooks,

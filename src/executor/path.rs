@@ -909,6 +909,9 @@ fn path_scan_scaffold(
         let dirs = split_shell_path(env_vars.get("PATH").map(String::as_str).unwrap_or_default())
             .into_iter()
             .map(|dir| {
+                // rubash#3826: GNU findcmd.c:544 — expand a `~`-leading
+                // PATH element at lookup time (unless POSIX mode).
+                let dir = expand_path_element_tilde(&dir, env_vars);
                 // rubash#3104: fold a raw-byte pair in the element
                 // before the listing scan, like the unix walk; on
                 // Windows the folded string is already the WTF-8
@@ -1152,9 +1155,15 @@ fn memoized_miss_still_absent(
     env_vars: &HashMap<String, String>,
     _fingerprint: &str,
 ) -> bool {
+    // rubash#3826: the probe must expand a `~`-leading element exactly
+    // like the walk does, or a memoized miss would be served for a
+    // command that is findable via the expanded element.
     !split_shell_path(env_vars.get("PATH").map(String::as_str).unwrap_or_default())
         .iter()
-        .any(|dir| shell_path_to_windows(dir, env_vars).join(name).is_file())
+        .any(|dir| {
+            let dir = expand_path_element_tilde(dir, env_vars);
+            shell_path_to_windows(&dir, env_vars).join(name).is_file()
+        })
 }
 
 #[cfg_attr(unix, allow(unused_variables))]
@@ -1258,6 +1267,26 @@ fn find_user_command_uncached(
     None
 }
 
+/// GNU findcmd.c:544 `find_in_path_element`: a PATH element starting
+/// with `~` is tilde-expanded at lookup time — `xpath =
+/// (posixly_correct == 0 && *path == '~') ? bash_tilde_expand (path, 0)
+/// : path`. The expansion happens per element, inside the walk, so
+/// `command -v` / `hash -t` print the expanded path (rubash#3826).
+/// The `~` is NOT expanded when PATH is assigned (that is the
+/// assignment layer's business) and NOT in POSIX mode
+/// (`posixly_correct == 0` gate). Reuses the assignment-layer tilde
+/// helper: `~`/`~/...` via $HOME, `~+`/`~-`/`~N` via the dirstack,
+/// `~user[/rest]` via getpwnam; an unresolvable user stays verbatim.
+pub(crate) fn expand_path_element_tilde(dir: &str, env_vars: &HashMap<String, String>) -> String {
+    if !dir.starts_with('~') {
+        return dir.to_string();
+    }
+    if crate::builtins::set::shell_option_enabled(env_vars, "posix") {
+        return dir.to_string();
+    }
+    crate::expand::tilde::tilde::expand_tilde_segment(dir, env_vars)
+}
+
 /// The unix PATH-element walk behind `find_user_command_uncached`,
 /// returning the winning candidate in two forms: the session-cwd-anchored
 /// path the executor opens/spawns, and the as-written join of the PATH
@@ -1279,6 +1308,11 @@ fn find_in_path_walk_unix(
 ) -> Option<(PathBuf, String)> {
     let mut file_to_lose_on: Option<(PathBuf, String)> = None;
     for dir in split_shell_path(env_vars.get("PATH").map(String::as_str).unwrap_or_default()) {
+        // rubash#3826: GNU findcmd.c:544 — expand a `~`-leading PATH
+        // element at lookup time (unless POSIX mode), before the
+        // fold/probe, so the element the walk joins is the expanded
+        // home path.
+        let dir = expand_path_element_tilde(&dir, env_vars);
         // rubash#3104: a PATH element carrying a raw-byte pair must be
         // folded before the probe — GNU findcmd.c:623 walks with the
         // element bytes verbatim, and the unfolded pair spelling never
@@ -3935,9 +3969,16 @@ fn file_is_executable(path: &Path) -> bool {
 
 /// GNU hashcmd.c phash_search: `hash -t` resolves a stored relative path
 /// through its `./`-prefixed form when that form is executable.
+/// GNU findcmd.c:214-223 `executable_file` requires FS_EXECABLE **and**
+/// not a directory: a bare access(X_OK) admits every directory (search
+/// permission), which made `phash_search_spelling` return `"./"` for a
+/// stored empty path (rubash#3824) and let `hash`/`type -a` accept
+/// non-executable files (rubash#3825). `is_dir` stats through symlinks,
+/// matching file_status's stat: a symlink to a directory is out, a
+/// symlink to an executable file is in, a dangling symlink fails access.
 #[cfg(unix)]
 pub(crate) fn is_executable_file(path: &Path) -> bool {
-    file_is_executable(path)
+    !path.is_dir() && file_is_executable(path)
 }
 
 #[cfg(not(unix))]
@@ -8330,6 +8371,86 @@ pub(crate) fn strip_verbatim_prefix(path: &Path) -> PathBuf {
 pub(crate) fn canonicalize_native(path: &Path) -> io::Result<PathBuf> {
     path.canonicalize()
         .map(|resolved| strip_verbatim_prefix(&resolved))
+}
+
+/// Whether the kernel would let this process search (chdir into)
+/// `path`: access(2) X_OK on a directory. The sibling of
+/// `file_is_executable` below, for directories instead of files —
+/// the same real-uid access(2) GNU's findcmd.c file_status uses
+/// (rubash#3788).
+///
+/// Unix-only semantics: Windows has no unix permission-bit
+/// semantics, so every directory qualifies there.
+#[cfg(unix)]
+pub(crate) fn directory_has_search_permission(path: &Path) -> bool {
+    let Ok(cpath) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
+        return false;
+    };
+    // SAFETY: access(2) with a NUL-terminated path.
+    unsafe { libc::access(cpath.as_ptr(), libc::X_OK) == 0 }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn directory_has_search_permission(_path: &Path) -> bool {
+    true
+}
+
+/// The error chdir would have reported for a target that exists but
+/// is not a directory (ENOTDIR / ERROR_DIRECTORY), in a form
+/// `posix_errors::message` renders as "Not a directory".
+fn not_a_directory_error() -> io::Error {
+    #[cfg(windows)]
+    {
+        io::Error::from_raw_os_error(267)
+    }
+    #[cfg(not(windows))]
+    {
+        io::Error::from_raw_os_error(20)
+    }
+}
+
+/// The error chdir would have reported for a target the process may
+/// not search (EACCES / ERROR_ACCESS_DENIED), in a form
+/// `posix_errors::message` renders as "Permission denied".
+fn search_denied_error() -> io::Error {
+    #[cfg(windows)]
+    {
+        io::Error::from_raw_os_error(5)
+    }
+    #[cfg(not(windows))]
+    {
+        io::Error::from_raw_os_error(libc::EACCES)
+    }
+}
+
+/// Probe a directory the way `chdir(2)` would, for the session-cwd
+/// moves (G-02): canonicalize (which carries chdir's ENOENT/ENOTDIR/
+/// EACCES for every component the walk traverses) + the directory
+/// check, PLUS the search-permission check on the target itself.
+///
+/// GNU builtins/cd.def change_to_directory performs a real chdir,
+/// and the kernel refuses a target without the search (execute) bit
+/// with EACCES — while realpath(3) and stat(2) both succeed on such
+/// a directory, because path resolution only needs search permission
+/// on the PARENT components, not on the final component itself. A
+/// probe built from canonicalize + is_dir therefore reports success
+/// for a directory the shell can never enter (rubash#3788):
+/// `cd`/`pushd` bound PWD/DIRSTACK to a directory the process never
+/// moved to. The session-cwd model never chdirs the process, so the
+/// permission half of chdir's verdict is reproduced here with
+/// access(2) X_OK on the resolved directory — root still passes, as
+/// with a real chdir, and ACLs are honored because the kernel itself
+/// adjudicates. The check is a no-op on Windows (no unix
+/// permission-bit semantics there).
+pub(crate) fn probe_directory_for_chdir(path: &Path) -> io::Result<PathBuf> {
+    let resolved = canonicalize_native(path)?;
+    if !resolved.is_dir() {
+        return Err(not_a_directory_error());
+    }
+    if !directory_has_search_permission(&resolved) {
+        return Err(search_denied_error());
+    }
+    Ok(resolved)
 }
 
 /// The canonical PWD display form: always the POSIX `/<drive>/…` spelling

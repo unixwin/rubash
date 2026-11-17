@@ -127,7 +127,25 @@ impl Executor {
         // stdin_redir whether fd 0 is among them; the flag is sticky for the
         // structure's whole dynamic extent and eval.c:181 resets it per
         // reader command. Async `cmd &` consults it (execute_cmd.c:2837).
-        if command_is_shell_control_structure(cmd) && !cmd.redirects.is_empty() {
+        // rubash#3605: a PIPELINE ELEMENT's own redirects never reach this
+        // check in GNU — the element's execute_in_subshell consumed them in
+        // do_redirections before re-dispatching (:1759-1764), so
+        // command->redirects is NULL at :826 and the element child's
+        // `|=pipe` verdict (execute_cmd.c:4570) survives: a pipe-fed
+        // `for … done | cat` body keeps flag=1 even with the element's own
+        // `< file` redirects. element_pipe_stdin stands in for that
+        // consumption; consume it here (only a shell-control-structure
+        // node — a `( )` element's marker must reach its own :1733 assign
+        // in execute_subshell_command_with_redirects).
+        let element_pipe_stdin = if command_is_shell_control_structure(cmd) {
+            self.shell_state.element_pipe_stdin.replace(false)
+        } else {
+            false
+        };
+        if command_is_shell_control_structure(cmd)
+            && !cmd.redirects.is_empty()
+            && !element_pipe_stdin
+        {
             self.shell_state
                 .stdin_redir
                 .set(cmd.redirects.iter().any(redirect_updates_stdin_redir));

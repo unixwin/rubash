@@ -364,8 +364,13 @@ impl Executor {
             {
                 return Some(values);
             }
-            if let Some((var_name, offset, length)) = self.parse_parameter_substring(name) {
+            if let Some(((var_name, offset, length), writes)) =
+                self.parse_parameter_substring_with_writes(name)
+            {
                 if var_name == "@" {
+                    // rubash#3649: this parse's result is the expansion,
+                    // so commit its offset/length arithmetic writes.
+                    self.queue_pending_subscript_writes(writes);
                     return Some(positional_parameter_substring_with_zero(
                         self.shell_state.positional_window(),
                         &self.script_name_value(),
@@ -374,6 +379,9 @@ impl Executor {
                     ));
                 }
                 if var_name == "*" {
+                    // rubash#3649: this parse's result is the expansion,
+                    // so commit its offset/length arithmetic writes.
+                    self.queue_pending_subscript_writes(writes);
                     let values = positional_parameter_substring_with_zero(
                         self.shell_state.positional_window(),
                         &self.script_name_value(),
@@ -597,10 +605,15 @@ impl Executor {
     /// embedded and standalone slices share byte-identical slicing
     /// semantics (GNU subst.c:9050 parameter_brace_substring).
     pub(in crate::executor) fn at_slice_segment_values(&self, inner: &str) -> Vec<String> {
-        let Some((var_name, offset, length)) = self.parse_parameter_substring(inner) else {
+        let Some(((var_name, offset, length), writes)) =
+            self.parse_parameter_substring_with_writes(inner)
+        else {
             return Vec::new();
         };
         if var_name == "@" {
+            // rubash#3649: this parse's result is the segment values, so
+            // commit its offset/length arithmetic writes.
+            self.queue_pending_subscript_writes(writes);
             return positional_parameter_substring_with_zero(
                 self.shell_state.positional_window(),
                 &self.script_name_value(),
@@ -610,6 +623,9 @@ impl Executor {
         }
         if let Some(base) = var_name.strip_suffix("[@]") {
             if is_shell_name(base) {
+                // rubash#3649: this parse's result is the segment values,
+                // so commit its offset/length arithmetic writes.
+                self.queue_pending_subscript_writes(writes);
                 return self
                     .array_subscript_range_values(base, offset, length)
                     .unwrap_or_default();

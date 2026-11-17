@@ -2664,12 +2664,32 @@ impl Executor {
     /// twin: it carries the same plan through the `__RUBASH_FD_*`
     /// env channel instead. Returns the pre-bind snapshot for
     /// `restore_procsub_spawn_plan_fd`. A disposition that cannot be
-    /// materialized (an unopenable carrier, a failed dup) leaves
-    /// the fd untouched — the ambient behavior, not a spawn failure.
-    fn bind_procsub_spawn_plan_fd(&mut self, fd: u32, disposition: &ProcsubSpawnFd) -> PlanFdSave {
+    /// materialized (an unopenable carrier, a failed dup of the NEW
+    /// endpoint) leaves the fd untouched — the ambient behavior, not
+    /// a spawn failure. (A failed dup of the SAVED entry is different:
+    /// see the #3732 note below — it fails the bind.)
+    ///
+    /// rubash#3732 (same hazard as #3706): the pre-bind snapshot
+    /// is a kernel dup (`FdTable::saved_entry`), never a bare Rc
+    /// clone — every bind arm below retires the displaced descriptor
+    /// (`FdTable::close` retires both arms; `set_fd_input_file` /
+    /// `open_output` retire the arm they replace, rubash#3213), so
+    /// a cloned save would restore a dead entry and the next spawn's
+    /// pin pass would dup2 whatever recycled that kernel number.
+    /// GNU's undo save IS that kernel dup (`fcntl (fd, F_DUPFD,
+    /// SHELL_FD_BASE)`, redir.c:965/1082/1144; compound groups run
+    /// `do_redirections (..., RX_ACTIVE|RX_UNDOABLE)`,
+    /// execute_cmd.c:854). A dup failure fails the bind (GNU
+    /// REDIRECTION_ERROR) before anything is mutated, so the caller
+    /// can unwind the bindings already made.
+    fn bind_procsub_spawn_plan_fd(
+        &mut self,
+        fd: u32,
+        disposition: &ProcsubSpawnFd,
+    ) -> Result<PlanFdSave, ExecuteError> {
         let saved = PlanFdSave {
             fd,
-            entry: self.fd_table.entries.get(&fd).cloned(),
+            entry: self.fd_table.saved_entry(fd)?,
             alias_generation: self.fd_table.stdout_alias_generation.get(&fd).cloned(),
             fd_stdin: self.shell_state.env_vars.get(&fd_stdin_key(fd)).cloned(),
             fd_stdin_offset: self
@@ -2815,7 +2835,7 @@ impl Executor {
                 }
             }
         }
-        saved
+        Ok(saved)
     }
 
     fn restore_procsub_spawn_plan_fd(&mut self, saved: PlanFdSave) {
@@ -2875,21 +2895,33 @@ impl Executor {
     /// from the map inherit the ambient table — the in-process
     /// consumer already sees it, unlike a spawned child, which
     /// needs the ambient fds transported (see the #2212 loop in
-    /// `spawn_output_process_substitution_child`).
+    /// `spawn_output_process_substitution_child`). A dup failure
+    /// while saving one fd's pre-bind snapshot (rubash#3732) fails
+    /// the whole run before `run` starts — the bindings already made
+    /// are restored in reverse first, the same unwind a redirect
+    /// apply failure performs (GNU `undo_partial_redirects`).
     pub(in crate::executor) fn with_procsub_spawn_plan<T>(
         &mut self,
         plan: &ProcsubSpawnPlan,
         run: impl FnOnce(&mut Self) -> T,
-    ) -> T {
+    ) -> Result<T, ExecuteError> {
         let mut saved = Vec::new();
         for (fd, disposition) in &plan.fds {
-            saved.push(self.bind_procsub_spawn_plan_fd(*fd, disposition));
+            match self.bind_procsub_spawn_plan_fd(*fd, disposition) {
+                Ok(save) => saved.push(save),
+                Err(error) => {
+                    for save in saved.into_iter().rev() {
+                        self.restore_procsub_spawn_plan_fd(save);
+                    }
+                    return Err(error);
+                }
+            }
         }
         let result = run(self);
         for save in saved.into_iter().rev() {
             self.restore_procsub_spawn_plan_fd(save);
         }
-        result
+        Ok(result)
     }
 
     fn materialize_standalone_process_substitution_word(

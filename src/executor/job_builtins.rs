@@ -377,17 +377,39 @@ impl Executor {
         // command's descriptors — `wait $p 2>/dev/null` silences the
         // "Killed" notice. Notices queued BEFORE this wait (reaped at
         // an earlier boundary) keep the boundary route: the raw-stderr
-        // flush in report_pending_signal_notices. So: snapshot the
-        // queue length, run the wait, then drain only the notices this
-        // wait produced and route them through the wait command's own
-        // fd-2 binding instead of leaving them for the raw flush
-        // (rubash#1303).
+        // flush in report_pending_signal_notices — EXCEPT for the jobs
+        // this wait resolved through the completed arm (rubash#3637):
+        // GNU jobs.c:3385 wait_for's notify_and_cleanup(job) prints
+        // the waited job's notice inside the wait, so a pre-queued
+        // notice for a waited pid has no later notify point in a
+        // single-list `-c` string and would otherwise be dropped at
+        // stream end. So: snapshot the queue length, run the wait,
+        // then drain the notices this wait produced PLUS the pre-queued
+        // notices for exactly the pids it resolved, and route them
+        // through the wait command's own fd-2 binding instead of
+        // leaving them for the raw flush (rubash#1303).
         let notice_mark = self.pending_signal_notices.borrow().len();
+        self.wait_notice_pids.clear();
         let result = self.execute_wait_inner(cmd);
         let drained: Vec<(u32, i32, String, bool)> = {
             let mut queue = self.pending_signal_notices.borrow_mut();
             let mark = notice_mark.min(queue.len());
-            queue.drain(mark..).collect()
+            let produced: Vec<(u32, i32, String, bool)> = queue.drain(mark..).collect();
+            // Pre-queued notices for the pids this wait resolved
+            // (completed arm): take them out of the pre-mark region,
+            // oldest first, leaving every other job's notice queued
+            // for the boundary route.
+            let mut prequeued = Vec::new();
+            let mut index = 0;
+            while index < queue.len() {
+                if self.wait_notice_pids.contains(&queue[index].0) {
+                    prequeued.push(queue.remove(index));
+                } else {
+                    index += 1;
+                }
+            }
+            prequeued.extend(produced);
+            prequeued
         };
         if !drained.is_empty() {
             let (text, printed_pids) = self.format_signal_notices(drained);
@@ -1606,6 +1628,28 @@ impl Executor {
         &mut self,
         notices: Vec<(u32, i32, String, bool)>,
     ) -> Result<(), ExecuteError> {
+        // rubash#3637: GNU jobs.c:4570 notify_of_job_status prints only
+        // when IS_NOTIFIED (job) == 0 — a job `jobs` (or an earlier
+        // notify point) already reported is never announced again. Drop
+        // such notices here, on the boundary / stream-end / `jobs`
+        // flush path. The wait drain routes through
+        // format_signal_notices directly and deliberately bypasses
+        // this filter: wait IS the notify point (jobs.c:3385), and its
+        // own bookkeeping marks the waited job notified before the
+        // drain runs. A pid with no job entry still prints (foreground
+        // notices carry the shell's own pid, not a job-table pid).
+        let notices: Vec<(u32, i32, String, bool)> = notices
+            .into_iter()
+            .filter(|(pid, _, _, _)| {
+                !self
+                    .shell_state
+                    .job_table
+                    .pid_to_job
+                    .get(pid)
+                    .and_then(|job_id| self.shell_state.job_table.jobs.get(job_id))
+                    .is_some_and(|job| job.notified)
+            })
+            .collect();
         let (out, printed_pids) = self.format_signal_notices(notices);
         // rubash#2698: record the notification on the job table —
         // notify_of_job_status marks J_NOTIFIED as it prints, and
@@ -2610,6 +2654,12 @@ impl Executor {
             if retain_for_explicit_wait {
                 self.shell_state.job_table.mark_job_waited_by_pid(pid);
             }
+            // rubash#3637: this wait resolved an already-completed job,
+            // so its death notice — queued when an earlier boundary
+            // reaped it — is not produced by this wait. Record the pid
+            // so execute_wait drains that pre-queued notice for it
+            // (GNU jobs.c:3385 wait_for's notify_and_cleanup(job)).
+            self.wait_notice_pids.push(pid);
             self.forget_background_runtime(pid);
             return Ok(WaitPidOutcome::Status(status));
         }
@@ -2648,7 +2698,15 @@ impl Executor {
                 super::read_helpers::note_reaped_child_cpu(&child);
                 // rubash#229: queue the signal-death notice (the job entry
                 // still exists here, so its command text is available).
-                if let Some(signal) = crate::executor::wait_status::exit_status_signal(&done) {
+                // rubash#3803: on Windows `exit_status_signal` is always
+                // None (no WTERMSIG), so fall back to the 128+signal
+                // exit-code decode — the same convention the boundary
+                // reap already uses. Without it the wait's own reap
+                // never queues the notice and the immediate-wait face
+                // (`kill -9 %1; wait %1`) prints nothing.
+                if let Some(signal) = crate::executor::wait_status::exit_status_signal(&done)
+                    .or_else(|| crate::executor::wait_status::exit_code_signal(&done))
+                {
                     let command = self
                         .shell_state
                         .job_table
