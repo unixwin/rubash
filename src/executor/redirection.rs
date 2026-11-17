@@ -3579,12 +3579,27 @@ impl Executor {
             let fifo_validation: Option<Result<(), std::io::Error>> = {
                 let path =
                     self.session_path(self.redirect_target_filesystem_path_for(redirect, &target));
-                crate::executor::shell_options::redirect_path_is_fifo(&path).then(|| {
-                    match crate::executor::shell_options::redirect_fifo_access_error(&path, true) {
-                        Some(error) => Err(crate::posix_errors::path_error(&target, error)),
-                        None => Ok(()),
-                    }
-                })
+                if crate::executor::shell_options::redirect_path_is_fifo(&path) {
+                    Some(
+                        match crate::executor::shell_options::redirect_fifo_access_error(
+                            &path, true,
+                        ) {
+                            Some(error) => Err(crate::posix_errors::path_error(&target, error)),
+                            None => Ok(()),
+                        },
+                    )
+                } else {
+                    // rubash#3286: the joined-path check above misses
+                    // from a deleted cwd — the anchor faccessat is the
+                    // same access-only validation there (a validation
+                    // open would consume the flush open's rendezvous
+                    // pairing, rubash#1820).
+                    crate::executor::shell_options::output_fifo_validation_via_anchor(
+                        self,
+                        Some(redirect),
+                        &target,
+                    )
+                }
             };
             #[cfg(not(any(unix, windows)))]
             let fifo_validation: Option<Result<(), std::io::Error>> = None;
@@ -4452,18 +4467,32 @@ impl OutputFdState {
                 }
                 let resolved = executor
                     .session_path(shell_path_to_windows(&path, &executor.shell_state.env_vars));
-                if crate::executor::shell_options::redirect_path_is_fifo(&resolved) {
+                let mut is_fifo = crate::executor::shell_options::redirect_path_is_fifo(&resolved);
+                // rubash#3286: the joined-path check above misses from
+                // a deleted cwd — the anchor's fstatat classifies
+                // there, and the pairing open goes through the
+                // anchor-aware append opener (a joined-path open would
+                // die at the dead component).
+                #[cfg(unix)]
+                {
+                    if !is_fifo {
+                        let fs_operand = executor.redirect_target_filesystem_path(&path);
+                        is_fifo = fs_operand.is_relative()
+                            && executor.anchor_operand_is_fifo(&fs_operand) == Some(true);
+                    }
+                }
+                if is_fifo {
                     // rubash#2121: the FIFO pairing obeys the same
                     // single-open rule for a dup-aliased binding.
                     if let Some(owner) = self.path_sharing_owner(fd, &path) {
                         if self.cached_shared_handle(owner).is_none() {
-                            let pairing = open_redirect_append(&resolved)?;
+                            let pairing = executor.open_append_target(&path)?;
                             self.path_handle_cache
                                 .borrow_mut()
                                 .insert(owner, std::rc::Rc::new(pairing));
                         }
                     } else {
-                        let _pairing = open_redirect_append(&resolved)?;
+                        let _pairing = executor.open_append_target(&path)?;
                     }
                 }
             }

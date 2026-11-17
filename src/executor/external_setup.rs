@@ -2393,6 +2393,17 @@ impl Executor {
         if super::shell_options::redirect_path_is_fifo(&session_target) {
             return ProcsubPlanCapture::Declined;
         }
+        // rubash#3286: the joined-path check above misses from a
+        // deleted cwd — a FIFO there declines the capture the same way
+        // (the capture open would otherwise block the planner on the
+        // rendezvous, rubash#1820).
+        #[cfg(unix)]
+        {
+            let fs_operand = self.redirect_target_filesystem_path(target);
+            if fs_operand.is_relative() && self.anchor_operand_is_fifo(&fs_operand) == Some(true) {
+                return ProcsubPlanCapture::Declined;
+            }
+        }
         match mode {
             ProcsubPlanMode::Read => match FileFd::open_read(session_target) {
                 Ok(file) => ProcsubPlanCapture::Captured(file),
