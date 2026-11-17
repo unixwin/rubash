@@ -73,7 +73,12 @@ fn dollar_zero() -> String {
 }
 
 fn assert_invalid_variable_name(out: &Outcome, zero: &str) {
-    assert_eq!(out.stdout, b"", "stdout must be empty; stderr {0:?}", stderr_text(out));
+    assert_eq!(
+        out.stdout,
+        b"",
+        "stdout must be empty; stderr {0:?}",
+        stderr_text(out)
+    );
     let err = stderr_text(out);
     assert!(
         err.contains("invalid variable name"),
@@ -119,7 +124,12 @@ fn bang_zero_default_errors_inside_subshell() {
     // Seed check 9: the error stays inside its subshell (inner stderr
     // discarded, only the rc line is compared).
     let out = run("f() { (echo \"z=${!0-unset}\") 2>/dev/null; echo \"inner-rc=$?\"; }; f p q");
-    assert_eq!(out.stdout, b"inner-rc=1\n", "stderr: {:?}", stderr_text(&out));
+    assert_eq!(
+        out.stdout,
+        b"inner-rc=1\n",
+        "stderr: {:?}",
+        stderr_text(&out)
+    );
     assert_eq!(out.code, 0);
 }
 
@@ -127,14 +137,20 @@ fn bang_zero_default_errors_inside_subshell() {
 fn bang_zero_valid_name_expands_target() {
     // Positive branch of face 1: with $0 a valid identifier, `${!0}`
     // reads the variable $0 names (GNU probe: BASH_ARGV0=target).
-    let out = run_env("target=hello; echo \"[${!0}]\"", &[("BASH_ARGV0", "target")]);
+    let out = run_env(
+        "target=hello; echo \"[${!0}]\"",
+        &[("BASH_ARGV0", "target")],
+    );
     assert_eq!(out.stdout, b"[hello]\n", "stderr: {:?}", stderr_text(&out));
     assert_eq!(out.code, 0);
 }
 
 #[test]
 fn bang_zero_zero_valid_name_expands_target() {
-    let out = run_env("target=hello; echo \"[${!00}]\"", &[("BASH_ARGV0", "target")]);
+    let out = run_env(
+        "target=hello; echo \"[${!00}]\"",
+        &[("BASH_ARGV0", "target")],
+    );
     assert_eq!(out.stdout, b"[hello]\n", "stderr: {:?}", stderr_text(&out));
     assert_eq!(out.code, 0);
 }
@@ -228,4 +244,143 @@ fn control_bang_one_unset_positional_is_empty() {
     let out = run("set -- x; echo \"[${!5}]\"");
     assert_eq!(out.stdout, b"[]\n", "stderr: {:?}", stderr_text(&out));
     assert_eq!(out.code, 0);
+}
+
+// Operator faces on a numeric-0 source. GNU resolves the source to $0's
+// VALUE (find_indir, subst.c:7839), then applies the operator to the
+// parameter that value names (get_var_and_type, subst.c:8529-8545) — the
+// resolved name here is `target`, so every operator acts on $target.
+
+#[test]
+fn bang_zero_prefix_removal_operates_on_target() {
+    let out = run_env(
+        "target=hello; echo \"[${!0#h}]\"",
+        &[("BASH_ARGV0", "target")],
+    );
+    assert_eq!(out.stdout, b"[ello]\n", "stderr: {:?}", stderr_text(&out));
+    assert_eq!(out.code, 0);
+}
+
+#[test]
+fn bang_zero_suffix_removal_operates_on_target() {
+    let out = run_env(
+        "target=hello; echo \"[${!0%lo}]\"",
+        &[("BASH_ARGV0", "target")],
+    );
+    assert_eq!(out.stdout, b"[hel]\n", "stderr: {:?}", stderr_text(&out));
+    assert_eq!(out.code, 0);
+}
+
+#[test]
+fn bang_zero_zero_case_mod_operates_on_target() {
+    let out = run_env(
+        "target=hello; echo \"[${!00^}]\"",
+        &[("BASH_ARGV0", "target")],
+    );
+    assert_eq!(out.stdout, b"[Hello]\n", "stderr: {:?}", stderr_text(&out));
+    assert_eq!(out.code, 0);
+}
+
+#[test]
+fn bang_zero_zero_substring_operates_on_target() {
+    let out = run_env(
+        "target=hello; echo \"[${!000:1:2}]\"",
+        &[("BASH_ARGV0", "target")],
+    );
+    assert_eq!(out.stdout, b"[el]\n", "stderr: {:?}", stderr_text(&out));
+    assert_eq!(out.code, 0);
+}
+
+#[test]
+fn bang_zero_replacement_operates_on_target() {
+    let out = run_env(
+        "target=hello; echo \"[${!0/hello/world}]\"",
+        &[("BASH_ARGV0", "target")],
+    );
+    assert_eq!(out.stdout, b"[world]\n", "stderr: {:?}", stderr_text(&out));
+    assert_eq!(out.code, 0);
+}
+
+#[test]
+fn bang_zero_assignment_binds_target() {
+    // subst.c:8151: `:=` binds the parameter the source value names.
+    let out = run_env(
+        "echo \"[${!0:=d}]\"; echo \"[$target]\"",
+        &[("BASH_ARGV0", "target")],
+    );
+    assert_eq!(out.stdout, b"[d]\n[d]\n", "stderr: {:?}", stderr_text(&out));
+    assert_eq!(out.code, 0);
+}
+
+#[test]
+fn bang_zero_zero_dash_keeps_set_empty_target() {
+    // `-` substitutes only for an UNSET parameter: target="" stays empty.
+    let out = run_env("target=; echo \"[${!00-d}]\"", &[("BASH_ARGV0", "target")]);
+    assert_eq!(out.stdout, b"[]\n", "stderr: {:?}", stderr_text(&out));
+    assert_eq!(out.code, 0);
+}
+
+#[test]
+fn bang_hash_pattern_whole_word_argument_is_last_arg() {
+    // The whole word is a quoted `${!#%*}`: GNU's list-form gate
+    // (subst.c:9974 legal_variable_starter) rejects `!#`, so this is the
+    // `%` operator on `${!#}`, and `%*` removes the empty suffix.
+    let out = run("set -- a b c; printf '<%s>\\n' \"${!#%*}\"");
+    assert_eq!(out.stdout, b"<c>\n", "stderr: {:?}", stderr_text(&out));
+    assert_eq!(out.code, 0);
+}
+
+#[test]
+fn bang_hash_pattern_whole_word_no_args_is_dollar_zero() {
+    let out = run("printf '%s' \"${!#%*}\"");
+    assert_eq!(
+        out.stdout,
+        dollar_zero().into_bytes(),
+        "stderr: {:?}",
+        stderr_text(&out)
+    );
+    assert_eq!(out.code, 0);
+}
+
+// Nounset reports the whole `!source` name when the parameter that source
+// names is unbound (subst.c:10164-10175 check_unbound_variable over the
+// find_indir target). GNU 5.3.20: `${!0}` with $0=target and target unset
+// is `!0: unbound variable`, status 127.
+
+#[test]
+fn bang_zero_unset_target_reports_unbound_under_nounset() {
+    let out = run_env("set -u; echo \"${!0}\"", &[("BASH_ARGV0", "target")]);
+    assert_eq!(out.stdout, b"", "stderr: {:?}", stderr_text(&out));
+    assert!(
+        stderr_text(&out).contains("!0: unbound variable"),
+        "stderr: {:?}",
+        stderr_text(&out)
+    );
+    assert_eq!(out.code, 127);
+}
+
+#[test]
+fn bang_zero_zero_unset_target_reports_unbound_under_nounset() {
+    let out = run_env("set -u; echo \"${!00}\"", &[("BASH_ARGV0", "target")]);
+    assert_eq!(out.stdout, b"", "stderr: {:?}", stderr_text(&out));
+    assert!(
+        stderr_text(&out).contains("!00: unbound variable"),
+        "stderr: {:?}",
+        stderr_text(&out)
+    );
+    assert_eq!(out.code, 127);
+}
+
+#[test]
+fn bang_one_source_unset_target_reports_unbound_under_nounset() {
+    // A positional SOURCE resolves its target the same way: $1 holds
+    // `target`, and target is unbound.
+    let out = run("set -u; set -- target; echo \"${!1}\"");
+    assert_eq!(out.stdout, b"", "stderr: {:?}", stderr_text(&out));
+    assert!(
+        stderr_text(&out).contains("!1: unbound variable"),
+        "stderr: {:?}",
+        stderr_text(&out)
+    );
+    assert_eq!(out.code, 127);
 }
