@@ -1417,11 +1417,15 @@ impl Executor {
         texts.extend(cmd.assignment_values().map(String::as_str));
         for text in texts {
             for body in speculative_arithmetic_bodies(text) {
-                let (value, _writes, _category) =
+                // Probe mirrors the arithsub evalexp window: NULL
+                // this_command_name (rubash#3295).
+                let (value, _writes, _category) = {
+                    let _arith_label = crate::executor::arithmetic::arith_eval_label_scope(None);
                     crate::executor::arithmetic::eval_conditional_arith_value_categorized_with_writes(
                         &body,
                         &self.shell_state.env_vars,
-                    );
+                    )
+                };
                 if value.is_none() {
                     return true;
                 }
@@ -2473,6 +2477,47 @@ impl Executor {
                 break;
             };
             let after_start = &rest[start + 2..];
+            // GNU subst.c:10775-10798 param_expand `case LBRACE`:
+            // `${` + FUNSUB_CHAR (parser.h:85 — blank/newline/`|`)
+            // routes to function_substitute (subst.c:6917) BEFORE
+            // parameter_brace_expand ever runs, so the
+            // valid_brace_expansion_word gate (subst.c:10053/7583)
+            // and every operator arm below see command text, never a
+            // parameter name — `${ cmd; }` bodies must not be judged
+            // by braced_name_is_bad_substitution (rubash#3502
+            // follow-up: the scan read ` case x in x) esac; ` as an
+            // illegal name). Mirror the real path's admission —
+            // expand_word.rs / embedded_parameters.rs run the same
+            // three steps: funsub_introducer, extract_funsub_body,
+            // funsub_body_is_terminated. An introducer-led span that
+            // fails them is not a funsub and falls through to the
+            // parameter checks unchanged.
+            let mut funsub_chars = after_start.chars().peekable();
+            if funsub_chars
+                .peek()
+                .copied()
+                .and_then(crate::executor::command_substitution::funsub_introducer)
+                .is_some()
+            {
+                if let Some((body, _)) =
+                    crate::executor::command_substitution::extract_funsub_body(&mut funsub_chars)
+                {
+                    if crate::executor::command_substitution::funsub_body_is_terminated(&body) {
+                        // The funsub extent is introducer + body + `}`;
+                        // the `}` sits body.chars().count() + 1 chars
+                        // into after_start (introducer at 0, body
+                        // 1..=N, `}` at N+1) — the offset arithmetic
+                        // current_shell_command_substitution_span
+                        // (parameter_core.rs) already uses.
+                        if let Some((close, _)) =
+                            after_start.char_indices().nth(body.chars().count() + 1)
+                        {
+                            rest = &after_start[close + 1..];
+                            continue;
+                        }
+                    }
+                }
+            }
             let Some(end) = matching_parameter_brace(after_start) else {
                 return Some((
                     "${".to_string() + after_start + "}",

@@ -634,7 +634,7 @@ impl Executor {
     /// arithmetic entry's clear-to-drain window, so no entry-owned
     /// event can be in the log here.
     pub(in crate::executor) fn apply_pending_subscript_writes(&mut self) {
-        self.drain_arith_eval_events(None);
+        self.drain_arith_eval_events();
         let writes = PENDING_SUBSCRIPT_WRITES.with(|w| std::mem::take(&mut *w.borrow_mut()));
         for (name, value) in writes {
             if self.shell_state.env_vars.get(&name) != Some(&value) {
@@ -1007,17 +1007,22 @@ impl Executor {
                 // rubash#299).
                 let overlaid = env_vars_with_pending_subscript_writes(&self.shell_state.env_vars);
                 let dynamic_values = self.arith_dynamic_context();
-                let (result, writes) = eval_conditional_arith_value_with_writes(
-                    expr.trim(),
-                    &overlaid,
-                    Some(&self.shell_state.random_state),
-                    Some(&dynamic_values),
-                    if matches!(&overlaid, std::borrow::Cow::Borrowed(_)) {
-                        Some(&self.shell_state.variables)
-                    } else {
-                        None
-                    },
-                );
+                // GNU arrayfunc.c:1373-1377 array_expand_index clears
+                // this_command_name around evalexp (rubash#3295).
+                let (result, writes) = {
+                    let _arith_label = crate::executor::arithmetic::arith_eval_label_scope(None);
+                    eval_conditional_arith_value_with_writes(
+                        expr.trim(),
+                        &overlaid,
+                        Some(&self.shell_state.random_state),
+                        Some(&dynamic_values),
+                        if matches!(&overlaid, std::borrow::Cow::Borrowed(_)) {
+                            Some(&self.shell_state.variables)
+                        } else {
+                            None
+                        },
+                    )
+                };
                 if !writes.is_empty() {
                     PENDING_SUBSCRIPT_WRITES.with(|w| {
                         w.borrow_mut().extend(writes);

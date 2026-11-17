@@ -1131,11 +1131,17 @@ impl Executor {
                         // queue (overlaid so earlier queued writes are
                         // visible) for the mutable caller to apply.
                         let overlaid = crate::executor::expand_braced_indices::env_vars_with_pending_subscript_writes(&self.shell_state.env_vars);
-                        let (value, writes, actual_category) =
+                        // GNU subst.c:10873-10878 arithsub clears
+                        // this_command_name around evalexp
+                        // (rubash#3295).
+                        let (value, writes, actual_category) = {
+                            let _arith_label =
+                                crate::executor::arithmetic::arith_eval_label_scope(None);
                             eval_conditional_arith_value_categorized_with_writes(
                                 &expression,
                                 &overlaid,
-                            );
+                            )
+                        };
                         if !writes.is_empty() {
                             crate::executor::expand_braced_indices::PENDING_SUBSCRIPT_WRITES
                                 .with(|pending| pending.borrow_mut().extend(writes));
@@ -1393,9 +1399,15 @@ impl Executor {
                         } else {
                             crate::executor::arithmetic::arith_string_quote_removal(&expression)
                         };
-                        if let Some(value) =
+                        // GNU subst.c arithsub clears this_command_name
+                        // around evalexp for the legacy `$[...]` spelling
+                        // too (rubash#3295).
+                        let arith_value = {
+                            let _arith_label =
+                                crate::executor::arithmetic::arith_eval_label_scope(None);
                             eval_conditional_arith_value(&expression, &self.shell_state.env_vars)
-                        {
+                        };
+                        if let Some(value) = arith_value {
                             let value = value.to_string();
                             if preserve_quotes && !in_double {
                                 output

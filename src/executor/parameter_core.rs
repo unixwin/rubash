@@ -810,7 +810,7 @@ impl Executor {
             // evalexp of a bare integer literal, computed once per operand.
             lit
         } else {
-            match self.eval_parameter_substring_offset(offset_str) {
+            match self.eval_parameter_substring_offset(var_name, offset_str) {
                 (Some(value), writes) => {
                     writes_out.extend(writes);
                     value
@@ -854,7 +854,7 @@ impl Executor {
             // GNU literal fast path (same as offset above), computed once.
             Some(lit)
         } else {
-            match self.eval_parameter_substring_offset(length_str) {
+            match self.eval_parameter_substring_offset(var_name, length_str) {
                 (Some(value), writes) => {
                     writes_out.extend(writes);
                     Some(value)
@@ -880,8 +880,16 @@ impl Executor {
 
     pub(in crate::executor) fn eval_parameter_substring_offset(
         &self,
+        var_name: &str,
         value: &str,
     ) -> (Option<isize>, Vec<(String, String)>) {
+        // GNU parameter_brace_expand sets this_command_name = varname
+        // for the whole `${var:...}` expansion (subst.c:9372-9378), so
+        // arithmetic diagnostics produced by the offset/length
+        // evalexp carry the parameter name as their label
+        // (rubash#3295).
+        let _arith_label =
+            crate::executor::arithmetic::arith_eval_label_scope(Some(var_name.to_string()));
         // GNU verify_substring_values (subst.c:8395) hands the RAW operand
         // text to expand_arith_string/evalexp; evalerror (expr.c:1526-1537)
         // skips only the expression's LEADING whitespace at display time
@@ -1099,7 +1107,7 @@ impl Executor {
             // evalexp of a bare integer literal, computed once per operand.
             lit
         } else {
-            match self.eval_parameter_substring_offset_mut(offset_str) {
+            match self.eval_parameter_substring_offset_mut(var_name, offset_str) {
                 Some(value) => value,
                 None => {
                     // GNU subst.c verify_substring_values: an invalid offset
@@ -1136,7 +1144,7 @@ impl Executor {
             // GNU literal fast path (same as offset above), computed once.
             Some(lit)
         } else {
-            match self.eval_parameter_substring_offset_mut(length_str) {
+            match self.eval_parameter_substring_offset_mut(var_name, length_str) {
                 Some(value) => Some(value),
                 None => {
                     if self
@@ -1156,7 +1164,15 @@ impl Executor {
         Some((var_name, offset, length))
     }
 
-    fn eval_parameter_substring_offset_mut(&mut self, value: &str) -> Option<isize> {
+    fn eval_parameter_substring_offset_mut(
+        &mut self,
+        var_name: &str,
+        value: &str,
+    ) -> Option<isize> {
+        // Same varname label window as eval_parameter_substring_offset
+        // (subst.c:9372-9378; rubash#3295).
+        let _arith_label =
+            crate::executor::arithmetic::arith_eval_label_scope(Some(var_name.to_string()));
         // Raw operand text, head-trimmed only — same GNU evalerror
         // contract as eval_parameter_substring_offset (subst.c:8395,
         // expr.c:1526-1537; rubash#2713).
@@ -1181,7 +1197,11 @@ impl Executor {
         );
         let expression = self.expand_arithmetic_special_parameters(&expression);
         let expression = self.expand_embedded_parameters_mut(&expression);
-        let evaluated = self.eval_arithmetic_expansion_value(&expression);
+        // The offset/length evalexp runs under parameter_brace_expand's
+        // this_command_name = varname window (subst.c:9372-9378), not
+        // arithsub's NULL — inherit the label scope installed above
+        // (rubash#3295).
+        let evaluated = self.eval_arithmetic_expansion_value_inherit_label(&expression);
         if evaluated.is_none() {
             // Save the expanded expression for report_substring_arithmetic_error
             // (same rationale as eval_parameter_substring_offset).

@@ -1462,8 +1462,12 @@ impl Executor {
             // into the deferred-write queue (same channel as the embedded
             // parameter walker's arithmetic arm) for the mutable caller to
             // apply.
-            let (value, writes, actual_category) =
-                eval_conditional_arith_value_categorized_with_writes(&expression, &overlaid);
+            // GNU subst.c:10873-10878 arithsub clears
+            // this_command_name around evalexp (rubash#3295).
+            let (value, writes, actual_category) = {
+                let _arith_label = crate::executor::arithmetic::arith_eval_label_scope(None);
+                eval_conditional_arith_value_categorized_with_writes(&expression, &overlaid)
+            };
             if !writes.is_empty() {
                 crate::executor::expand_braced_indices::PENDING_SUBSCRIPT_WRITES
                     .with(|pending| pending.borrow_mut().extend(writes));
