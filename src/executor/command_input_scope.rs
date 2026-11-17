@@ -1540,6 +1540,15 @@ impl Executor {
             if is_closed_redirect_target(&target) {
                 continue;
             }
+            // rubash#3815: GNU redir.c redir_open has no /dev/null
+            // shortcut — the null device is an ordinary file open, so
+            // on Unix the bind must fall through to the plain open
+            // below and install a real descriptor. An empty-text
+            // endpoint delivers a synthetic carrier pipe to children
+            // (`ls -l /proc/self/fd/8` shows pipe:[...] where GNU shows
+            // /dev/null). Windows keeps the synthetic empty bind: it
+            // has no /dev/null path to open.
+            #[cfg(not(unix))]
             if is_null_device(&target) {
                 self.set_fd_input_bytes(fd, Vec::new(), true);
                 if redirect.kind == crate::parser::RedirectKind::ReadWrite {
@@ -2845,8 +2854,18 @@ impl Executor {
         let target = self.expand_redirect_target(redirect);
         if super::execution_misc::is_closed_redirect_target(&target)
             || super::execution_misc::dev_stdio_redirect_fd(&target).is_some()
-            || is_null_device(&target)
         {
+            return None;
+        }
+        // rubash#3815: on Unix /dev/null is an ordinary file open
+        // (redir.c redir_open) — let it reach the stream-source
+        // class below, which admits character devices, so the
+        // compound's fd 0 binds a real descriptor instead of the
+        // empty text mirror (children would otherwise see a
+        // carrier, not /dev/null). Windows keeps declining it:
+        // NUL is not a filesystem object there.
+        #[cfg(not(unix))]
+        if is_null_device(&target) {
             return None;
         }
         if crate::special_paths::synthetic_proc_content(&target).is_some() {
