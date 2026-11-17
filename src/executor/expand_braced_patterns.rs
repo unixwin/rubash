@@ -301,7 +301,18 @@ impl Executor {
             return Some(apply_parameter_case_mod(&target_name, operation, pattern));
         }
 
-        let target_name = self.shell_state.env_vars.get(indirect_name)?;
+        let target_name = match self.shell_state.env_vars.get(indirect_name) {
+            Some(target_name) => target_name.clone(),
+            // GNU parameter_brace_find_indir (subst.c:7839-7881): a
+            // positional/special source has no env cell; its VALUE (e.g.
+            // $0 for `${!00^}`) is the parameter this operator applies
+            // to (rubash#3784).
+            None if !is_shell_name(indirect_name) => {
+                self.indirect_holder_target_name(indirect_name)?
+            }
+            None => return None,
+        };
+        let target_name = &target_name;
         if let Some(array_expr) = target_name
             .strip_suffix("[@]")
             .or_else(|| target_name.strip_suffix("[*]"))

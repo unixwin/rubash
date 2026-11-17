@@ -1231,9 +1231,13 @@ impl Executor {
         // parameter_brace_find_indir): `${!#:0:1}` resolves t through the
         // special parameter's scalar value first, then slices the
         // parameter t names — with $#=2 it is `${2:0:1}`, not a lookup of
-        // an env cell literally named `#`.
-        if indirect_name.len() == 1 && matches!(indirect_name, "#" | "?" | "@" | "*") {
-            let Some(t) = self.parameter_error_value(indirect_name) else {
+        // an env cell literally named `#`. An all-digit source is the
+        // same find_indir step through get_dollar_var_value
+        // (subst.c:3707): `${!00:1:2}` is `${$0:1:2}` (rubash#3784).
+        if indirect_name.len() == 1 && matches!(indirect_name, "#" | "?" | "@" | "*")
+            || !indirect_name.is_empty() && indirect_name.chars().all(|c| c.is_ascii_digit())
+        {
+            let Some(t) = self.indirect_holder_target_name(indirect_name) else {
                 return Some(String::new());
             };
             if !Self::is_valid_indirect_target(&t) {
