@@ -202,6 +202,20 @@ impl Executor {
         &mut self,
         word: &str,
     ) -> String {
+        // GNU parameter_brace_expand_rhs -> expand_string_for_rhs ->
+        // expand_word_internal (subst.c:7992 -> 4499 -> 11365-11390): an
+        // unquoted `<(`/`>(` inside the operator rhs materializes during
+        // the rhs's own word scan. This walker is the unquoted rhs walk
+        // for every `-`/`+`/`=`/`:=` arm, so the splice happens here, on
+        // the source text, before any expansion result can be rescanned.
+        let materialized;
+        let word = match self.materialize_operator_rhs_process_substitutions(word) {
+            Some(spliced) => {
+                materialized = spliced;
+                materialized.as_str()
+            }
+            None => word,
+        };
         self.expand_embedded_parameters_mut_inner(
             word,
             SubstitutionQuoteContext::Unquoted,

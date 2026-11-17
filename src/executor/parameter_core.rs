@@ -493,6 +493,24 @@ impl Executor {
             return self.expand_embedded_parameters_mut_with_context(word, context);
         }
 
+        // GNU expand_word_internal cases '<'/'>': an unquoted `<(`/`>(`
+        // inside a `${var op word}` rhs is materialized by the rhs's own
+        // word scan (parameter_brace_expand_rhs -> expand_string_for_rhs
+        // -> expand_word_internal, subst.c:7992 -> 4499 -> 11365-11390).
+        // The parse-time word scan skips `${...}` interiors
+        // (process_substitution.rs dollar_group_end), so a literal pair
+        // still present in this word text can only live inside a `${}`
+        // body — top-level spans were already spliced to /dev/fd forms
+        // before expansion. The &self pipeline below cannot spawn the
+        // substitution, so such a word takes the mutable embedded
+        // walker, whose operator-rhs arms splice the produced fd form
+        // before expanding (materialize_operator_rhs_process_substitutions).
+        // A `<(` arriving later as expansion data never reaches this
+        // check — it does not exist in the source word.
+        if word.contains("${") && (word.contains("<(") || word.contains(">(")) {
+            return self.expand_embedded_parameters_mut_with_context(word, context);
+        }
+
         self.expand_word(word)
     }
 

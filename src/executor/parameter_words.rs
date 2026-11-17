@@ -845,6 +845,43 @@ impl Executor {
         self.expand_embedded_parameters_alternate_mut(word)
     }
 
+    /// GNU parameter_brace_expand_rhs -> expand_string_for_rhs ->
+    /// call_expand_word_internal (subst.c:7992 -> 4499): the `word` half
+    /// of `${var op word}` is scanned by expand_word_internal, whose
+    /// '<'/`>' cases (subst.c:11365-11390) materialize an unquoted
+    /// `<(`/`>(` ANYWHERE in that text — the procsub arms fire inside
+    /// the rhs expansion itself, not only at the outer word's top
+    /// level. Rubash records process substitutions per parsed WORD and
+    /// treats `${...}` interiors as opaque (process_substitution.rs
+    /// dollar_group_end), so a procsub that lives only inside an
+    /// operator rhs is never recorded; materialize it here from the rhs
+    /// source text before the expansion walk — the same splice
+    /// expand_for_brace_word_values applies to for-list words
+    /// (command_words.rs:604-615). Only spans present in this source
+    /// text materialize: expansion results are appended as data and are
+    /// never rescanned (subst.c:11352-11356), and callers in a quoted
+    /// context never reach this helper (the GNU case checks
+    /// Q_HERE_DOCUMENT|Q_DOUBLE_QUOTES).
+    ///
+    /// Returns the materialized word, or None when the text carries no
+    /// materializable span (the common case — no allocation).
+    pub(in crate::executor) fn materialize_operator_rhs_process_substitutions(
+        &mut self,
+        word: &str,
+    ) -> Option<String> {
+        if !word.contains("<(") && !word.contains(">(") {
+            return None;
+        }
+        let substitutions = crate::parser::WordMetadata::new(0, word.to_string(), word.to_string())
+            .process_substitutions;
+        if substitutions.is_empty() {
+            return None;
+        }
+        self.materialize_for_list_process_substitutions(word, &substitutions)
+            .ok()
+            .filter(|materialized| materialized != word)
+    }
+
     /// Resolve one `${...}` fragment collected by the embedded walker
     /// WITHOUT re-entering the whole word-expansion pipeline (rubash#281).
     ///
@@ -1290,8 +1327,23 @@ impl Executor {
                         let old =
                             super::expand_braced_replacement::ASSIGNMENT_RHS.with(|f| f.get());
                         super::expand_braced_replacement::ASSIGNMENT_RHS.with(|f| f.set(true));
+                        // Same procsub materialization as the alternate
+                        // walker (subst.c:11365-11390 fires inside the rhs
+                        // scan); quoted contexts stay literal.
+                        let materialized;
+                        let word = if matches!(context, SubstitutionQuoteContext::Unquoted) {
+                            match self.materialize_operator_rhs_process_substitutions(&word) {
+                                Some(spliced) => {
+                                    materialized = spliced;
+                                    materialized.as_str()
+                                }
+                                None => word.as_str(),
+                            }
+                        } else {
+                            word.as_str()
+                        };
                         let result =
-                            self.expand_embedded_parameters_mut_with_context(&word, context);
+                            self.expand_embedded_parameters_mut_with_context(word, context);
                         super::expand_braced_replacement::ASSIGNMENT_RHS.with(|f| f.set(old));
                         result
                     });
@@ -1313,8 +1365,22 @@ impl Executor {
                         let old =
                             super::expand_braced_replacement::ASSIGNMENT_RHS.with(|f| f.get());
                         super::expand_braced_replacement::ASSIGNMENT_RHS.with(|f| f.set(true));
+                        // Same procsub materialization as the `:=` arm
+                        // above; quoted contexts stay literal.
+                        let materialized;
+                        let word = if matches!(context, SubstitutionQuoteContext::Unquoted) {
+                            match self.materialize_operator_rhs_process_substitutions(&word) {
+                                Some(spliced) => {
+                                    materialized = spliced;
+                                    materialized.as_str()
+                                }
+                                None => word.as_str(),
+                            }
+                        } else {
+                            word.as_str()
+                        };
                         let result =
-                            self.expand_embedded_parameters_mut_with_context(&word, context);
+                            self.expand_embedded_parameters_mut_with_context(word, context);
                         super::expand_braced_replacement::ASSIGNMENT_RHS.with(|f| f.set(old));
                         result
                     });

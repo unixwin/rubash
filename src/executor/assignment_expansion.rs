@@ -1021,13 +1021,30 @@ impl Executor {
         // `<('/`>(' that shows up in the EXPANDED value only because a
         // variable's value carried it (bats-preprocess
         // `line="${line//$'\r'/}"` over a file whose text contains `<(cmd)`
-        // — rubash#364) is data, not a substitution. Gate the
-        // post-expansion fallback materialization on the PRE-expansion RHS
-        // carrying a literal `<('/`>(' span: `var=$other` and
-        // `var="${other//X/Y}"` have none, so their results stay literal.
-        // A wholly double-quoted RHS (`var="<(x)"`) is data too (the
-        // subst.c case-'<' branch checks Q_DOUBLE_QUOTES), hence `!quoted`.
-        let rhs_has_procsub_text = !quoted && (value.contains("<(") || value.contains(">("));
+        // — rubash#364) is data, not a substitution, and a `<(` assembled
+        // across an expansion boundary (`a<${x}(y)`) is data too — GNU's
+        // scan never saw the pair adjacent. Materialize the RHS's OWN
+        // unquoted `<('/`>(' spans BEFORE the expansion walk, splicing the
+        // produced /dev/fd form into the source text so it is opaque data
+        // for the walk — the same order expand_for_brace_word_values uses
+        // for for-list words (command_words.rs:604-615) and the raw-RHS
+        // path above uses when raw is available. A wholly double-quoted
+        // RHS (`var="<(x)"`) is data too (the subst.c case-'<' branch
+        // checks Q_DOUBLE_QUOTES), hence `!quoted`; spans inside `${...}`
+        // belong to the operator rhs's own scan (parameter_brace_expand_rhs
+        // -> expand_string_for_rhs -> expand_word_internal) and are left
+        // for that path. There is deliberately no post-expansion pass:
+        // every `<(` still present in `expanded` arrived as expansion
+        // data.
+        let materialized_rhs;
+        let value = if !quoted && (value.contains("<(") || value.contains(">(")) {
+            materialized_rhs = self
+                .materialize_assignment_process_substitutions(value)
+                .unwrap_or_else(|_| value.to_string());
+            materialized_rhs.as_str()
+        } else {
+            value
+        };
         // A quoted value with no expansion syntax is already fully decoded
         // and must not go through the general expansion walker, which would
         // also run quote removal on quote syntax that the value legitimately
@@ -1502,12 +1519,7 @@ impl Executor {
                 ],
             )
         };
-        let mut expanded = decode_command_substitution_payload(&expanded);
-        if rhs_has_procsub_text {
-            if let Ok(materialized) = self.materialize_assignment_process_substitutions(&expanded) {
-                expanded = materialized;
-            }
-        }
+        let expanded = decode_command_substitution_payload(&expanded);
         if value.starts_with('(') && value.ends_with(')') {
             if compound_assignment {
                 return format!("{COMPOUND_ASSIGNMENT_MARKER}{expanded}");
