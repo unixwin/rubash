@@ -12,6 +12,12 @@
 //! child's own read (EBADF). The redirector gate is only
 //! redir.c:1151 (`redir_fd != redirector`).
 //!
+//! Pipeline members are the same dup in a forked element
+//! (execute_cmd.c:2620 execute_pipeline: do_piping first, then the
+//! element's own do_redirections), so a member's `<&N` supersedes the
+//! pipe — the pipeline pins below cover the cat/head/grep stage arms,
+//! the stage-0 position, and a readable-dup control.
+//!
 //! Expectations verified against GNU bash 5.2.21 on this Linux host
 //! (script files, LC_ALL=C) and the issue's GNU probes; the seed is
 //! R131-C. The alias spelling stays a fresh open: `cat < /dev/fd/3`
@@ -175,6 +181,66 @@ fn dup_write_only_fd_grep() {
         stderr.contains("grep:"),
         "expected grep's own diagnostic, got: {stderr}"
     );
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn dup_write_only_fd_head_in_pipeline() {
+    // Same mechanism, another inline stage arm: the member's own
+    // `<&3` dup supersedes the pipe for head too (GNU: the element's
+    // do_redirections runs after do_piping, execute_cmd.c:2620).
+    let (stdout, stderr, code) = run_script(
+        "head-pipe",
+        "exec 3>f1; printf 'x\\n' | head -c 5 <&3; echo \"rc=$?\"\n",
+    );
+    assert_eq!(stdout, "rc=1\n", "stderr: {stderr}");
+    assert!(
+        stderr.contains("head:") && stderr.contains("Bad file descriptor"),
+        "expected head's own EBADF diagnostic, got: {stderr}"
+    );
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn dup_write_only_fd_grep_in_pipeline() {
+    let (stdout, stderr, code) = run_script(
+        "grep-pipe",
+        "printf 'a\\nb\\n' > f1; exec 3>>f1; printf 'x\\n' | grep -c . <&3; echo \"rc=$?\"\n",
+    );
+    assert_eq!(stdout, "0\nrc=2\n", "stderr: {stderr}");
+    assert!(
+        stderr.contains("grep:") && stderr.contains("Bad file descriptor"),
+        "expected grep's own EBADF diagnostic, got: {stderr}"
+    );
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn dup_write_only_fd_cat_in_pipeline_stage0() {
+    // The dup winner on the FIRST stage routes the same way: cat
+    // reports EBADF, the downstream stage sees an empty pipe.
+    let (stdout, stderr, code) = run_script(
+        "cat-pipe-stage0",
+        "exec 3>f1; cat <&3 | wc -c; echo \"rc=$?\"\n",
+    );
+    assert_eq!(stdout, "0\nrc=0\n", "stderr: {stderr}");
+    assert!(
+        stderr.contains("cat:") && stderr.contains("Bad file descriptor"),
+        "expected cat's own EBADF diagnostic, got: {stderr}"
+    );
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn dup_readable_fd_cat_in_pipeline_control() {
+    // Control: a dup of a READABLE fd in a pipeline still serves the
+    // descriptor's stream (the write-only route must not overreach).
+    let (stdout, stderr, code) = run_script(
+        "cat-pipe-readable",
+        "printf 'data\\n' > f1; exec 3<f1; printf 'x\\n' | cat <&3; echo \"rc=$?\"\n",
+    );
+    assert_eq!(stdout, "data\nrc=0\n", "stderr: {stderr}");
+    assert_eq!(stderr, "", "no diagnostic for a readable dup: {stderr}");
     assert_eq!(code, Some(0));
 }
 

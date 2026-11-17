@@ -4070,6 +4070,37 @@ impl Executor {
             && self.function_stdin_remaining().is_some()
     }
 
+    /// rubash#3792: the fd-0 winner is a `<&N` dup (the `&N` spelling —
+    /// the `/dev/fd/N` path spelling is an alias OPEN, #1963, and stays
+    /// on the open serve) of a descriptor that is open WRITE-only: no
+    /// read endpoint, but a live write endpoint (`exec 3>f`). GNU's
+    /// dup2 (redir.c:1193 do_redirection_internal) hands the consumer
+    /// that write-only description itself, so the consumer's own reads
+    /// fail EBADF and the consumer reports it. A text serve cannot
+    /// model the description — stdin_string_for_command's dup arm
+    /// declines it by design (#2101: the caller's descriptor path must
+    /// surface the failure) — so a caller that can only consume text
+    /// must stand down for a descriptor path whenever this returns
+    /// Some. Returns the dup's source fd.
+    pub(in crate::executor) fn fd0_write_only_dup_source(&self, cmd: &CommandNode) -> Option<u32> {
+        let redirect = fd0_stdin_redirect_winner_redirect(cmd)?;
+        if !matches!(redirect.kind, crate::parser::RedirectKind::DuplicateInput) {
+            return None;
+        }
+        let target = self.expand_redirect_target(redirect);
+        if !target.starts_with('&') {
+            return None;
+        }
+        let (source, _) = super::execution_misc::redirect_target_fd_and_move(&target)?;
+        if self.fd_table.read_endpoint(source).is_some() {
+            return None;
+        }
+        if self.fd_table.write_endpoint(source).is_some() {
+            return Some(source);
+        }
+        None
+    }
+
     pub(in crate::executor) fn stdin_string_for_command(
         &self,
         cmd: &CommandNode,
