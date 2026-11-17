@@ -2743,6 +2743,21 @@ impl Executor {
             return Ok(true);
         }
 
+        // rubash#3792: no operands and fd 0 is a `<&N` dup of a
+        // write-only fd — GNU cat's read fails EBADF. The text
+        // channel declined above (it serves no bytes for a dup of a
+        // write-only description), and the plain-stdin fall-through
+        // below would otherwise read the pipe/process stdin or
+        // decline to a spawn that no longer exists on this path.
+        // The check sits beside the closed-stdin check, before any
+        // stdin serve, so a pipeline stage's FUNCTION_STDIN never
+        // pre-empts it.
+        if self.cat_stdin_write_only_dup_source(cmd).is_some() {
+            self.report_cat_write_only_dup_stdin(cmd)?;
+            self.exit_code = 1;
+            return Ok(true);
+        }
+
         if let Some(input) = self.stdin_string_for_command_mut(cmd) {
             self.write_cat_output(
                 cmd,
@@ -2846,6 +2861,54 @@ impl Executor {
         self.fd_table.is_closed(0)
     }
 
+    /// rubash#3792: the fd-0 stdin winner is a `<&N` dup of a fd that is
+    /// open WRITE-only (no read endpoint, but a live write endpoint —
+    /// `exec 3>f`). GNU dup2'd that descriptor onto fd 0 (redir.c:1193),
+    /// so cat's own reads fail EBADF. Only the dup SPELLING counts: an
+    /// fd-alias path spelling (`< /dev/fd/N`) is an open over the alias
+    /// layer (#1963) and reads the target fine. An in-list source
+    /// (`cmd 3>f1 <&3`) is not covered — the ambient table holds no
+    /// binding for it yet; see REPORT.
+    fn cat_stdin_write_only_dup_source(&self, cmd: &CommandNode) -> Option<u32> {
+        if let Some(winner) = super::shell_options::fd0_stdin_redirect_winner(cmd) {
+            if !matches!(winner, crate::parser::RedirectKind::DuplicateInput) {
+                return None;
+            }
+        }
+        let redirect = cmd.redirect_in.as_ref()?;
+        if redirect.fd.unwrap_or(0) != 0
+            || !matches!(redirect.kind, crate::parser::RedirectKind::DuplicateInput)
+        {
+            return None;
+        }
+        let target = self.expand_redirect_target(redirect);
+        if !target.starts_with('&') {
+            return None;
+        }
+        let (source, _) = crate::executor::execution_misc::redirect_target_fd_and_move(&target)?;
+        if self.fd_table.read_endpoint(source).is_some() {
+            return None;
+        }
+        if self.fd_table.write_endpoint(source).is_some() {
+            return Some(source);
+        }
+        None
+    }
+
+    /// GNU coreutils cat on a dup'd write-only stdin (cat.c): the read
+    /// fails EBADF and cat reports exactly ONE line. The close of
+    /// standard input succeeds on a write-only descriptor, unlike the
+    /// closed-stdin face below, whose failing close earns a second
+    /// line. The line is cat's OWN stderr, written bare (rubash#1596 /
+    /// rubash#1309: no shell envelope).
+    fn report_cat_write_only_dup_stdin(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
+        let prog = cmd.words.first().map(String::as_str).unwrap_or("cat");
+        let mut stderr = Vec::new();
+        writeln!(&mut stderr, "{prog}: -: Bad file descriptor")?;
+        self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+        Ok(())
+    }
+
     /// GNU coreutils cat on a closed stdin (cat.c): the read fails and the
     /// close of standard input fails too — two diagnostics, and the caller
     /// sets exit status 1. The lines are cat's OWN stderr, written bare:
@@ -2872,6 +2935,18 @@ impl Executor {
         use std::io::Read;
         if let Some(input) = self.stdin_string_for_command_mut(cmd) {
             return crate::executor::substitution_metadata::shell_text_to_raw_bytes(&input);
+        }
+        // rubash#3792: the `-' operand's stdin is a `<&N` dup of a
+        // write-only fd — the text channel declined above (the dup
+        // serves no bytes; its reads fail EBADF), and fd 0 was never
+        // rebound, so the fall-throughs below would hand back an
+        // empty stream and exit 0. Record the hard read error the
+        // #2101 face already reports for the `-' operand
+        // (`{prog}: -: ...`, status 1); the caller takes it from
+        // fd_table.read_error.
+        if self.cat_stdin_write_only_dup_source(cmd).is_some() {
+            self.fd_table.read_error = Some("Bad file descriptor".to_string());
+            return Vec::new();
         }
         if !matches!(
             self.fd_table.read_endpoint(0),
