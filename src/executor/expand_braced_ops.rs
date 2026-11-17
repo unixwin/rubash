@@ -63,14 +63,14 @@ impl Executor {
                         .unwrap_or_default(),
                 );
             }
-            return Some(self.expand_parameter_word(word));
+            return Some(self.expand_dash_plus_alternate_word(word));
         }
         if let Some((var_name, word)) = split_once_outside_subscript_str(name, ":+") {
             if self
                 .parameter_operator_value(var_name)
                 .is_some_and(|value| !value.is_empty())
             {
-                return Some(self.expand_parameter_word(word));
+                return Some(self.expand_dash_plus_alternate_word(word));
             }
             return Some(String::new());
         }
@@ -138,7 +138,7 @@ impl Executor {
         }
         if let Some((var_name, word)) = split_once_outside_subscript(name, '+') {
             if self.parameter_operator_value(var_name).is_some() {
-                return Some(self.expand_parameter_word(word));
+                return Some(self.expand_dash_plus_alternate_word(word));
             }
             return Some(String::new());
         }
@@ -192,7 +192,7 @@ impl Executor {
             return Some(
                 self.parameter_operator_value(var_name)
                     .map(|value| shell_safe_value(&value))
-                    .unwrap_or_else(|| self.expand_parameter_word(word)),
+                    .unwrap_or_else(|| self.expand_dash_plus_alternate_word(word)),
             );
         }
         if let Some((array_name, default)) = name

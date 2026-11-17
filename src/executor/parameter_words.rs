@@ -352,6 +352,33 @@ impl Executor {
         tilde_expand::expand_assignment_tilde_value(&expanded, &self.shell_state.env_vars, false)
     }
 
+    /// `-`/`+` alternate rhs carrying a `$@`-class word-list source:
+    /// GNU parameter_brace_expand_rhs (subst.c:8037-8070) expands the rhs
+    /// to a word list, rejoins it on ifs_firstchar with element internals
+    /// still protected, and lets the ambient field split recover the
+    /// element boundaries while consuming the rhs's edge IFS whitespace
+    /// (`A${u- "$@" }B` -> `Ap`/`q r`/`rB` unset IFS, `A p`/`q r`/`r B`
+    /// under IFS=:, measured GNU 5.3.20). Under PF_ASSIGNRHS the rhs
+    /// never splits, so the flat walk already matches GNU.
+    pub(in crate::executor) fn expand_dash_plus_alternate_word(&self, word: &str) -> String {
+        let assign_rhs = self.inside_assignment_rhs.get()
+            || super::expand_braced_replacement::ASSIGNMENT_RHS.with(|f| f.get());
+        if assign_rhs || !super::command_prepare::alternate_raw_has_dollar_at(word, true) {
+            return self.expand_parameter_word(word);
+        }
+        let expanded = self.expand_embedded_parameters_protect_ifs_and_data(word);
+        let ifs = self.shell_state.env_vars.get("IFS").map(String::as_str);
+        let fields = field_split_values_with_ifs(&expanded, ifs);
+        let separator = self.ifs_first_char_separator();
+        fields
+            .iter()
+            .map(|field| {
+                crate::executor::command_substitution_values::protect_ifs_field_chars(field, ifs)
+            })
+            .collect::<Vec<_>>()
+            .join(&separator)
+    }
+
     pub(in crate::executor) fn expand_parameter_word_mut(&mut self, word: &str) -> String {
         // GNU subst.c:4462 expand_string_for_rhs with quoted == 0 (the
         // `=`/`:=` rhs on an assignment RHS is the same unquoted-rhs
@@ -750,6 +777,31 @@ impl Executor {
                 self.shell_state.env_vars.get("IFS").map(String::as_str),
             );
             return restore_deferred_operator_backslashes(&unescaped);
+        }
+        // GNU parameter_brace_expand_rhs (subst.c:8037-8070): an unquoted
+        // rhs whose expansion yields a word list — a `$@`-class source,
+        // quoted or not — is rejoined on ifs_firstchar with each element's
+        // internal IFS bytes still protected, so the ambient field split
+        // recovers the element boundaries AND consumes the rhs's edge
+        // IFS whitespace (`A${u- "$@" }B` -> `Ap`/`q r`/`rB` under an unset
+        // IFS, `A p`/`q r`/`r B` under IFS=:, measured GNU 5.3.20). Under
+        // PF_ASSIGNRHS the rhs never splits (the assignment keeps the
+        // verbatim word), so the flat walk already matches GNU.
+        let assign_rhs = self.inside_assignment_rhs.get()
+            || super::expand_braced_replacement::ASSIGNMENT_RHS.with(|f| f.get());
+        if !assign_rhs && super::command_prepare::alternate_raw_has_dollar_at(word, true) {
+            let fields = self.expand_alternate_word_fragment(word, false);
+            let ifs = self.shell_state.env_vars.get("IFS").map(String::as_str);
+            let separator = self.ifs_first_char_separator();
+            return fields
+                .iter()
+                .map(|field| {
+                    crate::executor::command_substitution_values::protect_ifs_field_chars(
+                        field, ifs,
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(&separator);
         }
         self.expand_embedded_parameters_alternate_mut(word)
     }

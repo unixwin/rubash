@@ -766,7 +766,35 @@ impl Executor {
                 }
                 Some('@') => {
                     chars.next();
-                    let value = self.shell_state.positional_window().join(" ");
+                    // GNU param_expand '@' arm -> string_list_dollar_at
+                    // (subst.c:2975-3000): elements join on ifs_firstchar,
+                    // except under PF_ASSIGNRHS (assignment RHS /
+                    // `=`/`:=` op word) where the separator is always ' '.
+                    // A double-quoted `"$@"` outside assignment context
+                    // keeps each element's internal IFS bytes protected so
+                    // the ambient splitter recovers the element boundaries.
+                    let assign_rhs = self.inside_assignment_rhs.get()
+                        || super::expand_braced_replacement::ASSIGNMENT_RHS.with(|flag| flag.get());
+                    let ifs = self.shell_state.env_vars.get("IFS").map(String::as_str);
+                    let separator = if assign_rhs {
+                        " ".to_string()
+                    } else {
+                        self.ifs_first_char_separator()
+                    };
+                    let value = if in_double && !assign_rhs {
+                        self.shell_state
+                            .positional_window()
+                            .iter()
+                            .map(|element| {
+                                crate::executor::command_substitution_values::protect_ifs_field_chars(
+                                    element, ifs,
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(&separator)
+                    } else {
+                        self.shell_state.positional_window().join(&separator)
+                    };
                     if preserve_quotes {
                         push_preserved_expansion_output(&mut output, &value, in_double);
                     } else {

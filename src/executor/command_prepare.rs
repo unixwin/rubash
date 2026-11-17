@@ -3115,7 +3115,19 @@ impl Executor {
             word
         };
         let saved_nonfatal = self.shell_state.arithmetic_nonfatal_error.replace(false);
+        // A declaration-builtin assignment operand carries W_ASSIGNRHS
+        // into word expansion (general.c:480 assignment() ->
+        // expand_string_assignment, subst.c:4365): `$@`/`${@}` elements
+        // separate with ' ' — never IFS[0] — because no field splitting
+        // runs (string_list_dollar_at subst.c:2975-3000). The
+        // inside_assignment_rhs carrier is the same flag
+        // expand_assignment_value sets for a plain `name=value` word.
+        let saved_assign_rhs =
+            declare_assignment_word.then(|| self.inside_assignment_rhs.replace(true));
         let expanded = self.expand_word_mut_with_context(word_to_expand, context);
+        if let Some(saved) = saved_assign_rhs {
+            self.inside_assignment_rhs.set(saved);
+        }
         // GNU subst.c:9955-9956: when parameter_brace_expand_length returns
         // a negative number (bad array subscript), the word expansion returns
         // &expand_wdesc_error and the word is dropped entirely (echo produces

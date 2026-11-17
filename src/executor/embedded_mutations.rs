@@ -1212,7 +1212,32 @@ impl Executor {
                 }
                 Some('@') => {
                     chars.next();
-                    let value = self.shell_state.positional_window().join(" ");
+                    // Same string_list_dollar_at separator rule as the
+                    // &self walker (subst.c:2975-3000): ifs_firstchar,
+                    // ' ' under PF_ASSIGNRHS; quoted "$@" protects element
+                    // internals outside assignment context.
+                    let assign_rhs = self.inside_assignment_rhs.get()
+                        || super::expand_braced_replacement::ASSIGNMENT_RHS.with(|flag| flag.get());
+                    let ifs = self.shell_state.env_vars.get("IFS").map(String::as_str);
+                    let separator = if assign_rhs {
+                        " ".to_string()
+                    } else {
+                        self.ifs_first_char_separator()
+                    };
+                    let value = if in_double && !assign_rhs {
+                        self.shell_state
+                            .positional_window()
+                            .iter()
+                            .map(|element| {
+                                crate::executor::command_substitution_values::protect_ifs_field_chars(
+                                    element, ifs,
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(&separator)
+                    } else {
+                        self.shell_state.positional_window().join(&separator)
+                    };
                     let value =
                         protect_rhs_value(&value, protect_rhs_data || protect_expansion_results);
                     if expansion_ws_marked(alternate, preserve_quotes, in_double) {
