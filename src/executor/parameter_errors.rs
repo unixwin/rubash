@@ -773,7 +773,15 @@ impl Executor {
         // the positional window at element 0 ($1) instead of $0.
         if matches!(indirect_name, "#" | "?" | "@" | "*") || indirect_name.parse::<usize>().is_ok()
         {
-            return match self.parameter_error_value(indirect_name) {
+            // All-zero positional spellings name `$0` (rubash#3784); other
+            // leading-zero text stays a variable name, whose numeric fetch
+            // correctly reports an unset target.
+            let subject = if indirect_name.parse::<usize>() == Ok(0) {
+                Some(self.script_name_value())
+            } else {
+                self.parameter_error_value(indirect_name)
+            };
+            return match subject {
                 Some(t) => Some(self.parameter_operator_value(&t)),
                 None => Some(None),
             };
@@ -2660,7 +2668,18 @@ impl Executor {
                 // `<t>: invalid variable name`. An unset positional
                 // yields no t and proceeds silently (`${!9}`).
                 else if !indirect.is_empty() && indirect.bytes().all(|b| b.is_ascii_digit()) {
-                    if let Some(t) = self.parameter_error_value(indirect) {
+                    // GNU parameter_brace_find_indir resolves a positional
+                    // source through the parameter itself: the all-zero
+                    // spellings read `$0` (`${!00}`/`${!000}` reports the
+                    // script name as an invalid variable name, rubash#3784),
+                    // while any other leading-zero text is a variable name a
+                    // numeric fetch does not resolve.
+                    let t = if indirect.parse::<usize>() == Ok(0) {
+                        Some(self.script_name_value())
+                    } else {
+                        self.parameter_error_value(indirect)
+                    };
+                    if let Some(t) = t {
                         if !Self::is_valid_indirect_target(&t) {
                             return Some((t, "invalid variable name".to_string(), 1));
                         }

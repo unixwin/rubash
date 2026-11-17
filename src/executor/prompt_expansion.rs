@@ -239,11 +239,17 @@ impl Executor {
             .strip_suffix("[@]")
             .or_else(|| ref_expr.strip_suffix("[*]"))
             .unwrap_or(ref_expr);
-        if !is_shell_name(ref_name) {
-            return None;
-        }
-
-        let target_expr = self.shell_state.env_vars.get(ref_name)?;
+        // GNU parameter_brace_expand_indir (subst.c:7883-7952) resolves the
+        // `!`-source to t through parameter_brace_find_indir
+        // (subst.c:7839-7881) BEFORE the removal runs, so the holder need
+        // not be a plain variable: `${!#%*}` with no positionals strips
+        // from `0` — the script name — and `${!?%*}` from the status text.
+        // A named source contributes its value (env entry first; a nameref
+        // cell resolves through indirect_holder_target_name).
+        let target_expr = match self.shell_state.env_vars.get(ref_name) {
+            Some(value) => value.clone(),
+            None => self.indirect_holder_target_name(ref_name)?,
+        };
         // GNU subst.c:10320-10327 (`case '#': case '%':`): removal skips
         // the pattern expansion entirely when the indirect target's value
         // word is absent or empty (rubash#3501) — the same gate the scalar
@@ -254,7 +260,7 @@ impl Executor {
         if self.pattern_word_is_silent(&format!("!{ref_expr}"), true, false) {
             return Some(String::new());
         }
-        let values = self.indirect_target_values(target_expr);
+        let values = self.indirect_target_values(&target_expr);
         if values.is_empty() {
             return Some(String::new());
         }
@@ -289,7 +295,7 @@ impl Executor {
                 ),
             })
             .collect::<Vec<_>>();
-        Some(self.join_expanded_array_values(values, target_expr))
+        Some(self.join_expanded_array_values(values, &target_expr))
     }
 
     pub(in crate::executor) fn indirect_target_values(&self, target_expr: &str) -> Vec<String> {
@@ -302,7 +308,10 @@ impl Executor {
         // (rubash#1566). The leading-zero guard matches the plain
         // leg's: "007" is not a positional designator here.
         if let Ok(index) = target_expr.parse::<usize>() {
-            if !target_expr.starts_with('0') || target_expr == "0" {
+            // Same legal_number rule as the plain leg: an all-zero spelling
+            // is 0 and names `$0`; any other leading-zero text is a
+            // variable name, not a positional designator (rubash#3784).
+            if !target_expr.starts_with('0') || index == 0 {
                 if index == 0 {
                     return vec![self.script_name_value()];
                 }

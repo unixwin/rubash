@@ -231,11 +231,21 @@ impl Executor {
             // joins the positionals with a space.
             self.shell_state.positional_window().join(" ")
         } else if let Ok(index) = indirect_name.parse::<usize>() {
-            self.shell_state
-                .positional_window()
-                .get(index.saturating_sub(1))
-                .cloned()
-                .unwrap_or_default()
+            // GNU subst.c:7839-7881 parameter_brace_find_indir resolves a
+            // positional source through the parameter itself: `0` (and the
+            // numerically equal `00`) is the $0 special parameter — the
+            // script/function name — never positional_window[0]
+            // (rubash#3784). BASH_ARGV0 ranks above argv[0]
+            // (variables.c:1547-1555), which script_name_value carries.
+            if index == 0 {
+                self.script_name_value()
+            } else {
+                self.shell_state
+                    .positional_window()
+                    .get(index - 1)
+                    .cloned()
+                    .unwrap_or_default()
+            }
         } else if let Some((base, sub)) = indirect_name
             .split_once('[')
             .and_then(|(base, rest)| rest.strip_suffix(']').map(|sub| (base, sub)))
@@ -357,7 +367,11 @@ impl Executor {
         // (`i=3; ${!i}` -> $3). bash-completion's _comp_get_words walks its
         // name operands through exactly this form (`case ${!OPTIND} ...`).
         if let Ok(index) = target_name.parse::<usize>() {
-            if !target_name.starts_with('0') || target_name == "0" {
+            // GNU legal_number semantics: a leading zero means the text is
+            // NOT a positional designator (`${!010}` reads the variable
+            // "010") — except the all-zero spellings, whose value is 0 and
+            // which therefore name `$0` (`${!00}`/`${!000}`, rubash#3784).
+            if !target_name.starts_with('0') || index == 0 {
                 // Index 0 designates $0, which lives OUTSIDE the
                 // $1.. positional window: the saturating subtraction
                 // below silently read $1 for it. This is the target
