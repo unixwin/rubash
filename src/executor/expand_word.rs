@@ -406,6 +406,25 @@ impl Executor {
         // word the carrier path IS the expansion; return it verbatim.
         if operand_is_procsub(&redirect.target) || operand_is_procsub(&redirect.target_metadata.raw)
         {
+            // rubash#3808: a bare process-substitution operand expands to
+            // exactly ONE field — GNU redir.c:296-333 redirection_expand
+            // returns NULL (the AMBIGUOUS_REDIRECT condition) only for
+            // zero or several fields, and expand_word_internal's `<`/`>`
+            // cases (subst.c:11364-11391) extract the substitution whole
+            // (extract_process_subst, subst.c:1311) and splice the single
+            // /dev/fd/N filename in, so the body's characters are never
+            // this word's expansion introducers: a `{ ...; }` group body's
+            // `{` is a compound-command opener, not a brace-expansion
+            // candidate. Record the single-field verdict here (the #3089
+            // memo both ambiguity gates consult) so the textual gate
+            // below never misreads the body's `{` as a multi-field
+            // expansion — the subshell-list body passed only because it
+            // carries no such character, while the group body was
+            // rejected as ambiguous.
+            self.redirect_target_memo.borrow_mut().insert(
+                Self::redirect_target_field_memo_key(redirect, true),
+                String::new(),
+            );
             // rubash#394: while a compound command whose target IS a
             // process substitution is in scope, the substitution's carrier
             // path stands in for the text — the compound fd-table walk runs
@@ -869,6 +888,28 @@ impl Executor {
         }
     }
 
+    /// One-shot gate for the `bad substitution` diagnostic (rubash#3499):
+    /// returns true only for the first report in the current latch
+    /// lifetime. GNU subst.c:10277-10288 reports the FIRST expansion
+    /// failure of a word list and abandons the rest, so a word (or
+    /// pipeline element) expanded on several paths — the stage scan
+    /// plus the dispatch arms, a speculative concurrent attempt plus
+    /// the sequential re-expansion, the compound stage's assignment
+    /// pre-pass plus its subshell execution — must print the
+    /// diagnostic exactly once. The verdict latch
+    /// (`parameter_bad_substitution`) still sets at every site; only
+    /// the print is deduplicated. The budget clears wherever the
+    /// verdict is consumed (abort_on_expansion_errors, the assignment
+    /// loop, the pipeline stage harvest, command-substitution
+    /// boundaries) and rides the save/restore brackets that keep a
+    /// read-side walk transparent, so a spent budget can neither
+    /// suppress a later command's diagnostic nor re-print inside one
+    /// command's expansion. Same shape as the arithmetic print latch
+    /// (`arithmetic_expansion_error.replace(true)`).
+    pub(in crate::executor) fn bad_substitution_report_first(&self) -> bool {
+        !self.shell_state.bad_substitution_reported.replace(true)
+    }
+
     pub(crate) fn expand_word(&self, word: &str) -> String {
         let _xpass = crate::executor::expand_braced_indices::SubXpassFrame::new();
         let _wctx = crate::executor::expand_braced_indices::WordCtxGuard::new_if_absent();
@@ -1051,14 +1092,19 @@ impl Executor {
         // alternate word reaches expansion only when that word is actually
         // evaluated (`${x-${'x1'%'t'}}` with x set is silent in GNU).
         if braced_name_ends_on_quote(name) {
-            self.write_diagnostic_fd2(
-                format!(
-                    "{}{}: bad substitution\n",
-                    self.diagnostic_prefix(),
-                    bad_substitution_display(&diagnostic_word)
-                )
-                .as_bytes(),
-            );
+            // rubash#3499: one diagnostic per latch lifetime — a word
+            // re-expanded on the stage scan, the dispatch arms, or a
+            // speculative attempt must not print again.
+            if self.bad_substitution_report_first() {
+                self.write_diagnostic_fd2(
+                    format!(
+                        "{}{}: bad substitution\n",
+                        self.diagnostic_prefix(),
+                        bad_substitution_display(&diagnostic_word)
+                    )
+                    .as_bytes(),
+                );
+            }
             self.shell_state.parameter_bad_substitution.set(true);
             return String::new();
         }
@@ -1070,14 +1116,18 @@ impl Executor {
         // a bad name nested in an unevaluated word (`${x:-${(M)y}}` with x
         // set) stays silent, matching GNU's lazy expansion.
         if braced_name_is_bad_substitution(name) {
-            self.write_diagnostic_fd2(
-                format!(
-                    "{}{}: bad substitution\n",
-                    self.diagnostic_prefix(),
-                    bad_substitution_display(&diagnostic_word)
-                )
-                .as_bytes(),
-            );
+            // rubash#3499: one diagnostic per latch lifetime (see
+            // bad_substitution_report_first).
+            if self.bad_substitution_report_first() {
+                self.write_diagnostic_fd2(
+                    format!(
+                        "{}{}: bad substitution\n",
+                        self.diagnostic_prefix(),
+                        bad_substitution_display(&diagnostic_word)
+                    )
+                    .as_bytes(),
+                );
+            }
             self.shell_state.parameter_bad_substitution.set(true);
             return String::new();
         }
@@ -1125,7 +1175,15 @@ impl Executor {
             return value;
         }
 
-        if let Some(value) = self.expand_braced_pattern_or_transform_parameter(name) {
+        // rubash#3581: the `${}` fragment's recorded quote context
+        // (EXTQUOTE_NAME_QUOTED_CONTEXT: `in_double || double_quoted ||
+        // heredoc` at the embedded-walker dispatch sites) is what GNU's
+        // `quoted` flag means for the `#`/`%` silent gate — a quoted or
+        // heredoc-context list subject keeps QUOTED_NULL and diagnoses
+        // where the unquoted joined "" stays silent.
+        if let Some(value) =
+            self.expand_braced_pattern_or_transform_parameter(name, extquote_name_quoted_context())
+        {
             return value;
         }
 

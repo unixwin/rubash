@@ -17,9 +17,10 @@ jobs:
   rust:
     name: Rust tests
     runs-on: ubuntu-latest
-    # rubash#3430: the dynamic pin-stem census compiles and runs all
-    # ~1400 regression-pin stems; 30 minutes is too tight a backstop
-    # for that compile+run on a fresh runner.
+    # rubash#3656: the pin-stem census used to live in this job and set
+    # its backstop; it now runs as the separate `pin-stem-census` job
+    # (own 60-minute backstop). 60 minutes stays here as headroom for
+    # the lib run plus the named pin lanes on a fresh runner.
     timeout-minutes: 60
 
     steps:
@@ -124,15 +125,75 @@ jobs:
           cargo nextest run --test issue1467_test_procsub_path_regressions
           --test issue2237_bracket_word_expansion --profile ci
 
+  # rubash#3656: the dynamic pin-stem census used to run as the last step
+  # of the `rust` job above, after `cargo nextest run --lib`. A lib-step
+  # failure (e.g. the issue2875 baseline red) terminates the job, so the
+  # census step never executed -- since issue2875 went red, the census
+  # has run zero times on master. It is therefore its own job with no
+  # continue-on-error, following the #2176 cli-tests precedent below: a
+  # failure shows up as a red named check, and a lib-step red can no
+  # longer hide it. The job replicates the setup the census relied on
+  # inside the rust job: the bashdb fixture (so fixture-gated stems keep
+  # real coverage instead of skipping), the nextest install, and the
+  # `cargo build` that pins need to spawn target/debug/rubash.
+  # It is deliberately NOT a required gate yet: the census is red on
+  # master (known-red baseline, see scripts/ci-pin-exclusions.txt), so
+  # gating today would block every PR; promote it once the census
+  # reaches zero, as with cli-tests.
+  pin-stem-census:
+    name: Regression pin stem census
+    runs-on: ubuntu-latest
+    # rubash#3430: the dynamic pin-stem census compiles and runs all
+    # ~1400 regression-pin stems; 30 minutes is too tight a backstop
+    # for that compile+run on a fresh runner.
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # bashdb ships one branch per Bash version, and its configure
+      # hard-rejects any other Bash (configure.ac: define(OK_BASH_VERS)
+      # feeds the version case). The branch must accept the runner's
+      # Bash -- 5.3.x on the current ubuntu image; the bash-5.3 branch
+      # also accepts 5.2, so an image rollback stays green.
+      - name: Prepare external bashdb fixture
+        run: |
+          git clone --depth 1 --branch bash-5.3 https://github.com/Trepan-Debuggers/bashdb.git target/bashdb-source
+          cd target/bashdb-source
+          bash ./autogen.sh
+          ./configure --prefix="$GITHUB_WORKSPACE/target/bashdb-install"
+          make -j2
+          make install
+          cd "$GITHUB_WORKSPACE"
+          bash scripts/setup-bashdb-fixture.sh target/bashdb-install
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      # rubash#2875: pin stems spawn the built shell (consumer_tests
+      # resolve target/debug/rubash via the test-binary fallback); a
+      # bare nextest run never builds the bin target, so a pin that
+      # needs the binary fails in CI while passing locally after a
+      # build.
+      - name: Build the rubash binary for lib tests
+        run: cargo build --locked
+
       # rubash#3430 + unixwin/niubash#955: the dynamic test-stem census.
-      # The named lanes above are a hand-curated list, so any stem not
-      # on it never executed while CI stayed green (PR #3424's
-      # issue3406 stem ran 0 times under a green CI; its only execution
-      # evidence was the review's box legs). scripts/ci-run-pin-stems.sh
-      # enumerates tests/*.rs from the tree at run time, so a new target
-      # is covered by default; the only way out is an explicit, reasoned
-      # entry in scripts/ci-pin-exclusions.txt. A stem missing from
-      # the run fails loudly instead of silently never running.
+      # The named lanes in the `rust` job are a hand-curated list, so
+      # any stem not on it never executed while CI stayed green (PR
+      # #3424's issue3406 stem ran 0 times under a green CI; its only
+      # execution evidence was the review's box legs).
+      # scripts/ci-run-pin-stems.sh enumerates tests/*.rs from the tree
+      # at run time, so a new target is covered by default; the only
+      # way out is an explicit, reasoned entry in
+      # scripts/ci-pin-exclusions.txt. A stem missing from the run
+      # fails loudly instead of silently never running.
       - name: Run all integration test stems
         run: bash scripts/ci-run-pin-stems.sh
 

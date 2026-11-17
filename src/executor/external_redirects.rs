@@ -1045,7 +1045,7 @@ impl Executor {
             // `$FIX/b` from `$FIX/b: No such file or directory`. The open
             // classifies through the registry (rubash#1964) — a net
             // target connects instead of raw-opening its mapped name.
-            self.open_append_target(target)
+            self.open_append_target_for(Some(redirect), target)
                 .map_err(|e| crate::posix_errors::path_error(target, e))?
         } else {
             self.create_redirect_output_for(Some(redirect), target, redirect.clobber)?
@@ -1084,7 +1084,7 @@ impl Executor {
                 // One classified append open shared by both streams
                 // (rubash#1964), mirroring the truncating pair above.
                 let file = self
-                    .open_append_target(&stdout_target)
+                    .open_append_target_for(Some(stdout_redirect), &stdout_target)
                     .map_err(|e| crate::posix_errors::path_error(&stdout_target, e))?;
                 process.stderr(Stdio::from(file.try_clone()?));
                 process.stdout(Stdio::from(file));
@@ -1193,7 +1193,7 @@ impl Executor {
                     // failed /dev/tcp targets with a bare ENOENT that
                     // dropped the target word.
                     let file = self
-                        .open_append_target(&target)
+                        .open_append_target_for(Some(redirect), &target)
                         .map_err(|e| crate::posix_errors::path_error(&target, e))?;
                     process.stdout(Stdio::from(file));
                 }
@@ -1412,7 +1412,7 @@ impl Executor {
                     // Classified append open (rubash#1964), the fd-2
                     // twin of the stdout arm above.
                     let file = self
-                        .open_append_target(&target)
+                        .open_append_target_for(Some(redirect), &target)
                         .map_err(|e| crate::posix_errors::path_error(&target, e))?;
                     process.stderr(Stdio::from(file));
                 }
