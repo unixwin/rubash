@@ -660,8 +660,25 @@ impl Executor {
         // entries (the mut typed dispatcher opens its own; the typed child
         // path below routes through this one).
         let _profiler_comsub = super::profiler::enter_comsub();
-        self.last_command_substitution_status.set(Some(0));
-        self.last_command_substitution_parse_error.set(false);
+        // rubash#3756: GNU's `$(`-body grammar failure is a READ-time
+        // error of the enclosing input (parse.y:4451 parse_comsub ->
+        // yyerror -> jump_to_top_level (DISCARD)): the command carrying
+        // it is abandoned whole, and a LATER substitution in the same
+        // word list cannot resurrect it. The entry reset below is the
+        // per-substitution bookkeeping slot (`$?` overlay, left-to-right
+        // overwrite), so it must not clear a fatal body-error latch that
+        // belongs to a non-contained (`$(`, not backtick) body — doing
+        // so let `echo $(case x in a|) $(echo ok)` run and print `ok`
+        // where GNU reports the syntax error and executes nothing.
+        // Contained bodies (backtick / arithmetic fallback, subst.c
+        // string_locale -> parse_and_execute in the child) keep their
+        // per-site reset: their error kills only the substitution.
+        let sticky_body_error = self.last_command_substitution_parse_error.get()
+            && !self.last_command_substitution_parse_error_backtick.get();
+        if !sticky_body_error {
+            self.last_command_substitution_status.set(Some(0));
+            self.last_command_substitution_parse_error.set(false);
+        }
         // A command substitution is a subshell boundary: GNU runs the body
         // in a forked child (subst.c:7143 command_substitute ->
         // execute_cmd.c:1576 execute_in_subshell), so no mutation of shell
