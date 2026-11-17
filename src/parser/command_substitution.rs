@@ -1123,11 +1123,21 @@ mod case_reclassification_tests {
     }
 
     /// Empty case: `esac` is the case's own close; the extractor
-    /// must never truncate at `in` (this scan level finds no span
-    /// for the shape — the tokeniser owns it).
+    /// must never truncate at `in`. With the pattern region armed at
+    /// the `in` token (GNU special_case_tokens rule 6,
+    /// parse.y:3369-3386 — rubash#3756), `esac` is recognized as the
+    /// case close and the body scan completes over the whole span;
+    /// before that the unarmed region made this scan run off the end
+    /// and answer None (the tokeniser still owns the shape and the
+    /// executed result is identical: `echo $(case x in esac)`,
+    /// `x=$(case x in esac); echo $?` and the `v=… w=…` sibling form
+    /// are byte-identical to GNU 5.3.20).
     #[test]
     fn keeps_empty_case_esac_shape() {
-        assert_eq!(extract("$(case x in esac)"), None);
+        assert_eq!(
+            extract("$(case x in esac)").as_deref(),
+            Some("case x in esac")
+        );
     }
 
     /// A parenthesised pattern list: its `)` is the case's, and
