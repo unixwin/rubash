@@ -354,3 +354,35 @@ fn dual_procsub_no_read_callback_reads_own_stream() {
         "cb:0\ncb:1\ncb:2\ndeclare -a b=([0]=\"a\" [1]=\"b\" [2]=\"c\")\n"
     );
 }
+
+// ---- the staged FUNCTION_STDIN overlap (rubash#2779 × rubash#3660):
+// ---- a pipeline stage's mirror is BOTH the record source (the
+// ---- StagedText pull) and the callback's share — the callback `read`
+// ---- carves the mirror at the published consumed boundary, its
+// ---- consumption folds back into the puller instead of being
+// ---- re-served as a record, and a bounded -n read still leaves the
+// ---- unconsumed tail for the stage's next reader.
+
+#[test]
+fn staged_pipeline_bounded_callback_interleaves() {
+    let (stdout, _, code) = rubash_c(
+        "cb(){ read -r x; echo \"cbread=$x\"; }; printf 'L1\\nL2\\nL3\\nL4\\nL5\\n' | { mapfile -t -C cb -c 2 -n 2 a; declare -p a; echo \"tail:[$(cat)]\"; }",
+    );
+    assert_eq!(code, Some(0));
+    assert_eq!(
+        stdout,
+        "cbread=L3\ndeclare -a a=([0]=\"L1\" [1]=\"L2\")\ntail:[L4\nL5]\n"
+    );
+}
+
+#[test]
+fn staged_pipeline_callback_interleaves() {
+    let (stdout, _, code) = rubash_c(
+        "cb(){ read -r x; echo \"cbread=$x\"; }; printf 'L1\\nL2\\nL3\\nL4\\nL5\\n' | { mapfile -t -C cb -c 2 a; declare -p a; }",
+    );
+    assert_eq!(code, Some(0));
+    assert_eq!(
+        stdout,
+        "cbread=L3\ncbread=\ndeclare -a a=([0]=\"L1\" [1]=\"L2\" [2]=\"L4\" [3]=\"L5\")\n"
+    );
+}
