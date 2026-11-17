@@ -773,6 +773,21 @@ fn update_command_substitution_reserved_word_depth(
     completing_after_case: bool,
 ) -> bool {
     if !word_boundary {
+        // GNU special_case_tokens rule 6 (parse.y:3369-3386): the `in`
+        // after a case subject is IN even off a reserved-word boundary —
+        // the case grammar consumes it there regardless of how the
+        // preceding word ended (a plain subject word never leaves a
+        // separator behind, so `$(case x in ...)` reads its `in` with
+        // word_boundary false). parse.y:3379/3396 arms the pattern
+        // region on that token, which is what the extractor's unclosed-
+        // case close arm needs to judge a later `)` (rubash#3756:
+        // without it `$(case x in a|)` scanned as unclosed and the
+        // read-time body screen never saw the truncated body).
+        if word == "in" && *case_in_stage == 2 {
+            *case_in_stage = 3;
+            *case_pattern_region = true;
+            return true;
+        }
         // Even a non-boundary word ends the empty-case window.
         if !completing_after_case {
             *case_in_stage = 0;
