@@ -11,6 +11,20 @@ use super::*;
 /// definition line instead of the triggering line. `delta` is signed
 /// because the DEBUG action cache reuses one parse across firings at
 /// different lines.
+///
+/// rubash#3327 re-derivation: the parse-error diagnostic VALUES on the
+/// action's nodes carry parse-time line numbers too (the
+/// `__RUBASH_PARSE_ERROR_EOF_COMPOUND__` / `__RUBASH_PARSE_ERROR_EOF_SUBSHELL__`
+/// / `__RUBASH_PARSE_ERROR_NEAR__` / `__RUBASH_PARSE_ERROR_HD_WARN_n__`
+/// assignments) — they are data, not node lines, so the slot rebase
+/// above cannot see them. They are rebased by the same delta, in the
+/// same walk, so the firing-line diagnostic survives while the action
+/// keeps plain tokenize + base 1: tokenize-time start_line breaks the
+/// debugger frame via the stale `first_word_end_line` stamp (the
+/// bisection proved it — REPORT.md), so the line base must live ONLY
+/// in this rebase, never in the tokenize call. Values track ast_base
+/// exactly like node lines, so the DEBUG cache stays consistent
+/// across firings.
 pub(crate) fn shift_trap_action_lines(commands: &mut [CommandNode], delta: i64) {
     if delta == 0 {
         return;
@@ -20,11 +34,66 @@ pub(crate) fn shift_trap_action_lines(commands: &mut [CommandNode], delta: i64) 
             *value = (*value as i64 + delta).max(1) as usize;
         }
     }
+    /// Shift one SEP-separated line field of a parse-error value by
+    /// `delta` (clamped at 1, like shift_slot). Silently leaves the
+    /// value alone when the field is absent or not a number — a
+    /// diagnostic value is never corrupted by a rebase.
+    fn shift_error_field(value: &mut String, index: usize, delta: i64) {
+        let sep = crate::executor::markers::PARSE_ERROR_FIELD_SEP;
+        let parts: Vec<&str> = value.split(sep).collect();
+        let Some(field) = parts.get(index) else {
+            return;
+        };
+        let Ok(line) = field.parse::<usize>() else {
+            return;
+        };
+        let shifted = (line as i64 + delta).max(1) as usize;
+        if shifted == line {
+            return;
+        }
+        let mut out = String::with_capacity(value.len());
+        for (i, part) in parts.iter().enumerate() {
+            if i > 0 {
+                out.push(sep);
+            }
+            if i == index {
+                out.push_str(&shifted.to_string());
+            } else {
+                out.push_str(part);
+            }
+        }
+        *value = out;
+    }
+    /// Rebase the parse-error line fields carried as assignment VALUES
+    /// on one node (see the fn-level note). Formats, all SEP-joined:
+    /// EOF_COMPOUND `{name}{SEP}{name_line}{SEP}{eof_line}`;
+    /// EOF_SUBSHELL `{paren_line}{SEP}{eof_line}`; NEAR
+    /// `{name}{SEP}{line}`; HD_WARN_n
+    /// `{delim}{SEP}{at_line}{SEP}{warn_line}`. The message-only
+    /// shapes (EOF_PAREN, COMPOUND_SYNTAX_ERROR, plain PARSE_ERROR)
+    /// carry no line numbers and need nothing.
+    fn shift_parse_error_lines(node: &mut CommandNode, delta: i64) {
+        for (name, value) in node.assignments.iter_mut() {
+            if name == "__RUBASH_PARSE_ERROR_EOF_COMPOUND__" {
+                shift_error_field(value, 1, delta);
+                shift_error_field(value, 2, delta);
+            } else if name == "__RUBASH_PARSE_ERROR_EOF_SUBSHELL__" {
+                shift_error_field(value, 0, delta);
+                shift_error_field(value, 1, delta);
+            } else if name == "__RUBASH_PARSE_ERROR_NEAR__" {
+                shift_error_field(value, 1, delta);
+            } else if name.starts_with("__RUBASH_PARSE_ERROR_HD_WARN_") && name.ends_with("__") {
+                shift_error_field(value, 1, delta);
+                shift_error_field(value, 2, delta);
+            }
+        }
+    }
     fn shift_node(node: &mut CommandNode, delta: i64) {
         shift_slot(&mut node.line, delta);
         shift_slot(&mut node.logical_line, delta);
         shift_slot(&mut node.end_line, delta);
         shift_slot(&mut node.heredoc_gather_line, delta);
+        shift_parse_error_lines(node, delta);
         if let Some(pipeline) = &mut node.pipeline_command {
             shift_trap_action_lines(&mut pipeline.stages, delta);
         }
@@ -1265,6 +1334,8 @@ impl Executor {
         if caller_line > 1 {
             for token in tokens.iter_mut() {
                 token.position += caller_line - 1;
+                // rubash#3605: end_position shares position's line space.
+                token.end_position += caller_line - 1;
                 // rubash#3605: the gather end line shifts in lockstep
                 // (see script_driver.rs).
                 token.heredoc_end_line = token.heredoc_end_line.map(|line| line + caller_line - 1);
@@ -1852,6 +1923,17 @@ impl Executor {
         // out of the cache cell, re-stamped and executed, then put back —
         // no clone on the per-firing path.
         let action = self.comsub_body_alias_splice(action);
+        // rubash#3327 bisection: plain tokenize + recorded base 1
+        // (pre-fix shape). The __RUBASH_TRAP_CONTEXT insert and the
+        // take_parse_error() containment below are kept — this step
+        // isolates whether the tokenize/start_line half causes the
+        // two bashdb head-only regressions (CI run 43673700641).
+        // The firing-line rationale lives in REPORT.md Round 3;
+        // do NOT re-derive the DEBUG shape in this commit.
+        let old_trap_context = self.shell_state.env_vars.insert(
+            "__RUBASH_TRAP_CONTEXT".to_string(),
+            "debug trap".to_string(),
+        );
         let (mut ast, ast_base) = {
             let taken = self.debug_trap_action_cache.borrow_mut().take();
             match taken {
@@ -1903,7 +1985,30 @@ impl Executor {
             *self.shell_state.debug_trap_command.borrow_mut() = None;
         }
         self.debug_trap_running = false;
-        result?;
+        match old_trap_context {
+            Some(value) => {
+                self.shell_state
+                    .env_vars
+                    .insert("__RUBASH_TRAP_CONTEXT".to_string(), value);
+            }
+            None => {
+                self.shell_state.env_vars.remove("__RUBASH_TRAP_CONTEXT");
+            }
+        }
+        // rubash#3327: a parse failure of the action is contained, like
+        // the EXIT runner's — its diagnostics stand, but the pending
+        // status is not replaced and the script continues (GNU
+        // parse_and_execute's own status is discarded). A parse error
+        // that exit_shell(2)ed under live errexit keeps propagating,
+        // marked (parser_error_errexited, same as the signal/exit
+        // runners).
+        let parse_error_raised = self.take_parse_error();
+        let parser_error_errexited = self.parser_error_errexited.take();
+        if parse_error_raised && !parser_error_errexited {
+            self.exit_code = saved_exit_code;
+        } else {
+            result?;
+        }
         let trap_status = self.exit_code;
         self.exit_code = saved_exit_code;
         let extdebug =
@@ -1934,6 +2039,10 @@ impl Executor {
             self.return_trap_running = false;
             return Ok(());
         };
+        // rubash#3327: own the action before inserting
+        // __RUBASH_TRAP_CONTEXT below — the ref borrows env_vars, and
+        // the insert needs it mutably (E0502 on CI run 43672182309).
+        let action = action.to_owned();
         // GNU trap.c:367: the RETURN fire saves the pre-trap $? for a bare
         // `exit`/`return` inside the action (interp 1602).
         let prev_saved_exit =
@@ -1942,34 +2051,48 @@ impl Executor {
             &mut self.trap_saved_exit_context,
             self.shell_state.function_depth + self.source_nest_depth,
         );
-        let tokens = crate::lexer::tokenize(&action);
-        // rubash#3328: thread the action as the diagnostic source
-        // (same shape as the EXIT-trap site): GNU _run_trap_internal
-        // parses the action string as fresh input, so the echo line
-        // is the action's own line verbatim, not a token-join rebuild.
-        let mut ast = crate::parser::parse_with_options(
-            &tokens,
-            crate::parser::ParseLoopOptions {
-                source_text: Some(action.into()),
-                ..Default::default()
-            },
-        );
         // GNU trap.c:_run_trap_internal:1196 only sets SEVAL_RESETLINE for
         // ordinary signal traps; the RETURN trap keeps the caller's current
         // line_number, so $LINENO inside the action (and the DEBUG fire for
         // the trap command itself, execute_simple_command:4506) reports the
-        // caller's line. Stamp the parsed action with that line, mirroring
-        // run_debug_trap above.
+        // caller's line. Tokenize the action at that line (rubash#3327),
+        // which anchors both the node lines and the parse diagnostics —
+        // the post-parse rebase the old code did here is subsumed.
+        // Mirror the EXIT runner's __RUBASH_TRAP_CONTEXT marker with the
+        // return trap's own name for the duration of the re-parse and
+        // execution (trap.c:1340 passes "return trap").
         let call_line = self
             .shell_state
             .env_vars
             .get("__RUBASH_CURRENT_LINE")
             .and_then(|line| line.parse::<usize>().ok());
-        if let Some(call_line) = call_line {
-            // rubash#1166: rebase, don't just stamp the top level (see
-            // shift_trap_action_lines).
-            shift_trap_action_lines(&mut ast.commands, call_line as i64 - 1);
-        }
+        let old_trap_context = self.shell_state.env_vars.insert(
+            "__RUBASH_TRAP_CONTEXT".to_string(),
+            "return trap".to_string(),
+        );
+        let tokens = crate::lexer::tokenize_with_initial_posix_and_line(
+            &action,
+            false,
+            call_line.unwrap_or(1),
+        );
+        // rubash#3328: thread the action as the diagnostic source
+        // (same shape as the EXIT-trap site): GNU _run_trap_internal
+        // parses the action string as fresh input, so the echo line
+        // is the action's own line verbatim, not a token-join rebuild.
+        let ast = crate::parser::parse_with_options(
+            &tokens,
+            crate::parser::ParseLoopOptions {
+                source_text: Some(action.into()),
+                // Token positions are absolute (start_line-anchored), so
+                // the parse must know the same shift to map them back
+                // onto action-text lines and to compute the physical EOF
+                // line — same contract as the eval runner above
+                // (trap.c:_run_trap_internal parses the action at the
+                // caller's line_number).
+                source_line_offset: call_line.unwrap_or(1).saturating_sub(1),
+                ..Default::default()
+            },
+        );
         // rubash#1165: the function's return status is fixed BEFORE the
         // RETURN trap runs (execute_cmd.c's return_catch value becomes
         // last_command_exit_value; trap.c _run_trap_internal saves and
@@ -1995,6 +2118,27 @@ impl Executor {
         self.trap_saved_exit_value = prev_saved_exit;
         self.trap_saved_exit_context = prev_saved_context;
         self.return_trap_running = false;
+        match old_trap_context {
+            Some(value) => {
+                self.shell_state
+                    .env_vars
+                    .insert("__RUBASH_TRAP_CONTEXT".to_string(), value);
+            }
+            None => {
+                self.shell_state.env_vars.remove("__RUBASH_TRAP_CONTEXT");
+            }
+        }
+        // rubash#3327: a parse failure of the action is contained, like
+        // the EXIT runner's — its diagnostics stand, the pending return
+        // status is not replaced, and the script continues. A parse error
+        // that exit_shell(2)ed under live errexit keeps propagating,
+        // marked (parser_error_errexited).
+        let parse_error_raised = self.take_parse_error();
+        let parser_error_errexited = self.parser_error_errexited.take();
+        if parse_error_raised && !parser_error_errexited {
+            self.exit_code = saved_exit;
+            return Ok(());
+        }
         if result.is_ok() {
             self.exit_code = saved_exit;
         }
@@ -3341,27 +3485,53 @@ impl Executor {
             .or_else(|| self.err_trap_line.get())
             .or(command.line);
         let action = self.comsub_body_alias_splice(&action);
-        let tokens = crate::lexer::tokenize(&action);
+        // rubash#3327: GNU _run_trap_internal (trap.c:1196-1198) does NOT
+        // set SEVAL_RESETLINE for the ERR trap — the action parses at the
+        // failed command's line, so a syntax error reports that line, not
+        // action-relative line 1. Tokenize at the failed line (the
+        // post-parse rebase the old code did here is subsumed: the
+        // tokens already carry the right lines). Mirror the EXIT
+        // runner's __RUBASH_TRAP_CONTEXT marker with the error trap's
+        // own name for the duration of the re-parse and execution
+        // (trap.c:1324 passes "error trap").
+        let old_trap_context = self.shell_state.env_vars.insert(
+            "__RUBASH_TRAP_CONTEXT".to_string(),
+            "error trap".to_string(),
+        );
+        let tokens = crate::lexer::tokenize_with_initial_posix_and_line(
+            &action,
+            false,
+            failed_line.unwrap_or(1),
+        );
         // rubash#3328: thread the spliced action as the diagnostic
         // source (same shape as the EXIT-trap site): the bare parse()
         // re-serialized the echo line.
-        let mut ast = crate::parser::parse_with_options(
+        let ast = crate::parser::parse_with_options(
             &tokens,
             crate::parser::ParseLoopOptions {
                 source_text: Some(action.as_str().into()),
+                // Same start_line-anchored contract as the RETURN runner:
+                // the physical EOF line is source_line_offset + the
+                // action's newline count + 1, so the offset must be
+                // failed_line - 1 for GNU's `line N+1` EOF diagnostic.
+                source_line_offset: failed_line.unwrap_or(1).saturating_sub(1),
                 ..Default::default()
             },
         );
-        if let Some(line) = failed_line {
-            // rubash#1166: rebase the whole action onto the failed
-            // command's line, nested nodes included (see
-            // shift_trap_action_lines).
-            shift_trap_action_lines(&mut ast.commands, line as i64 - 1);
-        }
         let saved_alias_streamed = self.mark_alias_streamed();
         let result = self.with_xtrace_indirection(|executor| executor.execute_ast(&ast));
         self.resume_alias_streamed(saved_alias_streamed);
         *self.shell_state.debug_trap_command.borrow_mut() = saved_trap_command;
+        match old_trap_context {
+            Some(value) => {
+                self.shell_state
+                    .env_vars
+                    .insert("__RUBASH_TRAP_CONTEXT".to_string(), value);
+            }
+            None => {
+                self.shell_state.env_vars.remove("__RUBASH_TRAP_CONTEXT");
+            }
+        }
         self.error_trap_running = false;
         self.trap_saved_exit_value = prev_saved_exit;
         self.trap_saved_exit_context = prev_saved_context;
@@ -3400,6 +3570,19 @@ impl Executor {
             Err(ExecuteError::Break(_)) | Err(ExecuteError::Continue(_))
         );
         self.exit_code = saved_exit;
+        // rubash#3327: a parse failure of the action is contained, like
+        // the EXIT runner's — its diagnostics stand, the failing
+        // command's status is not replaced, and the script continues.
+        // The parse-error arm precedes the unwind arms (same order as
+        // the EXIT runner's match): GNU never executes an action that
+        // failed to parse, so no unwind from it is live. A parse error
+        // that exit_shell(2)ed under live errexit keeps propagating,
+        // marked (parser_error_errexited).
+        let parse_error_raised = self.take_parse_error();
+        let parser_error_errexited = self.parser_error_errexited.take();
+        if parse_error_raised && !parser_error_errexited {
+            return Ok(());
+        }
         if exit_unwind || return_unwind || loop_unwind {
             // For Break/Continue from the trap, preserve the failing
             // command's status (saved_exit) as the loop's exit status.
@@ -6978,7 +7161,17 @@ impl Executor {
             // would be silently discarded. Reinstate the stdio marker
             // for the body's duration, then put the closed slot back
             // exactly as close_output left it (rubash#1336).
-            let saved_entry = self.fd_table.entries.get(&fd).cloned();
+            // rubash#3729: snapshot via a kernel duplicate
+            // (FdTable::saved_entry) -- a plain clone shares the
+            // descriptor the stdio-marker bind's open_output retires
+            // (retire_read_arm, rubash#3213), so the restore would
+            // replay a dead entry; the duplicate keeps the saved
+            // descriptor alive until the restore replays it, exactly
+            // like GNU's `fcntl (fd, F_DUPFD, SHELL_FD_BASE)` save
+            // (redir.c:965/1082/1144). A dup failure propagates
+            // (GNU fails the redirect the same way, redir.c
+            // REDIRECTION_ERROR on a failed F_DUPFD save).
+            let saved_entry = self.fd_table.saved_entry(fd)?;
             if fd == 1 || fd == 2 {
                 let marker = if fd == 1 {
                     FdWriteEndpoint::Stdout
@@ -7086,10 +7279,62 @@ impl Executor {
         self.close_persistent_output_fd(fd)?;
         self.close_persistent_input_fd(fd);
         self.fd_table.close(fd);
+        // GNU redir.c r_close_this: close(redirector) drops THE
+        // descriptor at the redirector's number. A respawned child can
+        // carry the table endpoint on a transport handle at a different
+        // OS slot (the __RUBASH_FD_{,W}HANDLE dup restored at init), so
+        // dropping the endpoint frees the dup while the process's real
+        // descriptor `fd` stays open — an orphaned descriptor GNU's
+        // close(fd) removes (a coproc child's `exec >&-` leaving the
+        // c2p write end open, so the parent's `read` never sees EOF).
+        // Close it only when it is genuinely orphaned: still open and
+        // not the backing of another live table entry.
+        self.close_orphaned_process_fd(fd);
         self.shell_state
             .env_vars
             .insert(fd_closed_key(fd), "1".to_string());
         Ok(())
+    }
+
+    #[cfg(unix)]
+    fn close_orphaned_process_fd(&self, fd: u32) {
+        // Only the stdio slots carry an identity between the table fd
+        // and the process descriptor: spawn wires the child's real
+        // fd 0/1/2 to the streams the endpoints describe, so a slot
+        // close below 3 that left its OS twin behind is a leaked
+        // descriptor. Slots ≥3 are virtual numbers — an open OS fd at
+        // that number belongs to the runtime (self-pipes, inherited
+        // handles), never to this table entry.
+        if fd >= 3 {
+            return;
+        }
+        let target = fd as crate::fd::HANDLE;
+        let referenced = self.fd_table.entries.values().any(|entry| {
+            !entry.closed
+                && (entry
+                    .read
+                    .as_ref()
+                    .and_then(read_endpoint_os_handle)
+                    .is_some_and(|handle| handle == target)
+                    || entry
+                        .write
+                        .as_ref()
+                        .and_then(write_endpoint_os_handle)
+                        .is_some_and(|handle| handle == target))
+        });
+        if referenced {
+            return;
+        }
+        unsafe {
+            if libc::fcntl(target, libc::F_GETFD) != -1 {
+                libc::close(target);
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn close_orphaned_process_fd(&self, fd: u32) {
+        let _ = fd;
     }
 
     pub(in crate::executor) fn execute_persistent_output_process_substitution(
@@ -7119,7 +7364,10 @@ impl Executor {
             .env_vars
             .get(FUNCTION_STDIN_OFFSET)
             .cloned();
-        let old_fd0 = self.fd_table.entries.get(&0).cloned();
+        // rubash#3731: snapshot fd 0 with a kernel dup (FdTable::saved_entry),
+        // like #3723 — a bare Rc clone shares the descriptor the bind-time
+        // retire closes, so the restore would re-insert a retired entry.
+        let old_fd0 = self.fd_table.saved_entry(0)?;
         let fd0_key = fd_stdin_key(0);
         let fd0_offset_key = fd_stdin_offset_key(0);
         let fd0_dynamic_key = fd_dynamic_input_key(0);
@@ -9709,6 +9957,33 @@ fn exec_has_only_redirects(cmd: &CommandNode) -> bool {
     )
 }
 
+/// The process descriptor backing a read endpoint, when it carries one:
+/// an owned FileFd handle, a coproc pipe end, or the process standard
+/// descriptor a symbolic endpoint aliases (InheritedProcessStdin → fd 0).
+/// Virtual endpoints (in-memory Text, ProcSub carriers, Directory) have
+/// no descriptor behind them. Used to recognize the OS descriptor a
+/// closed slot leaves orphaned (close_orphaned_process_fd).
+#[cfg(unix)]
+fn read_endpoint_os_handle(endpoint: &FdReadEndpoint) -> Option<crate::fd::HANDLE> {
+    match endpoint {
+        FdReadEndpoint::File(file) => Some(file.handle),
+        FdReadEndpoint::CoprocStdout { fd, .. } => Some(fd.handle),
+        other => other.standard_backing().map(|(handle, _)| handle),
+    }
+}
+
+/// The write-side twin of `read_endpoint_os_handle` — FileFd and coproc
+/// ends expose their handle; Stdout/Stderr resolve through
+/// `standard_backing` to the process descriptors they alias.
+#[cfg(unix)]
+fn write_endpoint_os_handle(endpoint: &FdWriteEndpoint) -> Option<crate::fd::HANDLE> {
+    match endpoint {
+        FdWriteEndpoint::File(file) => Some(file.handle),
+        FdWriteEndpoint::CoprocStdin { fd, .. } => Some(fd.handle),
+        other => other.standard_backing().map(|(handle, _)| handle),
+    }
+}
+
 /// The four stdio-slot redirect arms of a compound command, ordered by
 /// their position in the command's parse-order redirect list (rubash#940 —
 /// the same contract prepare_brace_group_redirects follows for `{ }`,
@@ -10531,6 +10806,8 @@ impl Executor {
         if line_offset > 0 {
             for token in tokens.iter_mut() {
                 token.position += line_offset as usize;
+                // rubash#3605: end_position shares position's line space.
+                token.end_position += line_offset as usize;
                 // rubash#3605: the gather end line shifts in lockstep
                 // (see script_driver.rs).
                 token.heredoc_end_line = token

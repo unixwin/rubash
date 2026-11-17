@@ -587,6 +587,14 @@ impl Executor {
         // so they leave no record.
         if !matches!(signal, 0 | 17 | 18 | 19 | 20 | 21 | 22 | 23 | 28) {
             self.shell_state.job_table.note_fatal_signal(pid);
+            // rubash#3802: remember WHICH signal this delivery was.
+            // Windows reaps it as exit code 128+signal with no
+            // WIFSIGNALED bit, so the jobs listing can only render
+            // GNU's `Killed`/`Terminated` (jobs.c:1969-1985
+            // printable_job_status) from this record.
+            self.shell_state
+                .job_table
+                .note_delivered_signal(pid, signal);
         }
     }
 

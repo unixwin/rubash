@@ -176,6 +176,15 @@ impl Executor {
             );
         }
         if let Ok(index) = var_name.parse::<usize>() {
+            // `0` is the $0 special parameter (script name), never
+            // positional_window[0] — `${0@Q}`/`${!x@Q}` with x=0
+            // transform the script name (subst.c:9424-9428 name lookup
+            // before positional indexing).
+            if index == 0 {
+                return Some(
+                    self.apply_parameter_transform_value(&self.script_name_value(), transform),
+                );
+            }
             return Some(
                 self.shell_state
                     .positional_window()

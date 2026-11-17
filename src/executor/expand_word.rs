@@ -406,6 +406,25 @@ impl Executor {
         // word the carrier path IS the expansion; return it verbatim.
         if operand_is_procsub(&redirect.target) || operand_is_procsub(&redirect.target_metadata.raw)
         {
+            // rubash#3808: a bare process-substitution operand expands to
+            // exactly ONE field — GNU redir.c:296-333 redirection_expand
+            // returns NULL (the AMBIGUOUS_REDIRECT condition) only for
+            // zero or several fields, and expand_word_internal's `<`/`>`
+            // cases (subst.c:11364-11391) extract the substitution whole
+            // (extract_process_subst, subst.c:1311) and splice the single
+            // /dev/fd/N filename in, so the body's characters are never
+            // this word's expansion introducers: a `{ ...; }` group body's
+            // `{` is a compound-command opener, not a brace-expansion
+            // candidate. Record the single-field verdict here (the #3089
+            // memo both ambiguity gates consult) so the textual gate
+            // below never misreads the body's `{` as a multi-field
+            // expansion — the subshell-list body passed only because it
+            // carries no such character, while the group body was
+            // rejected as ambiguous.
+            self.redirect_target_memo.borrow_mut().insert(
+                Self::redirect_target_field_memo_key(redirect, true),
+                String::new(),
+            );
             // rubash#394: while a compound command whose target IS a
             // process substitution is in scope, the substitution's carrier
             // path stands in for the text — the compound fd-table walk runs

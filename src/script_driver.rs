@@ -5041,6 +5041,11 @@ fn run_source_impl_inner_body(
         for token in &mut tokens {
             token.position += line_offset;
             token.column += line_offset;
+            // rubash#3605: end_position lives in the same line space — a
+            // folded `{ ... }' token spans lines, and finish_compound_command
+            // stamps end_line from max(position, end_position): unshifted,
+            // `function name\n{ ... }' reported the `{' line.
+            token.end_position += line_offset;
             // rubash#1186: logical_line must shift with position — the
             // DISCARD skip gates compare command.logical_line against
             // reader-line state seeded in the absolute (offset) space, so

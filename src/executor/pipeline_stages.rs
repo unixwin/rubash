@@ -195,10 +195,22 @@ impl Executor {
         input: &str,
         streaming_stdin: bool,
         live_stdin: bool,
+        stdin_is_pipe: bool,
     ) -> Result<(String, String, i32), ExecuteError> {
         // G-02: no process-cwd save/restore — the stage subshell is a clone
         // with its own session cwd field.
         let mut subshell = self.command_substitution_executor();
+        // rubash#3605: stand in for the pipe_in != NO_PIPE fact GNU's
+        // element child carries into execute_in_subshell (its
+        // `stdin_redir |= pipe_in` at execute_cmd.c:4570, and the
+        // `( )` assign at :1733 that reads pipe_in). The marker is a
+        // one-shot: the element's own compound dispatch consumes it —
+        // the `( )` :1733 assign and the :826 stdin_redir assignments
+        // (which GNU skips for pipe-connected elements because their
+        // redirects were consumed pre-dispatch, :1759-1764) — so a
+        // nested `( )` or control structure in the body assigns its
+        // own verdict only, like GNU.
+        subshell.shell_state.element_pipe_stdin.set(stdin_is_pipe);
         // rubash#2557: a pipeline element is a forked child — it does
         // NOT inherit the parent's parse_and_execute catch. The clone
         // constructor renumbers the parent's frames +1 with the child's

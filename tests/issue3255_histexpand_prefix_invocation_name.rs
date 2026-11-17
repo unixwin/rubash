@@ -114,7 +114,6 @@ fn invocation_c_with_explicit_name_keeps_operand() {
 
 #[cfg(unix)]
 mod interactive {
-    use super::*;
     use std::io::Write as _;
     use std::os::unix::process::CommandExt as _;
     use std::process::{Command, Stdio};
@@ -173,6 +172,17 @@ mod interactive {
         )
     }
 
+    /// A literal `bash:` diagnostic prefix must never appear. Match on
+    /// line boundaries: `bash:` is a substring of `rubash:`, so a plain
+    /// `stderr.contains("bash: ...")` fires on the correct output too
+    /// (rubash#3800).
+    fn assert_no_literal_bash_prefix(stderr: &str) {
+        assert!(
+            !stderr.lines().any(|line| line.starts_with("bash: ")),
+            "literal bash: prefix must not appear, got stderr: {stderr:?}"
+        );
+    }
+
     const FAILED_INPUT: &str = "echo FIRST\n!nosuchcmd123\necho AFTER\n";
 
     /// GNU (5.3.20, `exec -a myname bash -i`): the failed expansion
@@ -186,10 +196,7 @@ mod interactive {
             stderr.contains("zimsh: !nosuchcmd123: event not found"),
             "renamed interactive failure must carry argv[0], got stderr: {stderr:?}"
         );
-        assert!(
-            !stderr.contains("bash: !nosuchcmd123: event not found"),
-            "literal bash: prefix must not appear under a renamed argv[0], got stderr: {stderr:?}"
-        );
+        assert_no_literal_bash_prefix(&stderr);
         assert!(
             stdout.contains("FIRST") && stdout.contains("AFTER"),
             "failed line is discarded but the session continues, got stdout: {stdout:?}"
@@ -205,9 +212,20 @@ mod interactive {
             stderr.contains("!nosuchcmd123: event not found"),
             "failure diagnostic must be reported, got stderr: {stderr:?}"
         );
+        assert_no_literal_bash_prefix(&stderr);
+        // The diagnostic line's prefix must be the binary's own
+        // basename (GNU error.c:90-120 `get_name_for_error`: an
+        // interactive shell prints the shell name alone, from argv[0]).
+        let basename = std::path::Path::new(env!("CARGO_BIN_EXE_rubash"))
+            .file_stem()
+            .expect("test binary has a file stem")
+            .to_string_lossy()
+            .into_owned();
         assert!(
-            !stderr.contains("bash: !nosuchcmd123: event not found"),
-            "literal bash: prefix must not appear, got stderr: {stderr:?}"
+            stderr.lines().any(
+                |line| line.starts_with(&format!("{basename}: !nosuchcmd123: event not found"))
+            ),
+            "failure diagnostic must carry the binary basename, got stderr: {stderr:?}"
         );
         assert!(
             stdout.contains("FIRST") && stdout.contains("AFTER"),

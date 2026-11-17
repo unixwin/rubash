@@ -654,11 +654,32 @@ impl Executor {
         adjusted > bound || adjusted < 0
     }
 
+    /// Probe/verdict-only parse of a `${var:offset:length}` form: the
+    /// offset/length are evaluated (so the verdict sees the same
+    /// operands), but any arithmetic writes they produce are DISCARDED
+    /// -- a probe must never apply a side effect the real expansion
+    /// will apply itself, or the write would land twice (rubash#3649).
     pub(in crate::executor) fn parse_parameter_substring<'a>(
         &self,
         name: &'a str,
     ) -> Option<(&'a str, isize, Option<isize>)> {
-        self.parse_parameter_substring_impl(name, false)
+        let mut writes = Vec::new();
+        self.parse_parameter_substring_impl(name, false, &mut writes)
+    }
+
+    /// Like [`Executor::parse_parameter_substring`], but returns the
+    /// arithmetic writes (name, new value) the offset/length evaluation
+    /// produced, so the caller that USES the parsed result can commit
+    /// them exactly once via `queue_pending_subscript_writes`
+    /// (rubash#3649). A caller whose parse is only a probe must use the
+    /// plain parse instead.
+    pub(in crate::executor) fn parse_parameter_substring_with_writes<'a>(
+        &self,
+        name: &'a str,
+    ) -> Option<((&'a str, isize, Option<isize>), Vec<(String, String)>)> {
+        let mut writes = Vec::new();
+        let parsed = self.parse_parameter_substring_impl(name, false, &mut writes);
+        parsed.map(|parsed| (parsed, writes))
     }
 
     /// Verdict-scan twin of [`Executor::parse_parameter_substring`]: the
@@ -685,13 +706,17 @@ impl Executor {
         &self,
         name: &'a str,
     ) -> Option<(&'a str, isize, Option<isize>)> {
-        self.parse_parameter_substring_impl(name, true)
+        // The scan is verdict-only: discard the offset/length writes
+        // (rubash#3649) -- the real expansion applies them.
+        let mut writes = Vec::new();
+        self.parse_parameter_substring_impl(name, true, &mut writes)
     }
 
     fn parse_parameter_substring_impl<'a>(
         &self,
         name: &'a str,
         scan_mode: bool,
+        writes_out: &mut Vec<(String, String)>,
     ) -> Option<(&'a str, isize, Option<isize>)> {
         // Use split_top_level_colon to skip `:` inside $(...), ${...}, and
         // quoted regions — a plain split_once(':') would match `$( : )` in
@@ -786,8 +811,12 @@ impl Executor {
             lit
         } else {
             match self.eval_parameter_substring_offset(offset_str) {
-                Some(value) => value,
-                None => {
+                (Some(value), writes) => {
+                    writes_out.extend(writes);
+                    value
+                }
+                (None, writes) => {
+                    writes_out.extend(writes);
                     // GNU subst.c verify_substring_values: an invalid offset
                     // expression is an arithmetic error (expok == 0), not a
                     // "not a substring" result. parameter_brace_substring
@@ -826,8 +855,12 @@ impl Executor {
             Some(lit)
         } else {
             match self.eval_parameter_substring_offset(length_str) {
-                Some(value) => Some(value),
-                None => {
+                (Some(value), writes) => {
+                    writes_out.extend(writes);
+                    Some(value)
+                }
+                (None, writes) => {
+                    writes_out.extend(writes);
                     if self
                         .shell_state
                         .arithmetic_last_error_category
@@ -848,7 +881,7 @@ impl Executor {
     pub(in crate::executor) fn eval_parameter_substring_offset(
         &self,
         value: &str,
-    ) -> Option<isize> {
+    ) -> (Option<isize>, Vec<(String, String)>) {
         // GNU verify_substring_values (subst.c:8395) hands the RAW operand
         // text to expand_arith_string/evalexp; evalerror (expr.c:1526-1537)
         // skips only the expression's LEADING whitespace at display time
@@ -881,8 +914,18 @@ impl Executor {
         // before arithmetic evaluation (Bash evaluates the slice offset as
         // an arithmetic expression after parameter expansion).
         let expression = self.expand_embedded_parameters(&expression);
-        let (evaluated, category) =
-            eval_conditional_arith_value_categorized(&expression, &self.shell_state.env_vars);
+        // rubash#3649: the offset/length arithmetic runs against a
+        // snapshot env on this `&self` path, so its writes (e.g. `i+=1`)
+        // must ride back out with the result instead of being dropped --
+        // the caller that USES the parsed substring commits them exactly
+        // once (see parse_parameter_substring_with_writes). Deliberately
+        // NO overlay of queued writes here: the same fragment is parsed
+        // more than once by layered fan-out probes, and every parse must
+        // read the same live value.
+        let (evaluated, writes, category) = eval_conditional_arith_value_categorized_with_writes(
+            &expression,
+            &self.shell_state.env_vars,
+        );
         if evaluated.is_none() {
             self.shell_state
                 .arithmetic_last_error_category
@@ -893,7 +936,10 @@ impl Executor {
             // `${HOME:`echo }`}` → offset `}` not `` `echo }` ``).
             *self.arithmetic_last_error_expression.borrow_mut() = expression.to_string();
         }
-        isize::try_from(evaluated?).ok()
+        let Some(evaluated) = evaluated else {
+            return (None, writes);
+        };
+        (isize::try_from(evaluated).ok(), writes)
     }
 
     /// `&self` counterpart of

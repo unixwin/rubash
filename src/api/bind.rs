@@ -40,6 +40,14 @@ pub enum BindKindView {
     Function { name: String },
     /// `bind '"\C-t": "text"'` — a macro.
     Macro { text: String },
+    /// `bind 'Control-t: prefix-meta'` — the sequence is bound to a
+    /// whole keymap (rl_generic_bind's ISKMAP value); `name` is the
+    /// target map as registered (the alias form; the entry's
+    /// `keymap` field still names the map the binding lives in).
+    /// Entered the contract for rubash#3013 — hosts dispatch on
+    /// the kind instead of pattern-matching the `prefix-meta`
+    /// function name.
+    Keymap { name: String },
 }
 
 /// One registered binding, as the contract reports it.
@@ -142,20 +150,11 @@ impl BindView {
                     },
                     BindKind::Function { name } => BindKindView::Function { name: name.clone() },
                     BindKind::Macro { text } => BindKindView::Macro { text: text.clone() },
-                    // The contract has no keymap-valued view kind:
-                    // GAP-13's Q-E ruling kept BindKind internal and
-                    // the view a 1:1 mirror, so a faithful rendering
-                    // needs a BindKindView::Keymap variant plus
-                    // ledger rows on both sides — a contract change
-                    // for the captain to schedule, NOT made here.
-                    // Rendering the entry as the `prefix-meta`
-                    // function name preserves exactly what hosts
-                    // saw for this binding before the registry grew
-                    // the kind (the old-style arm stored the name
-                    // verbatim, rubash#2923).
-                    BindKind::Keymap { .. } => BindKindView::Function {
-                        name: "prefix-meta".to_string(),
-                    },
+                    // rubash#3013: the contract now carries a
+                    // keymap-valued view kind — the entry reports
+                    // its real target map instead of the
+                    // `prefix-meta` function-name shim.
+                    BindKind::Keymap { name } => BindKindView::Keymap { name: name.clone() },
                 };
                 let dump = match &entry.kind {
                     BindKind::Execute { command } => {

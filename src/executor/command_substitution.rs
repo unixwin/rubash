@@ -1532,6 +1532,22 @@ impl Executor {
             self.last_command_substitution_status.set(Some(1));
             return Some(String::new());
         }
+        // rubash#3788: the fast path's probe is canonicalize + is_dir —
+        // the same pair the cd builtin used to probe with — and both
+        // succeed on a directory without the search bit, while GNU's
+        // real chdir refuses it with EACCES. The cd builtin's probe now
+        // carries the access(2) check; this arm mirrors its verdict
+        // instead of printing the logical display of a move that never
+        // happened.
+        if !crate::executor::path::directory_has_search_permission(&path) {
+            eprintln!(
+                "{}cd: {}: Permission denied",
+                self.parser_diagnostic_prefix(),
+                target_display
+            );
+            self.last_command_substitution_status.set(Some(1));
+            return Some(String::new());
+        }
 
         self.last_command_substitution_status.set(Some(0));
         // rubash#537: the physical directory renders in the same canonical
@@ -2249,6 +2265,7 @@ impl Executor {
             // SUBSHELL_COMSUB) never prints job-status notices, so the
             // fork copy starts with an empty notice list.
             pending_signal_notices: std::cell::RefCell::new(Vec::new()),
+            wait_notice_pids: Vec::new(),
             host_internal_depth: std::cell::Cell::new(self.host_internal_depth.get()),
             debug_trap_function_line: None,
             last_command_substitution_status: Cell::new(None),

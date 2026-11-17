@@ -4440,6 +4440,23 @@ impl Executor {
         let saved_exit_trap_ran = self.exit_trap_ran.get();
         crate::builtins::trap::reset_for_subshell_child(&mut self.shell_state.env_vars);
         self.shell_state.subshell_depth.set(saved_depth + 1);
+        // rubash#3605: GNU execute_cmd.c:1731-1739 (execute_in_subshell)
+        // ASSIGNS stdin_redir for a user subshell — `stdin_redir =
+        // stdin_redirects(redirects) || pipe_in != NO_PIPE` — an assign,
+        // not an OR: a nested `( )` with no fd-0 redirect CLEARS the
+        // enclosing structure's flag (`{ ( cat & wait ); } <file` feeds
+        // the async cat /dev/null), while the ( )'s own `< file` or its
+        // being a pipe-fed element's own dispatch sets it even when the
+        // parent's flag was 0. `redirects` here is the ( )'s own list —
+        // the same list do_redirections is about to consume (GNU reads
+        // it before the :1759-1764 consumption). element_pipe_stdin
+        // carries the element child's `pipe_in != NO_PIPE` for exactly
+        // this dispatch; consume it so nested ( )s don't inherit the
+        // outer element's pipe.
+        let element_pipe_stdin = self.shell_state.element_pipe_stdin.replace(false);
+        self.shell_state
+            .stdin_redir
+            .set(cmd.redirects.iter().any(redirect_updates_stdin_redir) || element_pipe_stdin);
         // execute_in_subshell (execute_cmd.c:1636-1637): the region is
         // "neither login nor interactive" — record the login reset
         // alongside the depth bump; saved_state's wholesale restore
@@ -4996,7 +5013,7 @@ impl Executor {
     where
         F: FnOnce(&mut Executor) -> Result<T, ExecuteError>,
     {
-        let saved_fd_inputs = self.bind_numbered_heredoc_redirects(cmd, true);
+        let saved_fd_inputs = self.bind_numbered_heredoc_redirects(cmd, true)?;
         let result = f(self);
         self.restore_numbered_heredoc_redirects(saved_fd_inputs);
         result
@@ -5015,7 +5032,7 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
         include_stdin: bool,
-    ) -> Vec<(u32, Option<crate::executor::fd_table::FdEntry>)> {
+    ) -> Result<Vec<(u32, Option<crate::executor::fd_table::FdEntry>)>, ExecuteError> {
         let mut saved_fd_inputs = Vec::new();
         for redirect in &cmd.heredoc_redirects {
             let Some(fd) = redirect.fd else {
@@ -5036,11 +5053,26 @@ impl Executor {
             // to the heredoc expansion leaked the storage prefix into
             // the stream and lost the last line (rubash#1867).
             let body = self.expand_heredoc_redirect_text(redirect);
-            saved_fd_inputs.push((fd, self.fd_table.entries.get(&fd).cloned()));
+            // rubash#3706: the saved entry duplicates the displaced
+            // descriptor (FdTable::saved_entry) — a plain clone shares
+            // the descriptor the heredoc bind's open_input retires, so
+            // the restore would replay a dead entry. A dup failure
+            // unwinds the heredocs this call already bound (GNU
+            // undo_partial_redirects, execute_cmd.c:855) before the
+            // error propagates — the caller never sees a half-bound
+            // list.
+            let saved = match self.fd_table.saved_entry(fd) {
+                Ok(saved) => saved,
+                Err(error) => {
+                    self.restore_numbered_heredoc_redirects(std::mem::take(&mut saved_fd_inputs));
+                    return Err(ExecuteError::IoError(error));
+                }
+            };
+            saved_fd_inputs.push((fd, saved));
             self.fd_table
                 .open_input(fd, FdReadEndpoint::text(&body), true);
         }
-        saved_fd_inputs
+        Ok(saved_fd_inputs)
     }
 
     /// The restore half of bind_numbered_heredoc_redirects: each bound

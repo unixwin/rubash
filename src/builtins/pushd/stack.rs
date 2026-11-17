@@ -102,22 +102,32 @@ pub(super) fn logical_dir_exists(dir: &str, env_vars: &HashMap<String, String>) 
     // The shell keeps POSIX-looking paths in PWD even on Windows.  Resolve
     // those paths before checking them, while allowing relative operands such
     // as `pushd .` and `pushd ..` against the process working directory.
+    // rubash#3788: the gate is the chdir verdict, not a bare existence
+    // probe — a directory without the search bit fails GNU's
+    // cd_builtin with EACCES, so it must not pass the gate.
     (!crate::executor::path::shell_root_configured(env_vars)
         && matches!(dir, "/" | "/bin" | "/etc" | "/tmp" | "/usr"))
-        || shell_path_to_windows(dir, env_vars).is_dir()
+        || {
+            let mapped = shell_path_to_windows(dir, env_vars);
+            mapped.is_dir() && crate::executor::path::directory_has_search_permission(&mapped)
+        }
 }
 
 /// The failure text for a directory operand `logical_dir_exists` rejected:
 /// GNU pushd.def routes the operand through cd_builtin, whose
 /// change_to_directory (cd.def) reports the chdir errno — a path that
 /// exists but is not a directory fails ENOTDIR ("Not a directory"), a
-/// missing path fails ENOENT ("No such file or directory"). Reporting
-/// ENOENT for both mislabels the regular-file case (rubash#1350).
+/// missing path fails ENOENT ("No such file or directory"), and a
+/// directory without the search bit fails EACCES ("Permission denied",
+/// rubash#3788). Reporting ENOENT for both mislabels the regular-file case (rubash#1350).
 pub(super) fn dir_operand_error_text(
     dir: &str,
     env_vars: &HashMap<String, String>,
 ) -> &'static str {
-    if shell_path_to_windows(dir, env_vars).exists() {
+    let mapped = shell_path_to_windows(dir, env_vars);
+    if mapped.is_dir() && !crate::executor::path::directory_has_search_permission(&mapped) {
+        "Permission denied"
+    } else if mapped.exists() {
         "Not a directory"
     } else {
         "No such file or directory"

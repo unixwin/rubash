@@ -323,6 +323,14 @@ impl Executor {
         // unset/empty PATH are exactly its arms.)
         if let Some(path_value) = self.shell_state.env_vars.get("PATH") {
             for dir in split_shell_path(path_value) {
+                // rubash#3826: GNU findcmd.c:544 — expand a `~`-leading
+                // PATH element at lookup time (unless POSIX mode), so
+                // `type -a` / `command -v -a` enumerate the expanded
+                // element.
+                let dir = crate::executor::path::expand_path_element_tilde(
+                    &dir,
+                    &self.shell_state.env_vars,
+                );
                 let candidate = shell_path_to_windows(&dir, &self.shell_state.env_vars).join(name);
                 // rubash#3147: the existence probe resolves against
                 // the SESSION cwd, exactly like the single-match walk
@@ -338,7 +346,13 @@ impl Executor {
                     candidate.clone(),
                     &self.shell_state.env_vars,
                 );
-                if anchored.is_file() {
+                // GNU type.def:381 describe_command: the -a enumeration
+                // uses user_command_matches (command, FS_EXEC_ONLY, ...)
+                // — only executable files are enumerated. The walk above
+                // is FS_EXEC_PREFERRED (correct for execution and the
+                // lenient faces), so the strict gate lives here, at the
+                // -a consumption point (rubash#3825).
+                if anchored.is_file() && crate::executor::path::is_executable_file(&anchored) {
                     paths.push(drop_exe_probe_suffix(
                         name,
                         shell_display_path(&candidate.to_string_lossy().replace('\\', "/")),
