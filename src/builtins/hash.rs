@@ -381,6 +381,22 @@ where
             crate::executor::path::remove_command_lookup_cache(name, env_vars);
             match crate::executor::path::find_user_command(name, env_vars) {
                 Some(path) => {
+                    // GNU hash.def:214-230 add_hashed_command: the lookup
+                    // result is stored only when executable_file
+                    // (full_path) holds (findcmd.c:214-223: FS_EXECABLE
+                    // and not a directory). The PATH walk is
+                    // FS_EXEC_PREFERRED, so a non-executable hit is the
+                    // file_to_lose_on fallback — correct for execution
+                    // (the exec then fails EACCES) and for the lenient
+                    // faces, but not for hashing: a non-executable file
+                    // is not stored and the builtin reports not found
+                    // (rubash#3825).
+                    if !crate::executor::path::is_executable_file(&path) {
+                        table.remove(name);
+                        diag.free(format_args!("{name}: not found"));
+                        status = EXECUTION_FAILURE;
+                        continue;
+                    }
                     // GNU hash.def:213-225 add_hashed_command:
                     // phash_insert(w, find_user_command(w), ...) stores the
                     // search's as-written join (`./mycmd` for a `.` PATH
