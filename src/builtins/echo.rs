@@ -400,8 +400,15 @@ mod tests {
         // value as-is (lib/sh/unicode.c:154 u32toutf8, no scalar
         // check): surrogates as 3-byte CESU-8, U+110000 as the 4-byte
         // form. The guard pins the shell locale for this thread only.
+        // The name must be one the C library actually activates:
+        // C.utf8 exists on glibc but not macOS (where en_US.UTF-8
+        // does), and locale_name_selects_utf8 probes real setlocale.
+        let utf8_locale = ["C.utf8", "C.UTF-8", "en_US.UTF-8", "en_US.utf8"]
+            .into_iter()
+            .find(|name| crate::locale::locale_name_selects_utf8(name))
+            .expect("a UTF-8 locale name must activate on CI platforms");
         let mut vars = std::collections::HashMap::new();
-        vars.insert("LC_ALL".to_string(), "C.utf8".to_string());
+        vars.insert("LC_ALL".to_string(), utf8_locale.to_string());
         let _guard = crate::locale::ShellLocaleGuard::new(&vars);
         assert_eq!(
             render_bytes(&["-e", "A\\ud83d\\ude00B"]),
@@ -409,10 +416,7 @@ mod tests {
         );
         assert_eq!(render_bytes(&["-e", "A\\ud800B"]), b"A\xed\xa0\x80B\n");
         assert_eq!(render_bytes(&["-e", "A\\udfffB"]), b"A\xed\xbf\xbfB\n");
-        assert_eq!(
-            render_bytes(&["-e", "A\\U0000D800B"]),
-            b"A\xed\xa0\x80B\n"
-        );
+        assert_eq!(render_bytes(&["-e", "A\\U0000D800B"]), b"A\xed\xa0\x80B\n");
         assert_eq!(
             render_bytes(&["-e", "A\\U00110000B"]),
             b"A\xf4\x90\x80\x80B\n"
