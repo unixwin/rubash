@@ -39,6 +39,13 @@ const FNM_WIDE: u32 = 1 << 8;
 /// resolve the symbol against the host image (GNU exports it from bash for
 /// the same purpose). Arguments follow the C order: pattern, string, flags.
 /// Returns 0 on match, FNM_NOMATCH (1) otherwise.
+///
+/// GNU's exported symbol is a thin wrapper over `xstrmatch` (strmatch.c:33-39),
+/// NOT over `internal_strmatch`: a loadable builtin therefore observes the
+/// same locale dispatch the shell's own matching does. Routing it to the
+/// single-byte compile made `strmatch("u/?.txt", "u/Ä.txt", FNM_PATHNAME)`
+/// answer 1 where GNU answers 0 (glob-bracket.tests canonicalizes through
+/// this call under a UTF-8 locale).
 #[no_mangle]
 pub unsafe extern "C" fn strmatch(
     pattern: *const c_char,
@@ -50,11 +57,76 @@ pub unsafe extern "C" fn strmatch(
     }
     let pattern = CStr::from_ptr(pattern).to_bytes();
     let string = CStr::from_ptr(string).to_bytes();
-    if strmatch_bytes(pattern, string, flags as u32) {
+    if xstrmatch(pattern, string, flags as u32) {
         0
     } else {
         FNM_NOMATCH
     }
+}
+
+/// smatch.c:585-603 `xstrmatch()`: the locale dispatch every caller goes
+/// through. `MB_CUR_MAX == 1` stays single-byte; otherwise a pattern and
+/// name that are both single-byte and whose bracket classes are all
+/// POSIX-defined still punt to the single-byte compile, and anything else
+/// is converted with `mbsrtowcs` and handed to `internal_wstrmatch`.
+/// rubash derives `MB_CUR_MAX > 1` from the shell's locale model
+/// (`is_multi_byte_active()`, the same predicate the expansion engines use);
+/// an unconvertible byte string falls back to the single-byte compile like
+/// xdupmbstowcs' `(size_t)-1`.
+pub(crate) fn xstrmatch(pattern: &[u8], string: &[u8], flags: u32) -> bool {
+    if !crate::locale::is_multi_byte_active() {
+        return strmatch_bytes(pattern, string, flags);
+    }
+    // mbsmbchar (lib/sh/utf8.c:49-58) looks for a continuation byte; a
+    // string without one holds no multibyte character.
+    let single_byte = |s: &[u8]| !s.iter().any(|&b| b & 0xc0 == 0x80);
+    if single_byte(string) && single_byte(pattern) && posix_cclass_only(pattern) {
+        return strmatch_bytes(pattern, string, flags);
+    }
+    let (Ok(pat), Ok(name)) = (std::str::from_utf8(pattern), std::str::from_utf8(string)) else {
+        return strmatch_bytes(pattern, string, flags);
+    };
+    let pat: Vec<char> = pat.chars().collect();
+    let name: Vec<char> = name.chars().collect();
+    strmatch_chars(&pat, &name, flags)
+}
+
+/// smatch.c:505-545 `posix_cclass_only()`: 1 when the pattern contains no
+/// `[:class:]` expression, or only POSIX-defined ones (the names
+/// `cclass_name[]` accepts). An unterminated `[:...]` ends the scan with 1;
+/// an unknown class name makes it 0 (the wide compile may know locale
+/// classes the single-byte compile does not).
+fn posix_cclass_only(pattern: &[u8]) -> bool {
+    const CCLASS_NAMES: [&[u8]; 14] = [
+        b"ascii", b"alnum", b"alpha", b"blank", b"cntrl", b"digit", b"graph", b"lower", b"print",
+        b"punct", b"space", b"upper", b"word", b"xdigit",
+    ];
+    let mut i = 0usize;
+    while let Some(off) = pattern[i..].iter().position(|&b| b == b'[') {
+        let p = i + off;
+        if pattern.get(p + 1) != Some(&b':') {
+            i = p + 1;
+            continue;
+        }
+        let mut j = p + 2;
+        let end = loop {
+            if j >= pattern.len() {
+                // No closing `:]`: C breaks out of the scan and returns 1.
+                return true;
+            }
+            if pattern[j] == b':' && pattern.get(j + 1) == Some(&b']') {
+                break j;
+            }
+            j += 1;
+        };
+        let name = &pattern[p + 2..end];
+        // `char cc[16]`: a longer name cannot be a valid POSIX class.
+        if name.len() >= 16 || !CCLASS_NAMES.contains(&name) {
+            return false;
+        }
+        i = end + 2;
+    }
+    true
 }
 
 /// `internal_strmatch` entry point (smatch.c FCT, single-byte compile):
@@ -962,4 +1034,23 @@ fn gmatch(pat: &[char], s: &[char], flags: u32) -> bool {
         return true;
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::posix_cclass_only;
+
+    /// smatch.c:505-545: no class expression, or only POSIX names, punts to
+    /// the single-byte compile; an unknown `[:name:]` keeps the wide compile.
+    #[test]
+    fn posix_cclass_only_matches_the_c_scan() {
+        assert!(posix_cclass_only(b"u/?.txt"));
+        assert!(posix_cclass_only(b"u/[[:alpha:]].txt"));
+        assert!(posix_cclass_only(b"[a-z]"));
+        assert!(posix_cclass_only(b"u/[[:unterminated.txt"));
+        // A bracket that is not a `[:class:]` is skipped by the scan.
+        assert!(posix_cclass_only(b"[[.a.]]"));
+        assert!(!posix_cclass_only(b"u/[[:bogus:]].txt"));
+        assert!(!posix_cclass_only(b"[[:alpha:]][[:bogus:]]"));
+    }
 }

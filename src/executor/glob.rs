@@ -1658,17 +1658,13 @@ fn ignore_pattern_matches(pattern: &str, word: &str, extglob: bool, nocase: bool
     if nocase {
         flags |= super::strmatch::FNM_CASEFOLD;
     }
-    // smatch.c:585-603 xstrmatch(): when the locale is multibyte and either
-    // the name or the pattern carries multibyte characters, GNU converts
-    // both to wide chars and runs internal_wstrmatch; otherwise it stays on
-    // the single-byte internal_strmatch. `!is_ascii()` is the &str
-    // equivalent of the mbsrtowcs "has multibyte" probe.
-    if crate::locale::is_multi_byte_active() && (!pattern.is_ascii() || !word.is_ascii()) {
-        let pat: Vec<char> = pattern.chars().collect();
-        let name: Vec<char> = word.chars().collect();
-        return super::strmatch::strmatch_chars(&pat, &name, flags);
-    }
-    super::strmatch::strmatch_bytes(pattern.as_bytes(), word.as_bytes(), flags)
+    // smatch.c:585-603 xstrmatch(): the one dispatch point for every
+    // matcher call. GNU's GLOBIGNORE path is `strmatch()` (pathexp.c:546),
+    // which calls xstrmatch, which stays on internal_strmatch unless the
+    // locale is multibyte and the data is not (a both-single-byte pattern
+    // with only POSIX classes). `xstrmatch` carries that decision, so the
+    // call site no longer re-derives it.
+    super::strmatch::xstrmatch(pattern.as_bytes(), word.as_bytes(), flags)
 }
 
 fn synthetic_dot_names(pattern: &str, globskipdots: bool) -> Vec<String> {

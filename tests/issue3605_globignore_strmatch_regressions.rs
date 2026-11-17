@@ -93,3 +93,105 @@ echo "p3: $(echo */*/efg*)"
     // match -> globbed.
     assert_eq!(run(script), "p1: ab/cd/efg\np2: ab/cd/efg\np3: ab/cd/efg\n");
 }
+
+// ---------------------------------------------------------------------------
+// The exported C ABI itself: glob-bracket.tests' strmatch.so calls the host
+// image's `strmatch()` from inside a loadable builtin. GNU's exported symbol
+// wraps `xstrmatch` (strmatch.c:33-39), so the loadable observes the same
+// locale dispatch as the shell: MB_CUR_MAX > 1 + multibyte data -> wide
+// compile. The fixture (tests/fixtures/dynamic_builtin/strmatch_probe.c)
+// prints GNU's 0/1 return value; expectations were recorded from GNU bash
+// 5.3.20 on WSL Linux under LC_ALL=C.UTF-8 and LC_ALL=C.
+// ---------------------------------------------------------------------------
+
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+fn strmatch_probe_object() -> &'static Path {
+    static OBJECT: OnceLock<PathBuf> = OnceLock::new();
+    OBJECT.get_or_init(|| {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/strmatch-probe-fixture");
+        std::fs::create_dir_all(&dir).expect("create fixture dir");
+        let source = dir.join("strmatch_probe.c");
+        std::fs::write(
+            &source,
+            include_str!("fixtures/dynamic_builtin/strmatch_probe.c"),
+        )
+        .expect("write fixture source");
+        let object = dir.join("strmatch_probe.so");
+        let compiler = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+        let status = Command::new(compiler)
+            .args(["-shared", "-fPIC", "-O0", "-o"])
+            .arg(&object)
+            .arg(&source)
+            .status()
+            .expect("run C compiler for the strmatch loadable fixture");
+        assert!(status.success(), "C fixture compile failed");
+        object
+    })
+}
+
+fn run_loadable(locale: &str) -> (String, String, Option<i32>) {
+    let object = strmatch_probe_object();
+    let dir = std::env::temp_dir().join(format!(
+        "rubash-issue3605-loadable-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&dir).expect("mkdir fixture");
+    let script_path = dir.join("probe.sh");
+    std::fs::write(
+        &script_path,
+        format!(
+            "enable -f {object} strmatch_probe\n\
+             echo u1=$(strmatch_probe 'u/?.txt' 'u/Ä.txt')\n\
+             echo u2=$(strmatch_probe 'u/??.txt' 'u/Ä.txt')\n\
+             echo e1=$(strmatch_probe 'ab@(/)cd/efg' 'ab/cd/efg' 33)\n\
+             echo e2=$(strmatch_probe '*@(/)cd/efg' 'ab/cd/efg' 33)\n\
+             echo b1=$(strmatch_probe 'u/[Ä].txt' 'u/Ä.txt')\n",
+            object = object.display()
+        ),
+    )
+    .expect("write probe script");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rubash"));
+    command
+        .arg(&script_path)
+        .current_dir(&dir)
+        .env("LC_ALL", locale)
+        .env_remove("LC_CTYPE")
+        .env_remove("LC_MESSAGES")
+        .env_remove("LANG")
+        .env_remove("BASH_ENV");
+    let output = command.output().expect("run rubash");
+    let _ = std::fs::remove_dir_all(&dir);
+    (
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+        output.status.code(),
+    )
+}
+
+/// A loadable builtin resolves `strmatch` against the shell image and the
+/// call follows xstrmatch: under UTF-8 `?` and `[Ä]` consume one character
+/// (0 = match); under C both stay byte-wise (1 = no match for a 2-byte Ä).
+#[test]
+fn exported_strmatch_dispatches_on_the_locale() {
+    let (stdout, stderr, code) = run_loadable("C.UTF-8");
+    assert_eq!(
+        stdout, "u1=strmatch=0\nu2=strmatch=1\ne1=strmatch=0\ne2=strmatch=1\nb1=strmatch=0\n",
+        "UTF-8 stderr: {stderr}"
+    );
+    assert_eq!(stderr, "");
+    assert_eq!(code, Some(0));
+
+    let (stdout, stderr, code) = run_loadable("C");
+    assert_eq!(
+        stdout, "u1=strmatch=1\nu2=strmatch=0\ne1=strmatch=0\ne2=strmatch=1\nb1=strmatch=1\n",
+        "C stderr: {stderr}"
+    );
+    assert_eq!(stderr, "");
+    assert_eq!(code, Some(0));
+}
