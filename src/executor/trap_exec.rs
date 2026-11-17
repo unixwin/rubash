@@ -4745,8 +4745,13 @@ impl Executor {
         if cfg!(unix) && self.exec_stdin_closed() {
             close_fds.push(0);
         }
+        // rubash#3286: the exec faces' Command is built inside
+        // builtins/exec.rs where stamp_spawn_cwd cannot reach — the
+        // cwd stamp rides the setup so external_exec_process replays
+        // the same three outcomes (path / anchor fchdir / unstamped).
+        let cwd_stamp = self.spawn_cwd_stamp();
         (
-            crate::executor::ChildFdSetup::new(env, delivery.pins, close_fds),
+            crate::executor::ChildFdSetup::new(env, delivery.pins, close_fds, cwd_stamp),
             delivery.parent_side_dups,
         )
     }
@@ -6372,15 +6377,10 @@ impl Executor {
                         };
                         self.flush_persistent_output_process_substitution(1)?;
                         match probed {
-                            Some(file) => self.set_fd_output_file_from_file(
-                                1,
-                                path.clone(),
-                                false,
-                                file,
-                            )?,
-                            None => {
-                                self.set_fd_output_file(1, path.clone(), false, false)?
+                            Some(file) => {
+                                self.set_fd_output_file_from_file(1, path.clone(), false, file)?
                             }
+                            None => self.set_fd_output_file(1, path.clone(), false, false)?,
                         }
                         self.flush_persistent_output_process_substitution(2)?;
                         self.share_fd_output_file(1, 2, &path, false);
@@ -6460,15 +6460,10 @@ impl Executor {
                     // substitution's deferred body (rubash#1336).
                     self.flush_persistent_output_process_substitution(fd)?;
                     match probed {
-                        Some(file) => self.set_fd_output_file_from_file(
-                            fd,
-                            target.clone(),
-                            fd >= 10,
-                            file,
-                        )?,
-                        None => {
-                            self.set_fd_output_file(fd, target.clone(), fd >= 10, append)?
+                        Some(file) => {
+                            self.set_fd_output_file_from_file(fd, target.clone(), fd >= 10, file)?
                         }
+                        None => self.set_fd_output_file(fd, target.clone(), fd >= 10, append)?,
                     }
                     if matches!(
                         redirect.kind,
@@ -6526,15 +6521,10 @@ impl Executor {
                         };
                         self.flush_persistent_output_process_substitution(1)?;
                         match probed {
-                            Some(file) => self.set_fd_output_file_from_file(
-                                1,
-                                path.clone(),
-                                false,
-                                file,
-                            )?,
-                            None => {
-                                self.set_fd_output_file(1, path.clone(), false, false)?
+                            Some(file) => {
+                                self.set_fd_output_file_from_file(1, path.clone(), false, file)?
                             }
+                            None => self.set_fd_output_file(1, path.clone(), false, false)?,
                         }
                         self.flush_persistent_output_process_substitution(2)?;
                         self.share_fd_output_file(1, 2, &path, false);
