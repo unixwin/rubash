@@ -631,6 +631,14 @@ fn copy_dollar_paren_substitution_cursor<'a>(out: &mut String, rest: &'a str) ->
     if !rest.starts_with('(') {
         return rest; // unreachable from the dispatcher; keeps parity
     }
+    if rest.as_bytes().get(1) == Some(&b'(') && super::skip::dollar_double_paren_is_arithmetic(rest)
+    {
+        // `$((` arithmetic expansion — see copy_dollar_paren_substitution.
+        out.push('(');
+        out.push('(');
+        let consumed = copy_arith_paren_body_cursor(out, &rest[2..]);
+        return &rest[2 + consumed..];
+    }
     out.push('(');
     copy_dollar_paren_body_raw_cursor(out, &rest[1..])
 }
@@ -1153,6 +1161,94 @@ fn copy_dollar_bracket_body_raw_cursor<'a>(
     }
 }
 
+/// `<<`/`<<-` here-document skip inside a `$(...)' body being copied
+/// verbatim — the same consumption `skip.rs`
+/// `skip_heredoc_in_command_substitution` performs for the span
+/// extractor, so the cooked span and the extracted span always agree on
+/// where the substitution closes (GNU parse.y:4451 parse_comsub gathers
+/// pending here-documents; make_cmd.c:602-627 reads the delimiter line).
+/// `rest` begins at the SECOND `<` of the operator. Returns the byte
+/// count consumed from `rest` — the caller copies that region verbatim —
+/// and whether a `)` on the header line closed the substitution, in
+/// which case the substitution span ends after the gathered body.
+fn comsub_heredoc_skip(rest: &str) -> (usize, bool) {
+    let mut lexer = super::scanner::Lexer::new(rest, false);
+    let closes = lexer.skip_heredoc_in_command_substitution();
+    (lexer.position, closes)
+}
+
+/// Cursor form of skip.rs `skip_arith_paren`: copy a `$((...))'
+/// arithmetic body through its closing `))' verbatim. `rest` begins just
+/// past the second `(' of the opener. Returns the bytes consumed.
+fn copy_arith_paren_body_cursor(out: &mut String, rest: &str) -> usize {
+    let mut depth = 0usize;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    let mut idx = 0usize;
+    while idx < rest.len() {
+        let ch = rest[idx..].chars().next().unwrap();
+        out.push(ch);
+        idx += ch.len_utf8();
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        match ch {
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '(' if !single && !double => depth += 1,
+            ')' if !single && !double && depth > 0 => depth -= 1,
+            ')' if !single && !double && rest[idx..].starts_with(')') => {
+                out.push(')');
+                idx += 1;
+                break;
+            }
+            _ => {}
+        }
+    }
+    idx
+}
+
+/// Char form of `copy_arith_paren_body_cursor` (chars just past the
+/// second `(' of a `$((` opener).
+fn copy_arith_paren_body_raw(
+    out: &mut String,
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+) {
+    let mut depth = 0usize;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    while let Some(ch) = chars.next() {
+        out.push(ch);
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        match ch {
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '(' if !single && !double => depth += 1,
+            ')' if !single && !double && depth > 0 => depth -= 1,
+            ')' if !single && !double && chars.peek() == Some(&')') => {
+                chars.next();
+                out.push(')');
+                break;
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Cursor form of `copy_dollar_paren_body_raw` (rest just past the `$(`).
 /// Every consumed byte is pushed verbatim; the case-depth tracker and the
 /// `rest` lookahead are transcribed unchanged (the lookahead now passes the
@@ -1239,32 +1335,46 @@ fn copy_dollar_paren_body_raw_cursor<'a>(out: &mut String, rest: &'a str) -> &'a
                 token_boundary = false;
             }
             '$' if rest.as_bytes().get(idx) == Some(&b'(') => {
-                idx += 1;
-                out.push('(');
-                depth += 1;
-                if case_depth > 0 {
-                    nested_case_subst += 1;
-                }
-                // rubash#3605: feed the skipped `(` to the case word
-                // machine — `(` ends a token, so `case` right after `$(`
-                // is a command-position keyword; otherwise `$(case` never
-                // armed the tracker and the pattern `)` closed the body
-                // one `)` early.
-                super::skip::update_command_substitution_case_depth(
-                    '(',
-                    false,
-                    false,
-                    &mut word,
-                    &mut case_depth,
-                    &mut word_boundary,
-                    &mut current_word_boundary,
-                    rest[idx..].chars().next(),
-                    &mut case_in_stage,
-                    &mut case_pattern_region,
-                    prev_sig,
-                );
-                if crate::lexer::skip::esac_prev_token_char('(') {
-                    prev_sig = Some('(');
+                if rest.as_bytes().get(idx + 1) == Some(&b'(')
+                    && super::skip::dollar_double_paren_is_arithmetic(&rest[idx..])
+                {
+                    // `$((` arithmetic expansion: copy through the closing
+                    // `))' verbatim (skip.rs skip_arith_paren's contract)
+                    // so a shift `<<` inside is never read as a
+                    // here-document operator (rubash#2930's guard).
+                    idx += 1;
+                    out.push('(');
+                    idx += 1;
+                    out.push('(');
+                    idx += copy_arith_paren_body_cursor(out, &rest[idx..]);
+                } else {
+                    idx += 1;
+                    out.push('(');
+                    depth += 1;
+                    if case_depth > 0 {
+                        nested_case_subst += 1;
+                    }
+                    // rubash#3605: feed the skipped `(` to the case word
+                    // machine — `(` ends a token, so `case` right after `$(`
+                    // is a command-position keyword; otherwise `$(case` never
+                    // armed the tracker and the pattern `)` closed the body
+                    // one `)` early.
+                    super::skip::update_command_substitution_case_depth(
+                        '(',
+                        false,
+                        false,
+                        &mut word,
+                        &mut case_depth,
+                        &mut word_boundary,
+                        &mut current_word_boundary,
+                        rest[idx..].chars().next(),
+                        &mut case_in_stage,
+                        &mut case_pattern_region,
+                        prev_sig,
+                    );
+                    if crate::lexer::skip::esac_prev_token_char('(') {
+                        prev_sig = Some('(');
+                    }
                 }
                 token_boundary = false;
             }
@@ -1286,6 +1396,21 @@ fn copy_dollar_paren_body_raw_cursor<'a>(out: &mut String, rest: &'a str) -> &'a
                 word.clear();
                 word_boundary = false;
                 token_boundary = false;
+            }
+            '<' if rest.as_bytes().get(idx) == Some(&b'<')
+                && rest.as_bytes().get(idx + 1) != Some(&b'<') =>
+            {
+                // `<<`/`<<-` here-document inside the substitution body:
+                // consume the gathered body with the same skip the span
+                // extractor uses so a `)` on a delimiter-prefixed line
+                // cannot close the copy early and drop the IFS_GLUE
+                // bookkeeping byte into quote removal (rubash#3817).
+                let (consumed, closes) = comsub_heredoc_skip(&rest[idx..]);
+                out.push_str(&rest[idx..idx + consumed]);
+                idx += consumed;
+                if closes {
+                    return &rest[idx..];
+                }
             }
             '(' if case_depth == 0 || nested_case_subst > 0 => {
                 depth += 1;
@@ -2548,9 +2673,26 @@ fn copy_dollar_paren_substitution(
     chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
 ) {
     out.push('$');
-    if chars.next() != Some('(') {
+    if chars.peek() != Some(&'(') {
+        chars.next();
         return;
     }
+    // `$((` arithmetic expansion (skip.rs skip_arith_paren's contract):
+    // copy through the closing `))' verbatim so a shift `<<` inside is
+    // never read as a here-document operator (rubash#2930's guard).
+    let mut probe = chars.clone();
+    probe.next();
+    if probe.next() == Some('(')
+        && super::skip::dollar_double_paren_is_arithmetic(&chars.clone().collect::<String>())
+    {
+        chars.next();
+        out.push('(');
+        chars.next();
+        out.push('(');
+        copy_arith_paren_body_raw(out, chars);
+        return;
+    }
+    chars.next();
     out.push('(');
     copy_dollar_paren_body_raw(out, chars);
 }
@@ -2909,32 +3051,47 @@ fn copy_dollar_paren_body_raw(
                 token_boundary = false;
             }
             '$' if chars.peek() == Some(&'(') => {
-                chars.next();
-                out.push('(');
-                depth += 1;
-                if case_depth > 0 {
-                    nested_case_subst += 1;
-                }
-                // rubash#3605: feed the skipped `(` to the case word
-                // machine — `(` ends a token, so `case` right after `$(`
-                // is a command-position keyword; otherwise `$(case` never
-                // armed the tracker and the pattern `)` closed the body
-                // one `)` early.
-                super::skip::update_command_substitution_case_depth(
-                    '(',
-                    false,
-                    false,
-                    &mut word,
-                    &mut case_depth,
-                    &mut word_boundary,
-                    &mut current_word_boundary,
-                    chars.peek().copied(),
-                    &mut case_in_stage,
-                    &mut case_pattern_region,
-                    prev_sig,
-                );
-                if crate::lexer::skip::esac_prev_token_char('(') {
-                    prev_sig = Some('(');
+                // `$((` arithmetic expansion — see the cursor form's arm.
+                let mut probe = chars.clone();
+                probe.next();
+                if probe.next() == Some('(')
+                    && super::skip::dollar_double_paren_is_arithmetic(
+                        &chars.clone().collect::<String>(),
+                    )
+                {
+                    chars.next();
+                    out.push('(');
+                    chars.next();
+                    out.push('(');
+                    copy_arith_paren_body_raw(out, chars);
+                } else {
+                    chars.next();
+                    out.push('(');
+                    depth += 1;
+                    if case_depth > 0 {
+                        nested_case_subst += 1;
+                    }
+                    // rubash#3605: feed the skipped `(` to the case word
+                    // machine — `(` ends a token, so `case` right after `$(`
+                    // is a command-position keyword; otherwise `$(case` never
+                    // armed the tracker and the pattern `)` closed the body
+                    // one `)` early.
+                    super::skip::update_command_substitution_case_depth(
+                        '(',
+                        false,
+                        false,
+                        &mut word,
+                        &mut case_depth,
+                        &mut word_boundary,
+                        &mut current_word_boundary,
+                        chars.peek().copied(),
+                        &mut case_in_stage,
+                        &mut case_pattern_region,
+                        prev_sig,
+                    );
+                    if crate::lexer::skip::esac_prev_token_char('(') {
+                        prev_sig = Some('(');
+                    }
                 }
                 token_boundary = false;
             }
@@ -2955,6 +3112,22 @@ fn copy_dollar_paren_body_raw(
                 word.clear();
                 word_boundary = false;
                 token_boundary = false;
+            }
+            '<' if chars.peek() == Some(&'<') => {
+                // `<<`/`<<-` here-document — see the cursor form's arm.
+                let mut probe = chars.clone();
+                probe.next();
+                if probe.next() != Some('<') {
+                    let remaining: String = chars.clone().collect();
+                    let (consumed, closes) = comsub_heredoc_skip(&remaining);
+                    out.push_str(&remaining[..consumed]);
+                    for _ in remaining[..consumed].chars() {
+                        chars.next();
+                    }
+                    if closes {
+                        break;
+                    }
+                }
             }
             '(' if case_depth == 0 || nested_case_subst > 0 => {
                 depth += 1;
