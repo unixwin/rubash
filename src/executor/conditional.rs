@@ -33,6 +33,8 @@ pub(crate) use extglob::extglob_case_pattern_matches;
 pub(in crate::executor) use extglob::extglob_case_pattern_matches_nocase;
 pub(in crate::executor) use extglob::extglob_case_pattern_matches_nocase_with_word_chars;
 pub(crate) use extglob::extglob_case_pattern_matches_with_word_chars;
+pub(in crate::executor) use extglob::extglob_group_end;
+pub(in crate::executor) use extglob::extglob_split_alternatives;
 pub(in crate::executor) use pattern::{
     case_bracket_expression_matches_with_case, case_pattern_matches, case_pattern_matches_nocase,
     case_pattern_matches_nocase_with_word_chars, case_pattern_matches_with_word_chars,
@@ -276,8 +278,13 @@ impl Executor {
                 let args = vec![op.to_string(), w];
                 self.sync_fd_terminal_marks(None);
                 i32::from(
-                    !(crate::builtins::test::execute(&args, false, &self.shell_state.env_vars)
-                        .unwrap_or(1)
+                    !(crate::builtins::test::execute(
+                        &args,
+                        false,
+                        &self.shell_state.env_vars,
+                        self.shell_state.positional_len(),
+                    )
+                    .unwrap_or(1)
                         == 0),
                 )
             }
@@ -291,8 +298,13 @@ impl Executor {
                 let args = vec![op.to_string(), w];
                 self.sync_fd_terminal_marks(None);
                 i32::from(
-                    !(crate::builtins::test::execute(&args, false, &self.shell_state.env_vars)
-                        .unwrap_or(1)
+                    !(crate::builtins::test::execute(
+                        &args,
+                        false,
+                        &self.shell_state.env_vars,
+                        self.shell_state.positional_len(),
+                    )
+                    .unwrap_or(1)
                         == 0),
                 )
             }
@@ -416,6 +428,22 @@ impl Executor {
     }
 
     fn expand_conditional_word(&mut self, word: &str) -> String {
+        // rubash#3605: GNU raises comsub_ignore_return around a flagged
+        // `[[ ]]`'s operand expansion (execute_cmd.c:4012, :4060,
+        // :4067 — `ignore` = the cond node's CMD_IGNORE_RETURN), so a
+        // `$( )` inside an exempt conditional stamps CMD_IGNORE_RETURN
+        // on its body commands (builtins/evalstring.c:496).
+        if self.suppress_errexit > 0 {
+            self.comsub_ignore_return += 1;
+        }
+        let result = self.expand_conditional_word_inner(word);
+        if self.comsub_ignore_return > 0 {
+            self.comsub_ignore_return -= 1;
+        }
+        result
+    }
+
+    fn expand_conditional_word_inner(&mut self, word: &str) -> String {
         // rubash#1422: an earlier operand already hit the DISCARD-class
         // error below; GNU abandons the conditional at the first bad
         // word, so later operands are never expanded at all.
@@ -956,7 +984,11 @@ impl Executor {
         let base = rewritten.split('[').next().unwrap_or(&rewritten);
         let overlaid_env = self.env_with_frame_arrays(&[base]);
         let env_vars = overlaid_env.as_ref().unwrap_or(&self.shell_state.env_vars);
-        Ok(crate::builtins::test::variable_is_set(&rewritten, env_vars))
+        Ok(crate::builtins::test::variable_is_set(
+            &rewritten,
+            env_vars,
+            self.shell_state.positional_len(),
+        ))
     }
 
     pub(super) fn conditional_string_unary(&mut self, op: &str, operand: &str) -> bool {
@@ -1043,7 +1075,14 @@ impl Executor {
             self.sync_fd_alias_facts_scoped(None, redirects.as_deref());
         }
         let args = vec![op.to_string(), value];
-        crate::builtins::test::execute(&args, false, &self.shell_state.env_vars).unwrap_or(1) == 0
+        crate::builtins::test::execute(
+            &args,
+            false,
+            &self.shell_state.env_vars,
+            self.shell_state.positional_len(),
+        )
+        .unwrap_or(1)
+            == 0
     }
 
     /// rubash#545 (cell 3): GNU realizes a `[[ ]]` process-substitution
@@ -1124,7 +1163,14 @@ impl Executor {
             self.sync_fd_alias_facts_scoped(None, redirects.as_deref());
         }
         let args = vec![left_exp, op.to_string(), right_exp];
-        crate::builtins::test::execute(&args, false, &self.shell_state.env_vars).unwrap_or(1) == 0
+        crate::builtins::test::execute(
+            &args,
+            false,
+            &self.shell_state.env_vars,
+            self.shell_state.positional_len(),
+        )
+        .unwrap_or(1)
+            == 0
     }
 
     pub(super) fn conditional_regex_match(&mut self, left: &str, right: &str) -> bool {
@@ -1407,6 +1453,13 @@ impl Executor {
         // differently (nested `?`, empty-minimum intervals): rewrite
         // to the nested form before compiling (rubash#1058).
         let pattern = translate_posix_ere_quantifiers(&pattern);
+        // Byte mode (rubash#3791): expand non-ASCII chars to their
+        // `\xHH` byte escapes — see expand_non_ascii_to_byte_escapes.
+        let pattern = if byte_mode {
+            Self::expand_non_ascii_to_byte_escapes(&pattern)
+        } else {
+            pattern
+        };
         // GNU regcomp is called WITHOUT REG_NEWLINE (lib/sh/shmatch.c
         // sh_regmatch), so `.` matches a newline (rubash#1058).
         // Granularity follows the locale model (rubash#1061): glibc
@@ -1428,6 +1481,66 @@ impl Executor {
                 .dot_matches_new_line(true)
                 .build()
                 .map(CompiledConditionalRegex::Text)
+        }
+    }
+
+    /// Byte-mode only (rubash#3791): glibc regcomp in the C locale
+    /// reads the pattern as bytes — a non-ASCII char inside a bracket
+    /// expression is the set of its UTF-8 bytes (`[é]` is {0xC3,
+    /// 0xA9}, `[é-ÿ]` is the byte range 0xA9-0xC3 plus 0xC3/0xBF;
+    /// lib/sh/shmatch.c:79-86 sh_regmatch regcomps with REG_EXTENDED
+    /// and no multibyte decoding). The regex crate in bytes mode
+    /// (unicode(false)) rejects every non-ASCII char inside a class
+    /// with "Unicode not allowed here", so expand each one to its
+    /// `\xHH` byte escapes before compiling: ranges then resolve on
+    /// bytes exactly as glibc resolves them, and a literal non-ASCII
+    /// char outside brackets keeps the byte-sequence meaning it
+    /// already had. A backslash before a non-ASCII char is dropped —
+    /// glibc reads `\` + byte as the literal byte, while the crate
+    /// rejects `\é` as an unrecognized escape. Runs after the bracket
+    /// translation (which doubles bare backslashes inside brackets,
+    /// so a `\` + non-ASCII pair can only be an outside-bracket
+    /// escape here) and after the quantifier rewrite (which copies
+    /// bracket spans verbatim). Raw-byte marker pairs (U+E000…)
+    /// expand the same way; pattern and subject stay in the same
+    /// marker encoding, so their consistency is preserved.
+    fn expand_non_ascii_to_byte_escapes(pattern: &str) -> String {
+        let chars: Vec<char> = pattern.chars().collect();
+        let mut out = String::with_capacity(pattern.len());
+        let mut index = 0usize;
+        while index < chars.len() {
+            let c = chars[index];
+            if c == '\\' && index + 1 < chars.len() {
+                let next = chars[index + 1];
+                if next == '\\' {
+                    out.push('\\');
+                    out.push('\\');
+                    index += 2;
+                    continue;
+                }
+                if !next.is_ascii() {
+                    Self::push_char_as_byte_escapes(&mut out, next);
+                    index += 2;
+                    continue;
+                }
+                out.push('\\');
+                index += 1;
+                continue;
+            }
+            if c.is_ascii() {
+                out.push(c);
+            } else {
+                Self::push_char_as_byte_escapes(&mut out, c);
+            }
+            index += 1;
+        }
+        out
+    }
+
+    fn push_char_as_byte_escapes(out: &mut String, c: char) {
+        let mut buf = [0u8; 4];
+        for byte in c.encode_utf8(&mut buf).as_bytes() {
+            out.push_str(&format!("\\x{byte:02X}"));
         }
     }
 

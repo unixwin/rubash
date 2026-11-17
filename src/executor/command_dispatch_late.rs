@@ -170,8 +170,13 @@ impl Executor {
         let overlaid_env = self.env_with_frame_arrays(&v_bases_ref);
         let env_vars = overlaid_env.as_ref().unwrap_or(&self.shell_state.env_vars);
         let mut stderr = Vec::new();
-        let status =
-            crate::builtins::test::execute_with_stderr(&merged, bracket, env_vars, &mut stderr)?;
+        let status = crate::builtins::test::execute_with_stderr(
+            &merged,
+            bracket,
+            env_vars,
+            self.shell_state.positional_len(),
+            &mut stderr,
+        )?;
         self.write_buffered_builtin_output(cmd, &[], &stderr)?;
         Ok(status)
     }
@@ -432,6 +437,15 @@ impl Executor {
                 }
             }
             Some(LateSlot::Arithmetic) => {
+                // rubash#3557: a literal `((` head word — quoted, the only
+                // way `((` survives parse as a plain word since the lexer
+                // folds unquoted `(( ... ))` into an arithmetic_command
+                // node — is a command name, not arithmetic syntax
+                // (parse.y:3667 read_token: `((` is read as ARITH_CMD only
+                // unquoted). GNU runs `((: command not found`.
+                if cmd.arithmetic_command.is_none() {
+                    return self.execute_external(cmd);
+                }
                 // rubash#846 (GNU execute_cmd.c:854-883): the `(( ))`
                 // command's OWN redirect failure — mark it for the `!` flip
                 // sites.

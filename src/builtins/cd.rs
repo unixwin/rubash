@@ -150,14 +150,68 @@ where
     // cdable_vars lookup reported the variable's VALUE, where GNU
     // reports the operand).
     let dirname_display = target.display.clone();
-    let target = match resolve_cdpath(&target, env_vars, cwd) {
-        Some(found) => found,
-        None => target,
-    };
-    let target = match resolve_cdable_vars(&target, env_vars, cwd) {
-        Some(found) => found,
-        None => target,
-    };
+    let (cdpath_found, cdpath_attempts) = resolve_cdpath(&target, env_vars, cwd);
+    let cdpath_hit = cdpath_found.is_some();
+    let target = cdpath_found.unwrap_or(target);
+    let cdable_found = resolve_cdable_vars(&target, env_vars, cwd);
+    let cdable_substituted = cdable_found.is_some();
+    let target = cdable_found.unwrap_or(target);
+
+    // rubash#3574: GNU builtins/cd.def:529-534 change_to_directory —
+    // when the_current_working_directory is NULL, the entry
+    // re-derives through get_working_directory ("chdir")
+    // (builtins/common.c:592-624): a failing getcwd prints
+    // `chdir: error retrieving current directory: ...` and the move
+    // proceeds; a succeeding one silently restores the cached value,
+    // which then bases make_absolute. The session's logical cache is
+    // poisoned exactly when logical_cwd is None
+    // (pwd_loop_builtins rubash#3349: a failed physical pwd
+    // resolution clears it, mirroring resetpwd cd.def:183-191).
+    // The session cwd field is this port's getcwd truth (G-02), so
+    // canonicalize is the gate. The entry fires once per
+    // change_to_directory call — the CDPATH candidates in order,
+    // then the plain operand, then the cdable_vars value (oracle:
+    // 1 failed CDPATH unit + hit = 2 lines; 2 failed units + plain
+    // fail = 3; cdable_vars success = plain + cdable_vars = 2) — so
+    // the count is the attempts the stages above performed or stand
+    // for. The early returns above (bad options, too many arguments,
+    // unset HOME/OLDPWD, null directory) never reach
+    // change_to_directory, so they owe no line (oracle p8/p9).
+    let entry_poisoned = logical_cwd.is_none();
+    if entry_poisoned {
+        // Attempts owed: the CDPATH candidates probed; a hit ends
+        // the sequence there (cd.def:371-388 returns after the
+        // successful candidate), otherwise the plain operand's
+        // attempt, plus the cdable_vars attempt when its value was
+        // substituted (cd.def:397-405 — reached only after the plain
+        // attempt failed).
+        let chdir_attempts = if cdpath_hit {
+            cdpath_attempts
+        } else {
+            cdpath_attempts + 1 + usize::from(cdable_substituted)
+        };
+        match cwd.canonicalize() {
+            Ok(physical) => {
+                // Re-derivation succeeded: GNU leaves
+                // the_current_working_directory set to the getcwd
+                // spelling (a directory recreated at the path after
+                // the poison), so restore the stored logical cwd —
+                // the make_absolute base below is the physical
+                // spelling, as in GNU.
+                *logical_cwd = Some(shell_pwd_display_path(&physical.to_string_lossy()));
+            }
+            Err(error) => {
+                for _ in 0..chdir_attempts {
+                    writeln!(
+                        stderr,
+                        "chdir: error retrieving current directory: getcwd: \
+                         cannot access parent directories: {}",
+                        crate::posix_errors::message(&error)
+                    )?;
+                }
+            }
+        }
+    }
 
     // OLDPWD records the RAW old $PWD variable (bindpwd, cd.def:136:
     // get_string_value("PWD") — a forged variable lands there verbatim),
@@ -266,12 +320,18 @@ where
     } else {
         cwd.join(&target.path)
     };
+    // rubash#3788: the probe is the chdir verdict itself — canonicalize
+    // + directory + the search-permission check on the target
+    // (executor::path::probe_directory_for_chdir). canonicalize and
+    // is_dir alone both succeed on a directory without the search bit
+    // (path resolution needs search permission only on the PARENT
+    // components), so the old probe reported success for a directory
+    // the shell could never enter and cd/pushd bound PWD/DIRSTACK to
+    // a move that never happened. GNU builtins/cd.def
+    // change_to_directory performs a real chdir and refuses with
+    // EACCES.
     let probe = |path: &Path| -> Result<PathBuf, io::Error> {
-        match crate::executor::path::canonicalize_native(path) {
-            Ok(path) if path.is_dir() => Ok(path),
-            Ok(_) => Err(not_a_directory_error()),
-            Err(error) => Err(error),
-        }
+        crate::executor::path::probe_directory_for_chdir(path)
     };
     // A completed move: the session cwd field's new physical value,
     // the value bindpwd binds into $PWD (and the new stored logical
@@ -302,7 +362,18 @@ where
                 return Ok(Move {
                     physical: cwd.clone(),
                     pwd_value: shell_pwd_display_path(&bind),
-                    stayed_deleted_dot: Some(cwd_error),
+                    // rubash#3574: in the poisoned state GNU's
+                    // make_absolute base is NULL, so the canon of a
+                    // dot-only operand cannot fail on a deleted
+                    // component and the verbatim chdir's resetpwd arm
+                    // (the `cd:` line this field owes) never runs —
+                    // the entry re-derivation's `chdir:` line above
+                    // is the only diagnostic (oracle p5/p12).
+                    stayed_deleted_dot: if entry_poisoned {
+                        None
+                    } else {
+                        Some(cwd_error)
+                    },
                 });
             }
         }
@@ -574,20 +645,6 @@ fn refresh_dirstack_top(
     save_stack(env_vars, &stack);
 }
 
-/// The error chdir would have reported for a target that exists but
-/// is not a directory (ENOTDIR / ERROR_DIRECTORY), in a form
-/// `posix_errors::message` renders as "Not a directory".
-fn not_a_directory_error() -> io::Error {
-    #[cfg(windows)]
-    {
-        io::Error::from_raw_os_error(267)
-    }
-    #[cfg(not(windows))]
-    {
-        io::Error::from_raw_os_error(20)
-    }
-}
-
 fn parse_options<W>(
     args: &[&str],
     env_vars: &HashMap<String, String>,
@@ -775,25 +832,37 @@ pub(crate) fn logical_destination_display_from(
     paths::logical_destination_display(&base, target)
 }
 
+/// The CDPATH resolution `cd_builtin` performs (builtins/cd.def:353-388):
+/// each colon-unit join is a `change_to_directory` candidate, tried
+/// in order until one moves (an empty unit is the cwd itself).
+///
+/// Returns the found target (if any) together with the number of
+/// candidates probed — the CDPATH leg of rubash#3574's per-attempt
+/// count: in the poisoned state every `change_to_directory` call
+/// re-derives through get_working_directory ("chdir") and prints one
+/// `chdir:` line, so each probed candidate (failed or found) owes one.
 fn resolve_cdpath(
     target: &Target,
     env_vars: &HashMap<String, String>,
     cwd: &Path,
-) -> Option<Target> {
+) -> (Option<Target>, usize) {
     if target
         .display
         .as_ref()
         .and_then(|path| path.to_str())
         .is_some_and(|path| path.starts_with('/'))
     {
-        return None;
+        return (None, 0);
     }
 
     if target.path.is_absolute() || starts_with_dot_component(&target.path) {
-        return None;
+        return (None, 0);
     }
 
-    let cdpath = shell_var(env_vars, "CDPATH")?;
+    let Some(cdpath) = shell_var(env_vars, "CDPATH") else {
+        return (None, 0);
+    };
+    let mut attempted = 0;
     for unit in cdpath.split(':') {
         let base = if unit.is_empty() { "." } else { unit };
         // rubash#3394: GNU tilde-expands each CDPATH element before
@@ -842,20 +911,32 @@ fn resolve_cdpath(
         } else {
             cwd.join(&candidate)
         };
-        if probed.is_dir() {
-            return Some(Target {
-                print: if unit.is_empty() {
-                    PrintPath::Never
-                } else {
-                    PrintPath::CdPath
-                },
-                display: Some(display),
-                path: candidate,
-            });
+        // rubash#3574: every candidate probed is a
+        // change_to_directory call in GNU (builtins/cd.def:360-371),
+        // and each owes one entry diagnostic while the cache is
+        // poisoned — count the failed ones as well as the hit.
+        attempted += 1;
+        // rubash#3788: the hit test is the chdir verdict, not a
+        // bare existence probe — a candidate without the search bit
+        // fails GNU's change_to_directory with EACCES, so cd.def's
+        // loop moves on to the next unit instead of taking it.
+        if crate::executor::path::probe_directory_for_chdir(&probed).is_ok() {
+            return (
+                Some(Target {
+                    print: if unit.is_empty() {
+                        PrintPath::Never
+                    } else {
+                        PrintPath::CdPath
+                    },
+                    display: Some(display),
+                    path: candidate,
+                }),
+                attempted,
+            );
         }
     }
 
-    None
+    (None, attempted)
 }
 
 /// The directory-search resolution `pushd` inherits from `cd_builtin`:
@@ -890,7 +971,7 @@ pub(crate) fn resolve_search_operand(
         display: Some(PathBuf::from(operand)),
         print: PrintPath::Never,
     };
-    if let Some(found) = resolve_cdpath(&target, env_vars, cwd) {
+    if let (Some(found), _) = resolve_cdpath(&target, env_vars, cwd) {
         return Some(SearchResolution::CdPath {
             candidate: found
                 .display
@@ -924,7 +1005,20 @@ fn resolve_cdable_vars(
     } else {
         cwd.join(&target.path)
     };
-    if here.is_dir() || !crate::builtins::shopt::cdable_vars_enabled(env_vars) {
+    // rubash#3788: GNU tries the cdable_vars value only when the
+    // plain operand's change_to_directory FAILED (builtins/cd.def
+    // LCD_DOVARS, cd.def:397-405). A directory without the search bit
+    // fails that chdir with EACCES, so it must NOT block the variable
+    // step the way a chdir-able directory does — the guard is "the
+    // operand names a directory the shell could enter", not a bare
+    // existence probe. The deleted-cwd dot-only shape keeps its old
+    // verdict: is_dir still holds on the deleted inode and its search
+    // bit still reads, so GNU's verbatim-chdir success there still
+    // skips the variable step.
+    if (here.is_dir()
+        && crate::executor::path::directory_has_search_permission(&here))
+        || !crate::builtins::shopt::cdable_vars_enabled(env_vars)
+    {
         return None;
     }
 

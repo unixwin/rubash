@@ -29,7 +29,7 @@ use std::process::{Command, Stdio};
 #[derive(Debug)]
 struct RunOutcome {
     stdout: String,
-    stderr: String,
+    _stderr: String,
     code: Option<i32>,
 }
 
@@ -42,7 +42,7 @@ fn rubash_c(script: &str) -> RunOutcome {
         .expect("run rubash -c");
     RunOutcome {
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        _stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         code: output.status.code(),
     }
 }

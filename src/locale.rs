@@ -256,9 +256,61 @@ pub fn locale_name_selects_utf8(name: &str) -> bool {
         return false;
     }
     if !is_utf8_locale_name(name) {
+        // locale.c set_locale_var is STATEFUL: a setlocale() failure
+        // leaves the previously effective locale in force — an
+        // un-activatable non-UTF-8 name (zh_TW.big5 on a box without
+        // the big5 archive) does NOT switch semantics to bytes; the
+        // still-effective locale decides ($'\u3b1' still decodes to
+        // α under a surviving UTF-8 locale — glob2.sub). Only a name
+        // the C library actually activates imposes its own charset.
+        if !locale_activatable(name) {
+            return effective_locale_selects_utf8();
+        }
         return false;
     }
-    utf8_locale_active(name)
+    // Same stateful fallback for an un-activatable UTF-8 name:
+    // setlocale() failing keeps the previous locale, which may itself
+    // be UTF-8 — only then does UTF-8 stay selected.
+    utf8_locale_active(name) || effective_locale_selects_utf8()
+}
+
+/// Whether the C library can activate `name` at all. Same probe as
+/// `utf8_locale_active`'s setlocale attempt, generalized past the
+/// UTF-8-name callers: setlocale returns NULL for a name with no
+/// compiled archive, and the previous locale survives — the fact this
+/// predicate exists to expose.
+#[cfg(unix)]
+fn locale_activatable(name: &str) -> bool {
+    probe_utf8_locale(name)
+}
+
+#[cfg(not(unix))]
+fn locale_activatable(_name: &str) -> bool {
+    // The Windows CRT has no compiled locale archive to reject a name
+    // (see utf8_locale_active).
+    true
+}
+
+/// The charset of the locale the C library currently has in force —
+/// what a failed setlocale attempt leaves behind (nl_langinfo CODESET).
+/// Android's libc crate exposes neither nl_langinfo nor CODESET, so it
+/// keeps the requested-name model like the non-Unix fallback.
+#[cfg(all(unix, not(target_os = "android")))]
+fn effective_locale_selects_utf8() -> bool {
+    unsafe {
+        let codeset = libc::nl_langinfo(libc::CODESET);
+        if codeset.is_null() {
+            return false;
+        }
+        std::ffi::CStr::from_ptr(codeset).to_string_lossy() == "UTF-8"
+    }
+}
+
+#[cfg(any(not(unix), target_os = "android"))]
+fn effective_locale_selects_utf8() -> bool {
+    // Windows keeps the requested-name model (utf8_locale_active);
+    // Android has no nl_langinfo binding in the libc crate.
+    false
 }
 
 /// GNU/MBCS view of the same decision: multibyte mode is on when

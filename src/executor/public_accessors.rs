@@ -147,6 +147,9 @@ impl Executor {
             // string; the reader's status words are restored below either
             // way (rubash#604 probes).
             let bad_sub_before = self.shell_state.parameter_bad_substitution.replace(false);
+            // rubash#3499: the print budget rides with the verdict (see
+            // expand_embedded_parameters_double_quoted).
+            let bad_sub_reported_before = self.shell_state.bad_substitution_reported.replace(false);
             let arith_err_before = self.shell_state.arithmetic_expansion_error.replace(false);
             let arith_fatal_before = self.shell_state.arithmetic_fatal_error.replace(false);
             let arith_nonfatal_before = self.shell_state.arithmetic_nonfatal_error.replace(false);
@@ -170,6 +173,10 @@ impl Executor {
                     .shell_state
                     .arithmetic_nonfatal_error
                     .replace(arith_nonfatal_before);
+            // rubash#3499: restore the print budget with the verdict.
+            self.shell_state
+                .bad_substitution_reported
+                .set(bad_sub_reported_before);
             if failed {
                 decoded
             } else {

@@ -51,7 +51,7 @@ impl Executor {
         // GNU subst.c:9362-9367 parameter_brace_patsub: an unset parameter
         // word returns NULL before getpattern, so neither the pattern nor
         // the replacement is expanded (rubash#3501).
-        if self.pattern_word_is_silent(var_name, false) {
+        if self.pattern_word_is_silent(var_name, false, false) {
             return Some(String::new());
         }
         // GNU subst.c match_upattern applies FNMATCH_IGNCASE when nocasematch

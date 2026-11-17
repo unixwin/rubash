@@ -995,6 +995,21 @@ impl Executor {
         env_vars.remove(super::compound_exec::POSITIONAL_PARAMS_TRANSPORT);
         mirror_env_remove(super::compound_exec::POSITIONAL_PARAMS_TRANSPORT);
 
+        // rubash#3605: the fork-shaped children that execute the
+        // parent's flagged command node (the async `&` wrapper and
+        // the coproc respawn — execute_cmd.c:1576/:2546 through
+        // execute_in_subshell) stamp the live CMD_IGNORE_RETURN
+        // depth under SUPPRESS_ERREXIT_TRANSPORT; seed it only for
+        // internal respawns and strip it either way so it never
+        // surfaces as a shell variable. A nonzero seed suppresses
+        // `set -e` inside the body, matching GNU's node-flag model —
+        // exec16's `! coproc C { set -e; false; echo reached coproc
+        // body; }`.
+        let respawn_suppress_errexit = internal_respawn
+            && env_vars.contains_key(super::compound_exec::SUPPRESS_ERREXIT_TRANSPORT);
+        env_vars.remove(super::compound_exec::SUPPRESS_ERREXIT_TRANSPORT);
+        mirror_env_remove(super::compound_exec::SUPPRESS_ERREXIT_TRANSPORT);
+
         // rubash#2058: the fork-context stamp (see
         // Executor::fork_context_transport_entries) — the parent's
         // effective call-stack views, its PIPESTATUS cell, and the
@@ -1317,6 +1332,7 @@ impl Executor {
                 reader_unit_source: std::cell::RefCell::new(None),
                 in_command_substitution: Cell::new(false),
                 stdin_redir: Cell::new(false),
+                element_pipe_stdin: Cell::new(false),
                 xtrace_indirection_level: Cell::new(0),
                 xtrace_suspended: Cell::new(0),
                 job_table: crate::jobs::table::JobTable::default(),
@@ -1340,6 +1356,7 @@ impl Executor {
                 conditional_nounset_error: Cell::new(false),
                 arithmetic_last_error_category: Cell::new(None),
                 parameter_bad_substitution: Cell::new(false),
+                bad_substitution_reported: Cell::new(false),
                 redirect_failglob_error: Cell::new(false),
                 redirect_failglob_seen: Cell::new(false),
                 debug_trap_command: std::cell::RefCell::new(None),
@@ -1404,7 +1421,8 @@ impl Executor {
             conditional_output_procsubs: Vec::new(),
             current_conditional_redirects: None,
             pending_scalar_assignment: false,
-            suppress_errexit: 0,
+            suppress_errexit: if respawn_suppress_errexit { 1 } else { 0 },
+            comsub_ignore_return: 0,
             errexit_ignore_frame: 0,
             parse_and_execute_frames: Vec::new(),
             command_builtin_depth: 0,
@@ -1434,9 +1452,11 @@ impl Executor {
             // rubash#1175: a process root IS its process's shell; the
             // image-replacement gates live at the exec dispatcher.
             owns_process_image: true,
+            emulated_child_depth: std::cell::Cell::new(0),
             source_nest_depth: 0,
             sigchld_notifications_pending: std::cell::Cell::new(0),
             pending_signal_notices: std::cell::RefCell::new(Vec::new()),
+            wait_notice_pids: Vec::new(),
             host_internal_depth: std::cell::Cell::new(0),
             debug_trap_function_line: None,
             arithmetic_last_error_expression: std::cell::RefCell::new(String::new()),
@@ -1507,6 +1527,7 @@ impl Executor {
             pipeline_final_stage: std::cell::Cell::new(false),
             pipeline_stage_pre_traced: std::cell::Cell::new(false),
             pipeline_stage_restricted_refused: std::cell::Cell::new(false),
+            pipeline_stage_bad_substitution_discarded: std::cell::Cell::new(false),
             last_heredoc_warning_source: RefCell::new(None),
             heredoc_admission_declined_source: RefCell::new(None),
             comsub_leading_newlines: Cell::new(0),
@@ -1638,15 +1659,31 @@ impl Executor {
                 },
                 None => None,
             };
-            if let Some(rc) = read_rc {
-                executor
-                    .fd_table
-                    .open_input(fd, FdReadEndpoint::File(rc), false);
-            }
-            if let Some(rc) = write_rc {
-                executor
-                    .fd_table
-                    .open_output(fd, FdWriteEndpoint::File(rc), false);
+            // rubash#3655: when both arms restore, they are ONE
+            // description — a single open_readwrite install, or the
+            // output restore would retire the read arm (dup2
+            // wholesale). Either arm alone keeps its
+            // single-direction install.
+            match (read_rc, write_rc) {
+                (Some(read), Some(write)) => {
+                    executor.fd_table.open_readwrite(
+                        fd,
+                        FdReadEndpoint::File(read),
+                        FdWriteEndpoint::File(write),
+                        false,
+                    );
+                }
+                (Some(rc), None) => {
+                    executor
+                        .fd_table
+                        .open_input(fd, FdReadEndpoint::File(rc), false);
+                }
+                (None, Some(rc)) => {
+                    executor
+                        .fd_table
+                        .open_output(fd, FdWriteEndpoint::File(rc), false);
+                }
+                (None, None) => {}
             }
         }
         // rubash#1557: adopt whatever descriptors the process itself
