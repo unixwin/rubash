@@ -2212,6 +2212,32 @@ impl Executor {
     /// fetch). In pure (pipeline-admission) mode no span is ever
     /// evaluated: an undecidable span is provisional.
     fn scan_question_is_error(&self, name: &str, require_non_empty: bool) -> QuestionOutcome {
+        // GNU subst.c:10060-10076: a `!`-indirect source is resolved FIRST —
+        // parameter_brace_expand_indir -> parameter_brace_find_indir
+        // (subst.c:7839-7881) turns `!src` into the VALUE of src (t), and
+        // parameter_brace_expand_word(t) (subst.c:7907) then produces the
+        // value the operator tests. The `?`/`:?` verdict therefore keys on
+        // the resolved target, not on the raw `!src` name: with
+        // `u=x; x=hello`, `${!u?v}` is set and expands to `hello`, while an
+        // unset x leaves temp NULL and the SAME report still names the
+        // original expression (`!u: v`, subst.c:10412
+        // parameter_brace_expand_error). `indirect_parameter_operator_value`
+        // is that two-step resolution (it already answers the `-`/`+`/`=`
+        // family); an unresolvable source yields no temp, i.e. unset.
+        if let Some(body) = self.indirect_parameter_body(name) {
+            if !body.is_empty() {
+                return match self.indirect_parameter_operator_value(name) {
+                    Some(Some(value)) => {
+                        if require_non_empty && value.is_empty() {
+                            QuestionOutcome::Error
+                        } else {
+                            QuestionOutcome::NoError
+                        }
+                    }
+                    Some(None) | None => QuestionOutcome::Error,
+                };
+            }
+        }
         // A negative-literal subscript can carry the fetch's own `bad
         // array subscript` diagnostic (GNU arrayfunc.c:1582-1583
         // INDEX_ERROR), which the pure probe cannot reproduce — let the

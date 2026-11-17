@@ -306,3 +306,52 @@ fn posix_question_is_bang_parameter() {
     );
     assert_eq!(out.code, 127, "stderr {err:?}");
 }
+
+/// GNU subst.c:10060-10076: a `?`/`:?` tail on a `!`-indirect source is
+/// judged on the RESOLVED target, not on the `!src` spelling —
+/// `parameter_brace_expand_indir` -> `parameter_brace_find_indir`
+/// (subst.c:7839-7881) produces t, and `parameter_brace_expand_word(t)`
+/// (subst.c:7907) produces the value the operator tests. Named, digit and
+/// special sources all take this path when the target is set / non-null.
+#[test]
+fn question_tail_judges_the_resolved_target() {
+    for (script, want) in [
+        ("u=x; x=hello; echo \"${!u?v}\"", "hello\n"),
+        ("u=x; x=hello; echo \"${!u:?v}\"", "hello\n"),
+        ("set -- a b c; b=ok; echo \"${!2?v}\"", "ok\n"),
+        ("set -- a b c; echo \"${!#?v}\"", "c\n"),
+        ("set -- a b c; echo \"${!#:?v}\"", "c\n"),
+        ("u=x; x=; echo \"a${!u?v}b\"", "ab\n"),
+    ] {
+        let out = run(script);
+        assert_eq!(
+            out.stdout,
+            want.as_bytes(),
+            "{script} stderr: {:?}",
+            stderr_text(&out)
+        );
+        assert_eq!(out.code, 0, "{script} stderr: {:?}", stderr_text(&out));
+    }
+}
+
+/// The same resolution decides the fatal arms: an unset target (or a null
+/// target under `:?`) reports the ORIGINAL expression name (`!u: v`,
+/// subst.c:10412 parameter_brace_expand_error) and aborts the
+/// non-interactive shell before the echo runs.
+#[test]
+fn question_tail_fatals_on_unset_target_naming_the_source() {
+    for (script, want_stdout) in [
+        ("u=x; unset x; echo before; echo \"${!u?v}\"", "before\n"),
+        ("u=x; unset x; echo \"${!u:?msg}\"", ""),
+        ("u=x; x=; echo \"${!u:?v}\"", ""),
+    ] {
+        let out = run(script);
+        assert_eq!(out.stdout, want_stdout.as_bytes(), "{script}");
+        assert_eq!(out.code, 127, "{script} stderr: {:?}", stderr_text(&out));
+        let err = stderr_text(&out);
+        assert!(
+            err.contains("!u:"),
+            "{script} wanted a !u diagnostic; got {err:?}"
+        );
+    }
+}
