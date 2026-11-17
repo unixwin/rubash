@@ -32,7 +32,8 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new(tag: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("rubash-3824-{tag}-{pid}", pid = std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("rubash-3824-{tag}-{pid}", pid = std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("create scratch dir");
         Scratch(dir)
@@ -75,10 +76,12 @@ fn issue3824_hash_t_prints_empty_path_for_empty_p_entry() {
 #[test]
 fn issue3824_running_empty_p_entry_is_no_such_file_rc127() {
     let scratch = Scratch::new("run");
-    let (stdout, stderr, code) =
-        scratch.rubash_file("hash -p '' ghost\nghost; echo rc=$?\n");
+    let (stdout, stderr, code) = scratch.rubash_file("hash -p '' ghost\nghost; echo rc=$?\n");
     assert_eq!(stdout, "rc=127\n");
-    assert!(stderr.contains(": No such file or directory"), "stderr: {stderr}");
+    assert!(
+        stderr.contains(": No such file or directory"),
+        "stderr: {stderr}"
+    );
     assert_eq!(code, Some(0));
 }
 
@@ -103,22 +106,34 @@ fn issue3824_hash_table_lists_empty_path_for_empty_p_entry() {
 #[test]
 fn issue3824_hash_p_dot_is_rejected_as_directory() {
     let scratch = Scratch::new("dot");
-    let (stdout, stderr, code) = scratch
-        .rubash_file("hash -p . ghost; echo rc=$?\nhash -t ghost; echo rc2=$?\n");
+    let (stdout, stderr, code) =
+        scratch.rubash_file("hash -p . ghost; echo rc=$?\nhash -t ghost; echo rc2=$?\n");
     assert_eq!(stdout, "rc=1\nrc2=1\n");
-    assert!(stderr.contains("hash: .: Is a directory"), "stderr: {stderr}");
-    assert!(stderr.contains("hash: ghost: not found"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("hash: .: Is a directory"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("hash: ghost: not found"),
+        "stderr: {stderr}"
+    );
     assert_eq!(code, Some(0));
 }
 
 #[test]
 fn issue3824_hash_p_slash_is_rejected_as_directory() {
     let scratch = Scratch::new("slash");
-    let (stdout, stderr, code) = scratch
-        .rubash_file("hash -p / ghost; echo rc=$?\nhash -t ghost; echo rc2=$?\n");
+    let (stdout, stderr, code) =
+        scratch.rubash_file("hash -p / ghost; echo rc=$?\nhash -t ghost; echo rc2=$?\n");
     assert_eq!(stdout, "rc=1\nrc2=1\n");
-    assert!(stderr.contains("hash: /: Is a directory"), "stderr: {stderr}");
-    assert!(stderr.contains("hash: ghost: not found"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("hash: /: Is a directory"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("hash: ghost: not found"),
+        "stderr: {stderr}"
+    );
     assert_eq!(code, Some(0));
 }
 
@@ -128,15 +143,18 @@ fn issue3824_running_rejected_dot_entry_is_command_not_found() {
     let (stdout, stderr, code) =
         scratch.rubash_file("hash -p . ghost 2>/dev/null\nghost; echo rc=$?\n");
     assert_eq!(stdout, "rc=127\n");
-    assert!(stderr.contains("ghost: command not found"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("ghost: command not found"),
+        "stderr: {stderr}"
+    );
     assert_eq!(code, Some(0));
 }
 
 #[test]
 fn issue3824_hash_t_prints_empty_path_after_double_empty_p() {
     let scratch = Scratch::new("twice");
-    let (stdout, stderr, code) = scratch
-        .rubash_file("hash -p '' ghost\nhash -p '' ghost\nhash -t ghost\n");
+    let (stdout, stderr, code) =
+        scratch.rubash_file("hash -p '' ghost\nhash -p '' ghost\nhash -t ghost\n");
     assert_eq!(stdout, "\n");
     assert_eq!(stderr, "");
     assert_eq!(code, Some(0));
