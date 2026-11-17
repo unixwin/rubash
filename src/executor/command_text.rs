@@ -134,7 +134,8 @@ pub(in crate::executor) fn append_function_redirect(
     if redirect.fd_var.is_none() {
         line.push(' ');
     }
-    let target = redirect.target.as_str();
+    let target = redirect_target_source_text(redirect);
+    let target = target.as_str();
     if target.starts_with('&') {
         // Bash keeps fd duplication operators adjacent to their raw token.
         if redirect.fd.is_none()
@@ -654,6 +655,25 @@ fn command_word_source_text(index: usize, word: &str, metadata: &[WordMetadata])
     // serialization in GNU (parse.y:4632), not the raw source text
     // (rubash#274).
     super::print_comsub::canonicalize_comsub_spans(&text)
+}
+
+/// The SOURCE spelling a respawned child must re-lex for a redirect
+/// target. GNU never re-lexes (a fork-shaped child carries the AST), so
+/// every text rubash re-renders has to be source text: the word's raw
+/// source slice when the parser kept one (the `command_word_source_text`
+/// rule), otherwise the cooked target decoded out of transport — CTLESC
+/// pairs to their data characters, the DATA_* quote carriers to what
+/// they denote and the `$name` terminator PARAM_NAME_END_MARKER to
+/// nothing (the `heredoc_delimiter_text` chain, rubash#1151). Shipping
+/// the transport carriers made a respawned background child re-tag the
+/// `\023` terminator of `>> "$V"` as literal data (rubash#3816), so the
+/// open(2) landed on `/tmp/x\023` and the redirect silently missed.
+pub(in crate::executor) fn redirect_target_source_text(redirect: &Redirect) -> String {
+    // The cooked target is what GNU print_cmd prints (the dequoted word:
+    // `declare -p X > "$OUT/f"` renders as `> $OUT/f`), so the source
+    // spelling is NOT the raw slice here; only the engine carriers have
+    // to come back out for the child's re-lex.
+    super::markers::decode_transport_word_text(&redirect.target)
 }
 
 fn compound_assignment_source_text(assignment: &crate::parser::CompoundAssignment) -> String {

@@ -15,10 +15,7 @@ use crate::lexer::{Token, TokenKind};
 /// alone leaked the \023 name terminator into the warning text
 /// (rubash#1151, the same marker-leak family as #1029/#1060).
 pub(crate) fn heredoc_delimiter_text(value: &str) -> String {
-    let decoded = crate::executor::markers::decode_word_position_carriers(value);
-    let decoded = crate::executor::markers::dequote_ctlesc_pairs(&decoded);
-    let decoded = decoded.replace(crate::executor::markers::PARAM_NAME_END_MARKER, "");
-    crate::executor::markers::strip_ansi_c_ifs_guard(&decoded)
+    crate::executor::markers::decode_transport_word_text(value)
 }
 
 pub(super) fn collect_trailing_redirections(
