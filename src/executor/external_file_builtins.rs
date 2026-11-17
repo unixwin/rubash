@@ -134,13 +134,18 @@ impl Executor {
         // single do_redirections open succeeds (redir.c:237). Skip the
         // walk unless an arm will emulate — the literal-file gates
         // inside the pwd/printf arms decline to the real exec path
-        // the same way a non-listed name does.
+        // the same way a non-listed name does. The retained variant
+        // carries the probe's FileFd to the emulation arm's bind so the
+        // entry still opens exactly once (h2).
         let literal_file_declines =
             matches!(
                 name,
                 "/bin/pwd" | "/usr/bin/pwd" | "/bin/printf" | "/usr/bin/printf"
             ) && crate::executor::path::literal_executable_file(name, &self.shell_state.env_vars);
-        if emulated && !literal_file_declines && self.apply_redirect_setup_side_effects(cmd)? {
+        if emulated
+            && !literal_file_declines
+            && self.apply_redirect_setup_side_effects_retained(cmd)?
+        {
             self.record_emulated_command_resolution(name, emulated);
             return Ok(true);
         }

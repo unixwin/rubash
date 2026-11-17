@@ -2667,18 +2667,36 @@ impl Executor {
         target: &str,
         clobber: bool,
     ) -> io::Result<File> {
+        match self.create_redirect_output_prepared_open_for(redirect, target, clobber)? {
+            Some(file) => Ok(file),
+            // The carve-out stand-ins are all inert — every caller of
+            // this wrapper drops the File — so one platform null file
+            // serves them all.
+            None => Self::inert_prepared_stand_in(),
+        }
+    }
+
+    /// rubash#3828: the retained twin of
+    /// [`Self::create_redirect_output_prepared_for`] — same carve-outs
+    /// and the same single create, but answers `Some(File)` with the
+    /// REAL opened file so a prepare-phase caller can carry it into
+    /// the bind walk (`pending_preopened_redirects`) instead of the
+    /// bind re-opening the path. `None` marks the net/FIFO carve-outs,
+    /// whose bind performs GNU's single open itself.
+    pub(in crate::executor) fn create_redirect_output_prepared_open_for(
+        &self,
+        redirect: Option<&crate::parser::Redirect>,
+        target: &str,
+        clobber: bool,
+    ) -> io::Result<Option<File>> {
         // rubash#1967: on a net target the prepare phase's connect is
         // the same phantom as the FIFO's prepare open below — dropped
         // unused while the bind phase connects again. Validate by
-        // resolution; the bind performs GNU's single open. Every
-        // caller drops the returned File, so the stand-in is inert.
+        // resolution; the bind performs GNU's single open.
         if crate::special_paths::is_net_redirect_target(target) {
             self.validate_net_redirect_target(target)
                 .map_err(|e| crate::posix_errors::path_error(target, e))?;
-            return File::open(shell_path_to_windows(
-                "/dev/null",
-                &self.shell_state.env_vars,
-            ));
+            return Ok(None);
         }
         // rubash#1820: on a FIFO the prepare phase's create is a
         // semantic no-op (O_TRUNC/O_CREAT do nothing to a fifo) whose
@@ -2686,10 +2704,9 @@ impl Executor {
         // (open_compound_output_redirects) then waits for in vain.
         // Skip the physical open — the bind performs GNU's single
         // open — after the same write-access validation the create's
-        // failure would have surfaced. Every caller drops the returned
-        // File, so the null-device stand-in is inert. rubash#1903: a
-        // WinuxCmd marker is a FIFO for this rule on Windows, with the
-        // marker probe standing in for access(2).
+        // failure would have surfaced. rubash#1903: a WinuxCmd marker
+        // is a FIFO for this rule on Windows, with the marker probe
+        // standing in for access(2).
         #[cfg(any(unix, windows))]
         {
             let path = self.session_path(shell_path_to_windows(
@@ -2700,26 +2717,19 @@ impl Executor {
                 if let Some(error) = redirect_fifo_access_error(&path, true) {
                     return Err(crate::posix_errors::path_error(target, error));
                 }
-                #[cfg(windows)]
-                {
-                    return File::open("NUL");
-                }
-                #[cfg(not(windows))]
-                {
-                    return File::open("/dev/null");
-                }
+                return Ok(None);
             }
         }
         // rubash#3286: the joined-path FIFO check above misses
         // from a deleted cwd (the joined spelling is dead by
         // construction) — the anchor faccessat stands in for the
-        // joined-path access check, and the /dev/null stand-in is the
-        // inert prepared File; the bind performs GNU's single open.
+        // joined-path access check; the bind performs GNU's single
+        // open.
         if let Some(verdict) = crate::executor::shell_options::output_fifo_validation_via_anchor(
             self, redirect, target,
         ) {
             verdict.map_err(|e| crate::posix_errors::path_error(target, e))?;
-            return File::open("/dev/null");
+            return Ok(None);
         }
         let file = self.create_redirect_output_for(redirect, target, clobber)?;
         if !clobber
@@ -2729,7 +2739,21 @@ impl Executor {
                 .borrow_mut()
                 .insert(target.to_string());
         }
-        Ok(file)
+        Ok(Some(file))
+    }
+
+    /// The inert File the prepared-phase carve-outs (net / FIFO)
+    /// substitute for a real open — every caller drops it, so one
+    /// platform null device serves all of them.
+    fn inert_prepared_stand_in() -> io::Result<File> {
+        #[cfg(windows)]
+        {
+            File::open("NUL")
+        }
+        #[cfg(not(windows))]
+        {
+            File::open("/dev/null")
+        }
     }
 
     /// Consume a prepare-phase noclobber record (rubash#1025): true when
@@ -2737,6 +2761,69 @@ impl Executor {
     /// phase, so the bind phase must not run the O_EXCL open again.
     pub(in crate::executor) fn take_noclobber_prepared_target(&self, target: &str) -> bool {
         self.noclobber_prepared_targets.borrow_mut().remove(target)
+    }
+
+    /// rubash#3828: record the File an earlier redirect walk already
+    /// opened for `cmd.redirects[position]` so the bind walk adopts it
+    /// instead of opening the path a second time (GNU do_redirections
+    /// opens each entry once — redir.c do_redirection_internal /
+    /// redir_open). `target` is the walk's expanded target word; a
+    /// consumer adopts only on an exact match.
+    pub(in crate::executor) fn store_pending_preopened(
+        &self,
+        position: usize,
+        target: &str,
+        file_fd: std::rc::Rc<crate::executor::fd_table::FileFd>,
+    ) {
+        self.pending_preopened_redirects
+            .borrow_mut()
+            .insert(position, (target.to_string(), file_fd));
+    }
+
+    /// rubash#3828: carry a compound prepare phase's opened File into
+    /// `pending_preopened_redirects` for the bind walk
+    /// (`open_compound_output_redirects_in`), keyed by the mirror
+    /// redirect's `cmd.redirects` position. Plain filesystem targets
+    /// only — the carve-out classes keep their own bind opens.
+    pub(in crate::executor) fn retain_prepared_output_file(
+        &self,
+        cmd: &crate::parser::CommandNode,
+        redirect: &crate::parser::Redirect,
+        target: &str,
+        file: std::fs::File,
+    ) {
+        if !matches!(
+            crate::special_paths::classify_special_path(target),
+            crate::special_paths::SpecialPathClass::Filesystem
+        ) {
+            return;
+        }
+        let path = self.session_path(shell_path_to_windows(
+            &self.redirect_output_path_target(target),
+            &self.shell_state.env_vars,
+        ));
+        let file_fd = crate::executor::fd_table::FileFd::from_file(file, path.into());
+        let position = self.redirect_list_position(cmd, redirect);
+        self.store_pending_preopened(position, target, file_fd);
+    }
+
+    /// Consume a pending preopened handle for `position` when its
+    /// recorded target matches `target` exactly. A mismatch drops the
+    /// stale entry and reports None, so a leftover from an earlier
+    /// command can never bind the wrong file.
+    pub(in crate::executor) fn take_pending_preopened(
+        &self,
+        position: usize,
+        target: &str,
+    ) -> Option<std::rc::Rc<crate::executor::fd_table::FileFd>> {
+        match self
+            .pending_preopened_redirects
+            .borrow_mut()
+            .remove(&position)
+        {
+            Some((recorded, file_fd)) if recorded == target => Some(file_fd),
+            _ => None,
+        }
     }
 
     pub(in crate::executor) fn redirect_output_path_target(&self, target: &str) -> String {
@@ -5211,7 +5298,9 @@ pub(in crate::executor) fn probe_output_redirect_file(
         // Special class: run the create for its error surfacing
         // (a 0444-class synthetic /proc still refuses EACCES here)
         // but keep no File — the bind re-opens the class itself.
-        return executor.create_redirect_output(target, clobber).map(|_| None);
+        return executor
+            .create_redirect_output(target, clobber)
+            .map(|_| None);
     }
     executor.create_redirect_output(target, clobber).map(Some)
 }

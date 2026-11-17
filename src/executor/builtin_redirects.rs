@@ -53,7 +53,7 @@ impl Executor {
     /// the projection source (a later assignment to the field
     /// overwrote it). Falls back to the whole list when no entry
     /// matches.
-    fn redirect_list_position(
+    pub(in crate::executor) fn redirect_list_position(
         &self,
         cmd: &CommandNode,
         redirect: &crate::parser::Redirect,
@@ -91,15 +91,35 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<bool, ExecuteError> {
-        self.apply_redirect_setup_side_effects_tracked(cmd, None)
+        self.apply_redirect_setup_side_effects_tracked(cmd, None, false)
+    }
+
+    /// rubash#3828: the retained form for callers whose command goes
+    /// on to the external spawn gate
+    /// (`command_output_redirect_fails_with_preopened` /
+    /// `apply_ordered_output_redirects`). The walk's plain-file opens
+    /// are recorded into `pending_preopened_redirects` so the gate
+    /// adopts each entry's ONE open instead of re-opening the path —
+    /// a target created without owner-write (umask masking 0200)
+    /// fails the second open EACCES although GNU's single
+    /// do_redirections open succeeds (redir.c do_redirection_internal
+    /// / redir_open). Callers that handle the command in-process keep
+    /// the plain form: their mirror skips the recorded positions and
+    /// never needs the File.
+    pub(in crate::executor) fn apply_redirect_setup_side_effects_retained(
+        &mut self,
+        cmd: &CommandNode,
+    ) -> Result<bool, ExecuteError> {
+        self.apply_redirect_setup_side_effects_tracked(cmd, None, true)
     }
 
     fn apply_redirect_setup_side_effects_tracked(
         &mut self,
         cmd: &CommandNode,
         created: Option<&mut Vec<std::path::PathBuf>>,
+        retain_opened: bool,
     ) -> Result<bool, ExecuteError> {
-        if let Some(error) = self.redirect_setup_open_error(cmd, created, None)? {
+        if let Some(error) = self.redirect_setup_open_error(cmd, created, None, retain_opened)? {
             let mut line = Vec::new();
             let _ = writeln!(
                 &mut line,
@@ -135,7 +155,8 @@ impl Executor {
         cmd: &CommandNode,
     ) -> Result<bool, ExecuteError> {
         let mut created = Vec::new();
-        let failed = self.apply_redirect_setup_side_effects_tracked(cmd, Some(&mut created))?;
+        let failed =
+            self.apply_redirect_setup_side_effects_tracked(cmd, Some(&mut created), false)?;
         if !failed {
             for path in created {
                 if let Ok(meta) = std::fs::metadata(&path) {
@@ -146,6 +167,18 @@ impl Executor {
             }
         }
         Ok(failed)
+    }
+
+    /// rubash#3828: hand a walk-opened File to the bind walk through
+    /// `pending_preopened_redirects`, keyed by the entry's
+    /// `cmd.redirects` position.
+    fn retain_preopened_file(&self, position: usize, target: &str, file: std::fs::File) {
+        let path = self.session_path(crate::executor::path::shell_path_to_windows(
+            &self.redirect_output_path_target(target),
+            &self.shell_state.env_vars,
+        ));
+        let file_fd = crate::executor::fd_table::FileFd::from_file(file, path.into());
+        self.store_pending_preopened(position, target, file_fd);
     }
 
     /// The open walk behind apply_redirect_setup_side_effects, minus the
@@ -161,6 +194,7 @@ impl Executor {
         cmd: &CommandNode,
         mut created: Option<&mut Vec<std::path::PathBuf>>,
         mut opened_positions: Option<&mut std::collections::HashSet<usize>>,
+        retain_opened: bool,
     ) -> Result<Option<io::Error>, ExecuteError> {
         use crate::parser::RedirectKind;
         for (position, redirect) in cmd.redirects.iter().enumerate() {
@@ -286,9 +320,12 @@ impl Executor {
                         &target,
                         redirect.clobber,
                     ) {
-                        Ok(Some(_file)) => {
+                        Ok(Some(file)) => {
                             if let Some(positions) = opened_positions.as_deref_mut() {
                                 positions.insert(position);
+                            }
+                            if retain_opened {
+                                self.retain_preopened_file(position, &target, file);
                             }
                             Ok(())
                         }
@@ -308,9 +345,12 @@ impl Executor {
                         Some(redirect),
                         &target,
                     ) {
-                        Ok(Some(_file)) => {
+                        Ok(Some(file)) => {
                             if let Some(positions) = opened_positions.as_deref_mut() {
                                 positions.insert(position);
+                            }
+                            if retain_opened {
+                                self.retain_preopened_file(position, &target, file);
                             }
                             Ok(())
                         }
@@ -340,6 +380,23 @@ impl Executor {
                             .map(|_| ())
                     } else if !plain_file_target {
                         continue;
+                    } else if self
+                        .pending_preopened_redirects
+                        .borrow()
+                        .contains_key(&position)
+                    {
+                        // rubash#3828: the reject gate's `<>` open
+                        // (open_readwrite_pair) already created the
+                        // target and parked its handle — this probe
+                        // would be the entry's SECOND open, which fails
+                        // EACCES on a file created without owner-write
+                        // (umask masking 0200). The open already
+                        // happened; record the position so the mirror
+                        // below skips its own re-probe too.
+                        if let Some(positions) = opened_positions.as_deref_mut() {
+                            positions.insert(position);
+                        }
+                        Ok(())
                     } else {
                         // rubash#3828: a plain filesystem target the
                         // probe really opened is recorded so the
@@ -349,7 +406,7 @@ impl Executor {
                         // probe — the mirror's re-probe of those
                         // cannot fail EACCES on a created file.
                         match self.probe_input_redirect_readwrite(&target) {
-                            Ok(_file) => {
+                            Ok(file) => {
                                 if matches!(
                                     crate::special_paths::classify_special_path(&target),
                                     crate::special_paths::SpecialPathClass::Filesystem
@@ -357,12 +414,13 @@ impl Executor {
                                     if let Some(positions) = opened_positions.as_deref_mut() {
                                         positions.insert(position);
                                     }
+                                    if retain_opened {
+                                        self.retain_preopened_file(position, &target, file);
+                                    }
                                 }
                                 Ok(())
                             }
-                            Err(error) => {
-                                Err(crate::posix_errors::path_error(&target, error))
-                            }
+                            Err(error) => Err(crate::posix_errors::path_error(&target, error)),
                         }
                     }
                 }
@@ -720,7 +778,7 @@ impl Executor {
         // renders and marks it exactly like an fd 0/1/2 failure.
         let mut opened_positions = std::collections::HashSet::new();
         if let Some(error) =
-            self.redirect_setup_open_error(cmd, None, Some(&mut opened_positions))?
+            self.redirect_setup_open_error(cmd, None, Some(&mut opened_positions), false)?
         {
             return Err(ExecuteError::IoError(error));
         }

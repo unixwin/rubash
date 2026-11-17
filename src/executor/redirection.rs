@@ -680,6 +680,12 @@ impl Executor {
         cmd: &CommandNode,
         settle_superseded_net_outputs: bool,
     ) -> Result<Option<RedirectRejection>, ExecuteError> {
+        // rubash#3828: this gate is the first redirect walk of the
+        // command — drop any pending preopened handles a previous
+        // command left behind. Consumers verify the recorded target,
+        // so an early clear can only cost a re-open (today's
+        // behavior), never a wrong bind.
+        self.pending_preopened_redirects.borrow_mut().clear();
         // Semantic identity of a redirect for this scan (the same key the
         // expand_redirect_target memo uses): the ordered `redirects` list
         // plus the legacy mirror fields may carry THE SAME source redirect
@@ -1463,7 +1469,26 @@ impl Executor {
                 // every other state keeps the pair open below.
                 let probe_verdict = match self.anchored_redirect_probe(&target, true) {
                     Some(verdict) => verdict,
-                    None => FileFd::open_readwrite_pair(path).map(|_| ()),
+                    None => match FileFd::open_readwrite_pair(path) {
+                        Ok((read_fd, _write_fd)) => {
+                            // rubash#3828: this gate's O_RDWR|O_CREAT
+                            // open IS the entry's one open (GNU
+                            // redir.c r_input_output) — park the
+                            // handle so the setup walk's probe and
+                            // any later bind adopt it instead of
+                            // re-opening a file created without
+                            // owner-write (umask masking 0200), which
+                            // fails EACCES.
+                            if matches!(
+                                crate::special_paths::classify_special_path(&target),
+                                crate::special_paths::SpecialPathClass::Filesystem
+                            ) {
+                                self.store_pending_preopened(index, &target, read_fd);
+                            }
+                            Ok(())
+                        }
+                        Err(error) => Err(error),
+                    },
                 };
                 if let Err(error) = probe_verdict {
                     // posix_errors::path_error already renders the
@@ -3594,6 +3619,26 @@ impl Executor {
                 }
             }
         } else {
+            // rubash#3828: an earlier walk of this command (the
+            // external setup side-effects probe, a compound's
+            // prepare phase) may already own this entry's ONE open —
+            // GNU do_redirections opens each redirect entry exactly
+            // once (redir.c do_redirection_internal / redir_open).
+            // Adopt its FileFd as both the walk state and the
+            // spawn-delivery record instead of opening the path a
+            // second time: a target created without owner-write
+            // (umask masking 0200) fails that second open EACCES
+            // although the single open succeeds. Pending entries are
+            // recorded only for plain filesystem targets, so the
+            // FIFO / net / special carve-outs below are unaffected.
+            if let Some(pending_fd) = self.take_pending_preopened(index, target) {
+                state
+                    .preopened
+                    .insert(index, std::rc::Rc::clone(&pending_fd));
+                state.fds.insert(fd, OutputTarget::SharedFile(pending_fd));
+                state.saw_output_redirect = true;
+                return Ok(());
+            }
             let target = self.redirect_output_path_target(target);
             // rubash#1868: this walk's open is a create/truncate
             // VALIDATION whose File is dropped on the floor — buffered
@@ -3653,47 +3698,46 @@ impl Executor {
             // File here (access-only / resolution-only validation
             // as before); their single open still happens at the
             // flush pairing site.
-            let open_result: Result<Option<std::fs::File>, std::io::Error> =
-                match fifo_validation {
-                    Some(result) => result.map(|_| None),
-                    // Routing resolution (OutputFdState::resolve_only_
-                    // numbered): the element's setup already opened this
-                    // target for its descriptor — a validation re-open
-                    // here (truncate / append / net-connect alike) can
-                    // only destroy what the element wrote through it.
-                    // Fall through to the target record below, unchanged.
-                    None if state.resolve_only_numbered && fd > 2 => Ok(None),
-                    None if crate::special_paths::is_net_redirect_target(&target) => {
-                        // rubash#1967: net twin of the #1868 FIFO
-                        // validation above — this walk's create would
-                        // CONNECT and drop the File (only the Path is
-                        // kept in the state), and the flush's open
-                        // connects again: two connections where GNU's
-                        // do_redirections opens once. Validate by
-                        // resolution; the flush open is the single
-                        // connect, and a refusal surfaces there with
-                        // the same diagnostic.
-                        self.validate_net_redirect_target(&target)
-                            .map(|_| None)
-                            .map_err(|e| crate::posix_errors::path_error(&target, e))
-                    }
-                    None if redirect.append => {
-                        // GNU redir.c redirection_error (redir.c:149-176) carries the
-                        // failed open's target word (`$FIX/b: No such file or
-                        // directory`, issue #518); a bare OS error renders
-                        // message-only and drops the word. The open itself
-                        // classifies through the registry (rubash#1964):
-                        // this validation is an append open, so it must
-                        // succeed and fail for exactly the shapes the
-                        // real append does.
-                        self.open_append_target_for(Some(redirect), &target)
-                            .map(Some)
-                            .map_err(|e| crate::posix_errors::path_error(&target, e))
-                    }
-                    None => self
-                        .create_redirect_output_for(Some(redirect), &target, redirect.clobber)
-                        .map(Some),
-                };
+            let open_result: Result<Option<std::fs::File>, std::io::Error> = match fifo_validation {
+                Some(result) => result.map(|_| None),
+                // Routing resolution (OutputFdState::resolve_only_
+                // numbered): the element's setup already opened this
+                // target for its descriptor — a validation re-open
+                // here (truncate / append / net-connect alike) can
+                // only destroy what the element wrote through it.
+                // Fall through to the target record below, unchanged.
+                None if state.resolve_only_numbered && fd > 2 => Ok(None),
+                None if crate::special_paths::is_net_redirect_target(&target) => {
+                    // rubash#1967: net twin of the #1868 FIFO
+                    // validation above — this walk's create would
+                    // CONNECT and drop the File (only the Path is
+                    // kept in the state), and the flush's open
+                    // connects again: two connections where GNU's
+                    // do_redirections opens once. Validate by
+                    // resolution; the flush open is the single
+                    // connect, and a refusal surfaces there with
+                    // the same diagnostic.
+                    self.validate_net_redirect_target(&target)
+                        .map(|_| None)
+                        .map_err(|e| crate::posix_errors::path_error(&target, e))
+                }
+                None if redirect.append => {
+                    // GNU redir.c redirection_error (redir.c:149-176) carries the
+                    // failed open's target word (`$FIX/b: No such file or
+                    // directory`, issue #518); a bare OS error renders
+                    // message-only and drops the word. The open itself
+                    // classifies through the registry (rubash#1964):
+                    // this validation is an append open, so it must
+                    // succeed and fail for exactly the shapes the
+                    // real append does.
+                    self.open_append_target_for(Some(redirect), &target)
+                        .map(Some)
+                        .map_err(|e| crate::posix_errors::path_error(&target, e))
+                }
+                None => self
+                    .create_redirect_output_for(Some(redirect), &target, redirect.clobber)
+                    .map(Some),
+            };
             let open_file = match open_result {
                 Ok(file) => file,
                 Err(error) => {
@@ -3741,17 +3785,13 @@ impl Executor {
                 // (the external spawn, whose preflight IS this walk);
                 // every other class keeps its own open (the spawn
                 // re-opens it as today).
-                let file_fd = crate::executor::fd_table::FileFd::from_file(
-                    file,
-                    target.clone().into(),
-                );
+                let file_fd =
+                    crate::executor::fd_table::FileFd::from_file(file, target.clone().into());
                 if matches!(
                     crate::special_paths::classify_special_path(&target),
                     crate::special_paths::SpecialPathClass::Filesystem
                 ) {
-                    state
-                        .preopened
-                        .insert(index, std::rc::Rc::clone(&file_fd));
+                    state.preopened.insert(index, std::rc::Rc::clone(&file_fd));
                 }
                 state.fds.insert(fd, OutputTarget::SharedFile(file_fd));
             } else {

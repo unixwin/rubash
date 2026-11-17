@@ -55,10 +55,7 @@ fn euid_is_root() -> bool {
 }
 
 fn have_nobody_via_setpriv() -> bool {
-    let setpriv = Command::new("setpriv")
-        .arg("--version")
-        .output()
-        .is_ok();
+    let setpriv = Command::new("setpriv").arg("--version").output().is_ok();
     let nobody = Command::new("id")
         .args(["-u", "nobody"])
         .output()
@@ -87,11 +84,7 @@ fn run(root: &Path, body: &str) -> Outcome {
         // Root bypasses DAC on most filesystems: drop to nobody so the
         // created mode actually gates the second open, as in the seed.
         let mut cmd = Command::new("setpriv");
-        cmd.args([
-            "--reuid=nobody",
-            "--regid=nogroup",
-            "--clear-groups",
-        ]);
+        cmd.args(["--reuid=nobody", "--regid=nogroup", "--clear-groups"]);
         cmd.arg(&shell);
         cmd
     } else {
@@ -240,15 +233,20 @@ fn append_umask_777_data_lands() {
         return;
     }
     let root = scratch("append-777");
-    let out = run(
-        &root,
-        "umask 777; echo a >> f7; echo b >> f7; echo rc=$?\n",
-    );
+    // GNU bash 5.3.20 (verified): the second `>>` is a fresh open of
+    // the mode-000 file and fails EACCES exactly like `>` — only the
+    // first append's data lands, rc of that command is 1, and the
+    // script's last `echo rc=$?` still exits 0.
+    let out = run(&root, "umask 777; echo a >> f7; echo b >> f7; echo rc=$?\n");
     assert_eq!(out.rc, 0);
-    assert_eq!(out.stdout, "rc=0\n");
-    assert_eq!(out.stderr, "");
+    assert_eq!(out.stdout, "rc=1\n");
+    assert!(
+        out.stderr.contains("Permission denied"),
+        "stderr lacks Permission denied: {:?}",
+        out.stderr
+    );
     assert_eq!(mode_of(&root.join("work").join("f7")), 0);
-    assert_eq!(read_back(&root.join("work").join("f7")), "a\nb\n");
+    assert_eq!(read_back(&root.join("work").join("f7")), "a\n");
 }
 
 /// 8: a persistent `exec 3> f` under umask 777 binds once; a later
@@ -289,10 +287,7 @@ fn group_stderr_redirect_umask_777() {
         return;
     }
     let root = scratch("group-777");
-    let out = run(
-        &root,
-        "umask 777; { echo oops >&2; } 2> f10; echo rc=$?\n",
-    );
+    let out = run(&root, "umask 777; { echo oops >&2; } 2> f10; echo rc=$?\n");
     assert_eq!(out.rc, 0);
     assert_eq!(out.stdout, "rc=0\n");
     assert_eq!(out.stderr, "");
@@ -337,11 +332,14 @@ fn preexisting_unwritable_file_still_fails() {
         return;
     }
     let root = scratch("control-444");
+    // GNU bash 5.3.20 (verified): the redirect fails with status 1,
+    // but the script's exit status is the FINAL command's — `echo
+    // rc=$?` prints rc=1 and itself exits 0.
     let out = run(
         &root,
         "printf 'x' > f13; chmod 444 f13; echo hi > f13; echo rc=$?\n",
     );
-    assert_eq!(out.rc, 1);
+    assert_eq!(out.rc, 0);
     assert_eq!(out.stdout, "rc=1\n");
     assert!(
         out.stderr.contains("Permission denied"),

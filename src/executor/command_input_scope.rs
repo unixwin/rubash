@@ -1921,7 +1921,7 @@ impl Executor {
         saved: &mut Vec<SavedOutputFd>,
         move_source_save: MoveSourceSave,
     ) -> Result<(), ExecuteError> {
-        for redirect in &cmd.redirects[start..end] {
+        for (offset, redirect) in cmd.redirects[start..end].iter().enumerate() {
             // `{var}`-targeted redirections allocate a persistent dynamic fd
             // (redir.c: the variable keeps the descriptor after the command)
             // and are handled by execute_dynamic_fd_var_redirect above.
@@ -2116,12 +2116,7 @@ impl Executor {
                                     false,
                                     file,
                                 ),
-                                None => self.set_fd_output_file(
-                                    1,
-                                    path.to_string(),
-                                    false,
-                                    false,
-                                ),
+                                None => self.set_fd_output_file(1, path.to_string(), false, false),
                             }
                         }
                         .map_err(|error| crate::posix_errors::path_error(path, error))?;
@@ -2153,7 +2148,13 @@ impl Executor {
                     // arm below); a FIFO / net / special target probes
                     // to None and keeps the plain bind, whose open is
                     // its single pairing open (rubash#1868).
-                    let probed = if !append && !self.take_noclobber_prepared_target(&target)
+                    // rubash#3828: same retained-open adoption as the
+                    // Output arm below — the prepare phase's File is
+                    // this entry's one open.
+                    let pending_fd = self.take_pending_preopened(start + offset, &target);
+                    let probed = if pending_fd.is_none()
+                        && !append
+                        && !self.take_noclobber_prepared_target(&target)
                     {
                         crate::executor::shell_options::probe_output_redirect_file(
                             self,
@@ -2163,7 +2164,13 @@ impl Executor {
                     } else {
                         None
                     };
-                    match probed {
+                    let opened = match pending_fd {
+                        Some(file_fd) => Some(crate::fd::handle_to_file(
+                            crate::fd::duplicate_handle(file_fd.handle)?,
+                        )),
+                        None => probed,
+                    };
+                    match opened {
                         Some(file) => {
                             self.set_fd_output_file_from_file(1, target.clone(), false, file)
                         }
@@ -2301,7 +2308,17 @@ impl Executor {
                     // below; a FIFO / net / special target probes to
                     // None and keeps the plain bind, whose open is its
                     // single pairing open (rubash#1868).
-                    let probed = if !redirect.append
+                    // rubash#3828: the prepare phase's retained open
+                    // IS this entry's one open (GNU do_redirections
+                    // opens each entry once — redir.c
+                    // do_redirection_internal / redir_open) — adopt
+                    // its handle as the bind instead of probing the
+                    // path again, which fails EACCES on a file the
+                    // prepare just created without owner-write
+                    // (umask masking 0200).
+                    let pending_fd = self.take_pending_preopened(start + offset, &target);
+                    let probed = if pending_fd.is_none()
+                        && !redirect.append
                         && !self.take_noclobber_prepared_target(&target)
                     {
                         crate::executor::shell_options::probe_output_redirect_file(
@@ -2311,6 +2328,12 @@ impl Executor {
                         )?
                     } else {
                         None
+                    };
+                    let opened = match pending_fd {
+                        Some(file_fd) => Some(crate::fd::handle_to_file(
+                            crate::fd::duplicate_handle(file_fd.handle)?,
+                        )),
+                        None => probed,
                     };
                     // GNU redir.c do_redirection_internal: every `>file`
                     // redirection performs its OWN open() — `>f 2>f` binds
@@ -2326,16 +2349,11 @@ impl Executor {
                     // through a plain `2>f` binding take the same
                     // independent-offset semantics as GNU's second open.
                     let append = redirect.append;
-                    match probed {
-                        Some(file) => self.set_fd_output_file_from_file(
-                            fd,
-                            target.clone(),
-                            fd >= 10,
-                            file,
-                        ),
-                        None => {
-                            self.set_fd_output_file(fd, target.clone(), fd >= 10, append)
+                    match opened {
+                        Some(file) => {
+                            self.set_fd_output_file_from_file(fd, target.clone(), fd >= 10, file)
                         }
+                        None => self.set_fd_output_file(fd, target.clone(), fd >= 10, append),
                     }
                     .map_err(|error| crate::posix_errors::path_error(&target, error))?;
                 }
