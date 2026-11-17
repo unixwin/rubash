@@ -435,7 +435,13 @@ pub(in crate::executor) fn execute_history_session(
             if !operands.is_empty() {
                 let control = executor.get_env("HISTCONTROL").unwrap_or_default();
                 let ignore = executor.get_env("HISTIGNORE").unwrap_or_default();
-                let was_recorded = shell.record(&command, &control, &ignore, histsize);
+                let was_recorded = shell.record(
+                    &command,
+                    &control,
+                    &ignore,
+                    histsize,
+                    comment_char_armed_of(executor),
+                );
                 // push_history goes through check_add_history ->
                 // really_add_history (bashhist.c:961), which sets
                 // hist_last_line_added = 1 for the pushed entry, and

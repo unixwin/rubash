@@ -2721,19 +2721,50 @@ impl Executor {
                     .insert(fd_closed_key(fd), "1".to_string());
             }
             ProcsubSpawnFd::File { read, write } => {
-                if let Some(file) = read {
-                    self.set_fd_input_file(fd, file.clone(), false);
-                }
-                if let Some(file) = write {
-                    self.fd_table
-                        .open_output(fd, FdWriteEndpoint::File(file.clone()), false);
-                    self.shell_state.env_vars.remove(&fd_closed_key(fd));
-                    self.shell_state
-                        .env_vars
-                        .insert(fd_output_key(fd), file.path.to_string_lossy().into_owned());
-                    self.shell_state
-                        .env_vars
-                        .remove(&fd_output_process_substitution_key(fd));
+                // rubash#3655: when both arms are present they are
+                // ONE description — a single open_readwrite install,
+                // not an input bind followed by an output bind (the
+                // second would retire the first). Either arm alone
+                // keeps its single-direction install.
+                match (read, write) {
+                    (Some(read), Some(write)) => {
+                        self.fd_table.open_readwrite(
+                            fd,
+                            // rubash#3655 fix: the enclosing match binds
+                            // by reference (match ergonomics), so both
+                            // arms need `.clone()` — the write side had
+                            // it, the read side did not (E0308, CI run
+                            // 43824819839).
+                            FdReadEndpoint::File(read.clone()),
+                            FdWriteEndpoint::File(write.clone()),
+                            false,
+                        );
+                        self.shell_state.env_vars.remove(&fd_closed_key(fd));
+                        self.shell_state.env_vars.remove(&fd_stdin_key(fd));
+                        self.shell_state.env_vars.remove(&fd_stdin_offset_key(fd));
+                        self.shell_state.env_vars.remove(&fd_dynamic_input_key(fd));
+                        self.shell_state
+                            .env_vars
+                            .insert(fd_output_key(fd), write.path.to_string_lossy().into_owned());
+                        self.shell_state
+                            .env_vars
+                            .remove(&fd_output_process_substitution_key(fd));
+                    }
+                    (Some(file), None) => {
+                        self.set_fd_input_file(fd, file.clone(), false);
+                    }
+                    (None, Some(file)) => {
+                        self.fd_table
+                            .open_output(fd, FdWriteEndpoint::File(file.clone()), false);
+                        self.shell_state.env_vars.remove(&fd_closed_key(fd));
+                        self.shell_state
+                            .env_vars
+                            .insert(fd_output_key(fd), file.path.to_string_lossy().into_owned());
+                        self.shell_state
+                            .env_vars
+                            .remove(&fd_output_process_substitution_key(fd));
+                    }
+                    (None, None) => {}
                 }
             }
             ProcsubSpawnFd::TruncatedFile(file) => {

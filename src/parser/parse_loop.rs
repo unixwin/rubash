@@ -2319,7 +2319,7 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
 
     if command_allows_compound_start(&state.current_cmd)
         && ((token.kind == TokenKind::Keyword && token.value == "(")
-            || token.value.starts_with("(("))
+            || (token.value.starts_with("((") && token.raw == token.value))
     {
         if let Some((arith_cmd, next_i)) = parse_arithmetic_command(tokens, i) {
             push_compound_command(state, arith_cmd);
@@ -2327,7 +2327,11 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
         }
     }
 
-    if command_allows_compound_start(&state.current_cmd) && token.value == "[[" {
+    // rubash#3557: `[[` opens a conditional only unquoted — a `'[['` word
+    // is a command name (parse.y:3667 read_token emits `[[` as COND only
+    // for unquoted text).
+    if command_allows_compound_start(&state.current_cmd) && super::is_unquoted_operator(token, "[[")
+    {
         if let Some((conditional_cmd, next_i)) = parse_conditional_command(
             tokens,
             i,
@@ -2372,7 +2376,7 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
 
     if command_accepts_embedded_arithmetic_command(&state.current_cmd)
         && ((token.kind == TokenKind::Keyword && token.value == "(")
-            || token.value.starts_with("(("))
+            || (token.value.starts_with("((") && token.raw == token.value))
     {
         if let Some((arith_cmd, next_i)) = parse_arithmetic_command(tokens, i) {
             note_command_line(&mut state.current_cmd, token);
@@ -2396,10 +2400,15 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
             push_compound_command(state, brace_cmd);
             return Some(next_i);
         }
-        if token.value == "{"
+        // rubash#3557 (parse.y:3667 read_token): quoted `{` is a WORD —
+        // `{ : command not found`, never a group opener; only unquoted
+        // `{` (Word raw==value or a collapsed `{...;` Keyword) may demand
+        // the `}` closer here.
+        if is_unquoted_operator(token, "{")
             || (token.value.starts_with('{')
                 && token.value.contains(';')
-                && !token.value.contains('}'))
+                && !token.value.contains('}')
+                && (token.kind == TokenKind::Keyword || token.raw == token.value))
         {
             return Some(push_parse_error_until(
                 state,
@@ -2766,7 +2775,7 @@ fn push_unclosed_paren_error(state: &mut ParseState, tokens: &[Token], start: us
         }
         if token.kind != TokenKind::HereDocBody {
             if index > start {
-                last_line = last_line.max(token.position);
+                last_line = last_line.max(token_last_consumed_line(token));
             }
             continue;
         }
@@ -2930,6 +2939,8 @@ pub(super) fn unclosed_brace_eof_node(
             // rubash#3028: the end line shifts in lockstep (it defaults
             // to the fragment-relative position, like `position`).
             token.end_position = token.end_position + brace_line - 1;
+            // rubash#3605: the heredoc gather end line too.
+            token.heredoc_end_line = token.heredoc_end_line.map(|line| line + brace_line - 1);
         }
         region_owned = inner;
         &region_owned
@@ -2941,11 +2952,17 @@ pub(super) fn unclosed_brace_eof_node(
     let last_line = if inner_text.is_empty() {
         region
             .iter()
-            .map(|token| token.position)
+            .map(token_last_consumed_line)
             .max()
             .unwrap_or(brace_line)
     } else {
-        brace_line + inner_text.matches('\n').count()
+        // The swallowed text IS the consumed tail: a final `\n' completes
+        // its line rather than starting a new one.
+        brace_line
+            + inner_text
+                .matches('\n')
+                .count()
+                .saturating_sub(usize::from(inner_text.ends_with('\n')))
     };
     let continuation = if inner_text.is_empty() {
         false
@@ -2982,10 +2999,26 @@ pub(super) fn unclosed_paren_eof_node(
     }
     let last_line = region
         .iter()
-        .map(|token| token.position)
+        .map(token_last_consumed_line)
         .max()
         .unwrap_or(paren_line);
     compound_eof_error_node("(", paren_line, region, last_line, false)
+}
+
+/// The last physical input line a region token consumed. `position` is
+/// only the token's first line: a line-break `;' that swallowed a `\n\n'
+/// tail ends at `end_position` (the physical line of its last byte), and
+/// a heredoc body's gather ran to `heredoc_end_line` even though its
+/// `position` stays at the `<<' line to feed the `at line N' warning
+/// (rubash#3605). GNU's EOF report counts every physical line the reader
+/// consumed before the failed fetch — parse.y:2504's per-line bump plus
+/// the final exhaustion read — so the last consumed line is the max over
+/// all three stamps.
+fn token_last_consumed_line(token: &Token) -> usize {
+    token
+        .position
+        .max(token.end_position)
+        .max(token.heredoc_end_line.unwrap_or(0))
 }
 
 fn eof_line_extra(last_line: usize, continuation: bool) -> usize {
@@ -3172,7 +3205,7 @@ pub(super) fn unclosed_keyword_eof_node(
     }
     let last_line = region
         .iter()
-        .map(|token| token.position)
+        .map(token_last_consumed_line)
         .max()
         .unwrap_or(opener_line);
     compound_eof_error_node(opener, opener_line, region, last_line, false)
@@ -3909,7 +3942,12 @@ pub(super) fn parse_time_prefixed_compound_command(
         parse_coproc_command(tokens, i)?
     } else if let Some(parsed) = parse_function_command(tokens, i) {
         parsed
-    } else if tokens.get(i).is_some_and(|token| token.value == "[[") {
+    // rubash#3557: `[[` is syntax only unquoted — a `'[['` word is a
+    // command name (`[[: command not found`).
+    } else if tokens
+        .get(i)
+        .is_some_and(|token| is_unquoted_operator(token, "[["))
+    {
         parse_conditional_command(tokens, i, None, 0)?
     } else if is_keyword(tokens, i, "{")
         || tokens.get(i).is_some_and(|token| {
@@ -4071,11 +4109,14 @@ fn time_prefixed_shell_command_starts_with_compound(tokens: &[Token], index: usi
         return true;
     }
 
+    // rubash#3557: quoted head words (`'for'`, `'[['`, `'((x))'`) are data,
+    // not compound openers — require the unquoted spelling (raw == value).
     if tokens.get(index).is_some_and(|token| {
-        matches!(
-            token.value.as_str(),
-            "for" | "case" | "select" | "coproc" | "if" | "while" | "until" | "[[" | "function"
-        ) || token.value.starts_with("((")
+        token.raw == token.value
+            && (matches!(
+                token.value.as_str(),
+                "for" | "case" | "select" | "coproc" | "if" | "while" | "until" | "[[" | "function"
+            ) || token.value.starts_with("(("))
     }) {
         return true;
     }

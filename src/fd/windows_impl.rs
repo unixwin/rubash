@@ -1116,6 +1116,27 @@ fn wait_socket_readable(h: HANDLE, timeout: std::time::Duration) -> ReadWait {
     }
 }
 
+/// Whether `h` names a directory (rubash#3777): a directory handle
+/// opened with FILE_FLAG_BACKUP_SEMANTICS reports FILE_TYPE_DISK
+/// like a regular file, so neither GetFileType nor the open outcome
+/// separates it — only the file attributes do.
+fn is_directory_handle(h: HANDLE) -> bool {
+    let mut info = BY_HANDLE_FILE_INFORMATION {
+        dwFileAttributes: 0,
+        ftCreationTime: [0; 2],
+        ftLastAccessTime: [0; 2],
+        ftLastWriteTime: [0; 2],
+        dwVolumeSerialNumber: 0,
+        nFileSizeHigh: 0,
+        nFileSizeLow: 0,
+        nNumberOfLinks: 0,
+        nFileIndexHigh: 0,
+        nFileIndexLow: 0,
+    };
+    let ok = unsafe { GetFileInformationByHandle(h, &mut info) } != 0;
+    ok && (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0
+}
+
 /// Read up to `n` bytes; ERROR_BROKEN_PIPE (drained anonymous pipe) is EOF.
 pub fn read_some(h: HANDLE, n: usize) -> std::io::Result<Vec<u8>> {
     // rubash#1976: a netopen endpoint is a socket handle — recv, not
@@ -1146,6 +1167,17 @@ pub fn read_some(h: HANDLE, n: usize) -> std::io::Result<Vec<u8>> {
         const ERROR_BROKEN_PIPE: DWORD = 109;
         if std::io::Error::last_os_error().raw_os_error() == Some(ERROR_BROKEN_PIPE as i32) {
             return Ok(Vec::new());
+        }
+        // rubash#3777: ReadFile on a directory handle fails with
+        // ERROR_INVALID_FUNCTION (1) where GNU read(2) fails EISDIR
+        // (read.def:911) — the fd layer reports the POSIX errno, so
+        // every reader of a directory descriptor (read, mapfile, the
+        // emulated cat drain) sees the same failure GNU's reader sees.
+        if is_directory_handle(h) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::IsADirectory,
+                "Is a directory",
+            ));
         }
         return Err(std::io::Error::last_os_error());
     }

@@ -3181,6 +3181,16 @@ impl Executor {
         if let Some(available) = self.own_input_binding_availability(cmd, fd) {
             return available;
         }
+        // rubash#3774: an own OUTPUT winner leaves the descriptor
+        // open but write-only (`read -u 3 x 3>file`). sh_validfd
+        // judges the REDIRECTED state (read.def:377-381), so the
+        // descriptor counts as available here and the read itself
+        // fails EBADF in the funnel (read.def:911) — reporting it
+        // unavailable at this gate would misstate an open fd as an
+        // invalid one.
+        if self.own_list_leaves_fd_write_only(cmd, fd) {
+            return true;
+        }
         if self.fd_table.is_open_for_read(fd) {
             return true;
         }

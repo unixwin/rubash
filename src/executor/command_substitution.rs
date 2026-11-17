@@ -690,6 +690,11 @@ impl Executor {
         // start_job (jobs.c:3837) refuses fg/bg inside it.
         self.shell_state.in_command_substitution.set(true);
         self.shell_state.parameter_bad_substitution.set(false);
+        // rubash#3499: the print budget clears with the verdict — the
+        // body is fresh parser input whose own diagnostic deserves its
+        // own report, and the interior snapshot below restores the
+        // parent's budget afterwards.
+        self.shell_state.bad_substitution_reported.set(false);
         // Bash evaluates BASH_COMMAND in a command substitution against the
         // substitution's own command source, rather than the outer word.
         *self.shell_state.debug_trap_command.borrow_mut() = Some(source.trim().to_string());
@@ -1235,9 +1240,12 @@ impl Executor {
             let mut comsub_env = self.shell_state.env_vars.clone();
             let mut out = Vec::new();
             let mut err = Vec::new();
+            // rubash#3605: a comsub body is a GNU fork — always model the
+            // set in env cells even on unix, never the process rlimits.
             let status = crate::builtins::ulimit::execute_with_io(
                 &words[1..],
                 &mut comsub_env,
+                true,
                 &mut out,
                 &mut err,
             )
@@ -1851,7 +1859,16 @@ impl Executor {
             let result = if posix_mode || inherit_errexit {
                 subshell.execute_ast(&ast)
             } else {
-                subshell.suppress_errexit = 0;
+                // rubash#3605: GNU does NOT clear the flag model at the
+                // comsub boundary — evalstring.c:496 stamps
+                // CMD_IGNORE_RETURN on every body command while
+                // comsub_ignore_return is held (execute_cmd.c:4616
+                // raised it during the exempt command's expand_words).
+                // Only a comsub spawned outside an exempt expansion
+                // resets the counter.
+                if subshell.comsub_ignore_return == 0 {
+                    subshell.suppress_errexit = 0;
+                }
                 // rubash#1563: subst.c:7356-7360 — the child also clears
                 // builtin_ignoring_errexit (and its own 'e' flag below),
                 // so an inherited CMD_IGNORE_RETURN frame ends at the
@@ -1999,6 +2016,9 @@ impl Executor {
         shell_state.arithmetic_nounset_error.set(false);
         shell_state.arithmetic_last_error_category.set(None);
         shell_state.parameter_bad_substitution.set(false);
+        // rubash#3499: the forked child starts with a clean print
+        // budget as well as a clean verdict.
+        shell_state.bad_substitution_reported.set(false);
         // The substitution body is fresh parser input (subst.c:7143
         // command_substitute re-reads the collected text): GNU expands its
         // aliases at that read, so the driver's streamed-batch marker must
@@ -2149,6 +2169,7 @@ impl Executor {
             current_conditional_redirects: None,
             pending_scalar_assignment: false,
             suppress_errexit: self.suppress_errexit,
+            comsub_ignore_return: self.comsub_ignore_return,
             // rubash#1563: a fork copy inherits the parent's GNU frame
             // state verbatim (builtin_ignoring_errexit is process memory);
             // the parse_and_execute frame entries renumber with the
@@ -2221,12 +2242,14 @@ impl Executor {
             // rubash#1175: a fork copy shares the parent shell's process;
             // it must never execve that process away.
             owns_process_image: false,
+            emulated_child_depth: std::cell::Cell::new(0),
             source_nest_depth: 0,
             sigchld_notifications_pending: std::cell::Cell::new(0),
             // jobs.c:4607-4612: a comsub child (startup_state 2 +
             // SUBSHELL_COMSUB) never prints job-status notices, so the
             // fork copy starts with an empty notice list.
             pending_signal_notices: std::cell::RefCell::new(Vec::new()),
+            wait_notice_pids: Vec::new(),
             host_internal_depth: std::cell::Cell::new(self.host_internal_depth.get()),
             debug_trap_function_line: None,
             last_command_substitution_status: Cell::new(None),
@@ -2241,6 +2264,7 @@ impl Executor {
             pipeline_final_stage: std::cell::Cell::new(false),
             pipeline_stage_pre_traced: std::cell::Cell::new(false),
             pipeline_stage_restricted_refused: std::cell::Cell::new(false),
+            pipeline_stage_bad_substitution_discarded: std::cell::Cell::new(false),
             last_heredoc_warning_source: RefCell::new(None),
             heredoc_admission_declined_source: RefCell::new(None),
             comsub_leading_newlines: Cell::new(0),
@@ -2443,8 +2467,13 @@ impl Executor {
             } else {
                 // subst.c:7023-7029: without inherit_errexit the funsub
                 // clears the -e flag for the body (same adjustment as
-                // command_substitute's fork).
-                subshell.suppress_errexit = 0;
+                // command_substitute's fork). rubash#3605: but the
+                // CMD_IGNORE_RETURN flag model survives through
+                // comsub_ignore_return (evalstring.c:496), so the
+                // counter resets only outside an exempt expansion.
+                if subshell.comsub_ignore_return == 0 {
+                    subshell.suppress_errexit = 0;
+                }
                 // rubash#1563: subst.c:7356-7360 — the child also clears
                 // builtin_ignoring_errexit (and its own 'e' flag below),
                 // so an inherited CMD_IGNORE_RETURN frame ends at the

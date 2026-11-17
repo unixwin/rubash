@@ -127,7 +127,25 @@ impl Executor {
         // stdin_redir whether fd 0 is among them; the flag is sticky for the
         // structure's whole dynamic extent and eval.c:181 resets it per
         // reader command. Async `cmd &` consults it (execute_cmd.c:2837).
-        if command_is_shell_control_structure(cmd) && !cmd.redirects.is_empty() {
+        // rubash#3605: a PIPELINE ELEMENT's own redirects never reach this
+        // check in GNU — the element's execute_in_subshell consumed them in
+        // do_redirections before re-dispatching (:1759-1764), so
+        // command->redirects is NULL at :826 and the element child's
+        // `|=pipe` verdict (execute_cmd.c:4570) survives: a pipe-fed
+        // `for … done | cat` body keeps flag=1 even with the element's own
+        // `< file` redirects. element_pipe_stdin stands in for that
+        // consumption; consume it here (only a shell-control-structure
+        // node — a `( )` element's marker must reach its own :1733 assign
+        // in execute_subshell_command_with_redirects).
+        let element_pipe_stdin = if command_is_shell_control_structure(cmd) {
+            self.shell_state.element_pipe_stdin.replace(false)
+        } else {
+            false
+        };
+        if command_is_shell_control_structure(cmd)
+            && !cmd.redirects.is_empty()
+            && !element_pipe_stdin
+        {
             self.shell_state
                 .stdin_redir
                 .set(cmd.redirects.iter().any(redirect_updates_stdin_redir));
@@ -359,7 +377,23 @@ impl Executor {
         let mut expanded = if cmd.arithmetic_command.is_some() {
             cmd.clone()
         } else {
-            match self.expand_command_words(cmd) {
+            // rubash#3605: GNU raises comsub_ignore_return around
+            // expand_words when the command carries CMD_IGNORE_RETURN
+            // (execute_cmd.c:4616; the flag arrives via :655-656 or the
+            // :917 ignore_return||invert arm), so command substitutions
+            // spawned by this expansion stamp CMD_IGNORE_RETURN on
+            // every body command (builtins/evalstring.c:496). Only the
+            // command-word expansion raises it — redirect expansion is
+            // outside the bracket (verified: `! cat < <(set -e; false;
+            // echo x)` stays empty under 5.3.20).
+            if self.suppress_errexit > 0 {
+                self.comsub_ignore_return += 1;
+            }
+            let expansion_result = self.expand_command_words(cmd);
+            if self.comsub_ignore_return > 0 {
+                self.comsub_ignore_return -= 1;
+            }
+            match expansion_result {
                 Ok(expanded) => expanded,
                 // GNU expr.c expr_streval: an unbound variable under `set -u`
                 // raises FORCE_EOF from ANY expansion position — the word
@@ -2123,6 +2157,10 @@ impl Executor {
             return Err(ExecuteError::ExpansionFailure(1));
         }
         if self.shell_state.parameter_bad_substitution.replace(false) {
+            // rubash#3499: consuming the verdict spends the print
+            // budget with it, so the next command reports its own
+            // failure.
+            self.shell_state.bad_substitution_reported.set(false);
             if self.posix_mode_enabled()
                 && !self.invocation_interactive()
                 && crate::builtins::shopt::compatibility_level(&self.shell_state.env_vars) > 43
@@ -2245,6 +2283,12 @@ impl Executor {
         let arithmetic_error = self.shell_state.arithmetic_expansion_error.get();
         let arithmetic_fatal = self.shell_state.arithmetic_fatal_error.get();
         let arithmetic_nounset = self.shell_state.arithmetic_nounset_error.get();
+        // rubash#3581: same crossing for the `bad substitution` latch —
+        // GNU's do_redirections runs in the child too, and a parameter
+        // error inside a heredoc body (`"${a[*]#${-y}}"`) is an
+        // expand_word_error the parent must observe to abandon the
+        // command (execute_cmd.c:5522 -> redir.c do_redirections).
+        let parameter_bad_substitution = self.shell_state.parameter_bad_substitution.get();
         self.restore_flat_subshell(saved_state);
         self.shell_state
             .arithmetic_expansion_error
@@ -2255,6 +2299,9 @@ impl Executor {
         self.shell_state
             .arithmetic_nounset_error
             .set(arithmetic_nounset);
+        self.shell_state
+            .parameter_bad_substitution
+            .set(parameter_bad_substitution);
         self.exit_code = saved_exit_code;
         self.last_command_substitution_status
             .set(saved_substitution_status);
