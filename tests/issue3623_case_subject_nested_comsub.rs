@@ -81,3 +81,36 @@ fn alternation_pattern_after_subject_comsub() {
     assert_eq!(stdout, "zw\n");
     assert_eq!(code, Some(0));
 }
+
+// The sharpest failing shape at the pre-fix tree is a ONE-WORD subject
+// comsub with no space inside it (`$(true)`, `$(ls)`, `$(pwd)`): the
+// word stays in `word` when the inner `)` arrives, so the truncated-case
+// close arm fired (`$(case $(ls` -> syntax error, rc 2). A two-word
+// comsub (`$(printf e)`) cleared the case stage at the blank and did not
+// fail, which is why this class needs its own pins.
+#[test]
+fn single_word_subject_comsub_keeps_outer_substitution_closed() {
+    let (stdout, stderr, code) = rubash("x=$(case $(true) in *) echo hit;; esac); echo \"$x\"");
+    assert_eq!(stdout, "hit\n");
+    assert_eq!(stderr, "");
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn single_word_subject_comsub_multiline_form() {
+    let (stdout, stderr, code) =
+        rubash("y=$(\n    case $(true) in\n\t*) echo got;;\n    esac\n)\necho \"$y\"");
+    assert_eq!(stdout, "got\n");
+    assert_eq!(stderr, "");
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn single_word_subject_comsub_empty_subject_patterns() {
+    // `$(true)` has an empty subject: GNU matches it against `""`.
+    let (stdout, stderr, code) =
+        rubash("x=$(case $(true) in \"\") echo empty;; *) echo other;; esac); echo \"$x\"");
+    assert_eq!(stdout, "empty\n");
+    assert_eq!(stderr, "");
+    assert_eq!(code, Some(0));
+}
