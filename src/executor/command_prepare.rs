@@ -4174,7 +4174,10 @@ impl Executor {
                     } else {
                         ""
                     };
-                    if text.starts_with('"') && unquoted_alternate_text_has_list(inner, true) {
+                    if outer_double_quoted
+                        && text.starts_with('"')
+                        && unquoted_alternate_text_has_list(inner, true)
+                    {
                         self.emit_unquoted_alternate_segment(
                             inner,
                             ifs_chars,
@@ -4291,7 +4294,7 @@ impl Executor {
                         let token: String = chars[index..end].iter().collect();
                         if protected_lists {
                             for (i, field) in self
-                                .alternate_list_fields(&token, ifs_chars)
+                                .alternate_list_fields(&token, ifs_chars, true)
                                 .into_iter()
                                 .enumerate()
                             {
@@ -4301,7 +4304,7 @@ impl Executor {
                                 emits.push(AlternateEmit::Text(field));
                             }
                         } else if !quoted_outer {
-                            let mut fields = self.alternate_list_fields(&token, ifs_chars);
+                            let mut fields = self.alternate_list_fields(&token, ifs_chars, false);
                             if fields.is_empty() {
                                 fields = self.expand_alternate_piece(&token);
                             }
@@ -4340,7 +4343,7 @@ impl Executor {
     }
 
     /// The element list an unquoted rhs list-expansion token contributes.
-    fn alternate_list_fields(&mut self, token: &str, ifs_chars: &str) -> Vec<String> {
+    fn alternate_list_fields(&mut self, token: &str, ifs_chars: &str, quoted: bool) -> Vec<String> {
         let ifs_first = ifs_chars.chars().next().unwrap_or(' ').to_string();
         match token {
             "$@" | "${@}" => self.shell_state.positional_window_cloned(),
@@ -4377,7 +4380,21 @@ impl Executor {
                     }
                     return Vec::new();
                 }
-                self.expand_alternate_piece(token)
+                // A `${name[@]<op>}` token with slice / pattern /
+                // case-modifier suffixes is not a bare list reference:
+                // expand it through the ordinary word machinery in the
+                // context it was scanned from. A token inside a `"..."`
+                // piece — or unquoted text under a `"${...}"` outer,
+                // where param_expand's `quoted` propagates
+                // (subst.c:7840-7860) — expands like `"${name[@]<op>}"`,
+                // keeping empty elements and per-element fields; an
+                // unquoted token expands bare. A token carrying its own
+                // `"` cannot be re-wrapped and keeps the bare expansion.
+                if quoted && !token.contains('"') {
+                    self.expand_alternate_piece(&format!("\"{token}\""))
+                } else {
+                    self.expand_alternate_piece(token)
+                }
             }
         }
     }
@@ -4455,7 +4472,7 @@ impl Executor {
             } else if let Some(end) = unquoted_list_token_end(&chars, index) {
                 flush_run!();
                 let token: String = chars[index..end].iter().collect();
-                let mut fields = self.alternate_list_fields(&token, ifs_chars);
+                let mut fields = self.alternate_list_fields(&token, ifs_chars, false);
                 if fields.is_empty() {
                     fields = self.expand_alternate_piece(&token);
                 }
