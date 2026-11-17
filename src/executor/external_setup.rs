@@ -1350,7 +1350,7 @@ impl Executor {
         // rubash#3210: the body's diagnostic seed is the enclosing
         // command's first-element end line (execute_cmd.c:936), not
         // its start line — see procsub_body_seed_line.
-        let cmd_line = super::command_text::procsub_body_seed_line(cmd);
+        let cmd_line = super::command_text::procsub_body_seed_line(cmd, self.ambient_line.get());
         let mut redirect_target_rewrites = Vec::new();
         // GNU subst.c: an unquoted `name=<( )` word is an assignment whose
         // value is the process substitution (make_dev_fd_filename,
@@ -2393,6 +2393,17 @@ impl Executor {
         if super::shell_options::redirect_path_is_fifo(&session_target) {
             return ProcsubPlanCapture::Declined;
         }
+        // rubash#3286: the joined-path check above misses from a
+        // deleted cwd — a FIFO there declines the capture the same way
+        // (the capture open would otherwise block the planner on the
+        // rendezvous, rubash#1820).
+        #[cfg(unix)]
+        {
+            let fs_operand = self.redirect_target_filesystem_path(target);
+            if fs_operand.is_relative() && self.anchor_operand_is_fifo(&fs_operand) == Some(true) {
+                return ProcsubPlanCapture::Declined;
+            }
+        }
         match mode {
             ProcsubPlanMode::Read => match FileFd::open_read(session_target) {
                 Ok(file) => ProcsubPlanCapture::Captured(file),
@@ -2401,6 +2412,7 @@ impl Executor {
             ProcsubPlanMode::WriteAppend => match open_redirect_append(&session_target) {
                 Ok(file) => ProcsubPlanCapture::Captured(Rc::new(FileFd {
                     handle: crate::fd::into_handle(file),
+                    closed: std::cell::Cell::new(false),
                     path: session_target,
                 })),
                 Err(_) => ProcsubPlanCapture::Failed,
@@ -2409,6 +2421,7 @@ impl Executor {
                 match self.create_redirect_output_for(Some(redirect), target, redirect.clobber) {
                     Ok(file) => ProcsubPlanCapture::Captured(Rc::new(FileFd {
                         handle: crate::fd::into_handle(file),
+                        closed: std::cell::Cell::new(false),
                         path: session_target,
                     })),
                     Err(_) => ProcsubPlanCapture::Failed,
@@ -2422,6 +2435,7 @@ impl Executor {
                 {
                     Ok(file) => ProcsubPlanCapture::Captured(Rc::new(FileFd {
                         handle: crate::fd::into_handle(file),
+                        closed: std::cell::Cell::new(false),
                         path: session_target,
                     })),
                     Err(_) => ProcsubPlanCapture::Failed,
@@ -2482,6 +2496,7 @@ impl Executor {
         let handle = crate::fd::duplicate_handle_inheritable(stream).ok()?;
         Some(Rc::new(crate::executor::fd_table::FileFd {
             handle,
+            closed: std::cell::Cell::new(false),
             path: PathBuf::from("ambient:stdout"),
         }))
     }
@@ -2493,6 +2508,7 @@ impl Executor {
         let file = crate::executor::shell_options::background_capture_write_end()?;
         Some(Rc::new(crate::executor::fd_table::FileFd {
             handle: crate::fd::into_handle(file),
+            closed: std::cell::Cell::new(false),
             path: PathBuf::from("ambient:stdout"),
         }))
     }
@@ -2513,6 +2529,7 @@ impl Executor {
                     .map(|dup| {
                         Rc::new(crate::executor::fd_table::FileFd {
                             handle: dup,
+                            closed: std::cell::Cell::new(false),
                             path: PathBuf::from(label),
                         })
                     })
@@ -2552,6 +2569,7 @@ impl Executor {
                             .map(|dup| {
                                 Rc::new(crate::executor::fd_table::FileFd {
                                     handle: dup,
+                                    closed: std::cell::Cell::new(false),
                                     path: PathBuf::from(label),
                                 })
                             })
@@ -2570,6 +2588,7 @@ impl Executor {
                     .map(|dup| {
                         Rc::new(crate::executor::fd_table::FileFd {
                             handle: dup,
+                            closed: std::cell::Cell::new(false),
                             path: PathBuf::from(label),
                         })
                     })
@@ -2656,12 +2675,32 @@ impl Executor {
     /// twin: it carries the same plan through the `__RUBASH_FD_*`
     /// env channel instead. Returns the pre-bind snapshot for
     /// `restore_procsub_spawn_plan_fd`. A disposition that cannot be
-    /// materialized (an unopenable carrier, a failed dup) leaves
-    /// the fd untouched — the ambient behavior, not a spawn failure.
-    fn bind_procsub_spawn_plan_fd(&mut self, fd: u32, disposition: &ProcsubSpawnFd) -> PlanFdSave {
+    /// materialized (an unopenable carrier, a failed dup of the NEW
+    /// endpoint) leaves the fd untouched — the ambient behavior, not
+    /// a spawn failure. (A failed dup of the SAVED entry is different:
+    /// see the #3732 note below — it fails the bind.)
+    ///
+    /// rubash#3732 (same hazard as #3706): the pre-bind snapshot
+    /// is a kernel dup (`FdTable::saved_entry`), never a bare Rc
+    /// clone — every bind arm below retires the displaced descriptor
+    /// (`FdTable::close` retires both arms; `set_fd_input_file` /
+    /// `open_output` retire the arm they replace, rubash#3213), so
+    /// a cloned save would restore a dead entry and the next spawn's
+    /// pin pass would dup2 whatever recycled that kernel number.
+    /// GNU's undo save IS that kernel dup (`fcntl (fd, F_DUPFD,
+    /// SHELL_FD_BASE)`, redir.c:965/1082/1144; compound groups run
+    /// `do_redirections (..., RX_ACTIVE|RX_UNDOABLE)`,
+    /// execute_cmd.c:854). A dup failure fails the bind (GNU
+    /// REDIRECTION_ERROR) before anything is mutated, so the caller
+    /// can unwind the bindings already made.
+    fn bind_procsub_spawn_plan_fd(
+        &mut self,
+        fd: u32,
+        disposition: &ProcsubSpawnFd,
+    ) -> Result<PlanFdSave, ExecuteError> {
         let saved = PlanFdSave {
             fd,
-            entry: self.fd_table.entries.get(&fd).cloned(),
+            entry: self.fd_table.saved_entry(fd)?,
             alias_generation: self.fd_table.stdout_alias_generation.get(&fd).cloned(),
             fd_stdin: self.shell_state.env_vars.get(&fd_stdin_key(fd)).cloned(),
             fd_stdin_offset: self
@@ -2693,19 +2732,50 @@ impl Executor {
                     .insert(fd_closed_key(fd), "1".to_string());
             }
             ProcsubSpawnFd::File { read, write } => {
-                if let Some(file) = read {
-                    self.set_fd_input_file(fd, file.clone(), false);
-                }
-                if let Some(file) = write {
-                    self.fd_table
-                        .open_output(fd, FdWriteEndpoint::File(file.clone()), false);
-                    self.shell_state.env_vars.remove(&fd_closed_key(fd));
-                    self.shell_state
-                        .env_vars
-                        .insert(fd_output_key(fd), file.path.to_string_lossy().into_owned());
-                    self.shell_state
-                        .env_vars
-                        .remove(&fd_output_process_substitution_key(fd));
+                // rubash#3655: when both arms are present they are
+                // ONE description — a single open_readwrite install,
+                // not an input bind followed by an output bind (the
+                // second would retire the first). Either arm alone
+                // keeps its single-direction install.
+                match (read, write) {
+                    (Some(read), Some(write)) => {
+                        self.fd_table.open_readwrite(
+                            fd,
+                            // rubash#3655 fix: the enclosing match binds
+                            // by reference (match ergonomics), so both
+                            // arms need `.clone()` — the write side had
+                            // it, the read side did not (E0308, CI run
+                            // 43824819839).
+                            FdReadEndpoint::File(read.clone()),
+                            FdWriteEndpoint::File(write.clone()),
+                            false,
+                        );
+                        self.shell_state.env_vars.remove(&fd_closed_key(fd));
+                        self.shell_state.env_vars.remove(&fd_stdin_key(fd));
+                        self.shell_state.env_vars.remove(&fd_stdin_offset_key(fd));
+                        self.shell_state.env_vars.remove(&fd_dynamic_input_key(fd));
+                        self.shell_state
+                            .env_vars
+                            .insert(fd_output_key(fd), write.path.to_string_lossy().into_owned());
+                        self.shell_state
+                            .env_vars
+                            .remove(&fd_output_process_substitution_key(fd));
+                    }
+                    (Some(file), None) => {
+                        self.set_fd_input_file(fd, file.clone(), false);
+                    }
+                    (None, Some(file)) => {
+                        self.fd_table
+                            .open_output(fd, FdWriteEndpoint::File(file.clone()), false);
+                        self.shell_state.env_vars.remove(&fd_closed_key(fd));
+                        self.shell_state
+                            .env_vars
+                            .insert(fd_output_key(fd), file.path.to_string_lossy().into_owned());
+                        self.shell_state
+                            .env_vars
+                            .remove(&fd_output_process_substitution_key(fd));
+                    }
+                    (None, None) => {}
                 }
             }
             ProcsubSpawnFd::TruncatedFile(file) => {
@@ -2718,6 +2788,7 @@ impl Executor {
                     let handle = crate::fd::into_handle(seeked);
                     let bound = std::rc::Rc::new(crate::executor::fd_table::FileFd {
                         handle,
+                        closed: std::cell::Cell::new(false),
                         path: file.path.clone(),
                     });
                     self.fd_table
@@ -2760,6 +2831,7 @@ impl Executor {
                 if let Ok(dup) = crate::fd::duplicate_handle_inheritable(file.handle) {
                     let bound = std::rc::Rc::new(crate::executor::fd_table::FileFd {
                         handle: dup,
+                        closed: std::cell::Cell::new(false),
                         path: file.path.clone(),
                     });
                     self.fd_table
@@ -2774,7 +2846,7 @@ impl Executor {
                 }
             }
         }
-        saved
+        Ok(saved)
     }
 
     fn restore_procsub_spawn_plan_fd(&mut self, saved: PlanFdSave) {
@@ -2834,21 +2906,33 @@ impl Executor {
     /// from the map inherit the ambient table — the in-process
     /// consumer already sees it, unlike a spawned child, which
     /// needs the ambient fds transported (see the #2212 loop in
-    /// `spawn_output_process_substitution_child`).
+    /// `spawn_output_process_substitution_child`). A dup failure
+    /// while saving one fd's pre-bind snapshot (rubash#3732) fails
+    /// the whole run before `run` starts — the bindings already made
+    /// are restored in reverse first, the same unwind a redirect
+    /// apply failure performs (GNU `undo_partial_redirects`).
     pub(in crate::executor) fn with_procsub_spawn_plan<T>(
         &mut self,
         plan: &ProcsubSpawnPlan,
         run: impl FnOnce(&mut Self) -> T,
-    ) -> T {
+    ) -> Result<T, ExecuteError> {
         let mut saved = Vec::new();
         for (fd, disposition) in &plan.fds {
-            saved.push(self.bind_procsub_spawn_plan_fd(*fd, disposition));
+            match self.bind_procsub_spawn_plan_fd(*fd, disposition) {
+                Ok(save) => saved.push(save),
+                Err(error) => {
+                    for save in saved.into_iter().rev() {
+                        self.restore_procsub_spawn_plan_fd(save);
+                    }
+                    return Err(error);
+                }
+            }
         }
         let result = run(self);
         for save in saved.into_iter().rev() {
             self.restore_procsub_spawn_plan_fd(save);
         }
-        result
+        Ok(result)
     }
 
     fn materialize_standalone_process_substitution_word(
@@ -2901,7 +2985,41 @@ impl Executor {
         files: &mut ProcessSubstitutionFiles,
         line: Option<usize>,
     ) -> Result<(), ExecuteError> {
-        for substitution in substitutions {
+        // rubash#3353: the recorded `target` is the RAW span spelling.
+        // Word expansion rewrites the span interior before this runs —
+        // quote removal always applies, and `$` / backquote evaluation
+        // inside the body text follows the word's own quoting — so
+        // `replacen(target)` misses on exactly the embedded mid-word
+        // spans GNU splices (subst.c:11364-11378 expand_word_internal
+        // '<'/'>' arms extract the span from the word being expanded,
+        // subst.c:1311 extract_process_subst). When the recorded
+        // spelling is absent, rescan the expanded word once and pair
+        // spans by order; the recorded `source` still feeds the body,
+        // so body quoting is untouched. A span-count mismatch (expansion
+        // introduced or destroyed a `<(`/`>(` span) keeps the recorded
+        // spelling — the pre-#3353 miss — rather than guessing a pairing.
+        let recorded_count = substitutions.len();
+        let mut expanded_span_targets: Option<Vec<String>> = None;
+        for (substitution_index, substitution) in substitutions.into_iter().enumerate() {
+            let splice_target = if word.contains(&substitution.target) {
+                substitution.target.clone()
+            } else {
+                let targets = expanded_span_targets.get_or_insert_with(|| {
+                    WordMetadata::new(0, word.clone(), word.clone())
+                        .process_substitutions
+                        .into_iter()
+                        .map(|substitution| substitution.target)
+                        .collect()
+                });
+                if targets.len() == recorded_count {
+                    targets
+                        .get(substitution_index)
+                        .cloned()
+                        .unwrap_or_else(|| substitution.target.clone())
+                } else {
+                    substitution.target.clone()
+                }
+            };
             if substitution.output {
                 let path = self.empty_process_substitution_temp()?;
                 files.outputs.push(OutputProcessSubstitution {
@@ -2911,7 +3029,7 @@ impl Executor {
                     spawn_plan: ProcsubSpawnPlan::default(),
                 });
                 let display_path = self.process_substitution_output_fd_word(&path);
-                *word = word.replacen(&substitution.target, &display_path, 1);
+                *word = word.replacen(&splice_target, &display_path, 1);
             } else {
                 // rubash#1952: stream first (see
                 // materialize_standalone_process_substitution_word);
@@ -2920,7 +3038,7 @@ impl Executor {
                 if let Some(streamed) =
                     self.process_substitution_child_fd_word(&substitution.source, line)
                 {
-                    *word = word.replacen(&substitution.target, &streamed, 1);
+                    *word = word.replacen(&splice_target, &streamed, 1);
                     continue;
                 }
                 let Some((output, body_timing)) =
@@ -2936,7 +3054,7 @@ impl Executor {
                 // path form) share one virtual clock.
                 self.procsub_stream_set_timing(&path, body_timing.clone());
                 let display_path = self.process_substitution_fd_word_timed(&output, body_timing);
-                *word = word.replacen(&substitution.target, &display_path, 1);
+                *word = word.replacen(&splice_target, &display_path, 1);
             };
         }
         Ok(())
@@ -3766,8 +3884,7 @@ impl Executor {
         spawn_plan: &ProcsubSpawnPlan,
         live: ProcsubLiveStdio,
     ) -> Result<(), ExecuteError> {
-        let exe = std::env::var_os("CARGO_BIN_EXE_rubash")
-            .map(std::path::PathBuf::from)
+        let exe = test_rubash_binary_from_env()
             .or_else(test_rubash_binary_from_current_exe)
             .or_else(|| std::env::current_exe().ok())
             .unwrap_or_else(|| "rubash".into());

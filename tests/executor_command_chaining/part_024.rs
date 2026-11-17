@@ -259,6 +259,70 @@ fn test_help_appends_stderr() {
     let _ = fs::remove_file(error_path);
 }
 
+/// The POSIX `/<drive>/…` display form of a native absolute path —
+/// the same normalization `shell_pwd_display_path` performs
+/// (executor/path.rs:7957; mirrors issue659's test-side
+/// `posix_display_form`, repeated here because the function is
+/// `pub(crate)` and unreachable from integration tests).
+fn posix_display_form(path: &std::path::Path) -> String {
+    let value = path.to_string_lossy().replace('\\', "/");
+    let value = if let Some(rest) = value.strip_prefix("//?/UNC/") {
+        format!("//{rest}")
+    } else if let Some(rest) = value.strip_prefix("//?/") {
+        rest.to_string()
+    } else {
+        value
+    };
+    let bytes = value.as_bytes();
+    if bytes.len() >= 3 && bytes[1] == b':' && bytes[2] == b'/' && bytes[0].is_ascii_alphabetic() {
+        let drive = (bytes[0] as char).to_ascii_lowercase();
+        format!("/{}/{}", drive, &value[3..])
+    } else {
+        value
+    }
+}
+
+/// rubash#3397: `dirs` prints the real working directory, never a
+/// temporary `PWD=` assignment. GNU `dirs_builtin` takes the first
+/// entry from `get_working_directory ("dirs")` and prints it through
+/// `polite_directory_format` (builtins/pushd.def `dirs_builtin`;
+/// general.c:953), which abbreviates a `$HOME` prefix to `~`. A `PWD=`
+/// prefix only sets the variable for the command's environment — it
+/// never chdirs — so it cannot steer `dirs`. The three tests below
+/// keep the `PWD=` prefix as the nail and derive the expectation from
+/// the live cwd (the embedded executor inherits the test process's
+/// cwd and env — the env is snapshotted once at `Executor::new()`,
+/// the cwd is read live from the process — executor/init.rs:326),
+/// so the subject stays the redirect
+/// plumbing, not the value. Call before `Executor::new()` so the
+/// snapshot mirrors the executor's own.
+fn expected_dirs_output() -> String {
+    let cwd = std::env::current_dir().expect("test process cwd");
+    // The dir-stack entry the builtin prints is stored in the
+    // canonical POSIX display spelling (shell_pwd_display_path), so
+    // the expectation derives from that same form — the native
+    // `X:\…` spelling never reaches stdout.
+    let cwd = posix_display_form(&cwd);
+    // polite_directory_format (builtins/pushd.rs:30) compares the
+    // display name against the executor env's HOME verbatim; on
+    // Windows Executor::new injects the same USERPROFILE /
+    // HOMEDRIVE+HOMEPATH fallback when HOME is absent
+    // (executor/init.rs:510-519), so mirror that lookup chain.
+    let home = std::env::var("HOME").unwrap_or_else(|_| {
+        std::env::var("USERPROFILE").unwrap_or_else(|_| {
+            match (std::env::var("HOMEDRIVE"), std::env::var("HOMEPATH")) {
+                (Ok(drive), Ok(path)) => format!("{drive}{path}"),
+                _ => String::new(),
+            }
+        })
+    });
+    if home.len() > 1 && (cwd == home || cwd.starts_with(&format!("{home}/"))) {
+        format!("~{}\n", &cwd[home.len()..])
+    } else {
+        format!("{cwd}\n")
+    }
+}
+
 #[test]
 fn test_dirs_redirects_output() {
     let _cwd_guard = CwdGuard::take();
@@ -267,16 +331,14 @@ fn test_dirs_redirects_output() {
     let input = format!("PWD=/tmp/rubash-dirs dirs > {output_path}");
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
+    let expected = expected_dirs_output();
     let mut executor = Executor::new();
 
     let result = executor.execute_ast(&ast);
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(
-        fs::read_to_string(output_path).unwrap(),
-        "/tmp/rubash-dirs\n"
-    );
+    assert_eq!(fs::read_to_string(output_path).unwrap(), expected);
     let _ = fs::remove_file(output_path);
 }
 
@@ -289,6 +351,7 @@ fn test_dirs_appends_output() {
     let input = format!("PWD=/tmp/rubash-dirs dirs >> {output_path}");
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
+    let expected = expected_dirs_output();
     let mut executor = Executor::new();
 
     let result = executor.execute_ast(&ast);
@@ -297,7 +360,7 @@ fn test_dirs_appends_output() {
     assert_eq!(executor.last_exit_code(), 0);
     assert_eq!(
         fs::read_to_string(output_path).unwrap(),
-        "before\n/tmp/rubash-dirs\n"
+        format!("before\n{expected}")
     );
     let _ = fs::remove_file(output_path);
 }
@@ -310,15 +373,13 @@ fn test_builtin_dirs_redirects_output() {
     let input = format!("PWD=/tmp/rubash-builtin-dirs builtin dirs > {output_path}");
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
+    let expected = expected_dirs_output();
     let mut executor = Executor::new();
 
     let result = executor.execute_ast(&ast);
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(
-        fs::read_to_string(output_path).unwrap(),
-        "/tmp/rubash-builtin-dirs\n"
-    );
+    assert_eq!(fs::read_to_string(output_path).unwrap(), expected);
     let _ = fs::remove_file(output_path);
 }

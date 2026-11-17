@@ -73,6 +73,13 @@ struct CommandLookupCache {
     /// which itself stats the pinned POSIX tools dir) is pure overhead.
     path_dirs: Option<Arc<Vec<PathBuf>>>,
     path_extensions: Option<Arc<Vec<String>>>,
+    /// Per-scaffold flag: did PATH element N carry a `.`-leading spelling?
+    /// GNU findcmd.c:550-551 examines that spelling (not the anchored
+    /// directory) before each element's hit test and sets
+    /// dot_found_in_search when it resolves to the session cwd
+    /// (rubash#3551); the Windows listing walk needs the raw verdict for
+    /// the same CHKDOT record.
+    path_dot_elements: Option<Arc<Vec<bool>>>,
 }
 
 impl CommandLookupCache {
@@ -84,6 +91,7 @@ impl CommandLookupCache {
             probes: HashMap::new(),
             path_dirs: None,
             path_extensions: None,
+            path_dot_elements: None,
         }
     }
 
@@ -100,6 +108,7 @@ impl CommandLookupCache {
         self.probes.clear();
         self.path_dirs = None;
         self.path_extensions = None;
+        self.path_dot_elements = None;
     }
 }
 
@@ -169,6 +178,15 @@ struct CommandLookupStores {
     /// (the per-scope self-cap in set_command_lookup_cache); only the
     /// resolution slices' memory is bounded by CACHE_SLICE_CAP.
     hashed: HashMap<String, HashMap<String, Option<PathBuf>>>,
+    /// The session's `dot_found_in_search` (findcmd.c:78): GNU keeps it
+    /// as a global the PATH walk resets at entry (findcmd.c:632) and
+    /// sets whenever an element beginning with `.` resolves to the
+    /// current directory (findcmd.c:550-551); every phash_insert then
+    /// carries the verdict into the entry's HASH_CHKDOT flag
+    /// (findcmd.c:416-426, hashcmd.c:113-114). A lookup answered from
+    /// the hash table runs no walk and leaves the stale value — the
+    /// same quirk GNU's global exhibits for `hash -p` inserts.
+    dot_found: HashMap<String, bool>,
 }
 
 impl CommandLookupStores {
@@ -177,6 +195,7 @@ impl CommandLookupStores {
             slices: HashMap::new(),
             recency: VecDeque::new(),
             hashed: HashMap::new(),
+            dot_found: HashMap::new(),
         }
     }
 
@@ -313,6 +332,21 @@ pub(crate) fn clear_command_lookup_cache(env_vars: &HashMap<String, String>) {
     // fingerprint reset, this clear drops the hash-table mirror as well.
     mirror.clear();
     cache.reset(String::new());
+}
+
+/// The session's `dot_found_in_search` verdict, as left by the most
+/// recent PATH walk (findcmd.c:78). phash_insert consumers read it
+/// through builtins::hash; mirrors GNU's stale-after-a-hash-hit quirk.
+pub(crate) fn dot_found_in_search(env_vars: &HashMap<String, String>) -> bool {
+    let scope = session_scope(env_vars);
+    let stores = command_lookup_stores();
+    stores.dot_found.get(&scope).copied().unwrap_or(false)
+}
+
+fn set_dot_found_in_search(env_vars: &HashMap<String, String>, found: bool) {
+    let scope = session_scope(env_vars);
+    let mut stores = command_lookup_stores();
+    stores.dot_found.insert(scope, found);
 }
 
 /// Forget one remembered command location in the session that owns
@@ -641,13 +675,45 @@ pub fn find_user_command(name: &str, env_vars: &HashMap<String, String>) -> Opti
         // hash table survives PATH changes — consult the mirrored
         // hash-table entries first, even right after a fingerprint reset
         // (rubash#1137).
+        //
+        // The consult is phash_search itself (hashcmd.c:126): a stored
+        // relative spelling is re-validated against the cwd on every read
+        // and may answer NULL (a deleted `./name`), which sends the lookup
+        // on to the PATH walk with the entry kept (rubash#3359). The
+        // PATH-scan memo for the name is stale evidence then too.
         if let Some(result) = mirror.get(name).cloned() {
             if let Some(path) = &result {
-                if crate::builtins::shopt::checkhash_enabled() && !cached_path_still_valid(path) {
-                    mirror.remove(name);
-                    cache.results.remove(name);
-                } else {
-                    return Some(path.clone());
+                // GNU hashcmd.c:146-191 phash_search's CHKDOT/RELPATH
+                // arm (rubash#3551): `./NAME` (or `./<stored>`) wins
+                // while executable, and a `.`-leading stored path
+                // resolving to `.` unexecutably is a miss — the PATH
+                // walk below then re-records (hash -p ./gone NAME falls
+                // through the same way). builtins::hash owns the arm; the
+                // mirror stores only the fs path. The served spelling is
+                // returned VERBATIM — GNU shell_execve runs the recorded
+                // string as-is, so diagnostics and post-`cd` ENOENT keep
+                // the `./elem/name` form (rubash#2696).
+                match crate::builtins::hash::phash_search(env_vars, name) {
+                    None => {
+                        mirror.remove(name);
+                        cache.results.remove(name);
+                    }
+                    Some(served) => {
+                        let served = PathBuf::from(served);
+                        // checkhash probes the served spelling anchored
+                        // at the session cwd (G-02).
+                        if crate::builtins::shopt::checkhash_enabled()
+                            && !cached_path_still_valid(&anchor_at_session_cwd(
+                                served.clone(),
+                                env_vars,
+                            ))
+                        {
+                            mirror.remove(name);
+                            cache.results.remove(name);
+                        } else {
+                            return Some(served);
+                        }
+                    }
                 }
             } else {
                 return None;
@@ -879,14 +945,22 @@ fn path_scan_scaffold(
     cache: &mut CommandLookupCache,
     env_vars: &HashMap<String, String>,
     fingerprint: &str,
-) -> (Arc<Vec<PathBuf>>, Arc<Vec<String>>) {
+) -> (Arc<Vec<PathBuf>>, Arc<Vec<String>>, Arc<Vec<bool>>) {
     if cache.fingerprint != fingerprint {
         cache.reset(fingerprint.to_string());
     }
     if cache.path_dirs.is_none() {
+        let mut dot_elements = Vec::new();
         let dirs = split_shell_path(env_vars.get("PATH").map(String::as_str).unwrap_or_default())
             .into_iter()
             .map(|dir| {
+                // rubash#3826: GNU findcmd.c:544 — expand a `~`-leading
+                // PATH element at lookup time (unless POSIX mode).
+                let dir = expand_path_element_tilde(&dir, env_vars);
+                // findcmd.c:550-551 is keyed on the element SPELLING
+                // beginning with `.`, read before the element is joined
+                // and anchored (rubash#3551).
+                dot_elements.push(dir.starts_with('.'));
                 // rubash#3104: fold a raw-byte pair in the element
                 // before the listing scan, like the unix walk; on
                 // Windows the folded string is already the WTF-8
@@ -897,6 +971,7 @@ fn path_scan_scaffold(
             })
             .collect::<Vec<_>>();
         cache.path_dirs = Some(Arc::new(dirs));
+        cache.path_dot_elements = Some(Arc::new(dot_elements));
     }
     if cache.path_extensions.is_none() {
         cache.path_extensions = Some(Arc::new(executable_extensions(env_vars)));
@@ -904,6 +979,7 @@ fn path_scan_scaffold(
     (
         Arc::clone(cache.path_dirs.as_ref().unwrap()),
         Arc::clone(cache.path_extensions.as_ref().unwrap()),
+        Arc::clone(cache.path_dot_elements.as_ref().unwrap()),
     )
 }
 
@@ -921,17 +997,41 @@ fn find_in_path_via_listings(
     env_vars: &HashMap<String, String>,
     fingerprint: &str,
 ) -> Option<PathBuf> {
+    // findcmd.c:632 resets dot_found_in_search at walk entry;
+    // findcmd.c:550-551 then sets it whenever an element beginning with
+    // `.` resolves to the session cwd — including the element the hit
+    // lands in. The verdict rides the session's dot_found side channel
+    // for the next phash_insert (rubash#3551, Windows listing face).
+    let mut dot_found = false;
+    let result = find_in_path_via_listings_inner(name, env_vars, fingerprint, &mut dot_found);
+    set_dot_found_in_search(env_vars, dot_found);
+    result
+}
+
+#[cfg(not(unix))]
+fn find_in_path_via_listings_inner(
+    name: &str,
+    env_vars: &HashMap<String, String>,
+    fingerprint: &str,
+    dot_found: &mut bool,
+) -> Option<PathBuf> {
     let scope = session_scope(env_vars);
     let mut stores = command_lookup_stores();
     let cache = session_lookup_slice(&mut stores, &scope);
-    let (dirs, extensions) = path_scan_scaffold(cache, env_vars, fingerprint);
+    let (dirs, extensions, dot_elements) = path_scan_scaffold(cache, env_vars, fingerprint);
     // Candidate spellings are per-NAME, not per-directory (GNU passes the
     // same NAME through the whole walk); derive them once so a miss costs
     // one contains() per PATH entry per PATHEXT candidate and no
     // allocation at all.
     let candidates = listed_candidates(name, &extensions);
     for attempt in 0..2 {
-        for dir in dirs.iter() {
+        for (index, dir) in dirs.iter().enumerate() {
+            // findcmd.c:550-551: a `.`-spelled element that resolves to
+            // the session cwd sets dot_found_in_search, examined in PATH
+            // order before the hit test below (rubash#3551).
+            if !*dot_found && dot_elements[index] && path_element_is_session_cwd(dir, env_vars) {
+                *dot_found = true;
+            }
             let listing = cached_dir_listing(cache, dir);
             for candidate in &candidates {
                 // rubash#799 relaxed by rubash#1283: within one directory a
@@ -1113,7 +1213,7 @@ fn memoized_miss_still_absent(
     env_vars: &HashMap<String, String>,
     fingerprint: &str,
 ) -> bool {
-    let (dirs, extensions) = path_scan_scaffold(cache, env_vars, fingerprint);
+    let (dirs, extensions, _dot_elements) = path_scan_scaffold(cache, env_vars, fingerprint);
     let candidates = listed_candidates(name, &extensions);
     !confirm_listing_miss(cache, &dirs, &candidates).hit
 }
@@ -1130,9 +1230,15 @@ fn memoized_miss_still_absent(
     env_vars: &HashMap<String, String>,
     _fingerprint: &str,
 ) -> bool {
+    // rubash#3826: the probe must expand a `~`-leading element exactly
+    // like the walk does, or a memoized miss would be served for a
+    // command that is findable via the expanded element.
     !split_shell_path(env_vars.get("PATH").map(String::as_str).unwrap_or_default())
         .iter()
-        .any(|dir| shell_path_to_windows(dir, env_vars).join(name).is_file())
+        .any(|dir| {
+            let dir = expand_path_element_tilde(dir, env_vars);
+            shell_path_to_windows(&dir, env_vars).join(name).is_file()
+        })
 }
 
 #[cfg_attr(unix, allow(unused_variables))]
@@ -1236,6 +1342,26 @@ fn find_user_command_uncached(
     None
 }
 
+/// GNU findcmd.c:544 `find_in_path_element`: a PATH element starting
+/// with `~` is tilde-expanded at lookup time — `xpath =
+/// (posixly_correct == 0 && *path == '~') ? bash_tilde_expand (path, 0)
+/// : path`. The expansion happens per element, inside the walk, so
+/// `command -v` / `hash -t` print the expanded path (rubash#3826).
+/// The `~` is NOT expanded when PATH is assigned (that is the
+/// assignment layer's business) and NOT in POSIX mode
+/// (`posixly_correct == 0` gate). Reuses the assignment-layer tilde
+/// helper: `~`/`~/...` via $HOME, `~+`/`~-`/`~N` via the dirstack,
+/// `~user[/rest]` via getpwnam; an unresolvable user stays verbatim.
+pub(crate) fn expand_path_element_tilde(dir: &str, env_vars: &HashMap<String, String>) -> String {
+    if !dir.starts_with('~') {
+        return dir.to_string();
+    }
+    if crate::builtins::set::shell_option_enabled(env_vars, "posix") {
+        return dir.to_string();
+    }
+    crate::expand::tilde::tilde::expand_tilde_segment(dir, env_vars)
+}
+
 /// The unix PATH-element walk behind `find_user_command_uncached`,
 /// returning the winning candidate in two forms: the session-cwd-anchored
 /// path the executor opens/spawns, and the as-written join of the PATH
@@ -1255,8 +1381,31 @@ fn find_in_path_walk_unix(
     env_vars: &HashMap<String, String>,
     name_had_transport: bool,
 ) -> Option<(PathBuf, String)> {
+    // findcmd.c:632 resets dot_found_in_search at walk entry;
+    // findcmd.c:550-551 then sets it whenever an element beginning
+    // with `.` resolves to the current directory — including the
+    // element the hit lands in. The verdict rides the session's
+    // dot_found side channel for the next phash_insert (rubash#3551).
+    let mut dot_found = false;
+    let result = find_in_path_walk_unix_inner(name, env_vars, name_had_transport, &mut dot_found);
+    set_dot_found_in_search(env_vars, dot_found);
+    result
+}
+
+#[cfg(unix)]
+fn find_in_path_walk_unix_inner(
+    name: &str,
+    env_vars: &HashMap<String, String>,
+    name_had_transport: bool,
+    dot_found: &mut bool,
+) -> Option<(PathBuf, String)> {
     let mut file_to_lose_on: Option<(PathBuf, String)> = None;
     for dir in split_shell_path(env_vars.get("PATH").map(String::as_str).unwrap_or_default()) {
+        // rubash#3826: GNU findcmd.c:544 — expand a `~`-leading PATH
+        // element at lookup time (unless POSIX mode), before the
+        // fold/probe, so the element the walk joins is the expanded
+        // home path.
+        let dir = expand_path_element_tilde(&dir, env_vars);
         // rubash#3104: a PATH element carrying a raw-byte pair must be
         // folded before the probe — GNU findcmd.c:623 walks with the
         // element bytes verbatim, and the unfolded pair spelling never
@@ -1296,6 +1445,15 @@ fn find_in_path_walk_unix(
             joined.to_string_lossy().into_owned()
         };
         let candidate = anchor_at_session_cwd(joined, env_vars);
+        // findcmd.c:550-551: an element beginning with `.` that resolves
+        // to the session cwd sets dot_found_in_search, examined in PATH
+        // order before the hit test below.
+        if !*dot_found && dir.starts_with('.') {
+            let anchored_dir = anchor_at_session_cwd(dir_fs.clone(), env_vars);
+            if path_element_is_session_cwd(&anchored_dir, env_vars) {
+                *dot_found = true;
+            }
+        }
         if !candidate.is_file() {
             continue;
         }
@@ -1307,6 +1465,22 @@ fn find_in_path_walk_unix(
         }
     }
     file_to_lose_on
+}
+
+/// findcmd.c:550-551 `same_file(".", xpath)` — whether a `.`-leading PATH
+/// element resolves to the session's current directory (device+inode
+/// equality, canonicalized here). Both faces need it: the unix stat walk
+/// and the Windows listing walk record the same CHKDOT verdict
+/// (rubash#3551).
+fn path_element_is_session_cwd(anchored_dir: &Path, env_vars: &HashMap<String, String>) -> bool {
+    let cwd = anchor_at_session_cwd(PathBuf::from("."), env_vars);
+    match (
+        std::fs::canonicalize(&cwd),
+        std::fs::canonicalize(anchored_dir),
+    ) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
 }
 
 /// rubash#2317: the name a PATH search RECORDS for `name` — the as-written
@@ -1395,6 +1569,38 @@ pub(crate) fn recorded_resolution_spelling(
         }
     }
     super::execution_misc::shell_display_path(&program.to_string_lossy().replace('\\', "/"))
+}
+
+/// niubash#993 S7: Git Bash/MSYS describe display drops the `.exe`
+/// probe suffix — `command -v cat` prints `/usr/bin/cat` for the
+/// `cat.exe` body (the POSIX layer resolves `name` -> `name.exe`
+/// transparently, so the as-written `<elem>/<name>` join
+/// findcmd.c:553 sh_makepath builds never carries the suffix).
+/// Applies only when the resolved display literally names
+/// `<elem>/<name>.exe`: a name the user typed with the suffix keeps
+/// it (`command -v cat.exe` -> `.../cat.exe`), and non-.exe bodies
+/// (`foo.bat`) keep their real filename — Git Bash does not probe
+/// them for a bare name at all. Display-only: the stored/executed
+/// resolution keeps the real filename. Unconditional: the unix walk
+/// never produces a `name.exe` hit for a bare `name`, so the helper
+/// is inert off Windows by construction.
+pub(crate) fn drop_exe_probe_suffix(name: &str, display: String) -> String {
+    let name_bytes = name.as_bytes();
+    if name_bytes.len() >= 4 && name_bytes[name_bytes.len() - 4..].eq_ignore_ascii_case(b".exe") {
+        return display;
+    }
+    let tail = format!("{name}.exe");
+    let disp = display.as_bytes();
+    if disp.len() > tail.len()
+        && disp[disp.len() - tail.len()..].eq_ignore_ascii_case(tail.as_bytes())
+        && matches!(disp[disp.len() - tail.len() - 1], b'/' | b'\\')
+    {
+        let mut display = display;
+        display.truncate(display.len() - 4);
+        display
+    } else {
+        display
+    }
 }
 
 /// rubash#2442: the one filename-resolution funnel every external
@@ -2069,6 +2275,15 @@ pub fn external_command_for_named_program_with_exec_name(
         // from the typed word; the resolved Windows PathBuf would leak a
         // backslash path as $0 instead.
         let zero_word = script_zero_word(program, command_name);
+        // rubash#3415: a resolvable non-shell `#!` interpreter is
+        // spawned directly (the MSYS model) before the shell wrap
+        // below can swallow the script as bash.
+        if let Some((mut command, used_shell)) =
+            shebang_interpreter_command(program, &zero_word, &native_args, env_vars)
+        {
+            arm_child_signal_reset(&mut command);
+            return (command, used_shell);
+        }
         if let Some((mut command, used_shell)) =
             shell_wrapped_command(program, &zero_word, &native_args, env_vars)
         {
@@ -2412,6 +2627,155 @@ pub fn shell_wrapped_command(
         return Some((command, true));
     }
     None
+}
+
+/// Whether a shebang interpreter word names a shell: the same name set
+/// `exec_format_refusal` treats as the shell-script fallback
+/// (sh/bash/dash/rubash, by basename or a `/sh` or `/bash` suffix).
+fn is_shell_interpreter_name(name: &str) -> bool {
+    let base = Path::new(name)
+        .file_name()
+        .and_then(|base| base.to_str())
+        .unwrap_or(name);
+    matches!(base, "sh" | "bash" | "dash" | "rubash")
+        || name.ends_with("/sh")
+        || name.ends_with("/bash")
+}
+
+/// The first line of `program` (up to the first LF, capped at 512 bytes —
+/// a `#!` line is 128 bytes at most on the hosts GNU supports) as text.
+/// None when the file cannot be read or has no `#!` line.
+fn read_shebang_line(program: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(program).ok()?;
+    let mut head = [0u8; 512];
+    let read = file.read(&mut head).unwrap_or(0);
+    let line_end = head[..read]
+        .iter()
+        .position(|&byte| byte == b'\n')
+        .unwrap_or(read);
+    let line = &head[..line_end];
+    if !line.starts_with(b"#!") {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&line[2..]).into_owned())
+}
+
+/// Mirror of the funnel's dispatcher insertion
+/// (`external_command_for_named_program_with_exec_name`): a
+/// WinuxCmd-dispatcher program takes the applet name as its first
+/// argument, so a dispatcher-resolved interpreter is spawned with
+/// `word`'s applet name ahead of `leading`.
+fn dispatch_prefixed(program: &Path, word: &str, mut leading: Vec<String>) -> Vec<String> {
+    if is_winuxcmd_dispatcher(program) {
+        let name = dispatcher_command_name(word);
+        if !matches!(
+            name.to_ascii_lowercase().as_str(),
+            "winuxcmd" | "winuxcmd.exe"
+        ) {
+            leading.insert(0, name);
+        }
+    }
+    leading
+}
+
+/// rubash#3415: the interpreter a directly-executed script's `#!` line
+/// names when that interpreter is NOT a shell, as
+/// `(resolved interpreter program, leading argv words)`.
+///
+/// GNU anchor: on a host with hash-bang exec the kernel execs the named
+/// interpreter (execute_cmd.c:6126 shell_execve execs first and only
+/// falls back to shell execution for a shebangless text file, :6225-6260);
+/// where the OS has no hash-bang exec, GNU re-execs through the NAMED
+/// interpreter (execute_shell_script, execute_cmd.c:6001-6043: the word
+/// after `#!` is the interpreter, one optional argument word follows,
+/// and the script name becomes its operand). Windows has no kernel `#!`,
+/// so this is the stand-in for both: resolve the named interpreter and
+/// spawn it with the script as its operand, exactly as the MSYS/Git Bash
+/// runtime does. A shell interpreter (sh/bash/dash/rubash, incl. the
+/// `/usr/bin/env sh` launcher shape) answers None — those keep the
+/// shell-script path — as does an unresolvable interpreter, whose
+/// refusal (`exec_format_refusal`: bad interpreter 126, env 127) runs
+/// upstream of every caller. The `should_run_with_shell` gate makes the
+/// helper Windows-only in effect: unix never enters it, so the kernel
+/// keeps owning `#!` there.
+pub(crate) fn foreign_shebang_interpreter(
+    program: &Path,
+    env_vars: &HashMap<String, String>,
+) -> Option<(PathBuf, Vec<String>)> {
+    if !should_run_with_shell(program) {
+        return None;
+    }
+    let line = read_shebang_line(program)?;
+    // getinterp (execute_cmd.c:5969): skip blanks after `#!`, take one
+    // whitespace-delimited word; execute_shell_script takes exactly one
+    // optional argument word the same way. split_whitespace matches both
+    // and the refusal classifier's parse (which also folds a trailing CR,
+    // the MSDOS-branch STRINGCHAR behavior, execute_cmd.c:5957-5964).
+    let mut words = line.split_whitespace();
+    let interp = words.next()?;
+    let arg = words.next();
+    // An `env` launcher resolves through the FOLLOWING word — the program
+    // env would exec — and that target decides the shell/foreign split,
+    // the same mailbox exec_format_refusal uses.
+    if Path::new(interp)
+        .file_name()
+        .is_some_and(|base| base == "env")
+    {
+        return match arg {
+            Some(target) if is_shell_interpreter_name(target) => None,
+            Some(target) => {
+                if let Some(env_program) = find_user_command(interp, env_vars) {
+                    let leading = dispatch_prefixed(&env_program, interp, vec![target.to_string()]);
+                    Some((env_program, leading))
+                } else {
+                    // No env binary on this host (native Windows without
+                    // an MSYS layer): env's only job here is the PATH
+                    // lookup of the target, so spawn the resolved target
+                    // directly instead of failing the script.
+                    let target_program = find_user_command(target, env_vars)?;
+                    let leading = dispatch_prefixed(&target_program, target, vec![]);
+                    Some((target_program, leading))
+                }
+            }
+            // A bare `#!/usr/bin/env` hands env the script as its operand.
+            None => {
+                let env_program = find_user_command(interp, env_vars)?;
+                let leading = dispatch_prefixed(&env_program, interp, vec![]);
+                Some((env_program, leading))
+            }
+        };
+    }
+    if is_shell_interpreter_name(interp) {
+        return None;
+    }
+    let resolved = find_user_command(interp, env_vars)?;
+    let leading: Vec<String> = arg.into_iter().map(|word| word.to_string()).collect();
+    let leading = dispatch_prefixed(&resolved, interp, leading);
+    Some((resolved, leading))
+}
+
+/// rubash#3415: build the spawn of a foreign `#!` interpreter for
+/// `program`: `[interpreter] [leading args] [script-as-invoked] [args...]`,
+/// the argv execute_shell_script (execute_cmd.c:6001-6043) composes —
+/// interpreter, one optional argument, then the script name. The second
+/// tuple member is false: this is a native child spawn, not a shell
+/// wrap, so the caller's spawn machinery must not treat the script as a
+/// shell child. None when no foreign interpreter applies; the caller
+/// then keeps today's shell path. The signal reset is the caller's, as
+/// with shell_wrapped_command.
+pub(crate) fn shebang_interpreter_command(
+    program: &Path,
+    zero_word: &str,
+    args: &[String],
+    env_vars: &HashMap<String, String>,
+) -> Option<(Command, bool)> {
+    let (interpreter, leading) = foreign_shebang_interpreter(program, env_vars)?;
+    let mut command = Command::new(interpreter);
+    command.args(&leading);
+    command.arg(zero_word);
+    push_external_args(&mut command, args);
+    Some((command, false))
 }
 
 fn is_winuxcmd_dispatcher(path: &Path) -> bool {
@@ -3723,9 +4087,16 @@ fn file_is_executable(path: &Path) -> bool {
 
 /// GNU hashcmd.c phash_search: `hash -t` resolves a stored relative path
 /// through its `./`-prefixed form when that form is executable.
+/// GNU findcmd.c:214-223 `executable_file` requires FS_EXECABLE **and**
+/// not a directory: a bare access(X_OK) admits every directory (search
+/// permission), which made `phash_search_spelling` return `"./"` for a
+/// stored empty path (rubash#3824) and let `hash`/`type -a` accept
+/// non-executable files (rubash#3825). `is_dir` stats through symlinks,
+/// matching file_status's stat: a symlink to a directory is out, a
+/// symlink to an executable file is in, a dangling symlink fails access.
 #[cfg(unix)]
 pub(crate) fn is_executable_file(path: &Path) -> bool {
-    file_is_executable(path)
+    !path.is_dir() && file_is_executable(path)
 }
 
 #[cfg(not(unix))]
@@ -8120,6 +8491,86 @@ pub(crate) fn canonicalize_native(path: &Path) -> io::Result<PathBuf> {
         .map(|resolved| strip_verbatim_prefix(&resolved))
 }
 
+/// Whether the kernel would let this process search (chdir into)
+/// `path`: access(2) X_OK on a directory. The sibling of
+/// `file_is_executable` below, for directories instead of files —
+/// the same real-uid access(2) GNU's findcmd.c file_status uses
+/// (rubash#3788).
+///
+/// Unix-only semantics: Windows has no unix permission-bit
+/// semantics, so every directory qualifies there.
+#[cfg(unix)]
+pub(crate) fn directory_has_search_permission(path: &Path) -> bool {
+    let Ok(cpath) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
+        return false;
+    };
+    // SAFETY: access(2) with a NUL-terminated path.
+    unsafe { libc::access(cpath.as_ptr(), libc::X_OK) == 0 }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn directory_has_search_permission(_path: &Path) -> bool {
+    true
+}
+
+/// The error chdir would have reported for a target that exists but
+/// is not a directory (ENOTDIR / ERROR_DIRECTORY), in a form
+/// `posix_errors::message` renders as "Not a directory".
+fn not_a_directory_error() -> io::Error {
+    #[cfg(windows)]
+    {
+        io::Error::from_raw_os_error(267)
+    }
+    #[cfg(not(windows))]
+    {
+        io::Error::from_raw_os_error(20)
+    }
+}
+
+/// The error chdir would have reported for a target the process may
+/// not search (EACCES / ERROR_ACCESS_DENIED), in a form
+/// `posix_errors::message` renders as "Permission denied".
+fn search_denied_error() -> io::Error {
+    #[cfg(windows)]
+    {
+        io::Error::from_raw_os_error(5)
+    }
+    #[cfg(not(windows))]
+    {
+        io::Error::from_raw_os_error(libc::EACCES)
+    }
+}
+
+/// Probe a directory the way `chdir(2)` would, for the session-cwd
+/// moves (G-02): canonicalize (which carries chdir's ENOENT/ENOTDIR/
+/// EACCES for every component the walk traverses) + the directory
+/// check, PLUS the search-permission check on the target itself.
+///
+/// GNU builtins/cd.def change_to_directory performs a real chdir,
+/// and the kernel refuses a target without the search (execute) bit
+/// with EACCES — while realpath(3) and stat(2) both succeed on such
+/// a directory, because path resolution only needs search permission
+/// on the PARENT components, not on the final component itself. A
+/// probe built from canonicalize + is_dir therefore reports success
+/// for a directory the shell can never enter (rubash#3788):
+/// `cd`/`pushd` bound PWD/DIRSTACK to a directory the process never
+/// moved to. The session-cwd model never chdirs the process, so the
+/// permission half of chdir's verdict is reproduced here with
+/// access(2) X_OK on the resolved directory — root still passes, as
+/// with a real chdir, and ACLs are honored because the kernel itself
+/// adjudicates. The check is a no-op on Windows (no unix
+/// permission-bit semantics there).
+pub(crate) fn probe_directory_for_chdir(path: &Path) -> io::Result<PathBuf> {
+    let resolved = canonicalize_native(path)?;
+    if !resolved.is_dir() {
+        return Err(not_a_directory_error());
+    }
+    if !directory_has_search_permission(&resolved) {
+        return Err(search_denied_error());
+    }
+    Ok(resolved)
+}
+
 /// The canonical PWD display form: always the POSIX `/<drive>/…` spelling
 /// (`/d/…`) on Windows, exactly what GNU Bash on MSYS reports for `$PWD` /
 /// `pwd` / cd's bindpwd value (builtins/cd.def:136-175 bindpwd stores one
@@ -8153,12 +8604,19 @@ pub fn shell_pwd_display_path(path: &str) -> String {
         && value.as_bytes()[2] == b'/'
     {
         let drive = (value.as_bytes()[0] as char).to_ascii_lowercase();
-        return format!("/{drive}/{}", &value[3..]);
+        // niubash#993 S2: the drive ROOT renders `/c`, not `/c/` —
+        // GNU's canonpath strips the trailing separator of every
+        // non-`/` root and Git Bash prints `cd /c; pwd` -> `/c`.
+        let tail = &value[3..];
+        if tail.is_empty() {
+            return format!("/{drive}");
+        }
+        return format!("/{drive}/{tail}");
     }
     // unixwin/niubash#481: the bare drive-root display `D:` — produced by
     // the display normalization of a `D:/` operand, which drops the
     // trailing separator — is the same drive root the `D:/` arm above
-    // renders `/d/`; folding it here keeps the canonical persona form
+    // renders `/d`; folding it here keeps the canonical persona form
     // instead of leaking the designator into $PWD.
     if cfg!(windows)
         && value.len() == 2
@@ -8166,11 +8624,99 @@ pub fn shell_pwd_display_path(path: &str) -> String {
         && value.as_bytes()[1] == b':'
     {
         let drive = (value.as_bytes()[0] as char).to_ascii_lowercase();
-        return format!("/{drive}/");
+        return format!("/{drive}");
     }
     if value.is_empty() {
         "/".to_string()
     } else {
         value
+    }
+}
+
+/// GNU variables.c:776 get_bash_name: the `$BASH` seed is the INVOCATION
+/// path, never the resolved binary — an absolute argv[0] survives
+/// verbatim (symlinks kept), a `./name` spelling joins $PWD textually, a
+/// bare name resolves through the PATH walk (the join as written), and
+/// any other slash-bearing relative spelling absolutizes onto $PWD —
+/// versus rubash's former `std::env::current_exe`, which canonicalizes
+/// `/tmp/linkbash` to the real binary (rubash#3318). None when nothing
+/// resolves: GNU falls back to the login shell there, and the caller
+/// keeps its existing fallback.
+pub fn bash_invocation_name(argv0: &str, env_vars: &HashMap<String, String>) -> Option<String> {
+    // set_shell_name (shell.c:1795) keeps argv[0] verbatim including a
+    // `-` login mark; for get_bash_name's purposes the mark only ever
+    // precedes the bare name (`-bash`), so strip it for resolution.
+    let name = argv0.strip_prefix('-').unwrap_or(argv0);
+    if name.is_empty() {
+        return None;
+    }
+    if invocation_path_is_absolute(name) {
+        return Some(name.to_string());
+    }
+    // GNU set_pwd() (shell.c) validates an inherited $PWD against getcwd
+    // and resets it when they are not the same file, so a stale PWD must
+    // not feed the textual joins below.
+    let pwd = || -> Option<String> {
+        let cwd = std::env::current_dir()
+            .ok()
+            .map(|dir| dir.to_string_lossy().into_owned())?;
+        let env_pwd = env_vars.get("PWD").filter(|value| !value.is_empty());
+        match env_pwd {
+            Some(env_pwd)
+                if std::fs::canonicalize(env_pwd)
+                    .map(|resolved| resolved == std::path::Path::new(&cwd))
+                    .unwrap_or(false) =>
+            {
+                Some(env_pwd.clone())
+            }
+            _ => Some(cwd),
+        }
+    };
+    if let Some(rest) = name.strip_prefix("./") {
+        // variables.c:790-799: the `./` fast path joins PWD literally.
+        return pwd().map(|pwd| format!("{pwd}/{rest}"));
+    }
+    if name.contains('/') {
+        // `dir/name` and `../dir/name`: find_user_command does not
+        // PATH-search slash spellings, so GNU lands on file_status +
+        // make_absolute — a textual $PWD join with `.`/`..` components
+        // normalized (full_pathname's contract; symlinks untouched).
+        let joined = format!("{}/{}", pwd()?, name);
+        return Some(
+            std::path::Path::new(&joined)
+                .components()
+                .collect::<std::path::PathBuf>()
+                .to_string_lossy()
+                .into_owned(),
+        );
+    }
+    find_user_command(name, env_vars).map(|path| {
+        let joined = path.to_string_lossy().into_owned();
+        if invocation_path_is_absolute(&joined) {
+            joined
+        } else {
+            // full_pathname (general.c) absolutizes a relative join
+            // against $PWD.
+            pwd().map(|pwd| format!("{pwd}/{joined}")).unwrap_or(joined)
+        }
+    })
+}
+
+/// The absolute-path test for an invocation spelling — the ABSPATH macro
+/// behind variables.c:785 get_bash_name. POSIX (general.h:266) is
+/// `x[0] == '/'` only; the __CYGWIN__ port (general.h:269) — the Windows
+/// spellings get_bash_name must recognize — counts a drive-letter
+/// designator (`C:` anything, including the drive-relative `C:name`) or
+/// a leading directory separator of EITHER spelling (general.h:279
+/// ISDIRSEP), so `C:\…`, `C:/…`, `\dir\…`, `\\?\…` and `\\server\…` are
+/// all already absolute and keep verbatim instead of falling into the
+/// PATH walk or the textual $PWD join (rubash#3318 rework).
+fn invocation_path_is_absolute(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    if cfg!(windows) {
+        matches!(bytes.first(), Some(b'/') | Some(b'\\'))
+            || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+    } else {
+        bytes.first() == Some(&b'/')
     }
 }

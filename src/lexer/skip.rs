@@ -31,6 +31,23 @@ impl<'a> Lexer<'a> {
         // substitution for the body parser instead of reading as case
         // syntax (GNU parse_comsub, parse.y:4451).
         let mut case_pattern_seen = false;
+        // rubash#3307: per-pattern content bookkeeping — mirror of the
+        // gate/parser arm's locals in dollar_command_substitution
+        // (#3303): whether the armed pattern region has seen pattern
+        // content since the current list was armed (reset at `|` and at
+        // a freshly armed region), the pattern-paren nesting depth, and
+        // whether a pattern-list opener is still available.
+        let mut case_pattern_content = false;
+        let mut case_pattern_paren_depth = 0usize;
+        let mut case_pattern_opener_available = true;
+        let mut case_pattern_region_seen = false;
+        // rubash#3307: opener parens still awaiting their closer. The unit
+        // scan carries no delimiter stack, so a `(` that takes the opener
+        // branch owns the next `)` the way the gate's pushed `(` delimiter
+        // does (`(a|)` stays held, exactly as the gate leaves it). Unlike
+        // the paren depth it is never reset by a `|` or by a region re-arm,
+        // only consumed by a `)`.
+        let mut case_pattern_opener_depth = 0usize;
         // rubash#380: the last significant unquoted char fed to the case
         // word machine — the previous-token witness for the `esac`
         // pattern-text rule (parse.y:3181/3183).
@@ -72,6 +89,12 @@ impl<'a> Lexer<'a> {
                 parameter_depth -= 1;
             }
             let next = self.peek();
+            // rubash#3307: pre-update snapshots for the close arm's
+            // reclassification predicate (mirror of the gate's snapshot idiom
+            // in unclosed_input_close_char_posix).
+            let region_before = case_pattern_region;
+            let content_before = case_pattern_content;
+            let opener_depth_before = case_pattern_opener_depth;
             update_command_substitution_case_depth(
                 c,
                 false,
@@ -87,6 +110,62 @@ impl<'a> Lexer<'a> {
             );
             if esac_prev_token_char(c) {
                 prev_sig = Some(c);
+            }
+            // rubash#3307: per-pattern content bookkeeping (mirror of the
+            // gate/parser arm's advance in dollar_command_substitution): a
+            // freshly armed region starts empty; `|` starts a fresh pattern;
+            // a pattern-list opener consumes the opener without setting
+            // content; any other char in the region is pattern content. The
+            // `)` arms consume a pending paren/opener instead of setting
+            // content, so the close arm below judges by the snapshots above.
+            if case_pattern_region {
+                if !case_pattern_region_seen {
+                    case_pattern_content = false;
+                    case_pattern_paren_depth = 0;
+                    case_pattern_opener_available = true;
+                    case_pattern_region_seen = true;
+                }
+            } else {
+                case_pattern_region_seen = false;
+            }
+            if case_depth > 0 && region_before {
+                match c {
+                    '(' => {
+                        if case_pattern_paren_depth == 0
+                            && !case_pattern_content
+                            && case_pattern_opener_available
+                        {
+                            case_pattern_opener_available = false;
+                            case_pattern_opener_depth += 1;
+                        } else {
+                            case_pattern_paren_depth += 1;
+                            case_pattern_content = true;
+                        }
+                    }
+                    '|' if case_pattern_paren_depth == 0 => {
+                        case_pattern_content = false;
+                        case_pattern_opener_available = true;
+                    }
+                    ')' if case_pattern_paren_depth > 0 => {
+                        case_pattern_paren_depth -= 1;
+                    }
+                    ')' if case_pattern_opener_depth > 0 => {
+                        case_pattern_opener_depth -= 1;
+                    }
+                    '&' => {
+                        // `;&` is a clause terminator, not pattern content.
+                        if self.input[..self.position - c.len_utf8()]
+                            .chars()
+                            .next_back()
+                            != Some(';')
+                        {
+                            case_pattern_content = true;
+                        }
+                    }
+                    ';' => {}
+                    c if c.is_whitespace() => {}
+                    _ => case_pattern_content = true,
+                }
             }
             // rubash#2784 pattern-content witness advance (mirror of
             // the oracle's advance in skip_parenthesized_unit_corrected).
@@ -110,9 +189,14 @@ impl<'a> Lexer<'a> {
                 // rubash#2784: a `)` while a case preamble is
                 // unfinished closes this substitution (mirror of the
                 // skip.rs oracle arm).
-                ')' if case_depth == 0
+                // rubash#3307: or while the armed pattern region has
+                // no content yet (the gate's reclassification
+                // predicate); a pending opener owns the `)` instead.
+                ')' if (case_depth == 0
                     || matches!(case_in_stage, 1 | 2)
-                    || (case_in_stage == 3 && !case_pattern_seen) =>
+                    || (case_in_stage == 3 && !case_pattern_seen)
+                    || (region_before && !content_before))
+                    && opener_depth_before == 0 =>
                 {
                     depth -= 1;
                     if depth == 0 {
@@ -1877,6 +1961,23 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
     // substitution's closer and hand the body over, not swallow it
     // as case syntax and run to EOF.
     let mut case_pattern_seen = false;
+    // rubash#3307: per-pattern content bookkeeping — mirror of the
+    // gate/parser arm's locals in dollar_command_substitution
+    // (#3303): whether the armed pattern region has seen pattern
+    // content since the current list was armed (reset at `|` and at
+    // a freshly armed region), the pattern-paren nesting depth, and
+    // whether a pattern-list opener is still available.
+    let mut case_pattern_content = false;
+    let mut case_pattern_paren_depth = 0usize;
+    let mut case_pattern_opener_available = true;
+    let mut case_pattern_region_seen = false;
+    // rubash#3307: opener parens still awaiting their closer. The unit
+    // scan carries no delimiter stack, so a `(` that takes the opener
+    // branch owns the next `)` the way the gate's pushed `(` delimiter
+    // does (`(a|)` stays held, exactly as the gate leaves it). Unlike
+    // the paren depth it is never reset by a `|` or by a region re-arm,
+    // only consumed by a `)`.
+    let mut case_pattern_opener_depth = 0usize;
     // rubash#380: previous significant unquoted char fed to the case
     // word machine (the `esac` previous-token witness,
     // parse.y:3181/3183).
@@ -1960,6 +2061,12 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
         // collect this replaces was O(span^2), rubash#241; the esac arm
         // has used the backward prev_sig witness since rubash#380).
         let next = chars.get(index + 1).copied();
+        // rubash#3307: pre-update snapshots for the close arm's
+        // reclassification predicate (mirror of the gate's snapshot idiom
+        // in unclosed_input_close_char_posix).
+        let region_before = case_pattern_region;
+        let content_before = case_pattern_content;
+        let opener_depth_before = case_pattern_opener_depth;
         update_command_substitution_case_depth(
             ch,
             false,
@@ -1979,6 +2086,58 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
             // sees it (skip_cmd_subst enters past `$(` and cannot).
             if index > open {
                 prev_sig = Some(ch);
+            }
+        }
+        // rubash#3307: per-pattern content bookkeeping (mirror of the
+        // gate/parser arm's advance in dollar_command_substitution): a
+        // freshly armed region starts empty; `|` starts a fresh pattern;
+        // a pattern-list opener consumes the opener without setting
+        // content; any other char in the region is pattern content. The
+        // `)` arms consume a pending paren/opener instead of setting
+        // content, so the close arm below judges by the snapshots above.
+        if case_pattern_region {
+            if !case_pattern_region_seen {
+                case_pattern_content = false;
+                case_pattern_paren_depth = 0;
+                case_pattern_opener_available = true;
+                case_pattern_region_seen = true;
+            }
+        } else {
+            case_pattern_region_seen = false;
+        }
+        if case_depth > 0 && region_before {
+            match ch {
+                '(' => {
+                    if case_pattern_paren_depth == 0
+                        && !case_pattern_content
+                        && case_pattern_opener_available
+                    {
+                        case_pattern_opener_available = false;
+                        case_pattern_opener_depth += 1;
+                    } else {
+                        case_pattern_paren_depth += 1;
+                        case_pattern_content = true;
+                    }
+                }
+                '|' if case_pattern_paren_depth == 0 => {
+                    case_pattern_content = false;
+                    case_pattern_opener_available = true;
+                }
+                ')' if case_pattern_paren_depth > 0 => {
+                    case_pattern_paren_depth -= 1;
+                }
+                ')' if case_pattern_opener_depth > 0 => {
+                    case_pattern_opener_depth -= 1;
+                }
+                '&' => {
+                    // `;&` is a clause terminator, not pattern content.
+                    if chars.get(index.wrapping_sub(1)) != Some(&';') {
+                        case_pattern_content = true;
+                    }
+                }
+                ';' => {}
+                ch if ch.is_whitespace() => {}
+                _ => case_pattern_content = true,
             }
         }
         // rubash#2784 pattern-content witness (see the declaration):
@@ -2073,9 +2232,14 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
             // seen) is NOT case syntax — it closes this substitution
             // and the body parser rejects the body at it, exactly like
             // GNU parse_comsub (parse.y:4451).
-            ')' if case_depth == 0
+            // rubash#3307: or while the armed pattern region has no
+            // content yet (the gate's reclassification predicate); a
+            // pending opener owns the `)` instead.
+            ')' if (case_depth == 0
                 || matches!(case_in_stage, 1 | 2)
-                || (case_in_stage == 3 && !case_pattern_seen) =>
+                || (case_in_stage == 3 && !case_pattern_seen)
+                || (region_before && !content_before))
+                && opener_depth_before == 0 =>
             {
                 depth = depth.saturating_sub(1);
                 if depth == 0 {
@@ -3379,6 +3543,142 @@ pub enum UnclosedComsubShape {
 ///   never a reader abort (push_stream/pop_stream clear EOF_Reached per
 ///   stream, parse.y:1908/1915, so an eval-string parse error cannot stop
 ///   the outer script by itself).
+/// rubash#3405: a redirect operator inside an unclosed comsub body
+/// whose target word never arrives — the next meaningful character is
+/// the newline ending the operator's line or the end of the input.
+/// GNU's nested yyparse inside parse_comsub (parse.y:4549-4555) reads
+/// the body as a token stream, so the redirection production
+/// (parse.y:532) fails on that newline token BEFORE the matched-pair
+/// EOF is ever reached: report_syntax_error names `newline' with the
+/// "while looking for matching `)'" suffix (parse.y:6858-6859). The
+/// scan re-walks the innermost unclosed comsub's body region with the
+/// same quote/comment/paren discipline as the shape scan and returns
+/// (char index, line) of the FIRST such operator at the body's own
+/// nesting depth. Heredoc operators are excluded (their next word is
+/// the delimiter by construction; an unterminated heredoc is the
+/// warning family), as are operators inside nested frames (an arith
+/// command's `>' is a comparison, and a nested frame's own streaming
+/// errors belong to that frame's parse).
+fn comsub_body_dangling_redirect(
+    chars: &[char],
+    stack: &[(usize, usize, OpenerKind)],
+) -> Option<(usize, usize)> {
+    let &(open_idx, open_line, _) = stack
+        .iter()
+        .rev()
+        .find(|&&(_, _, kind)| kind == OpenerKind::Comsub)?;
+    // A `$((` digraph frame is the arithmetic matched-pair scan, not a
+    // streamed comsub body (parse.y:4463-4470): no token error class.
+    if chars.get(open_idx + 1) == Some(&'(') {
+        return None;
+    }
+    let mut index = open_idx + 1;
+    let mut line = open_line;
+    let mut depth = 0usize;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    let mut token_boundary = true;
+    while index < chars.len() {
+        let ch = chars[index];
+        if escaped {
+            escaped = false;
+            token_boundary = false;
+            index += 1;
+            continue;
+        }
+        if single {
+            if ch == '\'' {
+                single = false;
+            }
+            index += 1;
+            continue;
+        }
+        if double {
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                double = false;
+            } else if ch == '\n' {
+                line += 1;
+            }
+            index += 1;
+            continue;
+        }
+        match ch {
+            '\\' => escaped = true,
+            '\'' => single = true,
+            '"' => double = true,
+            '\n' => line += 1,
+            '#' if token_boundary => {
+                while index + 1 < chars.len() && chars[index + 1] != '\n' {
+                    index += 1;
+                }
+                index += 1;
+                token_boundary = false;
+                continue;
+            }
+            '(' => depth += 1,
+            ')' => {
+                if depth == 0 {
+                    // The comsub's own close: the body ended cleanly
+                    // before this point, so no dangling operator in it
+                    // can be the unclosed tail's error.
+                    return None;
+                }
+                depth -= 1;
+            }
+            '<' | '>' if depth == 0 => {
+                // Heredoc operators (`<<`, `<<<`) take their delimiter
+                // as the next word by construction — not this class.
+                if ch == '<' && chars.get(index + 1) == Some(&'<') {
+                    index += 2;
+                    token_boundary = false;
+                    continue;
+                }
+                let mut end = index + 1;
+                // Operator extent: `>>`, `>&`, `>|`, `<&`, `<>`.
+                match ch {
+                    '>' if chars.get(end) == Some(&'>') => end += 1,
+                    _ => {}
+                }
+                if matches!(chars.get(end), Some('&') | Some('|')) {
+                    end += 1;
+                } else if ch == '<' && chars.get(end) == Some(&'>') {
+                    end += 1;
+                }
+                // Skip blanks and backslash-newline continuations: the
+                // target word may legitimately live on the next line
+                // after a continuation. A bare newline (or the end of
+                // the input) where the target should be is the error.
+                let mut probe = end;
+                let mut probe_line = line;
+                loop {
+                    match chars.get(probe) {
+                        Some(' ') | Some('\t') | Some('\r') => probe += 1,
+                        Some('\\') if chars.get(probe + 1) == Some(&'\n') => {
+                            probe += 2;
+                            probe_line += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                if probe >= chars.len() || chars[probe] == '\n' {
+                    return Some((index, probe_line));
+                }
+                index = end;
+                token_boundary = false;
+                continue;
+            }
+            _ => {}
+        }
+        token_boundary =
+            ch.is_whitespace() || matches!(ch, ';' | '&' | '|' | '(' | ')' | '<' | '>');
+        index += 1;
+    }
+    None
+}
+
 pub fn unclosed_comsub_eof_shape(
     input: &str,
     extglob_live: bool,
@@ -3430,6 +3730,32 @@ pub fn unclosed_comsub_eof_shape(
                 escaped = true;
             } else if ch == '"' {
                 double = false;
+            } else if ch == '`' {
+                // rubash#3664: a backquote inside double quotes opens a
+                // command substitution whose body is a unit — GNU
+                // read_token_word hands it to parse_matched_pair
+                // (parse.y:5419-5440) and string_extract_double_quoted
+                // runs in backquote mode (subst.c:925-932), so the
+                // body's `"` bytes neither close the enclosing quote
+                // nor toggle this scan's state. Skip the unit whole,
+                // with the same backslash walk the unquoted backquote
+                // arm below performs; without this, the body's first
+                // `"` closed the quote here and a quoted `(` in the
+                // body (`"`: "("`"`) landed on the paren stack as a
+                // bare opener, fabricating a token error at EOF. An
+                // unterminated unit consumes the rest of the input;
+                // the still-open quote is the close-char scan's
+                // verdict, not this scan's.
+                index += 1;
+                while index < chars.len() {
+                    match chars[index] {
+                        '\\' => index += 1,
+                        '`' => break,
+                        '\n' => line += 1,
+                        _ => {}
+                    }
+                    index += 1;
+                }
             }
             prev_escaped = false;
             index += 1;
@@ -3575,6 +3901,12 @@ pub fn unclosed_comsub_eof_shape(
     }
     let &(open_idx, open_line, open_kind) = stack.last()?;
     let newlines = input.matches('\n').count();
+    // rubash#3405: a dangling redirect inside the innermost unclosed
+    // comsub's body is a token error in the body's own yyparse, which
+    // GNU reaches before any EOF classification — it preempts the
+    // ComsubEof tail below and, when it sits earlier in the text than
+    // an invalid-position paren, that paren's error too.
+    let dangling_redirect = comsub_body_dangling_redirect(&chars, &stack);
 
     // `x=(` is the compound-assignment EOF family — its own report/exit
     // rules live in the generic close-char scan. The same deferral
@@ -3647,6 +3979,18 @@ pub fn unclosed_comsub_eof_shape(
                     && arith_for_pair_at(&chars, idx - 1))
         })
         .map(|(_, &(idx, line, _))| (idx, line));
+    if let Some((dangling_idx, dangling_line)) = dangling_redirect {
+        let preempts_paren = invalid.as_ref().is_none_or(|&(idx, _)| dangling_idx < idx);
+        if preempts_paren {
+            return Some((
+                UnclosedComsubShape::ComsubBodyTokenError {
+                    line: dangling_line,
+                    token: "newline".to_string(),
+                },
+                dangling_line,
+            ));
+        }
+    }
     if let Some((idx, line)) = invalid {
         let inside_comsub = stack
             .iter()
@@ -3723,6 +4067,15 @@ pub fn unclosed_comsub_eof_shape(
     // comsub's own yyparse, shell_eof_token == ')').
     let any_comsub = stack.iter().any(|&(_, _, kind)| kind == OpenerKind::Comsub);
     if any_comsub {
+        if let Some((_, dangling_line)) = dangling_redirect {
+            return Some((
+                UnclosedComsubShape::ComsubBodyTokenError {
+                    line: dangling_line,
+                    token: "newline".to_string(),
+                },
+                dangling_line,
+            ));
+        }
         return Some((
             UnclosedComsubShape::ComsubEof { line: newlines + 1 },
             open_line,
@@ -3815,6 +4168,52 @@ fn arith_internal_frame(stack: &[(usize, usize, OpenerKind)], pos: usize, chars:
         })
 }
 
+/// The operator token starting at `chars[i]`, maximal-munch per GNU
+/// read_token (parse.y:3630-3800), or None when the character starts no
+/// operator. Spelling table byte-verified against GNU bash 5.3.20
+/// (rubash#3405): `;;`/`;&`/`;;&`, `||`/`|&`, `&&`/`&>>`/`&>`,
+/// `>>`/`>&`/`>|`, `<<<`/`<<-`/`<<`/`<>`/`<&`. Note `>>|` names `>>`
+/// (the `|` is a separate token) and `>>>` names `>>`.
+fn operator_token_at(chars: &[char], i: usize) -> Option<String> {
+    let c = *chars.get(i)?;
+    let n = |j: usize| chars.get(j).copied();
+    let text: &str = match c {
+        ';' => match (n(i + 1), n(i + 2)) {
+            (Some(';'), Some('&')) => ";;&",
+            (Some(';'), _) => ";;",
+            (Some('&'), _) => ";&",
+            _ => ";",
+        },
+        '|' => match n(i + 1) {
+            Some('|') => "||",
+            Some('&') => "|&",
+            _ => "|",
+        },
+        '&' => match (n(i + 1), n(i + 2)) {
+            (Some('&'), _) => "&&",
+            (Some('>'), Some('>')) => "&>>",
+            (Some('>'), _) => "&>",
+            _ => "&",
+        },
+        '>' => match n(i + 1) {
+            Some('>') => ">>",
+            Some('&') => ">&",
+            Some('|') => ">|",
+            _ => ">",
+        },
+        '<' => match (n(i + 1), n(i + 2)) {
+            (Some('<'), Some('<')) => "<<<",
+            (Some('<'), Some('-')) => "<<-",
+            (Some('<'), _) => "<<",
+            (Some('>'), _) => "<>",
+            (Some('&'), _) => "<&",
+            _ => "<",
+        },
+        _ => return None,
+    };
+    Some(text.to_string())
+}
+
 /// The token a yacc error names for a `(` in invalid position: the grammar
 /// shifts the paren (function-definition candidate) and fails on the NEXT
 /// token — EOF/newline is reported as `newline' (GNU probe p14: `eval
@@ -3836,6 +4235,17 @@ fn token_after_paren(chars: &[char], open_idx: usize) -> String {
         // rest of the line, so the next token the grammar sees is the
         // newline / end of string.
         return "newline".to_string();
+    }
+    // GNU read_token's operator lexing (parse.y:3630-3800): the token after
+    // an invalid `(` can itself be an operator — `>`, `;`, `|`, `&&` and
+    // their compounds name themselves (rubash#3405: `x=$(echo (>` names
+    // `>`, `x=$(echo (&&` names `&&`). The word scan below stops at the
+    // first operator character and would return an empty token, so
+    // operators take their own maximal-munch arm before it; a digit-led
+    // word (`2>`) still falls through to the word scan, which names the
+    // digits alone.
+    if let Some(op) = operator_token_at(chars, i) {
+        return op;
     }
     let start = i;
     while i < chars.len()

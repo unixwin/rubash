@@ -2564,6 +2564,14 @@ impl Executor {
             // array unassigned too (GNU validates every name before
             // the array store; see the post-scan validation comment).
             if !invalid_name {
+                // rubash#3659: convert each split word through the array's
+                // attributes before the store (GNU read.def:976
+                // assign_array_var_from_word_list -> make_variable_value,
+                // variables.c:2905).
+                let values: Vec<String> = values
+                    .into_iter()
+                    .map(|value| self.convert_array_element_value(&name, &value))
+                    .collect();
                 let value = read_array_storage(&values);
                 let _ = replace_typed_indexed_array(&mut self.shell_state.variables, &name, values);
                 self.shell_state.env_vars.insert(name.clone(), value);
@@ -3172,6 +3180,16 @@ impl Executor {
         // source's availability.
         if let Some(available) = self.own_input_binding_availability(cmd, fd) {
             return available;
+        }
+        // rubash#3774: an own OUTPUT winner leaves the descriptor
+        // open but write-only (`read -u 3 x 3>file`). sh_validfd
+        // judges the REDIRECTED state (read.def:377-381), so the
+        // descriptor counts as available here and the read itself
+        // fails EBADF in the funnel (read.def:911) — reporting it
+        // unavailable at this gate would misstate an open fd as an
+        // invalid one.
+        if self.own_list_leaves_fd_write_only(cmd, fd) {
+            return true;
         }
         if self.fd_table.is_open_for_read(fd) {
             return true;
