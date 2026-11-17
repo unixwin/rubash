@@ -5150,6 +5150,26 @@ pub(in crate::executor) fn probe_output_redirect(
     target: &str,
     clobber: bool,
 ) -> std::io::Result<()> {
+    probe_output_redirect_file(executor, target, clobber).map(|_| ())
+}
+
+/// rubash#3828: File-returning twin of [`probe_output_redirect`].
+/// Returns the probe's open for plain filesystem targets — the caller
+/// keeps it as the entry's one open instead of re-opening at bind
+/// time (GNU opens each redirect target exactly once per entry,
+/// redir.c do_redirection_internal / redir_open; a target created
+/// with a mode lacking owner-write — umask masking 0200 — fails a
+/// second open with EACCES although the kernel-level single open
+/// succeeds). Returns None for the FIFO/net carve-outs and for every
+/// other special class (null / zero / full / random / fd-alias /
+/// synthetic /proc): those opens are stand-ins or sinks the bind
+/// must NOT adopt as the fd — the probe still runs for its error
+/// surfacing, and the bind re-opens the class as today.
+pub(in crate::executor) fn probe_output_redirect_file(
+    executor: &Executor,
+    target: &str,
+    clobber: bool,
+) -> std::io::Result<Option<std::fs::File>> {
     // rubash#1967: a net target's probe must not connect — the probe
     // connection is dropped unwritten while the bind's own open
     // connects again, so the peer sees two connections where GNU's
@@ -5157,9 +5177,10 @@ pub(in crate::executor) fn probe_output_redirect(
     // Validate by resolution; the one real open performs the
     // connect and surfaces a refusal with the same diagnostic.
     if crate::special_paths::is_net_redirect_target(target) {
-        return executor
+        executor
             .validate_net_redirect_target(target)
-            .map_err(|e| crate::posix_errors::path_error(target, e));
+            .map_err(|e| crate::posix_errors::path_error(target, e))?;
+        return Ok(None);
     }
     #[cfg(any(unix, windows))]
     {
@@ -5171,17 +5192,28 @@ pub(in crate::executor) fn probe_output_redirect(
             if let Some(error) = redirect_fifo_access_error(&path, true) {
                 return Err(crate::posix_errors::path_error(target, error));
             }
-            return Ok(());
+            return Ok(None);
         }
     }
     // rubash#3286: the joined-path FIFO check above misses from a
     // deleted cwd (the joined spelling is dead by construction) —
     // when the anchor applies and names an existing FIFO, the probe's
     // verdict is the anchor faccessat, never an open (rubash#1820).
+    // Some(Ok) lifts to Ok(None): a confirmed FIFO keeps no File, the
+    // bind performs the one real open (rubash#1820 rendezvous).
     if let Some(verdict) = output_fifo_validation_via_anchor(executor, None, target) {
-        return verdict;
+        return verdict.map(|_| None);
     }
-    executor.create_redirect_output(target, clobber).map(|_| ())
+    if !matches!(
+        crate::special_paths::classify_special_path(target),
+        crate::special_paths::SpecialPathClass::Filesystem
+    ) {
+        // Special class: run the create for its error surfacing
+        // (a 0444-class synthetic /proc still refuses EACCES here)
+        // but keep no File — the bind re-opens the class itself.
+        return executor.create_redirect_output(target, clobber).map(|_| None);
+    }
+    executor.create_redirect_output(target, clobber).map(Some)
 }
 
 /// Append-arm twin of [`probe_output_redirect`]. The open itself
@@ -5199,11 +5231,26 @@ pub(in crate::executor) fn probe_output_redirect_append(
     redirect: Option<&crate::parser::Redirect>,
     target: &str,
 ) -> std::io::Result<()> {
+    probe_output_redirect_append_file(executor, redirect, target).map(|_| ())
+}
+
+/// rubash#3828: File-returning twin of
+/// [`probe_output_redirect_append`] — same contract as
+/// [`probe_output_redirect_file`]: Some(File) only for plain
+/// filesystem targets; None for the FIFO/net carve-outs and every
+/// other special class (the probe still runs for its error
+/// surfacing; the bind re-opens the class as today).
+pub(in crate::executor) fn probe_output_redirect_append_file(
+    executor: &Executor,
+    redirect: Option<&crate::parser::Redirect>,
+    target: &str,
+) -> std::io::Result<Option<std::fs::File>> {
     // rubash#1967: net arm of the same carve-out as probe_output_redirect.
     if crate::special_paths::is_net_redirect_target(target) {
-        return executor
+        executor
             .validate_net_redirect_target(target)
-            .map_err(|e| crate::posix_errors::path_error(target, e));
+            .map_err(|e| crate::posix_errors::path_error(target, e))?;
+        return Ok(None);
     }
     #[cfg(any(unix, windows))]
     {
@@ -5215,17 +5262,27 @@ pub(in crate::executor) fn probe_output_redirect_append(
             if let Some(error) = redirect_fifo_access_error(&path, true) {
                 return Err(crate::posix_errors::path_error(target, error));
             }
-            return Ok(());
+            return Ok(None);
         }
     }
     // rubash#3286: same deleted-cwd miss as probe_output_redirect —
-    // the anchor faccessat is the probe's verdict here too.
+    // the anchor faccessat is the probe's verdict here too. Some(Ok)
+    // lifts to Ok(None): a confirmed FIFO keeps no File (rubash#1820).
     if let Some(verdict) = output_fifo_validation_via_anchor(executor, None, target) {
-        return verdict;
+        return verdict.map(|_| None);
+    }
+    if !matches!(
+        crate::special_paths::classify_special_path(target),
+        crate::special_paths::SpecialPathClass::Filesystem
+    ) {
+        return executor
+            .open_append_target_for(redirect, target)
+            .map(|_| None)
+            .map_err(|e| crate::posix_errors::path_error(target, e));
     }
     executor
         .open_append_target_for(redirect, target)
-        .map(|_| ())
+        .map(Some)
         .map_err(|e| crate::posix_errors::path_error(target, e))
 }
 

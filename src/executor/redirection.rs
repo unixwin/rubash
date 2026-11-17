@@ -3603,73 +3603,91 @@ impl Executor {
             };
             #[cfg(not(any(unix, windows)))]
             let fifo_validation: Option<Result<(), std::io::Error>> = None;
-            let open_result: Result<(), std::io::Error> = match fifo_validation {
-                Some(result) => result,
-                // Routing resolution (OutputFdState::resolve_only_
-                // numbered): the element's setup already opened this
-                // target for its descriptor — a validation re-open
-                // here (truncate / append / net-connect alike) can
-                // only destroy what the element wrote through it.
-                // Fall through to the target record below, unchanged.
-                None if state.resolve_only_numbered && fd > 2 => Ok(()),
-                None if crate::special_paths::is_net_redirect_target(&target) => {
-                    // rubash#1967: net twin of the #1868 FIFO
-                    // validation above — this walk's create would
-                    // CONNECT and drop the File (only the Path is
-                    // kept in the state), and the flush's open
-                    // connects again: two connections where GNU's
-                    // do_redirections opens once. Validate by
-                    // resolution; the flush open is the single
-                    // connect, and a refusal surfaces there with
-                    // the same diagnostic.
-                    self.validate_net_redirect_target(&target)
-                        .map_err(|e| crate::posix_errors::path_error(&target, e))
-                }
-                None if redirect.append => {
-                    // GNU redir.c redirection_error (redir.c:149-176) carries the
-                    // failed open's target word (`$FIX/b: No such file or
-                    // directory`, issue #518); a bare OS error renders
-                    // message-only and drops the word. The open itself
-                    // classifies through the registry (rubash#1964):
-                    // this validation is an append open, so it must
-                    // succeed and fail for exactly the shapes the
-                    // real append does.
-                    self.open_append_target_for(Some(redirect), &target)
-                        .map(|_| ())
-                        .map_err(|e| crate::posix_errors::path_error(&target, e))
-                }
-                None => self
-                    .create_redirect_output_for(Some(redirect), &target, redirect.clobber)
-                    .map(|_| ()),
-            };
-            if let Err(error) = open_result {
-                // GNU redir.c:149-176 redirection_error, reached from
-                // do_redirections (redir.c:246): a failed open reports
-                // through the fd 2 binding in force and fails only THIS
-                // command — the walk's redirect_failed protocol the
-                // sibling arms (ambiguous, failglob, bad-fd) already
-                // follow. Propagating the io error as an executor error
-                // instead unwound the WHOLE pipeline around the element:
-                // later stages never ran, earlier stages' captured
-                // output was dropped, the pipeline status collapsed to
-                // the error's 1 and PIPESTATUS was never written
-                // (rubash#1844). The io error's Display already carries
-                // `{target}: {reason}` (path_error / the noclobber
-                // wording inside create_redirect_output).
-                if state.open_failure_via_error {
-                    let mut slot = state.first_open_error.borrow_mut();
-                    if slot.is_none() {
-                        *slot = Some((error.kind(), error.to_string()));
+            // rubash#3828: GNU opens each output redirect target
+            // exactly once per redirect entry (redir.c
+            // do_redirections / do_redirection_internal /
+            // redir_open). This walk's create/append open IS the
+            // entry's open — keep the File as a SharedFile instead
+            // of dropping it and re-opening by path at flush time:
+            // a target created with a mode lacking owner-write
+            // (umask masking 0200) fails the second open with
+            // EACCES although the kernel-level single open
+            // succeeds. FIFO / net / resolve-only entries keep no
+            // File here (access-only / resolution-only validation
+            // as before); their single open still happens at the
+            // flush pairing site.
+            let open_result: Result<Option<std::fs::File>, std::io::Error> =
+                match fifo_validation {
+                    Some(result) => result.map(|_| None),
+                    // Routing resolution (OutputFdState::resolve_only_
+                    // numbered): the element's setup already opened this
+                    // target for its descriptor — a validation re-open
+                    // here (truncate / append / net-connect alike) can
+                    // only destroy what the element wrote through it.
+                    // Fall through to the target record below, unchanged.
+                    None if state.resolve_only_numbered && fd > 2 => Ok(None),
+                    None if crate::special_paths::is_net_redirect_target(&target) => {
+                        // rubash#1967: net twin of the #1868 FIFO
+                        // validation above — this walk's create would
+                        // CONNECT and drop the File (only the Path is
+                        // kept in the state), and the flush's open
+                        // connects again: two connections where GNU's
+                        // do_redirections opens once. Validate by
+                        // resolution; the flush open is the single
+                        // connect, and a refusal surfaces there with
+                        // the same diagnostic.
+                        self.validate_net_redirect_target(&target)
+                            .map(|_| None)
+                            .map_err(|e| crate::posix_errors::path_error(&target, e))
                     }
-                } else {
-                    let mut stderr = Vec::new();
-                    writeln!(&mut stderr, "{}{error}", self.error_prefix())?;
-                    state.write_to_fd(self, 2, &stderr)?;
+                    None if redirect.append => {
+                        // GNU redir.c redirection_error (redir.c:149-176) carries the
+                        // failed open's target word (`$FIX/b: No such file or
+                        // directory`, issue #518); a bare OS error renders
+                        // message-only and drops the word. The open itself
+                        // classifies through the registry (rubash#1964):
+                        // this validation is an append open, so it must
+                        // succeed and fail for exactly the shapes the
+                        // real append does.
+                        self.open_append_target_for(Some(redirect), &target)
+                            .map(Some)
+                            .map_err(|e| crate::posix_errors::path_error(&target, e))
+                    }
+                    None => self
+                        .create_redirect_output_for(Some(redirect), &target, redirect.clobber)
+                        .map(Some),
+                };
+            let open_file = match open_result {
+                Ok(file) => file,
+                Err(error) => {
+                    // GNU redir.c:149-176 redirection_error, reached from
+                    // do_redirections (redir.c:246): a failed open reports
+                    // through the fd 2 binding in force and fails only THIS
+                    // command — the walk's redirect_failed protocol the
+                    // sibling arms (ambiguous, failglob, bad-fd) already
+                    // follow. Propagating the io error as an executor error
+                    // instead unwound the WHOLE pipeline around the element:
+                    // later stages never ran, earlier stages' captured
+                    // output was dropped, the pipeline status collapsed to
+                    // the error's 1 and PIPESTATUS was never written
+                    // (rubash#1844). The io error's Display already carries
+                    // `{target}: {reason}` (path_error / the noclobber
+                    // wording inside create_redirect_output).
+                    if state.open_failure_via_error {
+                        let mut slot = state.first_open_error.borrow_mut();
+                        if slot.is_none() {
+                            *slot = Some((error.kind(), error.to_string()));
+                        }
+                    } else {
+                        let mut stderr = Vec::new();
+                        writeln!(&mut stderr, "{}{error}", self.error_prefix())?;
+                        state.write_to_fd(self, 2, &stderr)?;
+                    }
+                    self.exit_code = 1;
+                    state.redirect_failed = true;
+                    return Ok(());
                 }
-                self.exit_code = 1;
-                state.redirect_failed = true;
-                return Ok(());
-            }
+            };
             if crate::special_paths::synthetic_proc_write_allowed(&target) == Some(true) {
                 // rubash#2042: a 0644-class synthetic /proc content
                 // target's writes fail EINVAL through the symbolic
@@ -3677,6 +3695,17 @@ impl Executor {
                 // write fails) — never a Path flush open into the
                 // absorbed sink, which would silently succeed.
                 state.fds.insert(fd, OutputTarget::ProcContentWrite);
+            } else if let Some(file) = open_file {
+                // rubash#3828: the flush writes through the walk's
+                // own open — never re-opens by path (see the
+                // open_result match above).
+                state.fds.insert(
+                    fd,
+                    OutputTarget::SharedFile(crate::executor::fd_table::FileFd::from_file(
+                        file,
+                        target.clone().into(),
+                    )),
+                );
             } else {
                 state.fds.insert(fd, OutputTarget::Path(target));
             }
