@@ -90,10 +90,14 @@ pub(in crate::executor) fn rubash_spawn_inherited_state(key: &str) -> bool {
 /// (kernel resource state persists across GNU's execve; the env keys
 /// are the Windows-side model for real children too), the
 /// orig-ignores carrier (__RUBASH_TRAP_ORIG_IGN — trap.c
-/// original_signals SIG_IGN dispositions DO cross execve), and
-/// arbitrary session-mirrored probe keys (the G-03
-/// mirrored-assignment contract keeps a session's own mirrored
-/// `__RUBASH_*` writes visible to its children).
+/// original_signals SIG_IGN dispositions DO cross execve), the
+/// __RUBASH_FD_* delivery stamps (per-spawn fd-table transport minted
+/// fresh by the direct spawner for THIS child — init.rs consumes and
+/// strips them at entry, so they are delivery, not residue; stripping
+/// them for every non-respawn birth severed ALL fd>=3 delivery to
+/// children — rubash#3856), and arbitrary session-mirrored probe keys
+/// (the G-03 mirrored-assignment contract keeps a session's own
+/// mirrored `__RUBASH_*` writes visible to its children).
 pub(in crate::executor) fn fork_respawn_transport_key(key: &str) -> bool {
     const KEYS: &[&str] = &[
         // Variable-table serializations (the attribute strings
@@ -194,7 +198,6 @@ pub(in crate::executor) fn fork_respawn_transport_key(key: &str) -> bool {
     ];
     KEYS.contains(&key)
         || key.starts_with("__RUBASH_FORK_")
-        || key.starts_with("__RUBASH_FD_")
         || key.starts_with("__RUBASH_SETOPT_")
         || key.starts_with("__RUBASH_ALIAS_")
         || key.starts_with("__RUBASH_PARSE_")
