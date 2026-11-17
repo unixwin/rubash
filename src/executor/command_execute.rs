@@ -441,9 +441,18 @@ impl Executor {
             self.exit_code = code;
             return Err(ExecuteError::ExitCode(code));
         }
-        if self.last_command_substitution_status.get() == Some(2)
-            && self.last_command_substitution_parse_error.get()
-        {
+        // rubash#3756: the verdict is the LATCH, not the per-substitution
+        // status slot — a later substitution in the same word list
+        // overwrites `last_command_substitution_status' with its own
+        // child exit (the documented left-to-right `$?' overlay), which
+        // used to mask a fatal `$(' body error and let the command run
+        // (`echo $(case x in a|) $(echo ok)' printed `ok'). GNU's body
+        // grammar failure is read-time and fatal for the enclosing
+        // command (parse.y:4451 parse_comsub -> DISCARD), so the latch
+        // alone decides; `status == Some(2)' is implied — every latch
+        // site sets it (report_comsub_body_error_if_any,
+        // function_substitute, the heredoc-overflow arm).
+        if self.last_command_substitution_parse_error.get() {
             // A BACKTICK body's parse error killed only the substituted
             // child (GNU subst.c string_locale -> parse_and_execute: the
             // child reports `command substitution: line N: ...' at its own
@@ -2073,7 +2082,7 @@ impl Executor {
     /// order). A fatal word-expansion arithmetic failure in a bare command
     /// (e.g. bare `$((1/0))` with no other words) abandons the rest of the
     /// current command list (GNU Bash 5.2.37 evidence).
-    fn abort_on_expansion_errors(&mut self) -> Result<(), ExecuteError> {
+    pub(in crate::executor) fn abort_on_expansion_errors(&mut self) -> Result<(), ExecuteError> {
         if self.shell_state.arithmetic_expansion_error.get() {
             self.shell_state.arithmetic_expansion_error.set(false);
             let was_fatal = self.shell_state.arithmetic_fatal_error.replace(false);
@@ -2320,7 +2329,10 @@ impl Executor {
     /// expanded in the main shell (or no funsub exited): a main-shell
     /// latch stays on `current_shell_substitution_exit` for the caller
     /// to consume as a shell abort.
-    fn preexpand_command_stdin(&mut self, cmd: &mut CommandNode) -> Option<i32> {
+    pub(in crate::executor) fn preexpand_command_stdin(
+        &mut self,
+        cmd: &mut CommandNode,
+    ) -> Option<i32> {
         // rubash#2681: for a command GNU forks, the bodies expand in
         // the child — run the whole pre-expansion (every body of the
         // command, in redirect order, so later bodies still see

@@ -3640,6 +3640,19 @@ pub fn inject_console_ctrl_c() {
     crate::builtins::kill::note_console_ctrl_c();
 }
 
+/// Tier B host hook (PLAN row 11, M-3): note a console Ctrl+Z the
+/// host's own input watch received, so the engine's in-process waits
+/// see the stop request (rubash#3467, companion to niubash#877).
+/// This is the driver-layer face hosts consume; it delegates to the
+/// kill builtin's mailbox plumbing
+/// (`builtins::kill::note_console_ctrl_z`), which is internal from
+/// this row on. On Unix it is a no-op by design: the kernel delivers
+/// SIGTSTP to the foreground process group and waitpid reports the
+/// stop — there is no console keypress to forward.
+pub fn inject_console_ctrl_z() {
+    crate::builtins::kill::note_console_ctrl_z();
+}
+
 /// Tier B host hook (PLAN row 11, M-3): consume the background
 /// wrapper handshake from a host launcher's argv before the
 /// host's own option parsing sees it — the driver-layer face of

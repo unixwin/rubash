@@ -1760,6 +1760,50 @@ impl Executor {
         result
     }
 
+    /// Whether an ambient `2>&1` stage stderr may merge into the
+    /// pipeline's output stream (rubash#3403): the merge is GNU's dup2
+    /// snapshot only while the pipeline's output destination IS the
+    /// object fd 2 was dup'd from (redir.c:1192-1193 `2>&1 means dup2
+    /// (1, 2)` — the descriptor as it stood at dup time, in list
+    /// order per redir.c:237 do_redirections). The fd table records
+    /// that snapshot as fd 2's Stdout endpoint plus its capture
+    /// generation; the pipeline output rides the CURRENT fd 1. A later
+    /// `1>file` in the same list — or an `exec > file` inside the body
+    /// — retargets fd 1 while fd 2 still holds the snapshot, so
+    /// folding would re-resolve the dup against the LIVE fd 1:
+    /// `{ echo hi | ls /bad; } 2>&1 1>out.txt` sent the stage error
+    /// into out.txt. Only fold when fd 1 is still the same stdout
+    /// object (no entry, or a Stdout endpoint with fd 2's generation);
+    /// otherwise the bytes ride write_default_stderr, which resolves
+    /// the fd-2 snapshot itself (the concurrent drivers already do
+    /// exactly this — the snapshot comment at the intermediate-stderr
+    /// drain). The no-retarget shape (`{ ...; } 2>&1`, rubash#1552)
+    /// keeps folding: there fd 1 is still the process stdout, so the
+    /// merge and the snapshot are one object.
+    fn ambient_stderr_merges_into_pipeline_output(&self) -> bool {
+        if self.fd_table.write_endpoint(2) != Some(FdWriteEndpoint::Stdout) {
+            return false;
+        }
+        if !matches!(
+            self.fd_table.write_endpoint(1),
+            None | Some(FdWriteEndpoint::Stdout)
+        ) {
+            return false;
+        }
+        // The generation is the object identity: None is the real
+        // process stdout, Some(g) is capture g (fd_table.rs dup_entry
+        // records it at dup time; open_output clears it). An absent
+        // key and an explicit None both mean "no capture".
+        let generation = |fd: u32| {
+            self.fd_table
+                .stdout_alias_generation
+                .get(&fd)
+                .copied()
+                .flatten()
+        };
+        generation(1) == generation(2)
+    }
+
     fn execute_simple_pipeline_inner(
         &mut self,
         commands: &[CommandNode],
@@ -1912,8 +1956,9 @@ impl Executor {
                 // binding (fd 2 already on fd 1's object). Ambient bytes
                 // ride the pipeline's OUTPUT stream, not the pipe payload
                 // the remaining stages read (rubash#1552 — same fd model
-                // as the stage-loop merge below).
-                if self.fd_table.write_endpoint(2) == Some(FdWriteEndpoint::Stdout) {
+                // as the stage-loop merge below). rubash#3403: only while
+                // fd 1 is still the object fd 2 was dup'd from.
+                if self.ambient_stderr_merges_into_pipeline_output() {
                     input = prefix_output;
                     ambient_stderr.push_str(&prefix_stderr);
                 } else if !prefix_stderr.is_empty() {
@@ -2264,8 +2309,9 @@ impl Executor {
             // the pipeline's own output stream: non-final stages
             // accumulate theirs in stage order, and only the final
             // stage's may join next_input — there next_input IS the
-            // pipeline output.
-            if self.fd_table.write_endpoint(2) == Some(FdWriteEndpoint::Stdout) {
+            // pipeline output. rubash#3403: only while fd 1 is still
+            // the object fd 2 was dup'd from.
+            if self.ambient_stderr_merges_into_pipeline_output() {
                 if last_stage {
                     next_input.push_str(&next_stderr);
                 } else {

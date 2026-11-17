@@ -117,8 +117,5 @@ fn group_body_standalone_word_runs_body() {
     );
     assert_eq!(rc, Some(0));
     assert_eq!(stdout, "a\nb\ndone\n", "stderr: {stderr}");
-    assert!(
-        !stderr.contains("ambiguous redirect"),
-        "stderr: {stderr}"
-    );
+    assert!(!stderr.contains("ambiguous redirect"), "stderr: {stderr}");
 }

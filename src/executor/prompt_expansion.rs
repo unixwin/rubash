@@ -239,11 +239,21 @@ impl Executor {
             .strip_suffix("[@]")
             .or_else(|| ref_expr.strip_suffix("[*]"))
             .unwrap_or(ref_expr);
-        if !is_shell_name(ref_name) {
-            return None;
-        }
-
-        let target_expr = self.shell_state.env_vars.get(ref_name)?;
+        // GNU parameter_brace_expand_indir (subst.c:7883-7952) resolves the
+        // `!`-source to t through parameter_brace_find_indir
+        // (subst.c:7839-7881) BEFORE the removal runs, so the holder need
+        // not be a plain variable: `${!#%*}` with no positionals strips
+        // from the resolved t (`0` — the script name, or `${N}` with
+        // positionals), `${!0#h}` from $0's value, `${!?%*}` from the
+        // status text. A named source contributes its value; a
+        // positional/special/array source goes through the holder
+        // (subst.c:8529 get_var_and_type).
+        let target_expr = match self.shell_state.env_vars.get(ref_name) {
+            Some(target_expr) => target_expr.clone(),
+            None if !is_shell_name(ref_name) => self.indirect_holder_target_name(ref_expr)?,
+            None => return None,
+        };
+        let target_expr = &target_expr;
         // GNU subst.c:10320-10327 (`case '#': case '%':`): removal skips
         // the pattern expansion entirely when the indirect target's value
         // word is absent or empty (rubash#3501) — the same gate the scalar
@@ -254,7 +264,7 @@ impl Executor {
         if self.pattern_word_is_silent(&format!("!{ref_expr}"), true, false) {
             return Some(String::new());
         }
-        let values = self.indirect_target_values(target_expr);
+        let values = self.indirect_target_values(&target_expr);
         if values.is_empty() {
             return Some(String::new());
         }
@@ -289,7 +299,7 @@ impl Executor {
                 ),
             })
             .collect::<Vec<_>>();
-        Some(self.join_expanded_array_values(values, target_expr))
+        Some(self.join_expanded_array_values(values, &target_expr))
     }
 
     pub(in crate::executor) fn indirect_target_values(&self, target_expr: &str) -> Vec<String> {
@@ -299,21 +309,10 @@ impl Executor {
         // outside the $1.. positional window. Without this arm a
         // PIPESTATUS indirection's operator adjudication saw its
         // target — element 0, most often "0" — as an unset variable
-        // (rubash#1566). The leading-zero guard matches the plain
-        // leg's: "007" is not a positional designator here.
+        // (rubash#1566). GNU's valid_number (general.c:248) accepts
+        // leading zeros, so "007" designates $7 (rubash#3784).
         if let Ok(index) = target_expr.parse::<usize>() {
-            if !target_expr.starts_with('0') || target_expr == "0" {
-                if index == 0 {
-                    return vec![self.script_name_value()];
-                }
-                return self
-                    .shell_state
-                    .positional_window()
-                    .get(index - 1)
-                    .cloned()
-                    .into_iter()
-                    .collect();
-            }
+            return self.numeric_parameter_value(index).into_iter().collect();
         }
         if let Some(array_name) = target_expr
             .strip_suffix("[@]")

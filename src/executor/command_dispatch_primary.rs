@@ -219,7 +219,13 @@ impl Executor {
                         // its trap already dispatched — the command's
                         // status is the signal death 128+sig, like GNU
                         // reaping a real sleep killed the same way.
-                        match self.sleep_interruptibly(seconds)? {
+                        // rubash#3467: Some(20) is the other Some shape
+                        // on non-unix — the virtual sleep was STOPPED,
+                        // its sleeper child materialized and parked as
+                        // the stopped job; the status is still 128+sig
+                        // and the list continues.
+                        let command_text = self.signal_notice_command_text(cmd);
+                        match self.sleep_interruptibly(seconds, &command_text)? {
                             Some(signal) => {
                                 self.exit_code = 128 + signal;
                                 // rubash#1639: an UNTRAPPED SIGINT abort

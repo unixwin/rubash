@@ -2062,6 +2062,7 @@ impl Executor {
     fn wait_external_child(
         &mut self,
         child: &mut std::process::Child,
+        command: &str,
     ) -> Result<std::process::ExitStatus, ExecuteError> {
         #[cfg(not(unix))]
         {
@@ -2076,6 +2077,17 @@ impl Executor {
                     return Ok(status);
                 }
                 if let Err(error) = self.observe_signals_while_blocked() {
+                    // rubash#3467: an untrapped TSTP (128+20) stops the
+                    // foreground job instead of ending it — the Windows
+                    // Stopped arm. Any other untrapped delivery keeps
+                    // the pre-existing kill-the-child unwind below.
+                    if let ExecuteError::ExitCode(code) = error {
+                        if code == 128 + crate::builtins::kill::SIGTSTP_NUMBER {
+                            if let Some(stopped) = self.windows_stop_fg_child(child, command) {
+                                return Ok(stopped);
+                            }
+                        }
+                    }
                     // Untrapped SIGINT (console CTRL_C via note_console_ctrl_c,
                     // or a mailbox delivery) aborts the wait. Reap the child so
                     // it does not linger when the console event did not kill it.
@@ -2088,6 +2100,7 @@ impl Executor {
         }
         #[cfg(unix)]
         {
+            let _ = command;
             // GNU jobs.c:3086-3102 wait_for installs wait_sigint_handler
             // for the wait: the handler only records (trap.c
             // trap_handler sets pending_traps[SIGINT]) instead of dying,
@@ -2169,6 +2182,67 @@ impl Executor {
             }
             Ok(status)
         }
+    }
+
+    /// rubash#3467 (Windows only): stop a foreground external child
+    /// whose wait just observed an untrapped TSTP — the non-unix twin
+    /// of the unix wait's WUNTRACED stop report. Suspends the child
+    /// (kill.rs Windows `signal_process` STOP path), drops the
+    /// death/discard records `observe_signals_while_blocked` attached
+    /// to the delivery (a stop is neither a death nor a list discard:
+    /// GNU continues the list after the stop, jobs.c:3243 — verified
+    /// against bash 5.2 in a pty: `sleep 5; echo CONTINUED` + ^Z
+    /// prints the stop notice and still runs CONTINUED), parks a
+    /// duplicated handle in `background_children` (the caller's `Child`
+    /// is dropped when the wait returns), and applies the shared stop
+    /// bookkeeping. Returns the stopped status (128+20) on success.
+    /// Returns `None` when the stop could not materialize — the child
+    /// already finished (its natural status is returned instead) or
+    /// the suspend/duplicate failed — and the caller falls back to the
+    /// pre-existing kill-the-child unwind.
+    #[cfg(not(unix))]
+    fn windows_stop_fg_child(
+        &mut self,
+        child: &mut std::process::Child,
+        command: &str,
+    ) -> Option<std::process::ExitStatus> {
+        use std::os::windows::io::AsRawHandle;
+        use std::os::windows::process::ExitStatusExt;
+        let stop = crate::builtins::kill::SIGTSTP_NUMBER;
+        let pid = child.id();
+        if crate::builtins::kill::send_signal(pid, stop).is_err() {
+            // The child may have finished in the race between the
+            // last slice poll and the suspend: a finished child
+            // reports its natural status, not a stop.
+            if let Ok(Some(status)) = child.try_wait() {
+                return Some(status);
+            }
+            return None;
+        }
+        // observe() classified the delivery as a death + (interactive)
+        // discard before returning it; a stop is neither — drop both
+        // records so no death notice prints and the list continues.
+        let _ = crate::builtins::kill::take_adjudicated_signal_death();
+        self.take_signal_discard_pending();
+        // Duplicate the handle before the caller drops `child`: the
+        // duplicate keeps the suspended process waitable for fg/bg/wait.
+        let parked = crate::fd::duplicate_handle(child.as_raw_handle() as crate::fd::HANDLE)
+            .ok()
+            .map(|raw| {
+                use std::os::windows::io::FromRawHandle;
+                let owned = unsafe {
+                    std::os::windows::io::OwnedHandle::from_raw_handle(
+                        raw as std::os::windows::io::RawHandle,
+                    )
+                };
+                crate::fd::SpawnedChild::from_owned_handle(owned, pid)
+            });
+        let Some(parked) = parked else {
+            return None;
+        };
+        self.windows_mark_fg_stopped(pid, command, stop);
+        self.background_children.insert(pid, parked);
+        Some(std::process::ExitStatus::from_raw((128 + stop) as u32))
     }
 
     /// rubash#2398: the interactive foreground wait with job control
@@ -2961,6 +3035,76 @@ impl Executor {
             return Some(Err(std::io::Error::last_os_error()));
         }
         Some(Ok(stat))
+    }
+
+    /// rubash#3286: whether the anchor's fstatat classifies `operand`
+    /// as an existing FIFO. Some(true) / Some(false) when the anchor
+    /// applies and the stat succeeds; None when the anchor does not
+    /// apply or the stat fails (a missing target is not a FIFO — the
+    /// caller's plain path creates it). The guards that must not open
+    /// a FIFO (background defer, procsub decline) key on this; the
+    /// probe below adds the access verdict.
+    #[cfg(unix)]
+    pub(in crate::executor) fn anchor_operand_is_fifo(
+        &self,
+        operand: &std::path::Path,
+    ) -> Option<bool> {
+        match self.fstatat_via_cwd_anchor(operand) {
+            Some(Ok(stat)) => Some(
+                (u32::from(stat.st_mode) & u32::from(libc::S_IFMT)) == u32::from(libc::S_IFIFO),
+            ),
+            _ => None,
+        }
+    }
+
+    /// rubash#3286: faccessat against the cwd anchor — the validation
+    /// half of the output FIFO probe (the write-side twin of the input
+    /// face's inline faccessat in
+    /// [`Self::open_input_redirect_via_anchor`]). Some(verdict) when
+    /// the anchor applies; None otherwise.
+    #[cfg(unix)]
+    pub(in crate::executor) fn faccessat_via_cwd_anchor(
+        &self,
+        operand: &std::path::Path,
+        mode: libc::c_int,
+    ) -> Option<std::io::Result<()>> {
+        let anchor_fd = self.anchor_fd_for_dead_cwd()?;
+        let operand = if operand.as_os_str().is_empty() {
+            std::path::Path::new(".")
+        } else {
+            operand
+        };
+        let c_operand =
+            std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(operand.as_os_str()))
+                .ok()?;
+        // SAFETY: anchor_fd stays alive for the call (see
+        // open_via_cwd_anchor); faccessat only validates, it takes no
+        // descriptor and consumes no rendezvous.
+        let rc = unsafe { libc::faccessat(anchor_fd, c_operand.as_ptr(), mode, 0) };
+        if rc != 0 {
+            return Some(Err(std::io::Error::last_os_error()));
+        }
+        Some(Ok(()))
+    }
+
+    /// rubash#3286: the output-redirect FIFO probe against the cwd
+    /// anchor — the write-side twin of the input face's probe half
+    /// (open_input_redirect_via_anchor with consume == false).
+    /// Some(verdict) only when the anchor applies AND the operand is
+    /// an existing FIFO: the verdict is faccessat(W_OK), which proves
+    /// existence and write access without taking an fd, so no
+    /// rendezvous pairing is consumed (rubash#1820). None otherwise —
+    /// anchor N/A, missing target, non-FIFO — so the caller falls
+    /// through to its joined-path / plain-open path.
+    #[cfg(unix)]
+    pub(in crate::executor) fn output_fifo_probe_via_anchor(
+        &self,
+        operand: &std::path::Path,
+    ) -> Option<std::io::Result<()>> {
+        if self.anchor_operand_is_fifo(operand) == Some(true) {
+            return self.faccessat_via_cwd_anchor(operand, libc::W_OK);
+        }
+        None
     }
 
     /// rubash#3268: the input-redirect consumer of the cwd anchor.
@@ -5047,7 +5191,8 @@ impl Executor {
                     // own write-end copies dropped with the Command — so
                     // the join only collects the drained bytes.
                     let foreground_pid = child.id();
-                    let status = self.wait_external_child(&mut child)?;
+                    let status = self
+                        .wait_external_child(&mut child, &self.signal_notice_command_text(cmd))?;
                     if let Some(signal) = crate::executor::wait_status::exit_status_signal(&status)
                     {
                         self.print_fg_signal_notice_now(
@@ -5089,7 +5234,10 @@ impl Executor {
                         use std::io::Read;
                         let mut merged = Vec::new();
                         reader.read_to_end(&mut merged)?;
-                        let status = self.wait_external_child(&mut child)?;
+                        let status = self.wait_external_child(
+                            &mut child,
+                            &self.signal_notice_command_text(cmd),
+                        )?;
                         if let Some(signal) =
                             crate::executor::wait_status::exit_status_signal(&status)
                         {
@@ -5131,10 +5279,14 @@ impl Executor {
                                 bash_job_stage_commands(cmd),
                             )
                         } else {
-                            self.wait_external_child(&mut child)
+                            self.wait_external_child(
+                                &mut child,
+                                &self.signal_notice_command_text(cmd),
+                            )
                         };
                         #[cfg(not(unix))]
-                        let wait_result = self.wait_external_child(&mut child);
+                        let wait_result = self
+                            .wait_external_child(&mut child, &self.signal_notice_command_text(cmd));
                         let status = wait_result?;
                         if let Some(signal) =
                             crate::executor::wait_status::exit_status_signal(&status)
@@ -5206,10 +5358,11 @@ impl Executor {
                             bash_job_stage_commands(cmd),
                         )
                     } else {
-                        self.wait_external_child(&mut child)
+                        self.wait_external_child(&mut child, &self.signal_notice_command_text(cmd))
                     };
                     #[cfg(not(unix))]
-                    let wait_result = self.wait_external_child(&mut child);
+                    let wait_result =
+                        self.wait_external_child(&mut child, &self.signal_notice_command_text(cmd));
                     match wait_result {
                         Ok(status) => {
                             // rubash#229/#2769: print the signal-death

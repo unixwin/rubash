@@ -760,13 +760,25 @@ impl Executor {
         // parameter either way. The previous code fell through to
         // parameter_error_value, which returned $1's raw value ("a") as the
         // operator result.
-        if let Ok(index) = indirect_name.parse::<usize>() {
-            return match self
-                .shell_state
-                .positional_window()
-                .get(index.saturating_sub(1))
-            {
-                Some(target_name) => Some(self.parameter_operator_value(target_name)),
+        //
+        // The same two-step holds for a SPECIAL-parameter source
+        // (`#`, `?`, `@`, `*`, `0`): parameter_brace_find_indir
+        // (subst.c:7839-7881) resolves every parameter kind to t —
+        // the positional window count for `#`, the status text for
+        // `?`, the joined positionals for `@`/`*`, the script name for
+        // `0` — and the operator then applies to the parameter t
+        // names (`${!#:-d}` with $#=2 expands $2; `${!#x}` stays a
+        // bad substitution because `#x` is no parameter). Routing
+        // through parameter_error_value also fixes `0` indexing into
+        // the positional window at element 0 ($1) instead of $0.
+        if matches!(indirect_name, "#" | "?" | "@" | "*") || indirect_name.parse::<usize>().is_ok()
+        {
+            // parameter_error_value reads an all-digit name through
+            // get_dollar_var_value (subst.c:3707): 0 names `$0`, 1.. the
+            // positional window, leading zeros included (`${!010}` is $10,
+            // rubash#3784).
+            return match self.parameter_error_value(indirect_name) {
+                Some(t) => Some(self.parameter_operator_value(&t)),
                 None => Some(None),
             };
         }
@@ -873,7 +885,7 @@ impl Executor {
     /// the special parameters, and valid array references. Anything else
     /// triggers GNU's "invalid variable name" when indirected through
     /// (probe: x=123bad).
-    fn is_valid_indirect_target(value: &str) -> bool {
+    pub(in crate::executor) fn is_valid_indirect_target(value: &str) -> bool {
         if value.is_empty() {
             return false;
         }
@@ -943,6 +955,27 @@ impl Executor {
             || is_shell_name(base)
         {
             return true;
+        }
+        // A special-parameter SOURCE with an operator tail — `${!#:-d}`,
+        // `${!?-d}`, `${!@:-d}` — is a legal indirection too: GNU
+        // parameter_brace_expand_indir (subst.c:7907-7918) resolves the
+        // source through parameter_brace_find_indir for every parameter
+        // kind, then applies the operator to the word t names. `#`/`?`
+        // heads reach here only outside posix mode
+        // (indirect_parameter_body); `$`/`-`/`!` heads stay a bad
+        // substitution — VALID_INDIR_PARAM (subst.c:122) does not admit
+        // them as sources.
+        //
+        // The tail class is exactly the string_extract stop set at
+        // subst.c:9844-9860 (`#%:-=?+/@`): `^` and `,` are NOT scanned
+        // after a special indir source, so `${!#^}`/`${!#,}` stay bad
+        // substitutions (named and positional heads keep them — casemod
+        // binds post-expansion there, `${!x^}` -> Zzz).
+        if matches!(base.chars().next(), Some('@' | '*' | '#' | '?')) {
+            return matches!(
+                base[1..].chars().next(),
+                Some('#' | '%' | ':' | '-' | '=' | '?' | '+' | '/' | '@')
+            );
         }
         if let Some(prefix) = base.strip_suffix(['@', '*']) {
             return !prefix.is_empty() && is_shell_name(prefix);
@@ -2183,6 +2216,32 @@ impl Executor {
     /// fetch). In pure (pipeline-admission) mode no span is ever
     /// evaluated: an undecidable span is provisional.
     fn scan_question_is_error(&self, name: &str, require_non_empty: bool) -> QuestionOutcome {
+        // GNU subst.c:10060-10076: a `!`-indirect source is resolved FIRST —
+        // parameter_brace_expand_indir -> parameter_brace_find_indir
+        // (subst.c:7839-7881) turns `!src` into the VALUE of src (t), and
+        // parameter_brace_expand_word(t) (subst.c:7907) then produces the
+        // value the operator tests. The `?`/`:?` verdict therefore keys on
+        // the resolved target, not on the raw `!src` name: with
+        // `u=x; x=hello`, `${!u?v}` is set and expands to `hello`, while an
+        // unset x leaves temp NULL and the SAME report still names the
+        // original expression (`!u: v`, subst.c:10412
+        // parameter_brace_expand_error). `indirect_parameter_operator_value`
+        // is that two-step resolution (it already answers the `-`/`+`/`=`
+        // family); an unresolvable source yields no temp, i.e. unset.
+        if let Some(body) = self.indirect_parameter_body(name) {
+            if !body.is_empty() {
+                return match self.indirect_parameter_operator_value(name) {
+                    Some(Some(value)) => {
+                        if require_non_empty && value.is_empty() {
+                            QuestionOutcome::Error
+                        } else {
+                            QuestionOutcome::NoError
+                        }
+                    }
+                    Some(None) | None => QuestionOutcome::Error,
+                };
+            }
+        }
         // A negative-literal subscript can carry the fetch's own `bad
         // array subscript` diagnostic (GNU arrayfunc.c:1582-1583
         // INDEX_ERROR), which the pure probe cannot reproduce — let the
@@ -2598,6 +2657,25 @@ impl Executor {
                         }
                     }
                 }
+                // GNU subst.c:7907-7910 parameter_brace_expand_indir: a
+                // positional source skips the valid_identifier existence
+                // check entirely — find_indir resolves it and an invalid
+                // t (`${!0}` through $0's script name) reports
+                // `<t>: invalid variable name`. An unset positional
+                // yields no t and proceeds silently (`${!9}`).
+                else if !indirect.is_empty() && indirect.bytes().all(|b| b.is_ascii_digit()) {
+                    // GNU parameter_brace_find_indir resolves a positional
+                    // source through the parameter itself:
+                    // parameter_error_value reads it via get_dollar_var_value
+                    // (subst.c:3707), so `${!0}`/`${!00}` read $0 and an
+                    // invalid t (the script path) reports `<t>: invalid
+                    // variable name` (rubash#3784).
+                    if let Some(t) = self.parameter_error_value(indirect) {
+                        if !Self::is_valid_indirect_target(&t) {
+                            return Some((t, "invalid variable name".to_string(), 1));
+                        }
+                    }
+                }
                 // GNU subst.c:9978-10007 parameter_brace_expand:
                 // `${!NAME*}` / `${!NAME@}` with a valid-name prefix is the
                 // variable-name-prefix list form — handled before the indir
@@ -2614,9 +2692,20 @@ impl Executor {
                     // "invalid indirect expansion" error, aborting the command
                     // without evaluating the operator's rhs (nameref3.sub:29
                     // `recho "${!foo-unset}"` prints nothing).
-                    let head_end = indirect
-                        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-                        .unwrap_or(indirect.len());
+                    //
+                    // The source may also be a positional or special
+                    // parameter (subst.c:7907-7910): a leading `#`/`?`/`@`
+                    // `*` is a one-character head before the operator tail
+                    // (`${!@:-d}`), while digits keep the alnum run
+                    // (`${!1:-d}`).
+                    let head_end = if matches!(indirect.chars().next(), Some('#' | '?' | '@' | '*'))
+                    {
+                        1
+                    } else {
+                        indirect
+                            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                            .unwrap_or(indirect.len())
+                    };
                     let (head, tail) = indirect.split_at(head_end);
                     if head_end > 0
                         && is_shell_name(head)
@@ -2723,16 +2812,33 @@ impl Executor {
                     // scalar-form value proceeds silently; a nameref head
                     // names its target's value, adjudicated by the
                     // nameref arms.
+                    //
+                    // A positional or special source takes the same
+                    // validation (subst.c:7907-7910 "an indirect reference
+                    // to a positional parameter or a special parameter is
+                    // ok"): t comes from parameter_brace_find_indir —
+                    // `${!1:-${1}}` with $1=-3 reports
+                    // `-3: invalid variable name` (errors6.sub), `${!0-d}`
+                    // reports $0's text; an unset positional yields no t
+                    // and proceeds silently.
+                    let head_is_name = is_shell_name(head);
                     if head_end > 0
-                        && is_shell_name(head)
+                        && (head_is_name
+                            || head.bytes().all(|b| b.is_ascii_digit())
+                            || matches!(head, "#" | "?" | "@" | "*"))
                         && !tail.starts_with('[')
                         && matches!(
                             tail.chars().next(),
                             Some(':' | '-' | '+' | '=' | '?' | '#' | '%' | '/' | '^' | ',' | '@')
                         )
-                        && self.nameref_target_name(head).is_none()
+                        && (!head_is_name || self.nameref_target_name(head).is_none())
                     {
-                        if let Some(t) = self.indirect_source_scalar_value(head) {
+                        let t = if head_is_name {
+                            self.indirect_source_scalar_value(head)
+                        } else {
+                            self.parameter_error_value(head)
+                        };
+                        if let Some(t) = t {
                             if !Self::is_valid_indirect_target(&t) {
                                 return Some((t, "invalid variable name".to_string(), 1));
                             }
@@ -2757,6 +2863,23 @@ impl Executor {
                     };
                     if !t.is_empty() && !Self::is_valid_indirect_target(&t) {
                         return Some((t, "invalid variable name".to_string(), 1));
+                    }
+                }
+                // Same adjudication for a special source WITH an operator
+                // tail (subst.c:9844-9860 + parameter_brace_find_indir
+                // subst.c:7839-7881): `${!@/a/Q}` resolves t = "a b" and
+                // reports `a b: invalid variable name` before the operator
+                // ever runs.
+                if let Some(head) = indirect
+                    .chars()
+                    .next()
+                    .filter(|c| matches!(c, '#' | '?' | '@' | '*'))
+                    .filter(|_| indirect.len() > 1)
+                {
+                    if let Some(t) = self.parameter_error_value(&head.to_string()) {
+                        if !t.is_empty() && !Self::is_valid_indirect_target(&t) {
+                            return Some((t, "invalid variable name".to_string(), 1));
+                        }
                     }
                 }
                 if Self::is_indirect_array_operator_expression(indirect) {
@@ -3353,6 +3476,38 @@ impl Executor {
         (None, comsubs)
     }
 
+    /// Boundness of the parameter an indirect source names (GNU
+    /// subst.c:10164 check_unbound_variable over the find_indir target).
+    /// A numeric target names a POSITIONAL parameter, whose boundness is
+    /// the positional window (index 0 is `$0`, which always exists), not
+    /// the variable table — `${!i}` with i holding a positional index
+    /// (bats' bats_all_in loop over "$@", lib/bats-core/common.bash) must
+    /// not report `!i` for an in-window index, and must still report it
+    /// past the window (rubash#2212).
+    fn indirect_target_parameter_is_bound(&self, target: &str) -> bool {
+        if let Some((tbase, tsub)) = parse_array_subscript(target) {
+            if tsub == "@" || tsub == "*" {
+                true
+            } else if self.is_assoc_parameter_array(&tbase) {
+                let key = self.assoc_subscript_key(&tsub);
+                self.parameter_array_storage(&tbase)
+                    .and_then(|storage| assoc_value_at(&storage, &key))
+                    .is_some()
+            } else {
+                !self.nounset_indexed_element_absent(&tbase, &tsub)
+            }
+        } else if let Ok(index) = target.parse::<usize>() {
+            index == 0
+                || self
+                    .shell_state
+                    .positional_window()
+                    .get(index - 1)
+                    .is_some()
+        } else {
+            self.nounset_variable_bound(target)
+        }
+    }
+
     pub(in crate::executor) fn nounset_unbound_parameter(&self, word: &str) -> Option<String> {
         let mut chars = word.chars().peekable();
         while let Some(ch) = chars.next() {
@@ -3703,6 +3858,28 @@ impl Executor {
             let resolved = self
                 .resolved_variable_name(base)
                 .unwrap_or_else(|| base.to_string());
+            // A positional/special SOURCE (all digits, `#`, `?`, `@`, `*`)
+            // has no variable cell of its own: find_indir resolves t from
+            // $0 / $# / $? / the positional list (subst.c:7839-7881), and
+            // the caller's unbound check (subst.c:10164-10175) still tests
+            // the parameter t names and reports the whole `!base`
+            // (rubash#3784; GNU 5.3.20: `set -u; BASH_ARGV0=target;
+            // echo ${!0}` -> `!0: unbound variable`, status 127).
+            if !base.is_empty() && base.chars().all(|c| c.is_ascii_digit())
+                || base.len() == 1 && matches!(base, "#" | "?" | "@" | "*")
+            {
+                let Some(target) = self.indirect_holder_target_name(base) else {
+                    return None;
+                };
+                if target.ends_with("[@]") || target.ends_with("[*]") {
+                    return None;
+                }
+                if !Self::is_valid_indirect_target(&target) {
+                    return None;
+                }
+                let bound = self.indirect_target_parameter_is_bound(&target);
+                return (!bound).then(|| format!("!{base}"));
+            }
             // GNU subst.c:7883-7920 parameter_brace_expand_indir + the
             // caller's unbound check at subst.c:10164-10175 — three ordered
             // outcomes for the indirection SOURCE:
@@ -3743,37 +3920,7 @@ impl Executor {
                     if !Self::is_valid_indirect_target(&target) {
                         return None;
                     }
-                    let bound = if let Some((tbase, tsub)) = parse_array_subscript(&target) {
-                        if tsub == "@" || tsub == "*" {
-                            true
-                        } else if self.is_assoc_parameter_array(&tbase) {
-                            let key = self.assoc_subscript_key(&tsub);
-                            self.parameter_array_storage(&tbase)
-                                .and_then(|storage| assoc_value_at(&storage, &key))
-                                .is_some()
-                        } else {
-                            !self.nounset_indexed_element_absent(&tbase, &tsub)
-                        }
-                    } else if let Ok(index) = target.parse::<usize>() {
-                        // GNU subst.c parameter_brace_expand_indir +
-                        // variables.c find_variable: a purely numeric
-                        // target names a POSITIONAL parameter, whose
-                        // boundness is the positional window, not the
-                        // variable table — `${!i}` with i holding a
-                        // positional index (bats' bats_all_in loop over
-                        // "$@", lib/bats-core/common.bash) must not
-                        // report `!i` for an in-window index, and must
-                        // still report it past the window (rubash#2212).
-                        // Index 0 is $0, which always exists.
-                        index == 0
-                            || self
-                                .shell_state
-                                .positional_window()
-                                .get(index - 1)
-                                .is_some()
-                    } else {
-                        self.nounset_variable_bound(&target)
-                    };
+                    let bound = self.indirect_target_parameter_is_bound(&target);
                     return (!bound).then(|| format!("!{base}"));
                 }
             }
@@ -4352,6 +4499,19 @@ impl Executor {
         None
     }
 
+    /// GNU subst.c:3707 get_dollar_var_value: numeric parameter 0 is the
+    /// special `$0` cell (dollar_vars[0], the shell/script name), while
+    /// 1.. index the positional window. This is the lookup
+    /// parameter_brace_expand_word (subst.c:7684 valid_number) performs
+    /// for an all-digit NAME, so `${!0}`/`${!00}` indirect through $0's
+    /// VALUE, never through $1 (rubash#3784).
+    pub(in crate::executor) fn numeric_parameter_value(&self, index: usize) -> Option<String> {
+        if index == 0 {
+            return Some(self.script_name_value());
+        }
+        self.shell_state.positional_window().get(index - 1).cloned()
+    }
+
     pub(in crate::executor) fn parameter_error_value(&self, name: &str) -> Option<String> {
         // GNU subst.c:7786 (parameter_brace_expand_word, PF_ALLINDS) +
         // subst.c:10142 (var_is_set/var_is_null): for `${arr[@]}` /
@@ -4397,11 +4557,7 @@ impl Executor {
                     return Some(value);
                 }
                 if let Ok(index) = name.parse::<usize>() {
-                    return self
-                        .shell_state
-                        .positional_window()
-                        .get(index.saturating_sub(1))
-                        .cloned();
+                    return self.numeric_parameter_value(index);
                 }
                 if let Some(value) = self.array_element_parameter_value(name) {
                     return Some(value);

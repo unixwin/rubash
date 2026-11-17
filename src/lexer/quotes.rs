@@ -354,11 +354,18 @@ fn q22_name_start_byte(b: u8) -> bool {
 /// parse.y:5305+): `rest` walks the raw word byte-by-byte and runs of
 /// non-trigger bytes are pushed as one `&str` span.
 fn remove_shell_quotes_inner_cursor(raw: &str, posix: bool) -> String {
-    if !raw
-        .as_bytes()
-        .iter()
-        .any(|&b| matches!(b, b'\'' | b'"' | b'\\' | b'$' | b'`' | b'[' | b']'))
-    {
+    // rubash#3816: the fast path's admission ("no trigger byte") is not
+    // "provably trivial": a trigger-free word can still hold a literal
+    // control byte that collides with a transport carrier (`V=<0x11>`),
+    // which must be tagged as a raw-byte marker pair, not returned bare.
+    // A carrier byte therefore disqualifies the fast path exactly like a
+    // trigger byte does; the walk below tags it in its bulk span.
+    // (ESC is excluded from the carrier set here: niubash#200 owns it —
+    // word-initial tagged by tag_word_initial_raw_esc, mid-word verbatim.)
+    if !raw.as_bytes().iter().any(|&b| {
+        matches!(b, b'\'' | b'"' | b'\\' | b'$' | b'`' | b'[' | b']')
+            || super::ansi::is_literal_source_carrier_byte(b as u32)
+    }) {
         return raw.to_string();
     }
     let mut out = String::with_capacity(raw.len());
@@ -460,7 +467,11 @@ fn remove_shell_quotes_inner_cursor(raw: &str, posix: bool) -> String {
                     while idx < bytes.len() && !matches!(bytes[idx], b'\'' | b'$' | b'`' | b'"') {
                         idx += 1;
                     }
-                    out.push_str(&rest[..idx]);
+                    // rubash#3816: tag literal carrier bytes in the span
+                    // as raw-byte marker pairs (see
+                    // ansi::push_tagged_source_span) so a literal C0 byte
+                    // can never ride bare into transport text.
+                    super::ansi::push_tagged_source_span(&mut out, &rest[..idx]);
                     rest = &rest[idx..];
                     match rest.as_bytes().first() {
                         Some(&b'\'') => {
@@ -563,7 +574,10 @@ fn remove_shell_quotes_inner_cursor(raw: &str, posix: bool) -> String {
                         rest = &rest[2..];
                     }
                     b if b < 0x80 => {
-                        out.push(char::from(b));
+                        // rubash#3816: a backslash-escaped control byte
+                        // is literal data — tag it so it cannot be read
+                        // as the carrier it collides with.
+                        super::ansi::push_tagged_source_char(&mut out, char::from(b));
                         rest = &rest[2..];
                     }
                     _ => {
@@ -599,7 +613,9 @@ fn remove_shell_quotes_inner_cursor(raw: &str, posix: bool) -> String {
                         pending_name = false;
                     }
                 }
-                out.push_str(&rest[..idx]);
+                // rubash#3816: tag literal carrier bytes in the span as
+                // raw-byte marker pairs (see ansi::push_tagged_source_span).
+                super::ansi::push_tagged_source_span(&mut out, &rest[..idx]);
                 rest = &rest[idx..];
             }
         }
@@ -614,6 +630,14 @@ fn copy_dollar_paren_substitution_cursor<'a>(out: &mut String, rest: &'a str) ->
     let rest = &rest[1..]; // past '$'
     if !rest.starts_with('(') {
         return rest; // unreachable from the dispatcher; keeps parity
+    }
+    if rest.as_bytes().get(1) == Some(&b'(') && super::skip::dollar_double_paren_is_arithmetic(rest)
+    {
+        // `$((` arithmetic expansion — see copy_dollar_paren_substitution.
+        out.push('(');
+        out.push('(');
+        let consumed = copy_arith_paren_body_cursor(out, &rest[2..]);
+        return &rest[2 + consumed..];
     }
     out.push('(');
     copy_dollar_paren_body_raw_cursor(out, &rest[1..])
@@ -1137,6 +1161,94 @@ fn copy_dollar_bracket_body_raw_cursor<'a>(
     }
 }
 
+/// `<<`/`<<-` here-document skip inside a `$(...)' body being copied
+/// verbatim — the same consumption `skip.rs`
+/// `skip_heredoc_in_command_substitution` performs for the span
+/// extractor, so the cooked span and the extracted span always agree on
+/// where the substitution closes (GNU parse.y:4451 parse_comsub gathers
+/// pending here-documents; make_cmd.c:602-627 reads the delimiter line).
+/// `rest` begins at the SECOND `<` of the operator. Returns the byte
+/// count consumed from `rest` — the caller copies that region verbatim —
+/// and whether a `)` on the header line closed the substitution, in
+/// which case the substitution span ends after the gathered body.
+fn comsub_heredoc_skip(rest: &str) -> (usize, bool) {
+    let mut lexer = super::scanner::Lexer::new(rest, false);
+    let closes = lexer.skip_heredoc_in_command_substitution();
+    (lexer.position, closes)
+}
+
+/// Cursor form of skip.rs `skip_arith_paren`: copy a `$((...))'
+/// arithmetic body through its closing `))' verbatim. `rest` begins just
+/// past the second `(' of the opener. Returns the bytes consumed.
+fn copy_arith_paren_body_cursor(out: &mut String, rest: &str) -> usize {
+    let mut depth = 0usize;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    let mut idx = 0usize;
+    while idx < rest.len() {
+        let ch = rest[idx..].chars().next().unwrap();
+        out.push(ch);
+        idx += ch.len_utf8();
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        match ch {
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '(' if !single && !double => depth += 1,
+            ')' if !single && !double && depth > 0 => depth -= 1,
+            ')' if !single && !double && rest[idx..].starts_with(')') => {
+                out.push(')');
+                idx += 1;
+                break;
+            }
+            _ => {}
+        }
+    }
+    idx
+}
+
+/// Char form of `copy_arith_paren_body_cursor` (chars just past the
+/// second `(' of a `$((` opener).
+fn copy_arith_paren_body_raw(
+    out: &mut String,
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+) {
+    let mut depth = 0usize;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    while let Some(ch) = chars.next() {
+        out.push(ch);
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        match ch {
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '(' if !single && !double => depth += 1,
+            ')' if !single && !double && depth > 0 => depth -= 1,
+            ')' if !single && !double && chars.peek() == Some(&')') => {
+                chars.next();
+                out.push(')');
+                break;
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Cursor form of `copy_dollar_paren_body_raw` (rest just past the `$(`).
 /// Every consumed byte is pushed verbatim; the case-depth tracker and the
 /// `rest` lookahead are transcribed unchanged (the lookahead now passes the
@@ -1223,32 +1335,46 @@ fn copy_dollar_paren_body_raw_cursor<'a>(out: &mut String, rest: &'a str) -> &'a
                 token_boundary = false;
             }
             '$' if rest.as_bytes().get(idx) == Some(&b'(') => {
-                idx += 1;
-                out.push('(');
-                depth += 1;
-                if case_depth > 0 {
-                    nested_case_subst += 1;
-                }
-                // rubash#3605: feed the skipped `(` to the case word
-                // machine — `(` ends a token, so `case` right after `$(`
-                // is a command-position keyword; otherwise `$(case` never
-                // armed the tracker and the pattern `)` closed the body
-                // one `)` early.
-                super::skip::update_command_substitution_case_depth(
-                    '(',
-                    false,
-                    false,
-                    &mut word,
-                    &mut case_depth,
-                    &mut word_boundary,
-                    &mut current_word_boundary,
-                    rest[idx..].chars().next(),
-                    &mut case_in_stage,
-                    &mut case_pattern_region,
-                    prev_sig,
-                );
-                if crate::lexer::skip::esac_prev_token_char('(') {
-                    prev_sig = Some('(');
+                if rest.as_bytes().get(idx + 1) == Some(&b'(')
+                    && super::skip::dollar_double_paren_is_arithmetic(&rest[idx..])
+                {
+                    // `$((` arithmetic expansion: copy through the closing
+                    // `))' verbatim (skip.rs skip_arith_paren's contract)
+                    // so a shift `<<` inside is never read as a
+                    // here-document operator (rubash#2930's guard).
+                    idx += 1;
+                    out.push('(');
+                    idx += 1;
+                    out.push('(');
+                    idx += copy_arith_paren_body_cursor(out, &rest[idx..]);
+                } else {
+                    idx += 1;
+                    out.push('(');
+                    depth += 1;
+                    if case_depth > 0 {
+                        nested_case_subst += 1;
+                    }
+                    // rubash#3605: feed the skipped `(` to the case word
+                    // machine — `(` ends a token, so `case` right after `$(`
+                    // is a command-position keyword; otherwise `$(case` never
+                    // armed the tracker and the pattern `)` closed the body
+                    // one `)` early.
+                    super::skip::update_command_substitution_case_depth(
+                        '(',
+                        false,
+                        false,
+                        &mut word,
+                        &mut case_depth,
+                        &mut word_boundary,
+                        &mut current_word_boundary,
+                        rest[idx..].chars().next(),
+                        &mut case_in_stage,
+                        &mut case_pattern_region,
+                        prev_sig,
+                    );
+                    if crate::lexer::skip::esac_prev_token_char('(') {
+                        prev_sig = Some('(');
+                    }
                 }
                 token_boundary = false;
             }
@@ -1270,6 +1396,21 @@ fn copy_dollar_paren_body_raw_cursor<'a>(out: &mut String, rest: &'a str) -> &'a
                 word.clear();
                 word_boundary = false;
                 token_boundary = false;
+            }
+            '<' if rest.as_bytes().get(idx) == Some(&b'<')
+                && rest.as_bytes().get(idx + 1) != Some(&b'<') =>
+            {
+                // `<<`/`<<-` here-document inside the substitution body:
+                // consume the gathered body with the same skip the span
+                // extractor uses so a `)` on a delimiter-prefixed line
+                // cannot close the copy early and drop the IFS_GLUE
+                // bookkeeping byte into quote removal (rubash#3817).
+                let (consumed, closes) = comsub_heredoc_skip(&rest[idx..]);
+                out.push_str(&rest[idx..idx + consumed]);
+                idx += consumed;
+                if closes {
+                    return &rest[idx..];
+                }
             }
             '(' if case_depth == 0 || nested_case_subst > 0 => {
                 depth += 1;
@@ -2248,7 +2389,9 @@ pub(crate) fn remove_double_quoted_into_cursor<'a>(
                         pending_name = false;
                     }
                 }
-                out.push_str(&rest[..idx]);
+                // rubash#3816: tag literal carrier bytes in the span as
+                // raw-byte marker pairs (see ansi::push_tagged_source_span).
+                super::ansi::push_tagged_source_span(&mut *out, &rest[..idx]);
                 rest = &rest[idx..];
             }
         }
@@ -2321,6 +2464,20 @@ pub(super) fn remove_shell_quotes_outside_backticks(raw: &str) -> String {
                         '$' => out.push(DATA_DOLLAR),
                         '`' => out.push(crate::executor::markers::DATA_BACKTICK),
                         '"' => out.push(crate::executor::markers::DATA_DQUOTE),
+                        // rubash#3816: a literal control byte inside the
+                        // quotes is user data — tag it as a raw-byte
+                        // marker pair so no downstream decoder can claim
+                        // it as the carrier it collides with. ESC (0x1b)
+                        // is excluded: niubash#200 owns it (word-initial
+                        // tagged by tag_word_initial_raw_esc, mid-word
+                        // verbatim).
+                        quoted
+                            if crate::lexer::ansi::is_literal_source_carrier_byte(
+                                quoted as u32,
+                            ) =>
+                        {
+                            crate::lexer::ansi::push_tagged_source_char(&mut out, quoted);
+                        }
                         _ => out.push(quoted),
                     }
                 }
@@ -2346,7 +2503,9 @@ pub(super) fn remove_shell_quotes_outside_backticks(raw: &str) -> String {
                 } else if escaped == '`' {
                     out.push(crate::executor::markers::DATA_BACKTICK);
                 } else {
-                    out.push(escaped);
+                    // rubash#3816: a backslash-escaped control byte is
+                    // literal data — tag it as a raw-byte marker pair.
+                    super::ansi::push_tagged_source_char(&mut out, escaped);
                 }
             }
             _ => {
@@ -2357,7 +2516,9 @@ pub(super) fn remove_shell_quotes_outside_backticks(raw: &str) -> String {
                 } else if !(pending_name && is_lexer_shell_name_char(ch)) {
                     pending_name = false;
                 }
-                out.push(ch);
+                // rubash#3816: a literal control byte in the unquoted word
+                // is user data — tag it as a raw-byte marker pair.
+                super::ansi::push_tagged_source_char(&mut out, ch);
             }
         }
     }
@@ -2496,7 +2657,11 @@ fn remove_double_quoted_into(
                 } else if !(pending_name && is_lexer_shell_name_char(quoted)) {
                     pending_name = false;
                 }
-                out.push(quoted);
+                // rubash#3816: a literal control byte inside double
+                // quotes is user data — tag it as a raw-byte marker pair
+                // so no downstream decoder can claim it as the carrier
+                // it collides with.
+                super::ansi::push_tagged_source_char(&mut *out, quoted);
             }
         }
     }
@@ -2508,9 +2673,26 @@ fn copy_dollar_paren_substitution(
     chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
 ) {
     out.push('$');
-    if chars.next() != Some('(') {
+    if chars.peek() != Some(&'(') {
+        chars.next();
         return;
     }
+    // `$((` arithmetic expansion (skip.rs skip_arith_paren's contract):
+    // copy through the closing `))' verbatim so a shift `<<` inside is
+    // never read as a here-document operator (rubash#2930's guard).
+    let mut probe = chars.clone();
+    probe.next();
+    if probe.next() == Some('(')
+        && super::skip::dollar_double_paren_is_arithmetic(&chars.clone().collect::<String>())
+    {
+        chars.next();
+        out.push('(');
+        chars.next();
+        out.push('(');
+        copy_arith_paren_body_raw(out, chars);
+        return;
+    }
+    chars.next();
     out.push('(');
     copy_dollar_paren_body_raw(out, chars);
 }
@@ -2681,6 +2863,24 @@ pub(super) fn decode_ansi_c_span(chars: &mut std::iter::Peekable<std::str::Chars
 /// has_unclosed_command_substitution) cannot mistake it for a live
 /// command-substitution opener (rubash#215: `x=$'a`b$(echo z)'`).
 pub(crate) fn escape_decoded_ansi_c_quotes(decoded: &str) -> String {
+    escape_decoded_ansi_c_quotes_impl(decoded, true)
+}
+
+/// [`escape_decoded_ansi_c_quotes`] without the CTLESC glob protection for
+/// `*`/`?`/`[` (and extglob introducers). The protection is only needed
+/// when the decoded bytes are emitted into an UNQUOTED region, where the
+/// glob engine would read them as pattern syntax. The preserve-quotes
+/// caller wraps the result in the synthetic single-quoted span GNU's
+/// `sh_single_quote` produces (parse.y:5564-5571), so the bytes are
+/// already quoted data — prefixing them with CTLESC there leaves the
+/// carrier inside the quoted span, where the escape pair is data, and it
+/// leaked as a literal `\x11` into the stored element
+/// (`A=([0]=$'\[a\]')`).
+pub(crate) fn escape_decoded_ansi_c_quotes_unprotected(decoded: &str) -> String {
+    escape_decoded_ansi_c_quotes_impl(decoded, false)
+}
+
+fn escape_decoded_ansi_c_quotes_impl(decoded: &str, protect_glob: bool) -> String {
     let chars: Vec<char> = decoded.chars().collect();
     let mut out = String::with_capacity(decoded.len());
     let mut index = 0usize;
@@ -2714,12 +2914,12 @@ pub(crate) fn escape_decoded_ansi_c_quotes(decoded: &str) -> String {
             // skip-pair carrier (glob.rs contains_glob_or_extglob), the
             // assignment boundary's dequote_ctlesc_pairs removes the pair
             // before storage, and materialize strips it at argv.
-            '*' | '?' | '[' => {
+            '*' | '?' | '[' if protect_glob => {
                 out.push_str(crate::executor::markers::CTLESC_STR);
                 out.push(ch);
             }
             // Extglob introducers as decoded data must not open a group.
-            '@' | '+' | '!' if chars.get(index + 1) == Some(&'(') => {
+            '@' | '+' | '!' if protect_glob && chars.get(index + 1) == Some(&'(') => {
                 out.push_str(crate::executor::markers::CTLESC_STR);
                 out.push(ch);
             }
@@ -2851,32 +3051,47 @@ fn copy_dollar_paren_body_raw(
                 token_boundary = false;
             }
             '$' if chars.peek() == Some(&'(') => {
-                chars.next();
-                out.push('(');
-                depth += 1;
-                if case_depth > 0 {
-                    nested_case_subst += 1;
-                }
-                // rubash#3605: feed the skipped `(` to the case word
-                // machine — `(` ends a token, so `case` right after `$(`
-                // is a command-position keyword; otherwise `$(case` never
-                // armed the tracker and the pattern `)` closed the body
-                // one `)` early.
-                super::skip::update_command_substitution_case_depth(
-                    '(',
-                    false,
-                    false,
-                    &mut word,
-                    &mut case_depth,
-                    &mut word_boundary,
-                    &mut current_word_boundary,
-                    chars.peek().copied(),
-                    &mut case_in_stage,
-                    &mut case_pattern_region,
-                    prev_sig,
-                );
-                if crate::lexer::skip::esac_prev_token_char('(') {
-                    prev_sig = Some('(');
+                // `$((` arithmetic expansion — see the cursor form's arm.
+                let mut probe = chars.clone();
+                probe.next();
+                if probe.next() == Some('(')
+                    && super::skip::dollar_double_paren_is_arithmetic(
+                        &chars.clone().collect::<String>(),
+                    )
+                {
+                    chars.next();
+                    out.push('(');
+                    chars.next();
+                    out.push('(');
+                    copy_arith_paren_body_raw(out, chars);
+                } else {
+                    chars.next();
+                    out.push('(');
+                    depth += 1;
+                    if case_depth > 0 {
+                        nested_case_subst += 1;
+                    }
+                    // rubash#3605: feed the skipped `(` to the case word
+                    // machine — `(` ends a token, so `case` right after `$(`
+                    // is a command-position keyword; otherwise `$(case` never
+                    // armed the tracker and the pattern `)` closed the body
+                    // one `)` early.
+                    super::skip::update_command_substitution_case_depth(
+                        '(',
+                        false,
+                        false,
+                        &mut word,
+                        &mut case_depth,
+                        &mut word_boundary,
+                        &mut current_word_boundary,
+                        chars.peek().copied(),
+                        &mut case_in_stage,
+                        &mut case_pattern_region,
+                        prev_sig,
+                    );
+                    if crate::lexer::skip::esac_prev_token_char('(') {
+                        prev_sig = Some('(');
+                    }
                 }
                 token_boundary = false;
             }
@@ -2897,6 +3112,22 @@ fn copy_dollar_paren_body_raw(
                 word.clear();
                 word_boundary = false;
                 token_boundary = false;
+            }
+            '<' if chars.peek() == Some(&'<') => {
+                // `<<`/`<<-` here-document — see the cursor form's arm.
+                let mut probe = chars.clone();
+                probe.next();
+                if probe.next() != Some('<') {
+                    let remaining: String = chars.clone().collect();
+                    let (consumed, closes) = comsub_heredoc_skip(&remaining);
+                    out.push_str(&remaining[..consumed]);
+                    for _ in remaining[..consumed].chars() {
+                        chars.next();
+                    }
+                    if closes {
+                        break;
+                    }
+                }
             }
             '(' if case_depth == 0 || nested_case_subst > 0 => {
                 depth += 1;

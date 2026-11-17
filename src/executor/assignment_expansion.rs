@@ -2785,16 +2785,12 @@ impl Executor {
                                 && raw_param.starts_with('"')
                                 && raw_param.ends_with('"')));
                     if name.chars().all(|c| c.is_ascii_digit()) && !name.is_empty() {
-                        let expanded = if name == "0" {
-                            Some(self.script_name_value())
-                        } else if let Ok(index) = name.parse::<usize>() {
-                            self.shell_state
-                                .positional_window()
-                                .get(index.saturating_sub(1))
-                                .cloned()
-                        } else {
-                            None
-                        };
+                        // GNU subst.c:3707 get_dollar_var_value: `${00}` is
+                        // $0, `${01}` is $1 (rubash#3784).
+                        let expanded = name
+                            .parse::<usize>()
+                            .ok()
+                            .and_then(|index| self.numeric_parameter_value(index));
                         if let Some(value) = expanded {
                             changed = true;
                             // Preserve [N]= subscript form without
