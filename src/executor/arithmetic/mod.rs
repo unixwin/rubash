@@ -2616,19 +2616,6 @@ pub(crate) fn eval_conditional_arith_value_categorized_with_writes_and_state(
     (result, writes, category)
 }
 
-/// Like `eval_conditional_arith_value`, but also reports the error category
-/// from the actual evaluation, so callers can classify fatality without
-/// re-evaluating the expression in a fresh environment (GNU expr.c raises
-/// evalerror from the real evaluation; state-dependent errors such as
-/// `x+=2` with `x` declared only disappear under a fresh environment).
-pub(crate) fn eval_conditional_arith_value_categorized(
-    value: &str,
-    env_vars: &crate::shell::var_table::VarTable,
-) -> (Option<i128>, Option<ArithmeticErrorCategory>) {
-    let mut env_vars = env_vars.clone();
-    eval_mutable_arith_result(value, &mut env_vars, None, None, false, None)
-}
-
 /// `eval_conditional_arith_value_categorized` plus the write-capture of
 /// `eval_conditional_arith_value_with_writes`: `&self` arithmetic
 /// expansions (`$((i++))` inside a `${}` body or array subscript) still
