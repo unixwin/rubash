@@ -595,7 +595,18 @@ pub(in crate::executor) fn is_parameter_error_name(name: &str) -> bool {
     is_shell_name(name)
         || name
             .strip_prefix('!')
-            .is_some_and(|name| !name.is_empty() && is_shell_name(name))
+            .is_some_and(|name| {
+                // `!` + a legal indirect SOURCE: an identifier, a
+                // positional index (`${!9:-d}` -> `${$9:-d}`), or a
+                // VALID_INDIR_PARAM special (`${!#:-d}`, `${!?-d}`,
+                // `${!@:-d}` — subst.c:122, :9920 want_indir). `$`/`-`
+                // stay excluded: `${!$-d}` is a bad substitution in
+                // GNU, not an indirection through `$$`.
+                !name.is_empty()
+                    && (is_shell_name(name)
+                        || name.parse::<usize>().is_ok()
+                        || matches!(name, "#" | "?" | "@" | "*"))
+            })
         || matches!(name, "#" | "@" | "*" | "?" | "$" | "-" | "0")
         || name.parse::<usize>().is_ok()
         // Array references, including `arr[@]`/`arr[*]` (subst.c:9954-9957).
@@ -629,7 +640,12 @@ pub(in crate::executor) fn has_indirect_parameter_word_operator(name: &str) -> b
     // (nested `${...}` + quotes); brackets are NOT tracked, matching the
     // previous scan's treatment of `${!a[i-1]}`.
     let bytes = indirect.as_bytes();
-    let mut index = 0usize;
+    // A leading `#`/`?`/`@`/`*` is the indirect SOURCE itself
+    // (VALID_INDIR_PARAM, subst.c:122: `#` and `?` reach this caller
+    // only outside posix mode — indirect_parameter_body), never a
+    // pattern-open or operator character: `${!#:-d}` is indirection
+    // through `$#` under `:-`, not `$!` minus a `:-d` prefix.
+    let mut index = usize::from(matches!(bytes.first(), Some(b'#' | b'?' | b'@' | b'*')));
     let mut nested = 0usize;
     let mut quote: Option<u8> = None;
     while index < bytes.len() {

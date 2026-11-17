@@ -1227,6 +1227,22 @@ impl Executor {
         length: Option<isize>,
     ) -> Option<String> {
         let indirect_name = var_name.strip_prefix('!')?;
+        // VALID_INDIR_PARAM specials (subst.c:122; subst.c:7839-7881
+        // parameter_brace_find_indir): `${!#:0:1}` resolves t through the
+        // special parameter's scalar value first, then slices the
+        // parameter t names — with $#=2 it is `${2:0:1}`, not a lookup of
+        // an env cell literally named `#`.
+        if indirect_name.len() == 1 && matches!(indirect_name, "#" | "?" | "@" | "*") {
+            let Some(t) = self.parameter_error_value(indirect_name) else {
+                return Some(String::new());
+            };
+            if !Self::is_valid_indirect_target(&t) {
+                // `<t>: invalid variable name` is diagnosed by the
+                // parameter-expansion error pre-scan.
+                return Some(String::new());
+            }
+            return Some(self.expand_braced_substring_parameter(&t, offset, length));
+        }
         if let Some(target_name) = self.nameref_target_name(indirect_name) {
             return Some(parameter_substring(&target_name, offset, length));
         }
