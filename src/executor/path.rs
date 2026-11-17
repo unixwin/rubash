@@ -73,6 +73,13 @@ struct CommandLookupCache {
     /// which itself stats the pinned POSIX tools dir) is pure overhead.
     path_dirs: Option<Arc<Vec<PathBuf>>>,
     path_extensions: Option<Arc<Vec<String>>>,
+    /// Per-scaffold flag: did PATH element N carry a `.`-leading spelling?
+    /// GNU findcmd.c:550-551 examines that spelling (not the anchored
+    /// directory) before each element's hit test and sets
+    /// dot_found_in_search when it resolves to the session cwd
+    /// (rubash#3551); the Windows listing walk needs the raw verdict for
+    /// the same CHKDOT record.
+    path_dot_elements: Option<Arc<Vec<bool>>>,
 }
 
 impl CommandLookupCache {
@@ -84,6 +91,7 @@ impl CommandLookupCache {
             probes: HashMap::new(),
             path_dirs: None,
             path_extensions: None,
+            path_dot_elements: None,
         }
     }
 
@@ -100,6 +108,7 @@ impl CommandLookupCache {
         self.probes.clear();
         self.path_dirs = None;
         self.path_extensions = None;
+        self.path_dot_elements = None;
     }
 }
 
@@ -169,6 +178,15 @@ struct CommandLookupStores {
     /// (the per-scope self-cap in set_command_lookup_cache); only the
     /// resolution slices' memory is bounded by CACHE_SLICE_CAP.
     hashed: HashMap<String, HashMap<String, Option<PathBuf>>>,
+    /// The session's `dot_found_in_search` (findcmd.c:78): GNU keeps it
+    /// as a global the PATH walk resets at entry (findcmd.c:632) and
+    /// sets whenever an element beginning with `.` resolves to the
+    /// current directory (findcmd.c:550-551); every phash_insert then
+    /// carries the verdict into the entry's HASH_CHKDOT flag
+    /// (findcmd.c:416-426, hashcmd.c:113-114). A lookup answered from
+    /// the hash table runs no walk and leaves the stale value — the
+    /// same quirk GNU's global exhibits for `hash -p` inserts.
+    dot_found: HashMap<String, bool>,
 }
 
 impl CommandLookupStores {
@@ -177,6 +195,7 @@ impl CommandLookupStores {
             slices: HashMap::new(),
             recency: VecDeque::new(),
             hashed: HashMap::new(),
+            dot_found: HashMap::new(),
         }
     }
 
@@ -313,6 +332,21 @@ pub(crate) fn clear_command_lookup_cache(env_vars: &HashMap<String, String>) {
     // fingerprint reset, this clear drops the hash-table mirror as well.
     mirror.clear();
     cache.reset(String::new());
+}
+
+/// The session's `dot_found_in_search` verdict, as left by the most
+/// recent PATH walk (findcmd.c:78). phash_insert consumers read it
+/// through builtins::hash; mirrors GNU's stale-after-a-hash-hit quirk.
+pub(crate) fn dot_found_in_search(env_vars: &HashMap<String, String>) -> bool {
+    let scope = session_scope(env_vars);
+    let stores = command_lookup_stores();
+    stores.dot_found.get(&scope).copied().unwrap_or(false)
+}
+
+fn set_dot_found_in_search(env_vars: &HashMap<String, String>, found: bool) {
+    let scope = session_scope(env_vars);
+    let mut stores = command_lookup_stores();
+    stores.dot_found.insert(scope, found);
 }
 
 /// Forget one remembered command location in the session that owns
@@ -649,15 +683,25 @@ pub fn find_user_command(name: &str, env_vars: &HashMap<String, String>) -> Opti
         // PATH-scan memo for the name is stale evidence then too.
         if let Some(result) = mirror.get(name).cloned() {
             if let Some(path) = &result {
-                match crate::builtins::hash::phash_search_spelling(
-                    &path.to_string_lossy(),
-                    env_vars,
-                ) {
+                // GNU hashcmd.c:146-191 phash_search's CHKDOT/RELPATH
+                // arm (rubash#3551): `./NAME` (or `./<stored>`) wins
+                // while executable, and a `.`-leading stored path
+                // resolving to `.` unexecutably is a miss — the PATH
+                // walk below then re-records (hash -p ./gone NAME falls
+                // through the same way). builtins::hash owns the arm; the
+                // mirror stores only the fs path. The served spelling is
+                // returned VERBATIM — GNU shell_execve runs the recorded
+                // string as-is, so diagnostics and post-`cd` ENOENT keep
+                // the `./elem/name` form (rubash#2696).
+                match crate::builtins::hash::phash_search(env_vars, name) {
                     None => {
+                        mirror.remove(name);
                         cache.results.remove(name);
                     }
                     Some(served) => {
                         let served = PathBuf::from(served);
+                        // checkhash probes the served spelling anchored
+                        // at the session cwd (G-02).
                         if crate::builtins::shopt::checkhash_enabled()
                             && !cached_path_still_valid(&anchor_at_session_cwd(
                                 served.clone(),
@@ -901,17 +945,22 @@ fn path_scan_scaffold(
     cache: &mut CommandLookupCache,
     env_vars: &HashMap<String, String>,
     fingerprint: &str,
-) -> (Arc<Vec<PathBuf>>, Arc<Vec<String>>) {
+) -> (Arc<Vec<PathBuf>>, Arc<Vec<String>>, Arc<Vec<bool>>) {
     if cache.fingerprint != fingerprint {
         cache.reset(fingerprint.to_string());
     }
     if cache.path_dirs.is_none() {
+        let mut dot_elements = Vec::new();
         let dirs = split_shell_path(env_vars.get("PATH").map(String::as_str).unwrap_or_default())
             .into_iter()
             .map(|dir| {
                 // rubash#3826: GNU findcmd.c:544 — expand a `~`-leading
                 // PATH element at lookup time (unless POSIX mode).
                 let dir = expand_path_element_tilde(&dir, env_vars);
+                // findcmd.c:550-551 is keyed on the element SPELLING
+                // beginning with `.`, read before the element is joined
+                // and anchored (rubash#3551).
+                dot_elements.push(dir.starts_with('.'));
                 // rubash#3104: fold a raw-byte pair in the element
                 // before the listing scan, like the unix walk; on
                 // Windows the folded string is already the WTF-8
@@ -922,6 +971,7 @@ fn path_scan_scaffold(
             })
             .collect::<Vec<_>>();
         cache.path_dirs = Some(Arc::new(dirs));
+        cache.path_dot_elements = Some(Arc::new(dot_elements));
     }
     if cache.path_extensions.is_none() {
         cache.path_extensions = Some(Arc::new(executable_extensions(env_vars)));
@@ -929,6 +979,7 @@ fn path_scan_scaffold(
     (
         Arc::clone(cache.path_dirs.as_ref().unwrap()),
         Arc::clone(cache.path_extensions.as_ref().unwrap()),
+        Arc::clone(cache.path_dot_elements.as_ref().unwrap()),
     )
 }
 
@@ -946,17 +997,41 @@ fn find_in_path_via_listings(
     env_vars: &HashMap<String, String>,
     fingerprint: &str,
 ) -> Option<PathBuf> {
+    // findcmd.c:632 resets dot_found_in_search at walk entry;
+    // findcmd.c:550-551 then sets it whenever an element beginning with
+    // `.` resolves to the session cwd — including the element the hit
+    // lands in. The verdict rides the session's dot_found side channel
+    // for the next phash_insert (rubash#3551, Windows listing face).
+    let mut dot_found = false;
+    let result = find_in_path_via_listings_inner(name, env_vars, fingerprint, &mut dot_found);
+    set_dot_found_in_search(env_vars, dot_found);
+    result
+}
+
+#[cfg(not(unix))]
+fn find_in_path_via_listings_inner(
+    name: &str,
+    env_vars: &HashMap<String, String>,
+    fingerprint: &str,
+    dot_found: &mut bool,
+) -> Option<PathBuf> {
     let scope = session_scope(env_vars);
     let mut stores = command_lookup_stores();
     let cache = session_lookup_slice(&mut stores, &scope);
-    let (dirs, extensions) = path_scan_scaffold(cache, env_vars, fingerprint);
+    let (dirs, extensions, dot_elements) = path_scan_scaffold(cache, env_vars, fingerprint);
     // Candidate spellings are per-NAME, not per-directory (GNU passes the
     // same NAME through the whole walk); derive them once so a miss costs
     // one contains() per PATH entry per PATHEXT candidate and no
     // allocation at all.
     let candidates = listed_candidates(name, &extensions);
     for attempt in 0..2 {
-        for dir in dirs.iter() {
+        for (index, dir) in dirs.iter().enumerate() {
+            // findcmd.c:550-551: a `.`-spelled element that resolves to
+            // the session cwd sets dot_found_in_search, examined in PATH
+            // order before the hit test below (rubash#3551).
+            if !*dot_found && dot_elements[index] && path_element_is_session_cwd(dir, env_vars) {
+                *dot_found = true;
+            }
             let listing = cached_dir_listing(cache, dir);
             for candidate in &candidates {
                 // rubash#799 relaxed by rubash#1283: within one directory a
@@ -1138,7 +1213,7 @@ fn memoized_miss_still_absent(
     env_vars: &HashMap<String, String>,
     fingerprint: &str,
 ) -> bool {
-    let (dirs, extensions) = path_scan_scaffold(cache, env_vars, fingerprint);
+    let (dirs, extensions, _dot_elements) = path_scan_scaffold(cache, env_vars, fingerprint);
     let candidates = listed_candidates(name, &extensions);
     !confirm_listing_miss(cache, &dirs, &candidates).hit
 }
@@ -1306,6 +1381,24 @@ fn find_in_path_walk_unix(
     env_vars: &HashMap<String, String>,
     name_had_transport: bool,
 ) -> Option<(PathBuf, String)> {
+    // findcmd.c:632 resets dot_found_in_search at walk entry;
+    // findcmd.c:550-551 then sets it whenever an element beginning
+    // with `.` resolves to the current directory — including the
+    // element the hit lands in. The verdict rides the session's
+    // dot_found side channel for the next phash_insert (rubash#3551).
+    let mut dot_found = false;
+    let result = find_in_path_walk_unix_inner(name, env_vars, name_had_transport, &mut dot_found);
+    set_dot_found_in_search(env_vars, dot_found);
+    result
+}
+
+#[cfg(unix)]
+fn find_in_path_walk_unix_inner(
+    name: &str,
+    env_vars: &HashMap<String, String>,
+    name_had_transport: bool,
+    dot_found: &mut bool,
+) -> Option<(PathBuf, String)> {
     let mut file_to_lose_on: Option<(PathBuf, String)> = None;
     for dir in split_shell_path(env_vars.get("PATH").map(String::as_str).unwrap_or_default()) {
         // rubash#3826: GNU findcmd.c:544 — expand a `~`-leading PATH
@@ -1352,6 +1445,15 @@ fn find_in_path_walk_unix(
             joined.to_string_lossy().into_owned()
         };
         let candidate = anchor_at_session_cwd(joined, env_vars);
+        // findcmd.c:550-551: an element beginning with `.` that resolves
+        // to the session cwd sets dot_found_in_search, examined in PATH
+        // order before the hit test below.
+        if !*dot_found && dir.starts_with('.') {
+            let anchored_dir = anchor_at_session_cwd(dir_fs.clone(), env_vars);
+            if path_element_is_session_cwd(&anchored_dir, env_vars) {
+                *dot_found = true;
+            }
+        }
         if !candidate.is_file() {
             continue;
         }
@@ -1363,6 +1465,22 @@ fn find_in_path_walk_unix(
         }
     }
     file_to_lose_on
+}
+
+/// findcmd.c:550-551 `same_file(".", xpath)` — whether a `.`-leading PATH
+/// element resolves to the session's current directory (device+inode
+/// equality, canonicalized here). Both faces need it: the unix stat walk
+/// and the Windows listing walk record the same CHKDOT verdict
+/// (rubash#3551).
+fn path_element_is_session_cwd(anchored_dir: &Path, env_vars: &HashMap<String, String>) -> bool {
+    let cwd = anchor_at_session_cwd(PathBuf::from("."), env_vars);
+    match (
+        std::fs::canonicalize(&cwd),
+        std::fs::canonicalize(anchored_dir),
+    ) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
 }
 
 /// rubash#2317: the name a PATH search RECORDS for `name` — the as-written
