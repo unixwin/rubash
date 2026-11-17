@@ -1529,7 +1529,13 @@ pub(super) fn array_assignment_index(
     else {
         return ArrayAssignmentIndex::Unresolved;
     };
-    let Some(index) = eval_conditional_arith_value(expression, env_vars) else {
+    // GNU arrayfunc.c:1373-1377 array_expand_index clears
+    // this_command_name around evalexp (rubash#3295).
+    let index = {
+        let _arith_label = crate::executor::arithmetic::arith_eval_label_scope(None);
+        eval_conditional_arith_value(expression, env_vars)
+    };
+    let Some(index) = index else {
         return ArrayAssignmentIndex::Unresolved;
     };
     if index >= 0 {

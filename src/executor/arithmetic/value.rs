@@ -320,13 +320,20 @@ impl ConditionalArithParser<'_> {
         if stripped.trim().is_empty() {
             return Some(0);
         }
-        let (value, category) = eval_mutable_arith_value_with_random(
-            &stripped,
-            self.env_vars,
-            self.random_state,
-            self.dynamic_values,
-            self.cells,
-        );
+        // GNU arrayfunc.c:1373-1377 array_expand_index clears
+        // this_command_name around evalexp — the subscript's own
+        // diagnostics carry no command label even inside an
+        // enclosing `(( ))` (rubash#3295).
+        let (value, category) = {
+            let _arith_label = crate::executor::arithmetic::arith_eval_label_scope(None);
+            eval_mutable_arith_value_with_random(
+                &stripped,
+                self.env_vars,
+                self.random_state,
+                self.dynamic_values,
+                self.cells,
+            )
+        };
         // GNU expr.c:1190-1216 expr_streval: an unbound read inside the
         // subscript's own evalexp frame does not evalerror — it
         // err_unboundvar()s and jumps to top level (FORCE_EOF) straight
@@ -386,13 +393,20 @@ impl ConditionalArithParser<'_> {
                         end += 1;
                     }
                     let inner = text[index + 3..end.saturating_sub(1)].to_string();
-                    let (value, _cat) = eval_mutable_arith_value_with_random(
-                        &inner,
-                        self.env_vars,
-                        self.random_state,
-                        self.dynamic_values,
-                        self.cells,
-                    );
+                    // GNU subst.c:10873-10878 arithsub clears
+                    // this_command_name around evalexp
+                    // (rubash#3295).
+                    let (value, _cat) = {
+                        let _arith_label =
+                            crate::executor::arithmetic::arith_eval_label_scope(None);
+                        eval_mutable_arith_value_with_random(
+                            &inner,
+                            self.env_vars,
+                            self.random_state,
+                            self.dynamic_values,
+                            self.cells,
+                        )
+                    };
                     match value {
                         Some(value) => {
                             output.push_str(&value.to_string());
@@ -1042,13 +1056,20 @@ impl ConditionalArithParser<'_> {
             if let Some((elem_base, subscript)) = target.split_once('[') {
                 if let Some(subscript) = subscript.strip_suffix(']') {
                     let stripped = strip_arith_double_quotes(subscript);
-                    let (index, _cat) = eval_mutable_arith_value_with_random(
-                        &stripped,
-                        self.env_vars,
-                        self.random_state,
-                        self.dynamic_values,
-                        self.cells,
-                    );
+                    // GNU arrayfunc.c:1373-1377 array_expand_index
+                    // clears this_command_name around evalexp
+                    // (rubash#3295).
+                    let (index, _cat) = {
+                        let _arith_label =
+                            crate::executor::arithmetic::arith_eval_label_scope(None);
+                        eval_mutable_arith_value_with_random(
+                            &stripped,
+                            self.env_vars,
+                            self.random_state,
+                            self.dynamic_values,
+                            self.cells,
+                        )
+                    };
                     if let Some(index) = index {
                         self.set_array_element(
                             elem_base,
