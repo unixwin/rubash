@@ -2149,8 +2149,12 @@ impl Executor {
         // element's own redirections in its fork before exec
         // (redir.c:237 do_redirections), so a stage child must find
         // its `3<seed` binding at fd 3.
+        // rubash#3828: the stage gate's preopened map is not threaded
+        // here yet (the gate runs in execute_pipeline_stage_inner,
+        // the spawn here) — the stage's fd>=3 delivery opens by path
+        // as today; see REPORT §6.
         let stage_fd_delivery_dups =
-            self.apply_external_fd_delivery(command, &mut process, Some(&stage_stdio));
+            self.apply_external_fd_delivery(command, &mut process, Some(&stage_stdio), None);
         // rubash#438: pin the buffered process-substitution pipe read ends at
         // their /dev/fd/N numbers in the child (fork-exec dup2), so the
         // literal argv word resolves through the OS /dev/fd layer.

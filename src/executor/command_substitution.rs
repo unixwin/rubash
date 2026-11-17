@@ -2317,6 +2317,7 @@ impl Executor {
             // Executor); the parent never observes it.
             compound_redirect_failed: Cell::new(false),
             noclobber_prepared_targets: std::cell::RefCell::new(std::collections::HashSet::new()),
+            pending_preopened_redirects: std::cell::RefCell::new(std::collections::HashMap::new()),
             exit_jump_pending: Cell::new(false),
             run_diagnostics: std::cell::RefCell::new(None),
             errexit_status_converted: Cell::new(false),

@@ -1897,6 +1897,19 @@ pub struct Executor {
     /// pre-existing file still fails in the prepare phase itself, and
     /// simple commands never consult the set.
     pub(crate) noclobber_prepared_targets: std::cell::RefCell<std::collections::HashSet<String>>,
+    /// rubash#3828: redirect targets an earlier walk already opened,
+    /// retained by redirect-list position so the bind walk adopts the
+    /// entry's ONE open instead of re-opening the path. GNU
+    /// do_redirections opens each redirect entry exactly once
+    /// (redir.c do_redirection_internal -> redir_open); rubash splits
+    /// that open across a validate/prepare walk and a bind walk, so
+    /// the first walk's File is carried here keyed by
+    /// `cmd.redirects` position. The tuple's String is the expanded
+    /// target the producing walk saw — a consumer adopts only on an
+    /// exact match, so a stale entry can never bind the wrong file.
+    pub(crate) pending_preopened_redirects: std::cell::RefCell<
+        std::collections::HashMap<usize, (String, std::rc::Rc<crate::executor::fd_table::FileFd>)>,
+    >,
     /// The group's execute_ast ended by unwinding (`exit`, errexit, POSIX
     /// special-builtin failure, fatal expansion — GNU's
     /// jump_to_top_level(EXITPROG/ERREXIT/FORCE_EOF)). run_source converts

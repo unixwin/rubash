@@ -123,7 +123,29 @@ impl Executor {
         // search_for_command (and with it the hash record above) runs
         // before the fork whose child opens redirections, so the
         // redirect-killed path records too (rubash#2518).
-        if self.apply_redirect_setup_side_effects(cmd)? {
+        // rubash#3828: the walk's probe opens each plain-file target
+        // once and drops the File — correct only when an emulation arm
+        // below actually answers (those bodies re-open their fd 1/2
+        // mirrors when they write). A command that falls through to
+        // the real exec path gets its redirects from
+        // execute_external_inner's own preflight walk; running this
+        // walk first creates the target under the umask-stripped mode
+        // and the preflight's open then fails EACCES although GNU's
+        // single do_redirections open succeeds (redir.c:237). Skip the
+        // walk unless an arm will emulate — the literal-file gates
+        // inside the pwd/printf arms decline to the real exec path
+        // the same way a non-listed name does. The retained variant
+        // carries the probe's FileFd to the emulation arm's bind so the
+        // entry still opens exactly once (h2).
+        let literal_file_declines =
+            matches!(
+                name,
+                "/bin/pwd" | "/usr/bin/pwd" | "/bin/printf" | "/usr/bin/printf"
+            ) && crate::executor::path::literal_executable_file(name, &self.shell_state.env_vars);
+        if emulated
+            && !literal_file_declines
+            && self.apply_redirect_setup_side_effects_retained(cmd)?
+        {
             self.record_emulated_command_resolution(name, emulated);
             return Ok(true);
         }
