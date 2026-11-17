@@ -133,6 +133,15 @@ pub(super) fn parse_case_command(
         let mut current_raw_pattern = String::new();
         let mut current_pattern_has_token = false;
         let mut in_extglob = 0i32;
+        // rubash#3235: GNU reads every pattern word at command position
+        // (the pattern_list newline_list leaves last_read_token at '\n',
+        // which reserved_word_acceptable accepts — parse.y:5900-5903),
+        // so read_token_word plants `simplecmd_lineno` with the pattern
+        // word's END line each time (parse.y:5850-5851); the last
+        // alternative's last word wins. Track the end line of the last
+        // pattern-content token — `|` separators between alternatives
+        // are not words and plant nothing.
+        let mut pattern_plant_line = 0usize;
         while i < tokens.len() {
             // Check if this is a ) that ends the case pattern (not inside extglob)
             if is_keyword(tokens, i, ")") && in_extglob == 0 {
@@ -394,6 +403,13 @@ pub(super) fn parse_case_command(
                 }
                 _ => {}
             }
+            // rubash#3235: every token the pattern loop consumes except
+            // a top-level `|' separator is pattern-word content (the
+            // extglob/procsub collectors leave `i` on the span's last
+            // token, so `end_position` is the word's finishing line).
+            if tokens[i].kind != TokenKind::Pipe || in_extglob != 0 {
+                pattern_plant_line = tokens[i].end_position;
+            }
             i += 1;
         }
         if i >= tokens.len() {
@@ -498,11 +514,23 @@ pub(super) fn parse_case_command(
             ));
         }
         i = body_end;
-        let body = super::parse_loop::parse_body_with_diagnostics(
+        let mut body = super::parse_loop::parse_body_with_diagnostics(
             &tokens[body_start..i],
             source,
             source_line_offset,
         );
+        // rubash#3235: the clause body's first redirect-first simple
+        // command keeps the pattern word's planted stamp — a
+        // redirection element captures `simplecmd_lineno` only while it
+        // is unset (parse.y:810-811), and nothing between `)' and the
+        // body re-plants it (the redirect target and the command word
+        // after it are not read at command position). Restamp through
+        // the #3209 walk: wrappers consume nothing, the first simple
+        // command ends the plant, and a nested case/function blocks it
+        // (its own pattern/name plants instead).
+        if pattern_plant_line != 0 {
+            restamp_function_body_first_command(&mut body, pattern_plant_line);
+        }
         let terminator_text = case_terminator(tokens, i).map(|_| tokens[i].value.clone());
         let terminator_metadata =
             case_terminator(tokens, i).map(|_| build_keyword_metadata(&tokens[i]));
