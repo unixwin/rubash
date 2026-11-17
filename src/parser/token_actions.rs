@@ -1137,6 +1137,20 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                         token.position
                     ),
                 );
+                // GNU report_syntax_error echoes the offending line in
+                // every non-interactive near-token report (parse.y:6814);
+                // without the source assignment the executor's NEAR arm
+                // cannot echo it (rubash#3647: `echo hi | ! true` lost
+                // the line echo the `|'-after-`|' shape already had).
+                error.insert_assignment(
+                    "__RUBASH_PARSE_SOURCE__".to_string(),
+                    super::parse_loop::offending_line_text(
+                        tokens,
+                        *i,
+                        state.diagnostic_text.as_deref(),
+                        state.source_line_offset,
+                    ),
+                );
                 abort_parse_at_syntax_error(state, error, tokens[*i].position);
                 return TokenAction::Break;
             }
