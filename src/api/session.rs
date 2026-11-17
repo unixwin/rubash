@@ -879,6 +879,7 @@ impl Session {
                 crate::shell::bind_registry::BindKind::Function { name }
             }
             BindKindView::Macro { text } => crate::shell::bind_registry::BindKind::Macro { text },
+            BindKindView::Keymap { name } => crate::shell::bind_registry::BindKind::Keymap { name },
         };
         self.executor
             .register_bind_entry(crate::shell::bind_registry::BindEntry {
