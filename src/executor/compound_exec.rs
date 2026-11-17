@@ -62,6 +62,146 @@ pub(in crate::executor) fn rubash_spawn_inherited_state(key: &str) -> bool {
     key.starts_with("__RUBASH_SETOPT_") || KEYS.contains(&key)
 }
 
+/// rubash#3049: keys that are fork/respawn TRANSPORT — serialized shell
+/// state and per-spawn protocol stamps — not session state. GNU's exec
+/// boundary hands a child exactly the export environment (variables.c
+/// maybe_make_export_env / make_env_array_from_var_list); a forked
+/// subshell needs no environment entries at all because it shares the
+/// parent's table in-process (execute_cmd.c execute_in_subshell). This
+/// family exists only because rubash emulates the fork with a respawned
+/// `rubash -c` process, where the environment IS the state channel —
+/// so once such a process is born, its environ carries the transport
+/// residue of its own birth forever. Two boundary rules follow:
+///
+/// * the residue must never reach a REAL child's environment
+///   (compose_child_environment's process-env mirror arm would
+///   otherwise re-project it — the respawned child's
+///   __RUBASH_*_VARS attribute lists landed in the exec'd
+///   bats-exec-test, where VarTable::from_values applied them and
+///   BATS_TEST_TAGS was born `declare -ar`, deadlocking bats-core
+///   test #71 on its readonly assignment);
+/// * a process NOT born as a validated respawn must not import it
+///   (Executor::new_inner strips the family before from_values reads
+///   the attribute strings).
+///
+/// Deliberately NOT in the family: the binary/host config entries
+/// (COMPATIBLE_SHELL_PATH/SHELL_ROOT/TEMP_PATH — a spawned child keeps
+/// its lineage's install resolution), the ULIMIT_*/UMASK carriers
+/// (kernel resource state persists across GNU's execve; the env keys
+/// are the Windows-side model for real children too), the
+/// orig-ignores carrier (__RUBASH_TRAP_ORIG_IGN — trap.c
+/// original_signals SIG_IGN dispositions DO cross execve), and
+/// arbitrary session-mirrored probe keys (the G-03
+/// mirrored-assignment contract keeps a session's own mirrored
+/// `__RUBASH_*` writes visible to its children).
+pub(in crate::executor) fn fork_respawn_transport_key(key: &str) -> bool {
+    const KEYS: &[&str] = &[
+        // Variable-table serializations (the attribute strings
+        // VarTable::from_values imports, plus the list-only state sets
+        // the protocol importers read at their own sites).
+        "__RUBASH_ARRAY_VARS",
+        "__RUBASH_ASSOC_VARS",
+        "__RUBASH_ASSOC_128_VARS",
+        "__RUBASH_CAPCASE_VARS",
+        "__RUBASH_DECLARED_UNSET_VARS",
+        "__RUBASH_EXPORTED_VARS",
+        "__RUBASH_EXPORTED_FUNCTIONS",
+        "__RUBASH_INTEGER_VARS",
+        "__RUBASH_INVISIBLE_VARS",
+        "__RUBASH_LOWERCASE_VARS",
+        "__RUBASH_NAMEREF_VARS",
+        "__RUBASH_READONLY_VARS",
+        "__RUBASH_READONLY_FUNCTIONS",
+        "__RUBASH_TRACE_VARS",
+        "__RUBASH_UNSET_DYNAMIC_VARS",
+        "__RUBASH_UPPERCASE_VARS",
+        "__RUBASH_FUNC_TRACE_FUNCTIONS",
+        "__RUBASH_UNSTREAMED_FUNCTION_BODIES",
+        // Structural shell state: hash/dirstack/builtin/getopts/
+        // option/clock transports a forked subshell inherits
+        // in-process but an exec'd shell re-derives (SHELLOPTS /
+        // BASHOPTS are the exported carriers for options).
+        "__RUBASH_HASH_TABLE",
+        "__RUBASH_DIR_STACK",
+        "__RUBASH_DISABLED_BUILTINS",
+        "__RUBASH_GETOPTS_OFFSET",
+        "__RUBASH_GETOPTS_OPTIND",
+        "__RUBASH_LOCAL_EXPORT_ENV",
+        "__RUBASH_SECONDS_OFFSET",
+        "__RUBASH_SHELL_START_EPOCH",
+        "__RUBASH_POSIX_MODE",
+        "__RUBASH_ZSH_OPTIONS",
+        "__RUBASH_PHYSICAL_PWD",
+        "__RUBASH_SHOPT_STATE",
+        "__RUBASH_SHOPT_CHECKHASH",
+        // Spawn bookkeeping: the respawn claim/stamps, subshell-depth
+        // and $BASHPID seeds, the positional/fork-context transports
+        // (FORK_TRANSPORT_KEYS covers the __RUBASH_FORK_* prefix),
+        // the virtual-stdin delivery, the command-file and
+        // state-file pointers, and the per-spawn payload prefixes.
+        "__RUBASH_SHELL_PID",
+        "__RUBASH_SPAWNER_PID",
+        "__RUBASH_SUBSHELL_DEPTH",
+        "__RUBASH_BG_DEPTH",
+        "__RUBASH_BG_BASHPID_BASE",
+        "__RUBASH_COPROC_CHILD",
+        "__RUBASH_ASYNC_CHILD",
+        "__RUBASH_BACKGROUND_WRAPPER",
+        crate::invocation::RESPAWN_STATE_FILE_ENV_KEY,
+        "__RUBASH_INHERIT_PROCESS_STDIN",
+        "__RUBASH_CMD_FILE",
+        "__RUBASH_CMD_START_LINE",
+        "__RUBASH_COMSUB_BODY",
+        "__RUBASH_FUNCTION_STDIN",
+        "__RUBASH_FUNCTION_STDIN_OFFSET",
+        "__RUBASH_PIPESTATUS_STATE",
+        "__RUBASH_EVAL_CONTEXT",
+        "__RUBASH_CNF_HANDLER_RUNNING",
+        "__RUBASH_FILE_MODES",
+        // The signal-trap depth/status pair (the only two spellings in
+        // this sub-family).
+        "__RUBASH_SIGNAL_TRAP_DEPTH",
+        "__RUBASH_SIGNAL_TRAP_STATUS",
+        // Diagnostic-frame and invocation-classification transports:
+        // a fresh shell derives all of these from its own argv and
+        // entry state (init.rs strips the same set for non-respawns).
+        "__RUBASH_SCRIPT_NAME",
+        "__RUBASH_TOP_LEVEL_NAME",
+        "__RUBASH_CURRENT_FILE",
+        "__RUBASH_CURRENT_LINE",
+        "__RUBASH_CURRENT_FUNCTION",
+        "__RUBASH_CURRENT_COMMAND",
+        "__RUBASH_LAST_COMMAND",
+        "__RUBASH_IN_SOURCE",
+        "__RUBASH_EXTGLOB_ENABLED_LINE",
+        "__RUBASH_LINE_OFFSET",
+        "__RUBASH_ARGV0_AFTER_UNSET",
+        "__RUBASH_SHELL_NAME",
+        "__RUBASH_SESSION_SCOPE",
+        "__RUBASH_INTERACTIVE",
+        "__RUBASH_INTERACTIVE_FLAG_OFF",
+        "__RUBASH_IS_C",
+        "__RUBASH_LOGIN_SHELL",
+        "__RUBASH_READ_STDIN",
+        "__RUBASH_SOURCED_RC",
+        "__RUBASH_STARTUP_FILES_DONE",
+        "__RUBASH_NO_EDITING",
+        "__RUBASH_NO_PROFILE",
+        "__RUBASH_NO_RC",
+        "__RUBASH_PC_NOHIST",
+        "__RUBASH_DEBUGGER_MODE",
+        "__RUBASH_DEBUGGER_ATTEMPTED",
+    ];
+    KEYS.contains(&key)
+        || key.starts_with("__RUBASH_FORK_")
+        || key.starts_with("__RUBASH_FD_")
+        || key.starts_with("__RUBASH_SETOPT_")
+        || key.starts_with("__RUBASH_ALIAS_")
+        || key.starts_with("__RUBASH_PARSE_")
+        || key.starts_with("__RUBASH_COMPOUND_SYNTAX_ERROR")
+        || (key.starts_with("__RUBASH_TRAP") && key != crate::builtins::trap::TRAP_ORIG_IGNORES)
+}
+
 /// Transport key for the fork-inherited positional parameters. GNU fork
 /// children inherit the parent's dollar_vars verbatim (variables.c), but
 /// a respawned `rubash -c` child re-imports only its process
@@ -74,6 +214,21 @@ pub(in crate::executor) fn rubash_spawn_inherited_state(key: &str) -> bool {
 /// array storage codec (`format_indexed_array_values`/`array_values`),
 /// the same round-trip the array-variable transport uses.
 pub(in crate::executor) const POSITIONAL_PARAMS_TRANSPORT: &str = "__RUBASH_POSITIONAL_PARAMS";
+
+/// Transport key for the parent's live errexit-suppression depth at
+/// spawn. GNU's fork-shaped children that execute the SAME command
+/// node (the async `&` wrapper's execute_in_subshell fork,
+/// execute_cmd.c:1576, and the coproc child's execute_coproc ->
+/// execute_in_subshell, execute_cmd.c:2546) carry the node's
+/// CMD_IGNORE_RETURN — set by `!` (execute_cmd.c:655-656) or an
+/// enclosing ignore_return propagation arm — so `set -e` inside an
+/// inverted coproc/`&` body is ignored (exec16's "reached coproc
+/// body"). A respawned `rubash -c` child has no node; this stamp
+/// seeds its suppress_errexit. process_substitute children are
+/// excluded: GNU re-parses the producer's saved command text
+/// (subst.c:6362), so no flag survives — verified
+/// `! cat < <(set -e; false; echo x)` prints nothing under 5.3.20.
+pub(in crate::executor) const SUPPRESS_ERREXIT_TRANSPORT: &str = "__RUBASH_SUPPRESS_ERREXIT";
 
 /// RAII scope for the executor's `expansion_probe_active` flag
 /// (rubash#2585); restores the prior value on drop, so a nested probe
@@ -662,6 +817,7 @@ fn coproc_spec_binding(spec: &CoprocFdSpec, path: &Option<PathBuf>) -> Option<Co
             Some(CoprocFdBinding::File {
                 file: Rc::new(FileFd {
                     handle: crate::fd::into_handle(cloned),
+                    closed: std::cell::Cell::new(false),
                     path: path.clone().unwrap_or_default(),
                 }),
                 read: false,
@@ -674,6 +830,7 @@ fn coproc_spec_binding(spec: &CoprocFdSpec, path: &Option<PathBuf>) -> Option<Co
             Some(CoprocFdBinding::File {
                 file: Rc::new(FileFd {
                     handle: crate::fd::into_handle(cloned),
+                    closed: std::cell::Cell::new(false),
                     path: PathBuf::from("coproc:pipe"),
                 }),
                 read: false,
@@ -1375,8 +1532,7 @@ impl Executor {
                 Err(error) => return Err(error.into()),
             }
         }
-        let exe = std::env::var_os("CARGO_BIN_EXE_rubash")
-            .map(std::path::PathBuf::from)
+        let exe = test_rubash_binary_from_env()
             .or_else(test_rubash_binary_from_current_exe)
             .or_else(|| std::env::current_exe().ok())
             .unwrap_or_else(|| "rubash".into());
@@ -1551,6 +1707,13 @@ impl Executor {
         // transport set (see fork_context_transport_entries).
         for (key, value) in self.fork_context_transport_entries() {
             env_map.insert(key, value);
+        }
+        // rubash#3605: the async child is the same execute_in_subshell
+        // fork the flag model travels (execute_cmd.c:1576); an
+        // inverted/exempt `&` body keeps CMD_IGNORE_RETURN
+        // (SUPPRESS_ERREXIT_TRANSPORT).
+        if self.suppress_errexit > 0 {
+            env_map.insert(SUPPRESS_ERREXIT_TRANSPORT.to_string(), "1".to_string());
         }
         // rubash#1074: the wrapper child is one subshell level deeper than
         // this shell (execute_in_subshell's subshell_level++); carry the
@@ -3134,6 +3297,9 @@ impl Executor {
         // rubash#2117: the POSIX special-builtin conversion mark is
         // scoped the same way; the ast_exec time branch takes it.
         self.posix_special_status_converted.set(false);
+        // rubash#3325: the ERR-ownership verdict is recomputed by this
+        // frame after its inner dispatch; never inherit a stale one.
+        self.timed_err_owned_by_body.set(None);
         // rubash#1218: in posix mode a dash word right after `time`
         // means `time` was never a keyword (GNU parse.y), so the
         // reconstructed command (`time`, the prefix words, then the
@@ -3195,6 +3361,10 @@ impl Executor {
         // bypassed.
         self.timed_dispatch_depth
             .set(self.timed_dispatch_depth.get() + 1);
+        // rubash#3325: scoped to this frame's root dispatch (a nested
+        // time frame clears it again for its own root and leaves the
+        // verdict set for this frame to read).
+        self.timed_root_redirect_failure.set(false);
         // rubash#1611: clear the conversion mark immediately before the
         // inner dispatch (the DEBUG-trap call in the simple-command arm
         // below runs its own commands first; their conversions must not
@@ -3275,9 +3445,30 @@ impl Executor {
         };
         self.timed_dispatch_depth
             .set(self.timed_dispatch_depth.get() - 1);
+        // rubash#3325: GNU time_command (execute_cmd.c:1430) only hands
+        // the command to execute_command_internal; whether the ERR trap
+        // runs is decided inside that command's own execution. A
+        // statement compound reaches run_error_trap at its own level
+        // only for its do_redirections failure (execute_cmd.c:854-883);
+        // its body's failing commands fire the trap themselves (nested
+        // lists run with the timed deferral masked). The time branch's
+        // final-status adjudication therefore stands only for the
+        // non-compound roots (simple, pipeline, subshell, (( )), [[ ]],
+        // function call) and a compound root's own redirect failure.
+        let body_owns_err = timed_root_is_statement_compound(&time_command.command)
+            && !self.timed_root_redirect_failure.get();
         // rubash#1611: take the errexit-conversion mark left by the
         // inner dispatch (cleared at entry above).
         let errexit_converted = self.errexit_status_converted.replace(false);
+        // A `time time ...` chain: the nested frame (dispatched through
+        // the execute_command funnel, rubash#1805) already computed the
+        // verdict for the innermost command, with the errexit mark it
+        // consumed — keep it instead of recomputing from this frame's
+        // (already taken) mark.
+        if time_command.command.time_command.is_none() {
+            self.timed_err_owned_by_body
+                .set(body_owns_err.then_some(errexit_converted));
+        }
         // Q6 arm B: a converted ExitCode was adjudicated here, so
         // its unwind mark is consumed with it; the ast_exec time
         // branch's own gate re-marks if it raises the break itself.
@@ -4074,6 +4265,16 @@ impl Executor {
             return self.execute_if_command(if_command);
         }
 
+        // rubash#3454: `if ... fi > $nope` under `set -u` — GNU's
+        // do_redirections (execute_cmd.c:854) fails the target expansion
+        // with `name: unbound variable` and aborts the script; the
+        // prologue arms expand with no nounset gate, so report before
+        // any procsub materialization or create side effect and unwind
+        // as ExitCode(1), the same fatal the brace gate returns.
+        if self.compound_redirect_nounset_fatal(cmd)? {
+            return Err(ExecuteError::ExitCode(1));
+        }
+
         // rubash#2246: GNU walks the stored tree by pointer and binds
         // the redirects once at entry (execute_cmd.c:854-883). The
         // deep clones this wrapper used to take — cmd.clone() plus
@@ -4139,6 +4340,12 @@ impl Executor {
                 self.exit_code = 1;
                 return Ok(());
             }
+        }
+        // rubash#3454: same `set -u` unbound-target gate as `if` —
+        // `while/until ... done > $nope` aborts in GNU's compound
+        // do_redirections before any expansion side effect.
+        if self.compound_redirect_nounset_fatal(cmd)? {
+            return Err(ExecuteError::ExitCode(1));
         }
         // rubash#2246: same borrow conversion as the if wrapper —
         // cmd.clone() + loop_command.clone() existed only for the
@@ -4233,6 +4440,23 @@ impl Executor {
         let saved_exit_trap_ran = self.exit_trap_ran.get();
         crate::builtins::trap::reset_for_subshell_child(&mut self.shell_state.env_vars);
         self.shell_state.subshell_depth.set(saved_depth + 1);
+        // rubash#3605: GNU execute_cmd.c:1731-1739 (execute_in_subshell)
+        // ASSIGNS stdin_redir for a user subshell — `stdin_redir =
+        // stdin_redirects(redirects) || pipe_in != NO_PIPE` — an assign,
+        // not an OR: a nested `( )` with no fd-0 redirect CLEARS the
+        // enclosing structure's flag (`{ ( cat & wait ); } <file` feeds
+        // the async cat /dev/null), while the ( )'s own `< file` or its
+        // being a pipe-fed element's own dispatch sets it even when the
+        // parent's flag was 0. `redirects` here is the ( )'s own list —
+        // the same list do_redirections is about to consume (GNU reads
+        // it before the :1759-1764 consumption). element_pipe_stdin
+        // carries the element child's `pipe_in != NO_PIPE` for exactly
+        // this dispatch; consume it so nested ( )s don't inherit the
+        // outer element's pipe.
+        let element_pipe_stdin = self.shell_state.element_pipe_stdin.replace(false);
+        self.shell_state
+            .stdin_redir
+            .set(cmd.redirects.iter().any(redirect_updates_stdin_redir) || element_pipe_stdin);
         // execute_in_subshell (execute_cmd.c:1636-1637): the region is
         // "neither login nor interactive" — record the login reset
         // alongside the depth bump; saved_state's wholesale restore
@@ -4789,7 +5013,7 @@ impl Executor {
     where
         F: FnOnce(&mut Executor) -> Result<T, ExecuteError>,
     {
-        let saved_fd_inputs = self.bind_numbered_heredoc_redirects(cmd, true);
+        let saved_fd_inputs = self.bind_numbered_heredoc_redirects(cmd, true)?;
         let result = f(self);
         self.restore_numbered_heredoc_redirects(saved_fd_inputs);
         result
@@ -4808,7 +5032,7 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
         include_stdin: bool,
-    ) -> Vec<(u32, Option<crate::executor::fd_table::FdEntry>)> {
+    ) -> Result<Vec<(u32, Option<crate::executor::fd_table::FdEntry>)>, ExecuteError> {
         let mut saved_fd_inputs = Vec::new();
         for redirect in &cmd.heredoc_redirects {
             let Some(fd) = redirect.fd else {
@@ -4829,11 +5053,26 @@ impl Executor {
             // to the heredoc expansion leaked the storage prefix into
             // the stream and lost the last line (rubash#1867).
             let body = self.expand_heredoc_redirect_text(redirect);
-            saved_fd_inputs.push((fd, self.fd_table.entries.get(&fd).cloned()));
+            // rubash#3706: the saved entry duplicates the displaced
+            // descriptor (FdTable::saved_entry) — a plain clone shares
+            // the descriptor the heredoc bind's open_input retires, so
+            // the restore would replay a dead entry. A dup failure
+            // unwinds the heredocs this call already bound (GNU
+            // undo_partial_redirects, execute_cmd.c:855) before the
+            // error propagates — the caller never sees a half-bound
+            // list.
+            let saved = match self.fd_table.saved_entry(fd) {
+                Ok(saved) => saved,
+                Err(error) => {
+                    self.restore_numbered_heredoc_redirects(std::mem::take(&mut saved_fd_inputs));
+                    return Err(ExecuteError::IoError(error));
+                }
+            };
+            saved_fd_inputs.push((fd, saved));
             self.fd_table
                 .open_input(fd, FdReadEndpoint::text(&body), true);
         }
-        saved_fd_inputs
+        Ok(saved_fd_inputs)
     }
 
     /// The restore half of bind_numbered_heredoc_redirects: each bound
@@ -5222,37 +5461,71 @@ impl Executor {
         }
     }
 
+    /// rubash#3267: spellings a fresh `-c` re-parse reads as non-words
+    /// at command position — `!`, `{`, `}`, `[[`, `]]`, and the
+    /// reserved-word set. The coproc simple-body respawn re-renders
+    /// collected words back to source text, so an unquoted head word
+    /// with one of these spellings regains keyword/operator status in
+    /// the child (`coproc >x done` came back a DONE token and errored
+    /// as a syntax error where GNU's forked child ran `done` and
+    /// reported `done: command not found`). `time` is deliberately
+    /// included even though GNU keeps it a timespec (parse.y:1416):
+    /// the #1653 pins assert `time: command not found` and rewriting
+    /// them to timespec output is a separate ledger.
+    fn coproc_head_word_needs_quote(word: &str) -> bool {
+        matches!(word, "!" | "{" | "}" | "[[" | "]]")
+            || super::support_names::is_reserved_word(word)
+    }
+
     pub(in crate::executor) fn execute_coproc_command(
         &mut self,
         cmd: &CommandNode,
         coproc_cmd: &crate::parser::CoprocCommand,
     ) -> Result<(), ExecuteError> {
-        let array_name = coproc_cmd
+        let mut array_name = coproc_cmd
             .name
             .clone()
             .unwrap_or_else(|| "COPROC".to_string());
-        // GNU execute_cmd.c execute_coproc validates an explicit NAME
-        // before anything is spawned: valid_identifier fails ->
-        // err_invalidid (`` `<name>': not a valid identifier ``) and
-        // EXECUTION_FAILURE, and no coprocess is created (rubash#1153:
-        // `coproc "" { echo hi; }` printed the same text but exited 0
-        // after spawning). The default COPROC name never takes this
-        // branch, and a nameref name is a valid identifier itself — its
-        // target is adjudicated at bind time below.
+        // GNU execute_cmd.c:2502-2513 execute_coproc expands the name
+        // BEFORE validating — expand_string_unsplit_to_string
+        // (command->value.Coproc->name, 0) — then valid_identifier on
+        // the EXPANSION, and the expanded text replaces the name so the
+        // coproc's fd array and _PID variable land under it. When the
+        // word expands to zero fields the expansion is NULL (an
+        // unquoted unset/empty `$nv`), and err_invalidid
+        // (error.c:459-462) renders the NULL %s as `(null)`; a quoted
+        // word still yields one field — even an empty one — and
+        // reports `` `': `` (rubash#3032; the `coproc ""` shape is
+        // rubash#1153's). The default COPROC name never takes this
+        // branch, and a nameref name is a valid identifier itself —
+        // its target is adjudicated at bind time below.
         if let Some(name) = &coproc_cmd.name {
-            if !is_shell_name(name) {
+            let raw = coproc_cmd
+                .name_metadata
+                .as_ref()
+                .map(|meta| meta.raw.as_str())
+                .unwrap_or(name.as_str());
+            let expanded = self.expand_word(raw);
+            let expanded_name = if expanded.is_empty() && !raw.contains('"') && !raw.contains('\'')
+            {
+                None
+            } else {
+                Some(expanded)
+            };
+            let name_text = expanded_name.as_deref().unwrap_or("(null)");
+            if !is_shell_name(name_text) {
                 eprintln!(
                     "{}`{}': not a valid identifier",
                     self.diagnostic_prefix(),
-                    name
+                    name_text
                 );
                 self.exit_code = 1;
                 return Ok(());
             }
+            array_name = name_text.to_string();
         }
         use std::process::{Command, Stdio};
-        let exe = std::env::var_os("CARGO_BIN_EXE_rubash")
-            .map(std::path::PathBuf::from)
+        let exe = test_rubash_binary_from_env()
             .or_else(test_rubash_binary_from_current_exe)
             .or_else(|| std::env::current_exe().ok())
             .unwrap_or_else(|| "rubash".into());
@@ -5318,25 +5591,31 @@ impl Executor {
                     child.arg(word);
                 }
             } else {
-                // rubash#1653: the child re-parses this text, so a bare
-                // head word `time` would regain keyword status in the
-                // child even though the coproc parser never granted it
-                // (GNU parse.y:1125-1175: after `coproc`, `time` is a
-                // plain word — GNU forks the same parse tree, rubash
-                // respawns through `-c`). Quote the bare head word so
-                // the re-parse keeps it an ordinary command name: the
-                // child's lookup then matches GNU's forked child
-                // (function, builtin, PATH, else 127 `time: command
-                // not found`). A head word already quoted in source
-                // keeps its own raw spelling; only the bare `time`
-                // spelling needs the quote.
+                // rubash#1653 + rubash#3267: the child re-parses this
+                // text, so a bare head word whose spelling is a
+                // keyword or operator AT COMMAND POSITION would regain
+                // non-word status on re-parse even though the coproc
+                // parser already bound it as a word — GNU forks the
+                // parse tree, so a `!` collected after a redirection
+                // stays the command name (`coproc >x ! echo hi`
+                // reports `!: command not found` in GNU; `done`, `}`,
+                // `[[`, `]]`, `function` the same). Quote such a head
+                // word's raw spelling so the re-parse keeps it the
+                // command name. The quote must be `"` — not `'`: the
+                // lexer folds `'!'` back into a BANG token (GNU's
+                // lexer never does; the fold lives in continuation.rs
+                // and is a captain-lane residual). `{`, `coproc` and
+                // `time` are fold-blocked in every quoting form, so
+                // head words with those spellings still re-parse as
+                // their keywords — the same anti-GNU residual the
+                // #1653 `time` expectations already pin. A head word
+                // already quoted in source keeps its own raw
+                // spelling.
                 let mut metadata = coproc_cmd.word_metadata.clone();
-                if coproc_cmd.words.first().map(String::as_str) == Some("time")
-                    && metadata
-                        .first()
-                        .is_some_and(|meta| meta.value == "time" && meta.raw == "time")
-                {
-                    metadata[0].raw = "'time'".to_string();
+                if let Some(meta) = metadata.first_mut() {
+                    if meta.raw == meta.value && Self::coproc_head_word_needs_quote(&meta.value) {
+                        meta.raw = format!("\"{}\"", meta.value);
+                    }
                 }
                 let words_text = command_words_source_text(&coproc_cmd.words, &metadata);
                 respawn_argv_bytes += words_text.len();
@@ -5470,6 +5749,15 @@ impl Executor {
             // fork-shaped respawn (see fork_context_transport_entries).
             for (key, value) in self.fork_context_transport_entries() {
                 env_entries.push((key, value));
+            }
+            // rubash#3605: the coproc child executes the parent's
+            // flagged command node (execute_cmd.c:2546
+            // execute_coproc -> execute_in_subshell), so a `!`- or
+            // condition-suppressed coproc keeps CMD_IGNORE_RETURN
+            // and `set -e` inside is ignored
+            // (SUPPRESS_ERREXIT_TRANSPORT).
+            if self.suppress_errexit > 0 {
+                env_entries.push((SUPPRESS_ERREXIT_TRANSPORT.to_string(), "1".to_string()));
             }
             // rubash#2332: the compound body's line spans, collected
             // over the same list bash_command_sequence_text rendered
@@ -5762,10 +6050,12 @@ impl Executor {
                     // FileFd), so dup/close/fork share them like GNU's fork.
                     let coproc_write_file = Rc::new(FileFd {
                         handle: crate::fd::into_handle(stdin_writer),
+                        closed: std::cell::Cell::new(false),
                         path: std::path::PathBuf::from(format!("coproc:{pid}:stdin")),
                     });
                     let coproc_read_file = Rc::new(FileFd {
                         handle: crate::fd::into_handle(stdout_reader),
+                        closed: std::cell::Cell::new(false),
                         path: std::path::PathBuf::from(format!("coproc:{pid}:stdout")),
                     });
                     let (coproc_read_fd, coproc_write_fd) = self.allocate_coproc_fds();
@@ -6223,6 +6513,7 @@ impl Executor {
                                 CoprocFdBinding::File {
                                     file: Rc::new(FileFd {
                                         handle: crate::fd::into_handle(file),
+                                        closed: std::cell::Cell::new(false),
                                         path: self.session_path(shell_path_to_windows(
                                             &target,
                                             &self.shell_state.env_vars,
@@ -6260,6 +6551,7 @@ impl Executor {
                                 CoprocFdBinding::File {
                                     file: Rc::new(FileFd {
                                         handle: crate::fd::into_handle(file),
+                                        closed: std::cell::Cell::new(false),
                                         path: session_target,
                                     }),
                                     read: false,
@@ -6584,6 +6876,7 @@ impl Executor {
                                 CoprocFdBinding::File {
                                     file: Rc::new(FileFd {
                                         handle: crate::fd::into_handle(file),
+                                        closed: std::cell::Cell::new(false),
                                         path: self.session_path(shell_path_to_windows(
                                             &target,
                                             &self.shell_state.env_vars,
@@ -6614,6 +6907,7 @@ impl Executor {
                             CoprocFdBinding::File {
                                 file: Rc::new(FileFd {
                                     handle: crate::fd::into_handle(file),
+                                    closed: std::cell::Cell::new(false),
                                     path: session_target,
                                 }),
                                 read: true,
@@ -6850,8 +7144,30 @@ impl Executor {
         let mut word_chars: Option<Vec<char>> = None;
         let mut index = 0;
         while let Some(clause) = case_command.clauses.get(index) {
+            let mut pattern_error: Option<(String, String, i32)> = None;
             let matched = fall_through
                 || clause.pattern_nodes.iter().any(|pattern| {
+                    // rubash#2701 — GNU re-expands every arm's pattern
+                    // through the same word pipeline per match attempt
+                    // (execute_cmd.c:3712 expand_word_leave_quoted ->
+                    // subst.c:11229 expand_word_internal): a `:?` in an
+                    // evaluated arm is the same FORCE_EOF class as in a
+                    // command word (subst.c:10347 case '?', 10414/10418)
+                    // and `:=` binds at the evaluation point. GNU
+                    // consults arms in order and stops at the first
+                    // match, so the verdict latch preserves ordering —
+                    // an unreached arm can neither bind nor error.
+                    if pattern_error.is_some() {
+                        return true;
+                    }
+                    if pattern.text.contains('$') || pattern.text.contains('`') {
+                        self.apply_parameter_assignment_expansions_in_word(&pattern.text);
+                        pattern_error =
+                            self.parameter_expansion_error_in_word_isolated(&pattern.text);
+                        if pattern_error.is_some() {
+                            return true;
+                        }
+                    }
                     let stripped = self.expand_case_pattern(pattern);
                     if self.shell_state.arithmetic_fatal_error.get()
                         || self.shell_state.arithmetic_nounset_error.get()
@@ -6891,6 +7207,9 @@ impl Executor {
                         case_pattern_matches_with_word_chars(&stripped, &word, &mut word_chars)
                     }
                 });
+            if let Some(error) = pattern_error.take() {
+                return self.raise_word_expansion_error(error);
+            }
             self.abandon_on_arithmetic_expansion_error()?;
             if matched {
                 matched_any = true;
@@ -7246,6 +7565,13 @@ impl Executor {
             // via the per-command wrapper (command_execute.rs).
             let _ = self.finish_assignment_output_process_substitutions_for_command(cmd);
             return result;
+        }
+
+        // rubash#3454: same `set -u` unbound-target gate as `if` —
+        // `case ... esac > $nope` aborts in GNU's compound
+        // do_redirections before any expansion side effect.
+        if self.compound_redirect_nounset_fatal(cmd)? {
+            return Err(ExecuteError::ExitCode(1));
         }
 
         // rubash#2246: same borrow conversion as the if wrapper — the
@@ -7726,20 +8052,82 @@ fn parameter_expansion_assigns(raw: &str) -> bool {
     false
 }
 
-pub(in crate::executor) fn test_rubash_binary_from_current_exe() -> Option<std::path::PathBuf> {
+/// `CARGO_BIN_EXE_rubash` is trustworthy only when it names a real
+/// engine binary: `cargo test --lib` and `cargo nextest` export the
+/// lib-test binary itself under that name, and every cargo test
+/// artifact lands in `target/<profile>/deps` while the engine bin sits
+/// directly under the profile dir. A `-c` respawn pointed at the test
+/// binary prints `error: Unrecognized option: 'c'` and drops its body
+/// (rubash#2875), so reject env values inside a `deps` dir — or missing
+/// on disk — and let the current-exe helper take over.
+pub(crate) fn test_rubash_binary_from_env() -> Option<std::path::PathBuf> {
+    let candidate = std::path::PathBuf::from(std::env::var_os("CARGO_BIN_EXE_rubash")?);
+    let parent = candidate.parent()?;
+    if candidate.is_file() && parent.file_name().and_then(|name| name.to_str()) != Some("deps") {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+/// rubash#3292: resolve the real rubash binary for a procsub /
+/// background / coproc child spawned from a test binary. Cargo only
+/// builds the bin (and sets `CARGO_BIN_EXE_rubash`) for full `cargo
+/// test` runs; a lib-only run (`cargo test --lib`) on a fresh target
+/// has neither, and the spawn chain would otherwise fall back to the
+/// lib-test binary itself, which rejects `-c` (`Unrecognized option:
+/// 'c'`, issue2875). Search, in order, the profile dir the test
+/// binary lives under, the `CARGO_TARGET_DIR` target dir
+/// (debug/release), the release sibling of the test binary's profile
+/// dir, and the debug/release profile dirs under each ancestor of the
+/// test binary (nested/workspace layouts). Only a file literally
+/// named `rubash[.exe]` counts — a test binary is `rubash-<hash>`
+/// under `deps/` or `build/<pkg>/<fingerprint>/out/` and never
+/// matches. Production behaviour is unchanged: the test-layout gate
+/// still returns `None` outside a test binary, so a real shell keeps
+/// falling back to `current_exe()`.
+pub(crate) fn test_rubash_binary_from_current_exe() -> Option<std::path::PathBuf> {
     let current = std::env::current_exe().ok()?;
-    let deps = current.parent()?;
-    if deps.file_name().and_then(|name| name.to_str()) != Some("deps") {
+    let dir = current.parent()?;
+    // Test-binary layouts: `deps/` on the classic build dir, and
+    // `build/<pkg>/<fingerprint>/out/` on the current cargo build-dir
+    // layout (the unit-test binary for a package with a build script is
+    // placed inside the package's own out dir).
+    let dir_name = dir.file_name().and_then(|name| name.to_str());
+    if dir_name != Some("deps") && dir_name != Some("out") {
         return None;
     }
-    let debug_dir = deps.parent()?;
     let binary_name = if cfg!(windows) {
         "rubash.exe"
     } else {
         "rubash"
     };
-    let candidate = debug_dir.join(binary_name);
-    candidate.is_file().then_some(candidate)
+    let mut profile_dirs: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(debug_dir) = dir.parent() {
+        profile_dirs.push(debug_dir.to_path_buf());
+        if let Some(target_dir) = debug_dir.parent() {
+            profile_dirs.push(target_dir.join("release"));
+        }
+    }
+    if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR").map(std::path::PathBuf::from) {
+        profile_dirs.push(target_dir.join("debug"));
+        profile_dirs.push(target_dir.join("release"));
+    }
+    let mut ancestor = current.parent();
+    let mut depth = 0usize;
+    while let Some(dir) = ancestor {
+        if depth >= 8 {
+            break;
+        }
+        profile_dirs.push(dir.join("debug"));
+        profile_dirs.push(dir.join("release"));
+        ancestor = dir.parent();
+        depth += 1;
+    }
+    profile_dirs
+        .into_iter()
+        .map(|dir| dir.join(binary_name))
+        .find(|candidate| candidate.is_file())
 }
 
 fn case_pattern_has_extglob(pattern: &str) -> bool {
@@ -8769,4 +9157,17 @@ mod expansion_probe_guard_tests {
         }
         assert!(flag.get());
     }
+}
+
+/// rubash#3325: whether the command a `time` runs is a statement compound — the kinds GNU's execute_command_internal
+/// never adjudicates for ERR at their own level beyond their own
+/// do_redirections failure (execute_cmd.c:854-883): brace group, if,
+/// for (both forms), while/until, case, select.
+fn timed_root_is_statement_compound(root: &CommandNode) -> bool {
+    root.brace_group.is_some()
+        || root.if_command.is_some()
+        || root.for_command.is_some()
+        || root.loop_command.is_some()
+        || root.case_command.is_some()
+        || root.select_command.is_some()
 }

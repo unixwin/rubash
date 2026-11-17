@@ -57,7 +57,15 @@ impl Executor {
         command_index: usize,
         words: &[String],
     ) -> Option<(ArithmeticForCommand, usize)> {
-        if words.first().map(String::as_str) != Some("for") {
+        // rubash#3557: literal `for` head is a command name, not an
+        // arithmetic-for opener (parse.y:3249 alias_expand_token).
+        if words.first().map(String::as_str) != Some("for")
+            || commands
+                .get(command_index)
+                .and_then(|command| command.words.first())
+                .map(String::as_str)
+                == Some("for")
+        {
             return None;
         }
 

@@ -848,3 +848,41 @@ fn issue2001_env_channel_missing_function_applies_nothing() {
     assert!(result.is_err());
     assert_eq!(session.variables().resolved_value("SHOULD_NOT_STICK"), None);
 }
+
+/// rubash#3605 class B: Session::run takes the grouped driver whenever
+/// expand_aliases is live at submission start — even with an empty
+/// alias table. GNU's reader is incremental (evalstring.c
+/// parse_and_execute) and the alias gate is live on every token
+/// (parse.y:5759); a non-interactive posix shell has expand_aliases =
+/// posixly_correct (shell.c:1853 init_noninteractive), so `alias
+/// for=echo` on line 1 must be in the table when `al for` is read on
+/// line 2 — and under the posix reserved-word-first order
+/// (parse.y:5751-5755) `for` stays the loop keyword. The empty-table
+/// shortcut sent this shape down the whole-source route, whose
+/// word-level alias fallback expanded `for` to `echo` and broke the
+/// loop with a syntax error (the niubash host's `-o posix -c` path
+/// reproduces this through this contract).
+#[test]
+fn posix_run_expands_aliases_defined_in_the_same_submission() {
+    let dir = temp_dir("posix-alias-live-empty-table");
+    let mut session = Session::builder()
+        .working_directory(&dir)
+        .build()
+        .expect("session builds");
+    session.options().set("posix", true);
+    // Redirect through a RELATIVE spelling: the session's
+    // working_directory is `dir`, and an absolute Windows path
+    // (`C:\...`) embedded in shell text loses its backslashes to
+    // quote removal — the pin must mean the same thing on every host.
+    let script = concat!(
+        "alias al=\" \"\n",
+        "alias foo=bar\n",
+        "alias for=echo\n",
+        "al for foo in v\n",
+        "do echo foo=$foo bar=$bar\n",
+        "done >out.txt"
+    );
+    let outcome = session.run(&script, &opts()).expect("run");
+    assert_eq!(outcome.status, 0, "{:?}", outcome.classification);
+    assert_eq!(read(&dir, "out.txt"), "foo=v bar=\n");
+}
