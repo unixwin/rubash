@@ -71,12 +71,8 @@ fn run_driver(tag: &str, driver: &str) -> (String, String, Option<i32>, PathBuf)
         .stderr(Stdio::piped())
         .output()
         .expect("spawn rubash");
-    let stdout = String::from_utf8_lossy(&out.stdout)
-        .replace("\r\n", "\n")
-        .into_owned();
-    let stderr = String::from_utf8_lossy(&out.stderr)
-        .replace("\r\n", "\n")
-        .into_owned();
+    let stdout = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
+    let stderr = String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n");
     let code = out.status.code();
     let _ = fs::remove_dir_all(&home);
     (stdout, stderr, code, home)
