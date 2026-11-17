@@ -267,8 +267,8 @@ fn completion_family_help() {
 
 #[test]
 fn remaining_divergent_help() {
-    assert_help(&run_script("pwd --help\n"), "pwd: pwd [-LP]\n");
-    assert_help(&run_script("pwd -L --help\n"), "pwd: pwd [-LP]\n");
+    assert_help(&run_script("pwd --help\n"), "pwd: pwd [-LPW]\n");
+    assert_help(&run_script("pwd -L --help\n"), "pwd: pwd [-LPW]\n");
     assert_help(&run_script("let --help\n"), "let: let arg [arg ...]\n");
     assert_help(
         &run_script("mapfile --help\n"),

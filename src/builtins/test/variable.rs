@@ -26,6 +26,7 @@ const UNSET_DYNAMIC_VARS: &str = "__RUBASH_UNSET_DYNAMIC_VARS";
 fn dash_v_nameref_verdict(
     operand: &str,
     env_vars: &crate::shell::var_table::VarTable,
+    positional_count: usize,
 ) -> Option<bool> {
     let (base, suffix) = match operand.find('[') {
         Some(index) => (&operand[..index], &operand[index..]),
@@ -41,7 +42,11 @@ fn dash_v_nameref_verdict(
             if current.contains('[') {
                 return Some(false);
             }
-            return Some(variable_is_set(&format!("{current}{suffix}"), env_vars));
+            return Some(variable_is_set(
+                &format!("{current}{suffix}"),
+                env_vars,
+                positional_count,
+            ));
         }
         if level > 8 {
             return Some(false);
@@ -82,9 +87,31 @@ fn is_valid_variable_name(name: &str) -> bool {
 /// engine's ingest drops undecodable entries the same way (rubash#2064),
 /// so consulting `env::var_os` reported entries the shell does not hold,
 /// including entries a host adds after the session was built.
-pub(crate) fn variable_is_set(operand: &str, env_vars: &crate::shell::var_table::VarTable) -> bool {
-    if let Some(verdict) = dash_v_nameref_verdict(operand, env_vars) {
+pub(crate) fn variable_is_set(
+    operand: &str,
+    env_vars: &crate::shell::var_table::VarTable,
+    positional_count: usize,
+) -> bool {
+    if let Some(verdict) = dash_v_nameref_verdict(operand, env_vars, positional_count) {
         return verdict;
+    }
+    // GNU test.c:670-671 (unary `-v`): after the array-reference check,
+    // `valid_number(arg, &r)` (general.c:248-281, strtoimax base 10:
+    // optional sign, surrounding whitespace, errno on overflow) makes
+    // `-v n` a positional-parameter probe — `r >= 0 && r <=
+    // number_of_args()` (builtins/common.c:429-446, posparam_count, the
+    // count of $1..$N), so `0` is always set and `00`/`01` parse
+    // numerically (rubash#3783). Ordering note: a digit-only operand
+    // carries no `[`, so no array-reference branch below can match it,
+    // and it is not a valid identifier, so the nameref verdict above
+    // cannot match it either — this check sits exactly where GNU's
+    // valid_number check sits for this operand shape.
+    // `positional_count` is the live window length
+    // (ShellState::positional_len), frame-aware: inside a function it
+    // counts that frame's positionals, and an empty-but-present
+    // positional (`set -- ""`) still counts as set.
+    if let Some(n) = super::valid_number(operand) {
+        return n >= 0 && i128::from(n) <= positional_count as i128;
     }
     if let Some(name) = operand
         .strip_suffix("[@]")

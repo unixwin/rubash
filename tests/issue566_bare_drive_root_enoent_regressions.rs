@@ -25,7 +25,7 @@
 
 #![cfg(windows)]
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 fn run_rubash(script: &str, extra_env: &[(&str, &str)]) -> (Option<i32>, String, String) {
@@ -52,7 +52,7 @@ fn bare_root_without_c(tag: &str) -> PathBuf {
 }
 
 /// A shell root WITH a `c` child carrying a marker: `cd /c` must reach the
-/// DRIVE root (pwd `/c/`), never the same-named root child.
+/// DRIVE root (pwd `/c`), never the same-named root child.
 fn root_with_c_child(tag: &str) -> PathBuf {
     let dir = bare_root_without_c(tag);
     std::fs::create_dir_all(dir.join("c")).unwrap();
@@ -69,7 +69,7 @@ fn bare_drive_root_cd_under_shell_root_without_c_child() {
     let env = [("__RUBASH_SHELL_ROOT", root_str.as_str())];
     let (code, stdout, stderr) = run_rubash("cd /c && pwd", &env);
     assert_eq!(code, Some(0), "stdout: {stdout} stderr: {stderr}");
-    assert_eq!(stdout, "/c/\n", "pwd must render the POSIX drive form");
+    assert_eq!(stdout, "/c\n", "pwd must render the POSIX drive form");
     assert!(stderr.is_empty(), "stderr: {stderr}");
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -87,7 +87,13 @@ fn bare_drive_root_wins_over_same_named_root_child() {
         &env,
     );
     assert_eq!(code, Some(0), "stdout: {stdout} stderr: {stderr}");
-    assert!(stdout.contains("/c/"), "stdout: {stdout}");
+    assert!(
+        stdout.contains(
+            "/c
+"
+        ),
+        "stdout: {stdout}"
+    );
     assert!(stdout.contains("drive_root"), "stdout: {stdout}");
     assert!(!stdout.contains("SHADOWED"), "stdout: {stdout}");
     let _ = std::fs::remove_dir_all(&root);
@@ -103,7 +109,7 @@ fn slashed_and_dot_siblings_unchanged() {
     for script in ["cd /c/ && pwd", "cd /c/. && pwd", "cd /c/./ && pwd"] {
         let (code, stdout, stderr) = run_rubash(script, &env);
         assert_eq!(code, Some(0), "script {script:?}: stderr: {stderr}");
-        assert_eq!(stdout, "/c/\n", "script {script:?}");
+        assert_eq!(stdout, "/c\n", "script {script:?}");
         assert!(stderr.is_empty(), "script {script:?}: stderr: {stderr}");
     }
     let _ = std::fs::remove_dir_all(&root);
@@ -118,7 +124,7 @@ fn uppercase_drive_spelling_accepted() {
     let env = [("__RUBASH_SHELL_ROOT", root_str.as_str())];
     let (code, stdout, stderr) = run_rubash("cd /C && pwd", &env);
     assert_eq!(code, Some(0), "stdout: {stdout} stderr: {stderr}");
-    assert_eq!(stdout, "/c/\n");
+    assert_eq!(stdout, "/c\n");
     assert!(stderr.is_empty(), "stderr: {stderr}");
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -149,11 +155,11 @@ fn pwd_render_invariants_after_bare_root_cd() {
     let env = [("__RUBASH_SHELL_ROOT", root_str.as_str())];
     let (code, stdout, stderr) = run_rubash(
         "cd /c || exit 9; [[ $PWD == $(pwd) ]] || exit 8; \
-         [[ $PWD == /c/ ]] || exit 7; echo rendered=$PWD",
+         [[ $PWD == /c ]] || exit 7; echo rendered=$PWD",
         &env,
     );
     assert_eq!(code, Some(0), "stdout: {stdout} stderr: {stderr}");
-    assert_eq!(stdout, "rendered=/c/\n");
+    assert_eq!(stdout, "rendered=/c\n");
     assert!(stderr.is_empty(), "stderr: {stderr}");
     let _ = std::fs::remove_dir_all(&root);
 }
