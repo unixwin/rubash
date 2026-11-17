@@ -367,8 +367,24 @@ impl Executor {
         // redirections bind the real descriptors for the duration of the
         // test, then restore. Bind fd 1/2 so `[[ ]]`'s own diagnostics
         // reach `2>f`.
-        let saved_stdout = self.fd_table.entries.get(&1).cloned();
-        let saved_stderr = self.fd_table.entries.get(&2).cloned();
+        // rubash#3730 (same hazard as rubash#3706): the save below
+        // must be a kernel dup, not a bare Rc clone. `[[ ]]`'s own
+        // redirections bind fd 1/2 through open_output/close/dup,
+        // which retire the displaced File endpoints
+        // (retire_write_arm, rubash#3213) — a cloned entry shares
+        // the very descriptor the bind closes, so the restore loops
+        // below would re-insert a retired entry and the next spawn's
+        // pin pass would dup2 whatever recycled that kernel number
+        // (fd 1 lands on the `[[ ]]` redirect's target file). GNU's
+        // undo save IS a kernel dup (`fcntl (fd, F_DUPFD,
+        // SHELL_FD_BASE)`, redir.c:965/1082/1144, recorded by
+        // add_undo_redirect for undo_redirections; the conditional
+        // stamps its line only once its redirections have bound,
+        // execute_cmd.c:4138). A dup failure fails the command (GNU
+        // REDIRECTION_ERROR) via `?` — the saved dup is dropped
+        // (closed) on the bind-error path, so nothing leaks.
+        let saved_stdout = self.fd_table.saved_entry(1)?;
+        let saved_stderr = self.fd_table.saved_entry(2)?;
         // rubash#2131: stash the command's redirection list for the
         // fd-alias sync's own-redirect overlay — `[[ ]]` binds only
         // fds 1/2, so without the list the sync answers its fd-0
