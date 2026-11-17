@@ -15,10 +15,12 @@
 //! the stale entry (findcmd.c:416-426).
 //!
 //! All expectations are the GNU bash 5.3.20 outputs for the same probe
-//! scripts under LC_ALL=C.UTF-8.
-#![cfg(unix)]
+//! scripts under LC_ALL=C.UTF-8. The execution-driven cells need POSIX
+//! `#!/bin/sh` fixtures and `/bin/cp`, so they stay unix-only; the
+//! Windows listing walk (`find_in_path_via_listings`) records the same
+//! CHKDOT verdict (rubash#3551 F1) and is pinned by the `type` / `hash -t`
+//! cells below, which never execute the fixture.
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -68,7 +70,13 @@ fn fixture(tag: &str) -> PathBuf {
     ] {
         let f = dir.join(name);
         std::fs::write(&f, text).expect("fixture");
-        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).expect("mode");
+        // Windows has no execute bit; `is_executable_file` is `is_file()`
+        // there, so a plain file is already a command candidate.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).expect("mode");
+        }
     }
     root
 }
@@ -79,6 +87,8 @@ fn fixture(tag: &str) -> PathBuf {
 /// bindir path carries HASH_CHKDOT. Once `./foo` becomes executable,
 /// phash_search serves `./foo` ahead of the stored path and `type` /
 /// `hash -t` report the dotted spelling — the stored entry stays bindir.
+// POSIX exec faces (`#!/bin/sh` fixtures, /bin/cp, /bin/chmod).
+#[cfg(unix)]
 #[test]
 fn dot_element_before_hit_marks_chkdot_and_dotted_serve_wins() {
     let root = fixture("before");
@@ -109,6 +119,8 @@ fn dot_element_before_hit_marks_chkdot_and_dotted_serve_wins() {
 /// `.` element AFTER the hit: PATH order matters — the walk stops at the
 /// bindir hit before evaluating `.`, so dot_found_in_search stays 0 and
 /// the entry has no CHKDOT. A later `./foo` is never served.
+// POSIX exec faces (`#!/bin/sh` fixtures, /bin/cp, /bin/chmod).
+#[cfg(unix)]
 #[test]
 fn dot_element_after_hit_does_not_mark_chkdot() {
     let root = fixture("after");
@@ -137,6 +149,8 @@ fn dot_element_after_hit_does_not_mark_chkdot() {
 /// stale dot_found_in_search left by an earlier walk AND an executable
 /// `./x` in the cwd, the pinned entry serves the stored spelling
 /// verbatim — here a dead absolute path failing ENOENT with status 127.
+// POSIX exec faces (`#!/bin/sh` fixtures, /bin/cp, /bin/chmod).
+#[cfg(unix)]
 #[test]
 fn hash_p_insert_never_carries_dot_verdict() {
     let root = fixture("pinned");
@@ -158,6 +172,8 @@ fn hash_p_insert_never_carries_dot_verdict() {
 /// executable (`hash -p ./gone foo`) counts as not found in phash_search
 /// (hashcmd.c:183-196): the lookup falls through to a PATH walk and the
 /// walk's phash_insert replaces the dead entry.
+// POSIX exec faces (`#!/bin/sh` fixtures, /bin/cp, /bin/chmod).
+#[cfg(unix)]
 #[test]
 fn dead_relpath_entry_falls_through_and_is_replaced() {
     let root = fixture("relpath");
@@ -176,4 +192,113 @@ fn dead_relpath_entry_falls_through_and_is_replaced() {
     );
     assert_eq!(out.stderr, "");
     assert_eq!(out.rc, 0);
+}
+
+/// Windows face of the same CHKDOT chain (rubash#3551 F1): the listing
+/// walk records the `.`-element verdict, `hash` stores it in the entry,
+/// and `phash_search` serves `./NAME` while that spelling is a live
+/// command candidate. None of the cells execute the fixture — the
+/// assertion is the resolved spelling `type` / `hash -t` report.
+#[cfg(not(unix))]
+#[test]
+fn windows_listing_walk_records_chkdot_and_serves_dot_name() {
+    let root = fixture("win-before");
+    let out = run(
+        &root,
+        "PATH=\".:$PWD/bindir\"\nhash foo\n\
+         echo dot > ./foo\n\
+         type foo\nhash -t foo\nhash -l\n",
+    );
+    assert!(
+        out.stdout.contains("foo is hashed (./foo)"),
+        "stdout={:?}",
+        out.stdout
+    );
+    assert!(out.stdout.contains("\n./foo\n"), "stdout={:?}", out.stdout);
+    assert!(
+        out.stdout.contains("builtin hash -p "),
+        "stdout={:?}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("/bindir/foo foo\n"),
+        "stdout={:?}",
+        out.stdout
+    );
+    assert_eq!(out.stderr, "");
+    assert_eq!(out.rc, 0);
+}
+
+/// A `.` element AFTER the hit is never examined (the walk stops at the
+/// bindir hit), so no CHKDOT is recorded and `./foo` is never served.
+#[cfg(not(unix))]
+#[test]
+fn windows_dot_element_after_hit_stays_unhashed() {
+    let root = fixture("win-after");
+    let out = run(
+        &root,
+        "PATH=\"$PWD/bindir:.\"\nhash foo\n\
+         echo dot > ./foo\n\
+         type foo\nhash -t foo\n",
+    );
+    assert!(
+        out.stdout.contains("foo is hashed ("),
+        "stdout={:?}",
+        out.stdout
+    );
+    assert!(!out.stdout.contains("(./foo)"), "stdout={:?}", out.stdout);
+    assert!(!out.stdout.contains("\n./foo\n"), "stdout={:?}", out.stdout);
+    assert!(
+        out.stdout.contains("/bindir/foo\n"),
+        "stdout={:?}",
+        out.stdout
+    );
+    assert_eq!(out.stderr, "");
+    assert_eq!(out.rc, 0);
+}
+
+/// `hash -p` hardcodes check_dot=0 (hash.def:195): even right after a
+/// walk that left dot_found_in_search set, a pinned entry serves its
+/// stored spelling verbatim — never `./NAME`.
+#[cfg(not(unix))]
+#[test]
+fn windows_hash_p_insert_never_carries_dot_verdict() {
+    let root = fixture("win-pinned");
+    let out = run(
+        &root,
+        "PATH=\".:$PWD/bindir\"\nhash foo\nhash -p ./gone/x x\n\
+         echo dot > ./x\nhash -t x\n",
+    );
+    assert!(out.stdout.contains("./gone/x\n"), "stdout={:?}", out.stdout);
+    assert_eq!(out.stderr, "");
+    assert_eq!(out.rc, 0);
+}
+
+/// A dead RELPATH entry (`hash -p ./gone foo`) is refused by
+/// phash_search (hashcmd.c:176-187: its `.`-dir is the cwd): `hash -t`
+/// reports not found while `type` falls through to the PATH walk and
+/// resolves the live command. (Replacing the table entry needs the
+/// resolution that only an execution performs — that half stays on the
+/// unix cells, which run the fixture.)
+#[cfg(not(unix))]
+#[test]
+fn windows_dead_relpath_entry_falls_through() {
+    let root = fixture("win-relpath");
+    let out = run(
+        &root,
+        "PATH=\".:$PWD/bindir\"\nhash -p ./gone foo\n\
+         hash -t foo\necho \"rc=$?\"\ntype foo\n",
+    );
+    assert!(
+        out.stderr.contains("hash: foo: not found"),
+        "stderr={:?}",
+        out.stderr
+    );
+    assert!(out.stdout.contains("rc=1\n"), "stdout={:?}", out.stdout);
+    assert!(
+        out.stdout.contains("/bindir/foo\n"),
+        "stdout={:?}",
+        out.stdout
+    );
+    assert!(!out.stdout.contains("./gone"), "stdout={:?}", out.stdout);
 }
