@@ -1015,8 +1015,7 @@ fn resolve_cdable_vars(
     // verdict: is_dir still holds on the deleted inode and its search
     // bit still reads, so GNU's verbatim-chdir success there still
     // skips the variable step.
-    if (here.is_dir()
-        && crate::executor::path::directory_has_search_permission(&here))
+    if (here.is_dir() && crate::executor::path::directory_has_search_permission(&here))
         || !crate::builtins::shopt::cdable_vars_enabled(env_vars)
     {
         return None;

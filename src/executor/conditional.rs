@@ -33,8 +33,6 @@ pub(crate) use extglob::extglob_case_pattern_matches;
 pub(in crate::executor) use extglob::extglob_case_pattern_matches_nocase;
 pub(in crate::executor) use extglob::extglob_case_pattern_matches_nocase_with_word_chars;
 pub(crate) use extglob::extglob_case_pattern_matches_with_word_chars;
-pub(in crate::executor) use extglob::extglob_group_end;
-pub(in crate::executor) use extglob::extglob_split_alternatives;
 pub(in crate::executor) use pattern::{
     case_bracket_expression_matches_with_case, case_pattern_matches, case_pattern_matches_nocase,
     case_pattern_matches_nocase_with_word_chars, case_pattern_matches_with_word_chars,
