@@ -212,8 +212,7 @@ fn if_wrapped_digit_leading_compound_is_parse_error() {
 #[test]
 fn later_operand_on_same_line_never_binds() {
     let dir = scratch("later-op");
-    let (stdout, stderr, code) =
-        run_script(&dir, "declare -a 9bad=(x) good=(y)\necho \"rc=$?\"\n");
+    let (stdout, stderr, code) = run_script(&dir, "declare -a 9bad=(x) good=(y)\necho \"rc=$?\"\n");
     assert_parse_error(&stdout, &stderr, code);
     assert!(
         stderr.contains("`declare -a 9bad=(x) good=(y)'"),
@@ -243,7 +242,8 @@ fn declare_a_digit_leading_scalar_stays_invalid_id() {
     // No paren, no compound branch: still the builtin diagnostic, rc=1,
     // and the script continues.
     let dir = scratch("scalar");
-    let (stdout, stderr, code) = run_script(&dir, "declare -a 9bad=x\necho \"rc=$?\"\necho AFTER\n");
+    let (stdout, stderr, code) =
+        run_script(&dir, "declare -a 9bad=x\necho \"rc=$?\"\necho AFTER\n");
     assert_eq!(stdout, "rc=1\nAFTER\n");
     assert_eq!(code, 0, "stderr: {stderr}");
     assert_eq!(
@@ -283,10 +283,8 @@ fn declare_a_digit_leading_subscript_scalar_stays_invalid_id() {
 #[test]
 fn declare_a_letter_leading_compound_still_binds() {
     let dir = scratch("valid-a9");
-    let (stdout, stderr, code) = run_script(
-        &dir,
-        "declare -a a9=(x y)\necho \"rc=$?\"\ndeclare -p a9\n",
-    );
+    let (stdout, stderr, code) =
+        run_script(&dir, "declare -a a9=(x y)\necho \"rc=$?\"\ndeclare -p a9\n");
     assert_eq!(stdout, "rc=0\ndeclare -a a9=([0]=\"x\" [1]=\"y\")\n");
     assert_eq!(stderr, "");
     assert_eq!(code, 0, "stderr: {stderr}");
@@ -295,10 +293,8 @@ fn declare_a_letter_leading_compound_still_binds() {
 #[test]
 fn declare_a_underscore_digit_compound_still_binds() {
     let dir = scratch("valid-u9");
-    let (stdout, stderr, code) = run_script(
-        &dir,
-        "declare -a _9=(x)\necho \"rc=$?\"\ndeclare -p _9\n",
-    );
+    let (stdout, stderr, code) =
+        run_script(&dir, "declare -a _9=(x)\necho \"rc=$?\"\ndeclare -p _9\n");
     assert_eq!(stdout, "rc=0\ndeclare -a _9=([0]=\"x\")\n");
     assert_eq!(stderr, "");
     assert_eq!(code, 0, "stderr: {stderr}");
