@@ -276,6 +276,9 @@ impl SessionHistory {
 
     /// bashhist.c check_history_control + history_should_ignore, then
     /// add_history with HISTSIZE stifling. Returns true when recorded.
+    /// `comment_char_armed` is readline's history_comment_char latch
+    /// (rubash#3392): only an add made while it is armed takes a real
+    /// `#<epoch>` stamp; an unarmed add carries the empty stamp.
     /// There is deliberately NO emptiness check here: GNU's
     /// check_add_history (bashhist.c:789-807) has none — emptiness
     /// filtering lives at the line-recording call sites
@@ -289,6 +292,7 @@ impl SessionHistory {
         histcontrol: &str,
         histignore: &str,
         histsize: Option<usize>,
+        comment_char_armed: bool,
     ) -> bool {
         if history_should_ignore(line, histignore, self.entries.last().map(String::as_str)) {
             return false;
@@ -327,10 +331,20 @@ impl SessionHistory {
             self.timestamps = kept_ts;
         }
         self.entries.push(line.to_string());
-        // readline/history.c:322-333 hist_inittime: every add_history stores
-        // "#<unix-seconds>" on the entry regardless of whether timestamps are
-        // later written to the file.
-        self.timestamps.push(Self::now_stamp());
+        // readline/history.c:259-273 hist_inittime: every add_history
+        // stores a stamp, but the stamp's first char IS
+        // history_comment_char — `'\0'` while no HISTTIMEFORMAT bind
+        // has armed it, i.e. the empty string in this model. An entry
+        // added before the first bind therefore carries no stamp: it
+        // renders `??` and takes no `#<epoch>` line on -a/-w
+        // (rubash#3392). The latch is sticky — a later unset does not
+        // disarm it — so the caller passes the live armed state, not
+        // the current HISTTIMEFORMAT existence.
+        self.timestamps.push(if comment_char_armed {
+            Self::now_stamp()
+        } else {
+            String::new()
+        });
         self.stifle(histsize);
         self.lines_this_session += 1;
         true
@@ -387,7 +401,7 @@ impl SessionHistory {
     /// a timestamp that are not themselves timestamps are appended to
     /// the previous entry when the file has multi-line entries.
     pub fn load_file(&mut self, path: &str, histsize: Option<usize>) -> io::Result<usize> {
-        self.load_file_with_arming(path, histsize, true)
+        self.load_file_with_arming(path, histsize, true, true)
     }
 
     /// `load_file` with the readline comment-char state made explicit.
@@ -399,11 +413,21 @@ impl SessionHistory {
     /// gives each entry carries the unarmed (NUL) comment char — an
     /// empty string in this model — so those entries render as `??`
     /// once a HISTTIMEFORMAT appears (rubash#1669).
+    ///
+    /// The two arming inputs are distinct GNU states: `timestamps_armed`
+    /// is history_write_timestamps (HISTTIMEFORMAT exists RIGHT NOW,
+    /// variables.c:6177) and gates only the multiline regrouping below;
+    /// `comment_char_armed` is history_comment_char itself, which
+    /// sv_histtimefmt arms on the first HISTTIMEFORMAT bind and never
+    /// disarms — it survives `unset HISTTIMEFORMAT` (rubash#3535) and
+    /// governs whether `#<digit>` lines are timestamps at all and
+    /// whether a stamp-less entry takes a real read-time stamp.
     pub fn load_file_with_arming(
         &mut self,
         path: &str,
         histsize: Option<usize>,
         timestamps_armed: bool,
+        comment_char_armed: bool,
     ) -> io::Result<usize> {
         let content = fs::read_to_string(path)?;
         let lines: Vec<&str> = content.lines().collect();
@@ -411,7 +435,7 @@ impl SessionHistory {
         let has_timestamps = lines.first().is_some_and(|l| {
             l.starts_with('#') && l[1..].chars().next().is_some_and(|c| c.is_ascii_digit())
         });
-        let timestamps_active = timestamps_armed || has_timestamps;
+        let timestamps_active = comment_char_armed || timestamps_armed || has_timestamps;
         // histfile.c:384: `history_multiline_entries += has_timestamps &&
         // history_write_timestamps` — regrouping needs the file's leading
         // stamp AND HISTTIMEFORMAT existing at read time (every caller
@@ -592,13 +616,14 @@ impl SessionHistory {
         path: &str,
         histsize: Option<usize>,
         timestamps_armed: bool,
+        comment_char_armed: bool,
     ) -> io::Result<usize> {
-        self.load_file_with_arming(path, histsize, timestamps_armed)
+        self.load_file_with_arming(path, histsize, timestamps_armed, comment_char_armed)
     }
 
     /// builtins/history.def -n: append file lines not already in the list.
     pub fn read_new_file(&mut self, path: &str, histsize: Option<usize>) -> io::Result<usize> {
-        self.read_new_file_with_arming(path, histsize, true)
+        self.read_new_file_with_arming(path, histsize, true, true)
     }
 
     /// `read_new_file` with explicit timestamp arming (see
@@ -610,13 +635,14 @@ impl SessionHistory {
         path: &str,
         histsize: Option<usize>,
         timestamps_armed: bool,
+        comment_char_armed: bool,
     ) -> io::Result<usize> {
         let content = fs::read_to_string(path)?;
         // Same #<digit> detection as load_file (histfile.c:377-381).
         let has_timestamps = content.lines().next().is_some_and(|l| {
             l.starts_with('#') && l[1..].chars().next().is_some_and(|c| c.is_ascii_digit())
         });
-        let timestamps_active = timestamps_armed || has_timestamps;
+        let timestamps_active = comment_char_armed || timestamps_armed || has_timestamps;
         let mut count = 0usize;
         let mut last_ts: Option<String> = None;
         for line in content.lines() {

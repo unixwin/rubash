@@ -598,7 +598,7 @@ impl Executor {
                     }
                     values.push(record);
                 }
-                source.sync_offset();
+                self.mapfile_source_sync(&mut source);
                 Some(values)
             })
         } else {

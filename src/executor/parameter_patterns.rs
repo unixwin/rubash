@@ -60,11 +60,18 @@ impl Executor {
         &self,
         indirect_name: &str,
     ) -> Option<String> {
+        // GNU parameter_brace_find_indir (subst.c:7839-7881): t is the
+        // scalar VALUE of the source parameter — for `#` the positional
+        // count, not the last positional — and the operator applies to
+        // the parameter t names: `${!#@Q}` with $#=2 is `${2@Q}`.
         if indirect_name == "#" {
-            return self.shell_state.positional_window().last().cloned();
+            return Some(self.shell_state.positional_window().len().to_string());
         }
         if indirect_name == "?" {
             return Some(self.dollar_question_status().to_string());
+        }
+        if matches!(indirect_name, "@" | "*") {
+            return self.parameter_error_value(indirect_name);
         }
         if is_shell_name(indirect_name) {
             if let Some(target_name) = self.nameref_target_name(indirect_name) {
@@ -72,6 +79,11 @@ impl Executor {
             }
         }
         if let Ok(index) = indirect_name.parse::<usize>() {
+            // `0` is the $0 special parameter (script name), never
+            // positional_window[0] — `${!0}` names the script name.
+            if index == 0 {
+                return Some(self.script_name_value());
+            }
             return self
                 .shell_state
                 .positional_window()
@@ -104,6 +116,37 @@ impl Executor {
         transform: ParameterTransform,
     ) -> Option<String> {
         let indirect_name = name.strip_prefix('!')?;
+        // VALID_INDIR_PARAM specials and positional digits
+        // (subst.c:7839-7881 parameter_brace_find_indir): resolve t to
+        // the parameter the source VALUE names, then apply the transform
+        // to that parameter — `${!#@Q}` with $#=2 is `${2@Q}`. A
+        // name-head read of `!#` sees no `#` variable, so the generic
+        // path below would render an unset cell as `''`.
+        if indirect_name.chars().all(|c| c.is_ascii_digit()) && !indirect_name.is_empty()
+            || indirect_name.len() == 1 && matches!(indirect_name, "#" | "?" | "@" | "*")
+        {
+            let Some(t) = self.indirect_holder_target_name(indirect_name) else {
+                return Some(String::new());
+            };
+            if !Self::is_valid_indirect_target(&t) {
+                // `<t>: invalid variable name` is diagnosed by the
+                // parameter-expansion error pre-scan.
+                return Some(String::new());
+            }
+            let op = match transform {
+                ParameterTransform::Quote => "Q",
+                ParameterTransform::Escape => "E",
+                ParameterTransform::Assignment => "A",
+                ParameterTransform::Attributes => "a",
+                ParameterTransform::KeyValueQuoted => "K",
+                ParameterTransform::KeyValueSplit => "k",
+                ParameterTransform::Prompt => "P",
+                ParameterTransform::Upper => "U",
+                ParameterTransform::UpperFirst => "u",
+                ParameterTransform::Lower => "L",
+            };
+            return self.expand_braced_transform_parameter(&format!("{t}@{op}"));
+        }
         let ref_name = indirect_name
             .strip_suffix("[@]")
             .or_else(|| indirect_name.strip_suffix("[*]"));
@@ -159,23 +202,27 @@ impl Executor {
             if transform == ParameterTransform::KeyValueSplit {
                 return Some(self.parameter_key_value_transform(target_name, false));
             }
-            let value = self
-                .array_element_parameter_value(target_name)
-                .or_else(|| {
-                    self.shell_state
-                        .env_vars
-                        .get(target_name)
-                        .and_then(|value| {
-                            // Cell type, not value text (rubash#755).
-                            if self.parameter_is_array_variable(target_name) {
-                                array_value_at(value, 0)
-                            } else {
-                                Some(value.clone())
-                            }
-                        })
-                })
-                .unwrap_or_default();
-            return Some(self.apply_parameter_transform_value(&value, transform));
+            let value = self.array_element_parameter_value(target_name).or_else(|| {
+                self.shell_state
+                    .env_vars
+                    .get(target_name)
+                    .and_then(|value| {
+                        // Cell type, not value text (rubash#755).
+                        if self.parameter_is_array_variable(target_name) {
+                            array_value_at(value, 0)
+                        } else {
+                            Some(value.clone())
+                        }
+                    })
+            });
+            // GNU parameter_brace_transform (subst.c:8927): an unset
+            // parameter's word is NULL and the transform renders
+            // nothing — `${!x@Q}` with an unset target is empty, not
+            // the quoted-empty `''` a set-empty cell earns.
+            return Some(match value {
+                Some(value) => self.apply_parameter_transform_value(&value, transform),
+                None => String::new(),
+            });
         }
         let ref_name = ref_name?;
         // The source's own value: an env variable contributes its raw
@@ -274,11 +321,23 @@ impl Executor {
     /// empty), false for `/` and `^`/`,`/`~` (absent only). Callers return
     /// the empty expansion when this is true — every arm's skip-case
     /// result is "" — and expand the pattern otherwise.
+    /// `quoted` is true when the `${}` expansion appears inside double
+    /// quotes: GNU then marks a quoted-null LIST element QUOTED_NULL
+    /// (subst.c:10133-10140 `temp` construction), so the removal gate's
+    /// `*value == '\0'` test (subst.c:10320-10327) sees a non-empty word
+    /// and expands the pattern — `"${a[*]#${-y}}"` with a=("") diagnoses
+    /// where unquoted is silent (rubash#3581). Quoting only defeats the
+    /// EMPTY half of the gate for list subjects (`@`, `*`, `name[@]`,
+    /// `name[*]`); a scalar or element "" stays silent quoted or not
+    /// (no QUOTED_NULL is produced), and an absent list stays silent
+    /// either way.
     pub(in crate::executor) fn pattern_word_is_silent(
         &self,
         var_name: &str,
         empty_is_silent: bool,
+        quoted: bool,
     ) -> bool {
+        let list_empty_is_silent = empty_is_silent && !quoted;
         // Indirect (`!name`): the value word is the target's value word
         // (subst.c:7883 parameter_brace_expand_indir). A nameref holder's
         // value is the target NAME itself, never absent. A holder with no
@@ -288,34 +347,26 @@ impl Executor {
             if self.nameref_target_name(indirect_name).is_some() {
                 return false;
             }
-            // Resolve the holder to its target expression: a numeric holder
-            // names a positional, a special holder names its own value, an
-            // element holder names the element's value, anything else names
-            // the variable of that name.
+            // Resolve the holder to its target expression through the one
+            // find_indir owner (GNU subst.c:7839 parameter_brace_find_indir):
+            // a numeric holder reads $N with 0 meaning $0 (subst.c:3707
+            // get_dollar_var_value), a special holder its own value, an
+            // element holder the element's value, anything else the
+            // variable of that name (rubash#3784: `${!00^}` adjudicated a
+            // literal `!00` cell instead of the parameter $0 names).
             let target_owned;
-            let target_expr: &str = if indirect_name.parse::<usize>().is_ok()
-                || is_special_parameter_name(indirect_name)
-            {
-                target_owned = self.expand_parameter_named_value(indirect_name);
-                &target_owned
-            } else if let Some(value) = self.array_element_parameter_value(indirect_name) {
-                target_owned = value;
-                &target_owned
-            } else if parse_array_subscript(indirect_name).is_some() {
-                // Unresolvable element holder: GNU reports invalid
-                // indirect expansion; leave the existing flow alone.
-                return false;
-            } else {
-                match self.shell_state.env_vars.get(indirect_name) {
-                    Some(value) => value,
-                    None => return false,
+            let target_expr: &str = match self.indirect_holder_target_name(indirect_name) {
+                Some(value) => {
+                    target_owned = value;
+                    &target_owned
                 }
+                None => return false,
             };
             if let Some(array_name) = target_expr
                 .strip_suffix("[@]")
                 .or_else(|| target_expr.strip_suffix("[*]"))
             {
-                return self.pattern_subject_array_word_is_empty(array_name, empty_is_silent);
+                return self.pattern_subject_array_word_is_empty(array_name, list_empty_is_silent);
             }
             let values = self.indirect_target_values(target_expr);
             if values.is_empty() {
@@ -331,7 +382,7 @@ impl Executor {
         if matches!(var_name, "@" | "*") {
             let window = self.shell_state.positional_window();
             return window.is_empty()
-                || (empty_is_silent && window.len() == 1 && window[0].is_empty());
+                || (list_empty_is_silent && window.len() == 1 && window[0].is_empty());
         }
         // Single-char specials. "0" is special AND numeric, so this must
         // precede the numeric arm (subst.c:9837 VALID_SPECIAL_LENGTH_PARAM).
@@ -371,7 +422,7 @@ impl Executor {
             .strip_suffix("[@]")
             .or_else(|| var_name.strip_suffix("[*]"))
         {
-            return self.pattern_subject_array_word_is_empty(array_name, empty_is_silent);
+            return self.pattern_subject_array_word_is_empty(array_name, list_empty_is_silent);
         }
         // A subscripted reference the element fetch could not resolve is
         // an absent value word.
@@ -436,11 +487,37 @@ impl Executor {
         var_name: &str,
         pattern: &str,
         operation: PatternRemoval,
+        quoted: bool,
     ) -> Option<String> {
+        // GNU get_var_and_type (subst.c:8529-8545): for a `!` varname the
+        // removal subject resolves through parameter_brace_find_indir, so
+        // the `%`/`#` operator applies to the parameter the SOURCE VALUE
+        // names — `${!#%*}` with $#=3 is `${3%*}` — and the subst.c:10320
+        // absent/empty gate reads THAT parameter's value, not the holder
+        // name (rubash#3784). Guarded to the special/positional source
+        // family the sibling indirect entries already own; a plain
+        // `!name` source keeps the indirect_pattern_removal route.
+        if let Some(indirect_name) = var_name.strip_prefix('!') {
+            let special_or_numeric = indirect_name.len() == 1
+                && matches!(indirect_name, "#" | "?" | "@" | "*")
+                || !indirect_name.is_empty() && indirect_name.chars().all(|c| c.is_ascii_digit());
+            if special_or_numeric {
+                let Some(t) = self.indirect_holder_target_name(indirect_name) else {
+                    return Some(String::new());
+                };
+                if !Self::is_valid_indirect_target(&t) {
+                    // `<t>: invalid variable name` is diagnosed by the
+                    // parameter-expansion error pre-scan.
+                    return Some(String::new());
+                }
+                return self.expand_parameter_pattern_removal(&t, pattern, operation, quoted);
+            }
+        }
         // GNU subst.c:10320-10327 (`case '#': case '%':`): removal skips
         // the pattern expansion entirely when the parameter word is absent
-        // or empty (rubash#3501).
-        let silent = self.pattern_word_is_silent(var_name, true);
+        // or empty (rubash#3501). Quoted, a list subject's QUOTED_NULL
+        // element keeps the word non-empty (rubash#3581).
+        let silent = self.pattern_word_is_silent(var_name, true, quoted);
         if silent {
             return Some(String::new());
         }
@@ -840,7 +917,7 @@ impl Executor {
         if matches!(resolved.as_str(), "@" | "*") || resolved.trim().is_empty() {
             return false;
         }
-        let index = match self.eval_indexed_subscript_expression(&resolved) {
+        let index = match self.eval_indexed_subscript_expression(&resolved, false) {
             Some(index) => index,
             None => {
                 self.report_indexed_subscript_error_unless_nounset(&resolved);

@@ -1055,17 +1055,29 @@ pub(in crate::executor) fn text_pos_for_byte_len_exact(
     None
 }
 
-/// Whether a `-n`/`-N` serve over `text` must run in the byte domain
-/// because the character walkers' unit accounting diverges from
-/// read_mbchar: in a multibyte locale any raw byte (a raw-byte
-/// marker pair in the transport text) can join an invalid sequence
-/// whose bytes the walkers count one by one while GNU consumes the
-/// run as one unit (rubash#3294). Without a budget, or without raw
-/// bytes, the two domains agree unit for unit.
+/// Whether the byte-domain record scan (`scan_text_record_bytes`) must
+/// serve `text` for a -n/-N budget because the character-domain walkers
+/// count units GNU would not.
+/// In a multibyte locale any raw byte (a raw-byte marker pair in the
+/// transport text) can join an invalid sequence whose bytes the walkers
+/// count one by one while GNU consumes the run as one unit (rubash#3294).
+/// Without a budget, or without raw bytes, the two domains agree unit for
+/// unit.
+/// In a single-byte locale the budget counts BYTES (GNU
+/// builtins/read.def:851,874,880-886), so a literal multibyte character
+/// is as many units as its bytes and the character scan under-counts it
+/// (rubash#3785) — the byte-domain scan must decide whenever the mirror
+/// text holds a non-ASCII character (the scan's decoded_unit_len already
+/// returns one byte per unit there). Pure-ASCII text agrees unit for unit,
+/// so it keeps the historical character scan exactly.
 pub(in crate::executor) fn byte_unit_scan_applies(text: &str, char_limit: Option<usize>) -> bool {
-    char_limit.is_some()
-        && crate::locale::is_multi_byte()
-        && text.chars().any(|ch| ch as u32 == RAW_BYTE_MARKER_ESCAPE)
+    if !char_limit.is_some() {
+        return false;
+    }
+    if crate::locale::is_multi_byte() {
+        return text.chars().any(|ch| ch as u32 == RAW_BYTE_MARKER_ESCAPE);
+    }
+    text.chars().any(|ch| (ch as u32) > 0x7F)
 }
 
 /// Replay GNU's read loop over the DECODED BYTES of a text-domain
@@ -1326,15 +1338,26 @@ pub(in crate::executor) fn slurped_record_eof_no_delimiter(
             }
         } else {
             cursor += 1;
+            // rubash#3785: in a single-byte locale a literal character
+            // costs one unit per BYTE (read.def:851,874,880-886) — an
+            // escaped multibyte character's first byte is the escaped unit
+            // and its remaining bytes are fresh units, so the count is the
+            // character's byte length either way; the multibyte locale
+            // keeps one unit per character.
+            let unit_cost = if crate::locale::is_multi_byte() {
+                1
+            } else {
+                ch.len_utf8()
+            };
             if escaped {
                 if ch != '\n' {
-                    units += 1;
+                    units += unit_cost;
                 }
                 escaped = false;
             } else if !raw && ch == '\\' {
                 escaped = true;
             } else {
-                units += 1;
+                units += unit_cost;
             }
         }
         if char_limit.is_some_and(|limit| units >= limit) {
@@ -1886,7 +1909,18 @@ fn trim_read_input_literal(
 /// raw-byte marker pair is one unit as in truncate_read_units
 /// (rubash#1328, rubash#714).
 fn truncate_read_post_escape(input: &str, limit: usize) -> String {
-    if input.chars().any(|ch| ch as u32 == RAW_BYTE_MARKER_ESCAPE) {
+    // rubash#3785: in a single-byte locale the -n/-N budget counts BYTES
+    // (GNU builtins/read.def:851,874 — read_mbchar runs only when
+    // mb_cur_max > 1; with MB_CUR_MAX == 1 every byte is one unit,
+    // read.def:880-886), so the record is cut in the decoded byte domain
+    // whatever the transport spelling: a literal multibyte character costs
+    // as many units as its bytes, and a cut can land mid-character (the
+    // dangling lead byte rides as a raw-byte marker, exactly like the
+    // marker-spelled input below). The character walk underneath is the
+    // multibyte-locale shape only.
+    if !crate::locale::is_multi_byte()
+        || input.chars().any(|ch| ch as u32 == RAW_BYTE_MARKER_ESCAPE)
+    {
         // The record carries raw bytes: count in the decoded byte
         // domain, where an escaped or plain unit is one read_mbchar
         // consumption (rubash#3294) — the text walk below counts each

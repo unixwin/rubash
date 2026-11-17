@@ -160,6 +160,19 @@ pub struct JobTable {
     /// of these must not publish its death notice before a `wait`
     /// has had its chance to reap the job itself.
     pub fresh_fatal_marks: Vec<(u32, u64)>,
+    /// Terminating signals this shell's own `kill` delivered to a
+    /// background pid (rubash#3802), awaiting the completion that
+    /// records the job's death. Windows `ExitStatus` carries no
+    /// WIFSIGNALED bit — `signal_process` encodes a kill as
+    /// `TerminateProcess (128 + signal)` — so the reap alone cannot
+    /// tell a SIGKILL death (exit code 137) from a plain `exit 137`.
+    /// GNU keeps WTERMSIG in the wait status and printable_job_status
+    /// (jobs.c:1969-1985) prints `j_strsignal`, i.e. `Killed`; the
+    /// delivery record supplies that signal. Consumed by
+    /// [`Self::take_delivered_signal`] at completion, and dropped
+    /// when a pid is re-registered, so a recycled pid cannot borrow
+    /// an old delivery.
+    pub delivered_signals: Vec<(u32, i32)>,
 }
 
 impl JobTable {
@@ -248,6 +261,10 @@ impl JobTable {
                 )
             })
             .collect();
+        // rubash#3802: a delivery record belongs to the process that
+        // occupied this pid; a re-registered pid starts clean.
+        self.delivered_signals
+            .retain(|(marked, _)| !pids.contains(marked));
         let command = command.into();
         // get_job_by_name needs one entry per pipeline stage (GNU's
         // j->pipe PROCESS list); a caller that cannot describe them keeps
@@ -577,6 +594,48 @@ impl JobTable {
         } else {
             false
         }
+    }
+
+    /// Remember the terminating signal the shell's own `kill` handed
+    /// to `pid`, so the completion that reaps it can name the death
+    /// the way GNU's wait status does (rubash#3802). A newer signal
+    /// to the same pid supersedes the older one.
+    pub fn note_delivered_signal(&mut self, pid: u32, signal: i32) {
+        self.delivered_signals.retain(|(marked, _)| *marked != pid);
+        self.delivered_signals.push((pid, signal));
+    }
+
+    /// Consume the delivery record for `pid` at its completion and
+    /// return the signal ONLY when the reaped `status` is that
+    /// signal's `128+signal` death (rubash#3802). GNU decides the
+    /// jobs wording from the wait status itself: `printable_job_status`
+    /// (jobs.c:1969-2015) calls `j_strsignal(WTERMSIG(p->status))`
+    /// only in the `WIFSIGNALED` arm and renders `Exit %d` from
+    /// `WEXITSTATUS` otherwise — so a process that survived the
+    /// signal we delivered (ignored it, trapped it, or was already
+    /// past it) keeps its real exit status. A mismatch therefore
+    /// means the delivery did not end the process; the record is
+    /// consumed either way so a recycled pid cannot borrow it.
+    ///
+    /// Only a platform whose wait status has NO `WIFSIGNALED` trace
+    /// may call this: a normal `exit 143` is indistinguishable from
+    /// a SIGTERM death by the code alone, so where the kernel status
+    /// exists ([`Self::discard_delivered_signal`]) it is authoritative.
+    pub fn take_delivered_signal(&mut self, pid: u32, status: i32) -> Option<i32> {
+        let position = self
+            .delivered_signals
+            .iter()
+            .position(|(marked, _)| *marked == pid)?;
+        let (_, signal) = self.delivered_signals.remove(position);
+        (status == 128 + signal).then_some(signal)
+    }
+
+    /// Drop the delivery record for `pid` at its completion without
+    /// applying it (rubash#3802). Used where the kernel wait status is
+    /// authoritative (`WIFSIGNALED`/`WTERMSIG` present): the record
+    /// must not override it, and must not outlive the completion.
+    pub fn discard_delivered_signal(&mut self, pid: u32) {
+        self.delivered_signals.retain(|(marked, _)| *marked != pid);
     }
 
     /// Publish deferred marks at an observation event

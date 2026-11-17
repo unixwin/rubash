@@ -172,6 +172,14 @@ fn dollar_command_substitution(
     // when the region disarms, and it lets the `)` that follows
     // close the substitution like its glued twin `in)`.
     let mut case_in_completed_empty = false;
+    // rubash#3605: paren depth of a `$(` nested inside the case context
+    // (`$(case $(w) in e) ...`). The `(`/`)` match arms below do not
+    // count parens while `case_depth > 0` (pattern parens belong to the
+    // case machinery), so without this tracker the `)` ending the inner
+    // substitution reaches the truncated-case close arm and the outer
+    // substitution ends early at `$(w` — GNU parse_comsub instead lets
+    // the nested substitution's own reader consume its `)`.
+    let mut nested_case_subst = 0usize;
     // GNU read_token (parse.y:3630-3643): `#` introduces a comment only at
     // a token boundary — after whitespace, a separator (`;&|()<>`), or at
     // the start. `word_boundary`/`word.is_empty()` are wrong: `$`, quotes
@@ -352,6 +360,23 @@ fn dollar_command_substitution(
             &mut case_in_stage,
             &mut case_pattern_region,
         );
+        // `$(` nested inside the case context: its `)` belongs to the
+        // inner substitution, never to the case-close arm below. The
+        // counter is a paren DEPTH inside the nested substitution, so
+        // a subshell group inside it (`$(a (b) c)`) consumes its own
+        // `)` first instead of mis-closing the `$(`.
+        if !single
+            && !double
+            && case_depth > 0
+            && ch == '('
+            && (nested_case_subst > 0 || chars.get(index.wrapping_sub(1)) == Some(&'$'))
+        {
+            nested_case_subst += 1;
+        }
+        let closes_nested_subst = ch == ')' && !single && !double && nested_case_subst > 0;
+        if closes_nested_subst {
+            nested_case_subst -= 1;
+        }
         // rubash#2789: a `)` that cannot close anything inside the
         // case — no pattern content in the armed region (the pattern
         // never started, e.g. right after `in` or after a `;;`), the
@@ -359,9 +384,10 @@ fn dollar_command_substitution(
         // case subject — closes the substitution at the substitution's
         // own depth (parse.y:4519-4521), yielding the truncated body
         // for the body parser's grammar verdict. Pattern closers
-        // (content seen), nested-paren closers and quoted `)` never
-        // reach this arm.
-        let case_close_candidate = ch == ')' && !single && !double && depth == 1 && case_depth > 0;
+        // (content seen), nested-paren closers, nested `$(` closers
+        // and quoted `)` never reach this arm.
+        let case_close_candidate =
+            ch == ')' && !single && !double && depth == 1 && case_depth > 0 && !closes_nested_subst;
         if case_close_candidate
             && ((region_before && !content_before)
                 || (word_before == "in" && stage_before == 2)
@@ -747,6 +773,21 @@ fn update_command_substitution_reserved_word_depth(
     completing_after_case: bool,
 ) -> bool {
     if !word_boundary {
+        // GNU special_case_tokens rule 6 (parse.y:3369-3386): the `in`
+        // after a case subject is IN even off a reserved-word boundary —
+        // the case grammar consumes it there regardless of how the
+        // preceding word ended (a plain subject word never leaves a
+        // separator behind, so `$(case x in ...)` reads its `in` with
+        // word_boundary false). parse.y:3379/3396 arms the pattern
+        // region on that token, which is what the extractor's unclosed-
+        // case close arm needs to judge a later `)` (rubash#3756:
+        // without it `$(case x in a|)` scanned as unclosed and the
+        // read-time body screen never saw the truncated body).
+        if word == "in" && *case_in_stage == 2 {
+            *case_in_stage = 3;
+            *case_pattern_region = true;
+            return true;
+        }
         // Even a non-boundary word ends the empty-case window.
         if !completing_after_case {
             *case_in_stage = 0;
@@ -1082,11 +1123,21 @@ mod case_reclassification_tests {
     }
 
     /// Empty case: `esac` is the case's own close; the extractor
-    /// must never truncate at `in` (this scan level finds no span
-    /// for the shape — the tokeniser owns it).
+    /// must never truncate at `in`. With the pattern region armed at
+    /// the `in` token (GNU special_case_tokens rule 6,
+    /// parse.y:3369-3386 — rubash#3756), `esac` is recognized as the
+    /// case close and the body scan completes over the whole span;
+    /// before that the unarmed region made this scan run off the end
+    /// and answer None (the tokeniser still owns the shape and the
+    /// executed result is identical: `echo $(case x in esac)`,
+    /// `x=$(case x in esac); echo $?` and the `v=… w=…` sibling form
+    /// are byte-identical to GNU 5.3.20).
     #[test]
     fn keeps_empty_case_esac_shape() {
-        assert_eq!(extract("$(case x in esac)"), None);
+        assert_eq!(
+            extract("$(case x in esac)").as_deref(),
+            Some("case x in esac")
+        );
     }
 
     /// A parenthesised pattern list: its `)` is the case's, and

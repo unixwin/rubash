@@ -74,6 +74,7 @@ pub fn execute(args: &[String], env_vars: &crate::shell::var_table::VarTable) ->
         Stdio::inherit(),
         Stdio::inherit(),
         Stdio::inherit(),
+        &crate::executor::ChildFdSetup::default(),
     )
     .map_err(|error| match error {
         ExecuteError::IoError(error) => error,
@@ -160,6 +161,7 @@ pub(crate) fn replace_process_image(
     env_vars: &crate::shell::var_table::VarTable,
     cwd: &std::path::Path,
     stdio: Option<(Stdio, Stdio, Stdio)>,
+    setup: &crate::executor::ChildFdSetup,
 ) -> Option<io::Result<i32>> {
     let mut clean_env = false;
     let mut login = false;
@@ -199,6 +201,10 @@ pub(crate) fn replace_process_image(
         effective_argv0.as_deref(),
         cwd,
     );
+    // rubash#3311: the image inherits the shell's descriptor table as
+    // do_redirections left it (exec.def:231 shell_execve) — the fd >= 3
+    // pins and transport keys the executor collected.
+    setup.apply(&mut process);
     // rubash#1175 (redirected forms): the dispatcher resolved the fd
     // table's live bindings (ambient `exec >log`, group redirects) to
     // real OS descriptors; Command::exec dup2's them onto 0/1/2 in the
@@ -264,6 +270,7 @@ pub(crate) fn execute_with_io<W, E>(
     stdout: &mut W,
     stderr: &mut E,
     child_stdin: Stdio,
+    setup: &crate::executor::ChildFdSetup,
 ) -> Result<i32, ExecuteError>
 where
     W: Write,
@@ -279,9 +286,11 @@ where
         None,
         child_stdin,
         &[],
+        setup,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_with_child_stdio<W, E>(
     executor: Option<&mut Executor>,
     args: &[String],
@@ -292,6 +301,7 @@ pub(crate) fn execute_with_child_stdio<W, E>(
     child_stdout: Stdio,
     child_stderr: Stdio,
     child_stdin: Stdio,
+    setup: &crate::executor::ChildFdSetup,
 ) -> Result<i32, ExecuteError>
 where
     W: Write,
@@ -307,6 +317,7 @@ where
         Some((child_stdout, child_stderr)),
         child_stdin,
         &[],
+        setup,
     )
 }
 
@@ -330,6 +341,7 @@ pub(crate) fn execute_with_child_stdio_closing<W, E>(
     child_stderr: Stdio,
     child_stdin: Stdio,
     close_fds: &[u32],
+    setup: &crate::executor::ChildFdSetup,
 ) -> Result<i32, ExecuteError>
 where
     W: Write,
@@ -345,9 +357,11 @@ where
         Some((child_stdout, child_stderr)),
         child_stdin,
         close_fds,
+        setup,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_impl<W, E>(
     executor: Option<&mut Executor>,
     args: &[String],
@@ -358,6 +372,7 @@ fn execute_impl<W, E>(
     child_stdio: Option<(Stdio, Stdio)>,
     child_stdin: Stdio,
     close_fds: &[u32],
+    setup: &crate::executor::ChildFdSetup,
 ) -> Result<i32, ExecuteError>
 where
     W: Write,
@@ -560,6 +575,7 @@ where
                 child_stdin,
                 stderr,
                 close_fds,
+                setup,
             ),
             None => run_external_exec(
                 executor,
@@ -573,6 +589,7 @@ where
                 child_stdin,
                 stdout,
                 stderr,
+                setup,
             ),
         };
     }
@@ -785,6 +802,7 @@ fn report_exec_spawn_failure<E: Write>(
     Ok(status)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_external_exec<W, E>(
     executor: Option<&mut Executor>,
     program: &std::path::Path,
@@ -797,6 +815,7 @@ fn run_external_exec<W, E>(
     child_stdin: Stdio,
     stdout: &mut W,
     stderr: &mut E,
+    setup: &crate::executor::ChildFdSetup,
 ) -> Result<i32, ExecuteError>
 where
     W: Write,
@@ -811,6 +830,7 @@ where
         argv0,
         cwd,
     );
+    setup.apply(&mut process);
     process.stdout(Stdio::piped()).stderr(Stdio::piped());
     // std's Command::output() defaults stdin to Stdio::null() when .stdin()
     // is never called — a capture-path `$(exec cat)` then reads EOF on a
@@ -875,6 +895,7 @@ where
     Ok(crate::executor::wait_status::process_exit_status(&status))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_external_exec_with_stdio<E>(
     executor: Option<&mut Executor>,
     program: &std::path::Path,
@@ -889,6 +910,7 @@ fn run_external_exec_with_stdio<E>(
     child_stdin: Stdio,
     stderr: &mut E,
     close_fds: &[u32],
+    setup: &crate::executor::ChildFdSetup,
 ) -> Result<i32, ExecuteError>
 where
     E: Write,
@@ -902,6 +924,7 @@ where
         argv0,
         cwd,
     );
+    setup.apply(&mut process);
     process.stdout(child_stdout).stderr(child_stderr);
     // rubash#2803: genuinely closed std fds (see
     // execute_with_child_stdio_closing): std arranges the inherited

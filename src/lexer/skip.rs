@@ -31,6 +31,23 @@ impl<'a> Lexer<'a> {
         // substitution for the body parser instead of reading as case
         // syntax (GNU parse_comsub, parse.y:4451).
         let mut case_pattern_seen = false;
+        // rubash#3307: per-pattern content bookkeeping — mirror of the
+        // gate/parser arm's locals in dollar_command_substitution
+        // (#3303): whether the armed pattern region has seen pattern
+        // content since the current list was armed (reset at `|` and at
+        // a freshly armed region), the pattern-paren nesting depth, and
+        // whether a pattern-list opener is still available.
+        let mut case_pattern_content = false;
+        let mut case_pattern_paren_depth = 0usize;
+        let mut case_pattern_opener_available = true;
+        let mut case_pattern_region_seen = false;
+        // rubash#3307: opener parens still awaiting their closer. The unit
+        // scan carries no delimiter stack, so a `(` that takes the opener
+        // branch owns the next `)` the way the gate's pushed `(` delimiter
+        // does (`(a|)` stays held, exactly as the gate leaves it). Unlike
+        // the paren depth it is never reset by a `|` or by a region re-arm,
+        // only consumed by a `)`.
+        let mut case_pattern_opener_depth = 0usize;
         // rubash#380: the last significant unquoted char fed to the case
         // word machine — the previous-token witness for the `esac`
         // pattern-text rule (parse.y:3181/3183).
@@ -72,6 +89,12 @@ impl<'a> Lexer<'a> {
                 parameter_depth -= 1;
             }
             let next = self.peek();
+            // rubash#3307: pre-update snapshots for the close arm's
+            // reclassification predicate (mirror of the gate's snapshot idiom
+            // in unclosed_input_close_char_posix).
+            let region_before = case_pattern_region;
+            let content_before = case_pattern_content;
+            let opener_depth_before = case_pattern_opener_depth;
             update_command_substitution_case_depth(
                 c,
                 false,
@@ -87,6 +110,62 @@ impl<'a> Lexer<'a> {
             );
             if esac_prev_token_char(c) {
                 prev_sig = Some(c);
+            }
+            // rubash#3307: per-pattern content bookkeeping (mirror of the
+            // gate/parser arm's advance in dollar_command_substitution): a
+            // freshly armed region starts empty; `|` starts a fresh pattern;
+            // a pattern-list opener consumes the opener without setting
+            // content; any other char in the region is pattern content. The
+            // `)` arms consume a pending paren/opener instead of setting
+            // content, so the close arm below judges by the snapshots above.
+            if case_pattern_region {
+                if !case_pattern_region_seen {
+                    case_pattern_content = false;
+                    case_pattern_paren_depth = 0;
+                    case_pattern_opener_available = true;
+                    case_pattern_region_seen = true;
+                }
+            } else {
+                case_pattern_region_seen = false;
+            }
+            if case_depth > 0 && region_before {
+                match c {
+                    '(' => {
+                        if case_pattern_paren_depth == 0
+                            && !case_pattern_content
+                            && case_pattern_opener_available
+                        {
+                            case_pattern_opener_available = false;
+                            case_pattern_opener_depth += 1;
+                        } else {
+                            case_pattern_paren_depth += 1;
+                            case_pattern_content = true;
+                        }
+                    }
+                    '|' if case_pattern_paren_depth == 0 => {
+                        case_pattern_content = false;
+                        case_pattern_opener_available = true;
+                    }
+                    ')' if case_pattern_paren_depth > 0 => {
+                        case_pattern_paren_depth -= 1;
+                    }
+                    ')' if case_pattern_opener_depth > 0 => {
+                        case_pattern_opener_depth -= 1;
+                    }
+                    '&' => {
+                        // `;&` is a clause terminator, not pattern content.
+                        if self.input[..self.position - c.len_utf8()]
+                            .chars()
+                            .next_back()
+                            != Some(';')
+                        {
+                            case_pattern_content = true;
+                        }
+                    }
+                    ';' => {}
+                    c if c.is_whitespace() => {}
+                    _ => case_pattern_content = true,
+                }
             }
             // rubash#2784 pattern-content witness advance (mirror of
             // the oracle's advance in skip_parenthesized_unit_corrected).
@@ -110,9 +189,14 @@ impl<'a> Lexer<'a> {
                 // rubash#2784: a `)` while a case preamble is
                 // unfinished closes this substitution (mirror of the
                 // skip.rs oracle arm).
-                ')' if case_depth == 0
+                // rubash#3307: or while the armed pattern region has
+                // no content yet (the gate's reclassification
+                // predicate); a pending opener owns the `)` instead.
+                ')' if (case_depth == 0
                     || matches!(case_in_stage, 1 | 2)
-                    || (case_in_stage == 3 && !case_pattern_seen) =>
+                    || (case_in_stage == 3 && !case_pattern_seen)
+                    || (region_before && !content_before))
+                    && opener_depth_before == 0 =>
                 {
                     depth -= 1;
                     if depth == 0 {
@@ -423,9 +507,22 @@ impl<'a> Lexer<'a> {
             // `( )` subshell.
             let mut term = true;
             let mut paren_depth = 0usize;
+            // Shell_getc token-boundary state for `#` comment recognition
+            // (parse.y:3631-3645): true at the body start and after a
+            // blank, newline, or operator (`;` `&` `|` `(` `)` `<` `>`);
+            // false inside a word. `term` above answers a different
+            // question (is `}` a group closer here) — after `echo hi `
+            // it is false while a `#` still comments — so the comment arm
+            // needs its own state, kept in lockstep with skip_funsub_body's
+            // `at_word_start` (#3813) and skip_cmd_subst's token_boundary.
+            // Without it an apostrophe inside a comment (`# don't`) opened
+            // a phantom single-quote that swallowed the rest of the input
+            // (rubash#3823 f1).
+            let mut token_boundary = true;
             while let Some(c) = self.advance() {
                 if escaped {
                     escaped = false;
+                    token_boundary = false;
                     continue;
                 }
                 if c == '\\' && !single {
@@ -433,6 +530,7 @@ impl<'a> Lexer<'a> {
                     if !double {
                         term = false;
                     }
+                    token_boundary = false;
                     continue;
                 }
                 if single {
@@ -445,6 +543,17 @@ impl<'a> Lexer<'a> {
                     if c == '"' {
                         double = false;
                     }
+                    continue;
+                }
+                // parse.y:3631 shell_getc: `#` at a token start discards to
+                // EOL; a quote character inside the comment is inert. The
+                // newline itself is left for the next iteration (the
+                // `;`/`&`/`|`/`\n` arm), which restores command position.
+                if c == '#' && token_boundary {
+                    while self.peek().is_some_and(|ch| ch != '\n') {
+                        self.advance();
+                    }
+                    token_boundary = true;
                     continue;
                 }
                 match c {
@@ -508,28 +617,40 @@ impl<'a> Lexer<'a> {
                         // (`X${...}Y', `$(x)y'); a terminator only a
                         // following `;'/`&'/newline can set.
                         term = false;
+                        token_boundary = false;
                     }
                     '\'' => {
                         single = true;
                         term = false;
+                        token_boundary = false;
                     }
                     '"' => {
                         double = true;
                         term = false;
+                        token_boundary = false;
                     }
                     '(' => {
                         paren_depth += 1;
                         term = false;
+                        token_boundary = true;
                     }
                     ')' if paren_depth > 0 => {
                         paren_depth -= 1;
                         // A closed outermost `( ... )` is a complete command.
                         term = paren_depth == 0;
+                        token_boundary = true;
+                    }
+                    // A bare `)` (no open subshell) is a metacharacter, not
+                    // word text: the next token starts after it.
+                    ')' => {
+                        term = false;
+                        token_boundary = true;
                     }
                     '{' if term && paren_depth == 0 => {
                         depth += 1;
                         // A command follows the opening brace.
                         term = true;
+                        token_boundary = true;
                     }
                     '}' if term && paren_depth == 0 => {
                         // parse.y:5407-5416 read_token_word: a word BEGINNING
@@ -544,13 +665,69 @@ impl<'a> Lexer<'a> {
                             // another separator (`${ { echo x; } }`).
                             depth -= 1;
                             term = true;
+                            token_boundary = true;
                             continue;
                         }
                         return;
                     }
-                    ';' | '&' | '|' | '\n' if paren_depth == 0 => term = true,
-                    ' ' | '\t' | '\r' => {}
-                    _ => term = false,
+                    // `<<<` is a herestring, not a heredoc: consume all
+                    // three `<` as the operator (same as skip_cmd_subst);
+                    // the word after it starts fresh.
+                    '<' if self.peek() == Some('<') && self.peek_after(1) == Some('<') => {
+                        self.advance();
+                        self.advance();
+                        token_boundary = true;
+                        term = false;
+                    }
+                    // Heredoc bodies are raw lines (make_cmd.c:512): a `}`
+                    // or a quote character inside the body must not move
+                    // this scan (rubash#3823 h2/h3). The helper consumes
+                    // the header, the body lines through the delimiter,
+                    // and (for an exact delimiter line) its newline, so
+                    // the next character begins a fresh token — and, at
+                    // funsub level, a `}` there is the body's closer.
+                    // `term` stays false inside a subshell (an inner
+                    // group's `}` must not read as this funsub's closer),
+                    // mirroring skip_funsub_body (#3813).
+                    '<' if self.peek() == Some('<') => {
+                        let _header_closes = self.skip_heredoc_in_command_substitution();
+                        token_boundary = true;
+                        if paren_depth == 0 {
+                            term = true;
+                        }
+                        continue;
+                    }
+                    // A redirection operator ends the previous word: the
+                    // target word starts here, so a `#` there comments
+                    // (parse.y:3631; `echo >#f` is a comment in GNU,
+                    // #2033). `term` is untouched — a `}` right after `>`
+                    // is the redirect's target word, not this body's
+                    // closer.
+                    '<' | '>' => {
+                        term = false;
+                        token_boundary = true;
+                    }
+                    // A separator is a token boundary at any depth (`#`
+                    // after `;` comments even inside `( ... )`), but it
+                    // restores command position only at funsub level —
+                    // `term` stays false inside a subshell (an inner
+                    // group's `}` must not read as this funsub's closer),
+                    // mirroring skip_funsub_body (#3813).
+                    ';' | '&' | '|' | '\n' if paren_depth == 0 => {
+                        term = true;
+                        token_boundary = true;
+                    }
+                    ';' | '&' | '|' | '\n' => {
+                        term = false;
+                        token_boundary = true;
+                    }
+                    ' ' | '\t' | '\r' => {
+                        token_boundary = true;
+                    }
+                    _ => {
+                        term = false;
+                        token_boundary = false;
+                    }
                 }
             }
             return;
@@ -1877,6 +2054,23 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
     // substitution's closer and hand the body over, not swallow it
     // as case syntax and run to EOF.
     let mut case_pattern_seen = false;
+    // rubash#3307: per-pattern content bookkeeping — mirror of the
+    // gate/parser arm's locals in dollar_command_substitution
+    // (#3303): whether the armed pattern region has seen pattern
+    // content since the current list was armed (reset at `|` and at
+    // a freshly armed region), the pattern-paren nesting depth, and
+    // whether a pattern-list opener is still available.
+    let mut case_pattern_content = false;
+    let mut case_pattern_paren_depth = 0usize;
+    let mut case_pattern_opener_available = true;
+    let mut case_pattern_region_seen = false;
+    // rubash#3307: opener parens still awaiting their closer. The unit
+    // scan carries no delimiter stack, so a `(` that takes the opener
+    // branch owns the next `)` the way the gate's pushed `(` delimiter
+    // does (`(a|)` stays held, exactly as the gate leaves it). Unlike
+    // the paren depth it is never reset by a `|` or by a region re-arm,
+    // only consumed by a `)`.
+    let mut case_pattern_opener_depth = 0usize;
     // rubash#380: previous significant unquoted char fed to the case
     // word machine (the `esac` previous-token witness,
     // parse.y:3181/3183).
@@ -1960,6 +2154,12 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
         // collect this replaces was O(span^2), rubash#241; the esac arm
         // has used the backward prev_sig witness since rubash#380).
         let next = chars.get(index + 1).copied();
+        // rubash#3307: pre-update snapshots for the close arm's
+        // reclassification predicate (mirror of the gate's snapshot idiom
+        // in unclosed_input_close_char_posix).
+        let region_before = case_pattern_region;
+        let content_before = case_pattern_content;
+        let opener_depth_before = case_pattern_opener_depth;
         update_command_substitution_case_depth(
             ch,
             false,
@@ -1979,6 +2179,58 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
             // sees it (skip_cmd_subst enters past `$(` and cannot).
             if index > open {
                 prev_sig = Some(ch);
+            }
+        }
+        // rubash#3307: per-pattern content bookkeeping (mirror of the
+        // gate/parser arm's advance in dollar_command_substitution): a
+        // freshly armed region starts empty; `|` starts a fresh pattern;
+        // a pattern-list opener consumes the opener without setting
+        // content; any other char in the region is pattern content. The
+        // `)` arms consume a pending paren/opener instead of setting
+        // content, so the close arm below judges by the snapshots above.
+        if case_pattern_region {
+            if !case_pattern_region_seen {
+                case_pattern_content = false;
+                case_pattern_paren_depth = 0;
+                case_pattern_opener_available = true;
+                case_pattern_region_seen = true;
+            }
+        } else {
+            case_pattern_region_seen = false;
+        }
+        if case_depth > 0 && region_before {
+            match ch {
+                '(' => {
+                    if case_pattern_paren_depth == 0
+                        && !case_pattern_content
+                        && case_pattern_opener_available
+                    {
+                        case_pattern_opener_available = false;
+                        case_pattern_opener_depth += 1;
+                    } else {
+                        case_pattern_paren_depth += 1;
+                        case_pattern_content = true;
+                    }
+                }
+                '|' if case_pattern_paren_depth == 0 => {
+                    case_pattern_content = false;
+                    case_pattern_opener_available = true;
+                }
+                ')' if case_pattern_paren_depth > 0 => {
+                    case_pattern_paren_depth -= 1;
+                }
+                ')' if case_pattern_opener_depth > 0 => {
+                    case_pattern_opener_depth -= 1;
+                }
+                '&' => {
+                    // `;&` is a clause terminator, not pattern content.
+                    if chars.get(index.wrapping_sub(1)) != Some(&';') {
+                        case_pattern_content = true;
+                    }
+                }
+                ';' => {}
+                ch if ch.is_whitespace() => {}
+                _ => case_pattern_content = true,
             }
         }
         // rubash#2784 pattern-content witness (see the declaration):
@@ -2073,9 +2325,14 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
             // seen) is NOT case syntax — it closes this substitution
             // and the body parser rejects the body at it, exactly like
             // GNU parse_comsub (parse.y:4451).
-            ')' if case_depth == 0
+            // rubash#3307: or while the armed pattern region has no
+            // content yet (the gate's reclassification predicate); a
+            // pending opener owns the `)` instead.
+            ')' if (case_depth == 0
                 || matches!(case_in_stage, 1 | 2)
-                || (case_in_stage == 3 && !case_pattern_seen) =>
+                || (case_in_stage == 3 && !case_pattern_seen)
+                || (region_before && !content_before))
+                && opener_depth_before == 0 =>
             {
                 depth = depth.saturating_sub(1);
                 if depth == 0 {
@@ -3566,6 +3823,32 @@ pub fn unclosed_comsub_eof_shape(
                 escaped = true;
             } else if ch == '"' {
                 double = false;
+            } else if ch == '`' {
+                // rubash#3664: a backquote inside double quotes opens a
+                // command substitution whose body is a unit — GNU
+                // read_token_word hands it to parse_matched_pair
+                // (parse.y:5419-5440) and string_extract_double_quoted
+                // runs in backquote mode (subst.c:925-932), so the
+                // body's `"` bytes neither close the enclosing quote
+                // nor toggle this scan's state. Skip the unit whole,
+                // with the same backslash walk the unquoted backquote
+                // arm below performs; without this, the body's first
+                // `"` closed the quote here and a quoted `(` in the
+                // body (`"`: "("`"`) landed on the paren stack as a
+                // bare opener, fabricating a token error at EOF. An
+                // unterminated unit consumes the rest of the input;
+                // the still-open quote is the close-char scan's
+                // verdict, not this scan's.
+                index += 1;
+                while index < chars.len() {
+                    match chars[index] {
+                        '\\' => index += 1,
+                        '`' => break,
+                        '\n' => line += 1,
+                        _ => {}
+                    }
+                    index += 1;
+                }
             }
             prev_escaped = false;
             index += 1;
@@ -5432,6 +5715,16 @@ fn db_scan_dolbrace_body(
     mut line: usize,
     root_line: usize,
 ) -> (DbScan, usize, usize) {
+    // Bash 5.3 funsub (parser.h:85 FUNSUB_CHAR, parse.y:5506): `${` +
+    // blank/newline/`|` opens a command list, not a P_FIRSTCLOSE parameter
+    // body — `#` comments and heredoc bodies inside are opaque and the
+    // `}` closes only in command position (parse.y:3631 shell_getc,
+    // make_cmd.c:512, parse.y:5400-5416). Without this arm a `'` in a
+    // comment (`# don't`) or a `}` inside a heredoc body owned the EOF
+    // verdict (rubash#3823 f1/h2/h3).
+    if matches!(chars.get(i), Some(' ' | '\t' | '\n' | '|')) {
+        return db_scan_funsub_body(chars, i, line, root_line);
+    }
     let mut escaped = false;
     while i < chars.len() {
         let ch = chars[i];
@@ -5515,6 +5808,232 @@ fn db_scan_dolbrace_body(
                 return (DbScan::Closed, i + 1, line);
             }
             _ => {
+                i += 1;
+            }
+        }
+    }
+    (DbScan::Defer, i, line)
+}
+
+/// A `${ command; }` funsub body scan (parse.y:5506 FUNSUB_CHAR ->
+/// parse_comsub PST_FUNSUBST): the body is command text, so `#`
+/// comments at token boundaries and heredoc bodies are opaque
+/// (parse.y:3631 shell_getc, make_cmd.c:512) and the body closes at a
+/// `}` that is a lone word in command position (parse.y:5400-5416),
+/// not the first unquoted `}`. The term/paren model mirrors
+/// alias_stream::skip_funsub_body and extract_funsub_body_tail. Same
+/// DbScan contract as db_scan_comsub_body: a `$[` hunt opened inside
+/// owns the EOF.
+fn db_scan_funsub_body(
+    chars: &[char],
+    mut i: usize,
+    mut line: usize,
+    root_line: usize,
+) -> (DbScan, usize, usize) {
+    let mut depth = 1usize;
+    let mut paren_depth = 0usize;
+    // Command position: true at body start and after a command
+    // terminator (`;` `&` `|` newline) or a closed `{ }` group /
+    // `( )` subshell — only at funsub level, never inside `( ... )`.
+    let mut term = true;
+    // shell_getc token boundary for `#` comment recognition
+    // (parse.y:3631-3645): false inside a word, true after blanks,
+    // separators and operators at any depth.
+    let mut at_word_start = true;
+    let mut escaped = false;
+    while i < chars.len() {
+        let ch = chars[i];
+        if escaped {
+            escaped = false;
+            at_word_start = false;
+            i += 1;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            at_word_start = false;
+            i += 1;
+            continue;
+        }
+        if ch == '\n' {
+            line += 1;
+            if paren_depth == 0 {
+                term = true;
+            }
+            at_word_start = true;
+            i += 1;
+            continue;
+        }
+        // parse.y:3631 shell_getc: `#` at a token start discards to EOL;
+        // a quote character inside the comment is inert. The newline is
+        // left for the next iteration, which restores command position.
+        if ch == '#' && at_word_start {
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        // Heredoc bodies are raw lines (make_cmd.c:512): a `}` or a
+        // quote character inside the body must not move this scan.
+        // `<<<` is a herestring — no body to skip.
+        if ch == '<' && chars.get(i + 1) == Some(&'<') && chars.get(i + 2) != Some(&'<') {
+            let (next, _closure) =
+                super::heredoc_scan::skip_heredoc_in_chars_with_closure(chars, i);
+            if next > i {
+                line += chars[i..next].iter().filter(|c| **c == '\n').count();
+                i = next;
+                at_word_start = true;
+                if paren_depth == 0 {
+                    term = true;
+                }
+                continue;
+            }
+        }
+        if ch == '<' && chars.get(i + 1) == Some(&'<') && chars.get(i + 2) == Some(&'<') {
+            i += 3;
+            at_word_start = true;
+            term = false;
+            continue;
+        }
+        match ch {
+            '\'' | '"' | '`' => {
+                let quote = ch;
+                let (event, next, next_line) = db_scan_quote_unit(chars, i, line, quote, false);
+                match event {
+                    DbScan::Closed => {
+                        i = next;
+                        line = next_line;
+                    }
+                    DbScan::Defer => return (DbScan::Defer, i, line),
+                    DbScan::Report(mut report) => {
+                        report.construct_line = root_line;
+                        return (DbScan::Report(report), i, line);
+                    }
+                }
+                term = false;
+                at_word_start = false;
+            }
+            '$' if chars.get(i + 1) == Some(&'\'') => {
+                let (event, next, next_line) = db_scan_quote_unit(chars, i + 1, line, '\'', true);
+                match event {
+                    DbScan::Closed => {
+                        i = next;
+                        line = next_line;
+                    }
+                    DbScan::Defer => return (DbScan::Defer, i, line),
+                    DbScan::Report(report) => return (DbScan::Report(report), i, line),
+                }
+                term = false;
+                at_word_start = false;
+            }
+            '$' if chars.get(i + 1) == Some(&'[') => {
+                let (event, next, next_line) =
+                    db_scan_bracket_hunt(chars, i + 2, line, line, root_line);
+                return match event {
+                    DbScan::Closed => (DbScan::Closed, next, next_line),
+                    DbScan::Defer => (DbScan::Defer, i, line),
+                    DbScan::Report(report) => (DbScan::Report(report), i, line),
+                };
+            }
+            '$' if chars.get(i + 1) == Some(&'(') => {
+                if chars.get(i + 2) == Some(&'(') {
+                    // `$((` arithmetic command: its own scan owns any EOF
+                    // (`)' — a1); skip opaquely when it balances.
+                    match db_skip_dparen_span(chars, i + 2, line) {
+                        Some((next, next_line)) => {
+                            i = next;
+                            line = next_line;
+                            term = false;
+                            at_word_start = false;
+                            continue;
+                        }
+                        None => return (DbScan::Defer, i, line),
+                    }
+                }
+                let (event, next, next_line) = db_scan_comsub_body(chars, i + 2, line, root_line);
+                match event {
+                    DbScan::Closed => {
+                        i = next;
+                        line = next_line;
+                    }
+                    DbScan::Defer => return (DbScan::Defer, i, line),
+                    DbScan::Report(report) => return (DbScan::Report(report), i, line),
+                }
+                term = false;
+                at_word_start = false;
+            }
+            '$' if chars.get(i + 1) == Some(&'{') => {
+                let (event, next, next_line) = db_scan_dolbrace_body(chars, i + 2, line, root_line);
+                match event {
+                    DbScan::Closed => {
+                        i = next;
+                        line = next_line;
+                    }
+                    DbScan::Defer => return (DbScan::Defer, i, line),
+                    DbScan::Report(report) => return (DbScan::Report(report), i, line),
+                }
+                term = false;
+                at_word_start = false;
+            }
+            '(' => {
+                paren_depth += 1;
+                term = false;
+                at_word_start = true;
+                i += 1;
+            }
+            ')' if paren_depth > 0 => {
+                paren_depth -= 1;
+                term = paren_depth == 0;
+                at_word_start = true;
+                i += 1;
+            }
+            // A bare `)` (no open subshell) is a metacharacter, not word
+            // text: the next token starts after it.
+            ')' => {
+                term = false;
+                at_word_start = true;
+                i += 1;
+            }
+            '{' if term && paren_depth == 0 => {
+                depth += 1;
+                term = true;
+                at_word_start = true;
+                i += 1;
+            }
+            '}' if term && paren_depth == 0 => {
+                // parse.y:5407-5416: a word beginning with `}` in command
+                // position terminates the substitution; term==false
+                // covers mid-word `}` (`a}b`, `\"}`) as word text.
+                if depth > 1 {
+                    depth -= 1;
+                    term = true;
+                    at_word_start = true;
+                    i += 1;
+                    continue;
+                }
+                return (DbScan::Closed, i + 1, line);
+            }
+            ';' | '&' | '|' => {
+                // A separator is a token boundary at any depth, but it
+                // restores command position only at funsub level.
+                if paren_depth == 0 {
+                    term = true;
+                }
+                at_word_start = true;
+                i += 1;
+            }
+            ' ' | '\t' | '\r' => {
+                at_word_start = true;
+                i += 1;
+            }
+            '<' | '>' => {
+                at_word_start = true;
+                term = false;
+                i += 1;
+            }
+            _ => {
+                term = false;
+                at_word_start = false;
                 i += 1;
             }
         }

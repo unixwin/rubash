@@ -12,9 +12,12 @@
 //! name (root, daemon, bin, ...) in file order; `compgen -A user ro`
 //! prints root; a name present only in $USER never appears.
 
+#[cfg(unix)]
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::process::Command;
 
+#[cfg(unix)]
 fn rubash(script: &str) -> (String, String, Option<i32>) {
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("-c")

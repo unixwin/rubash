@@ -54,6 +54,16 @@ fn write_timestamps_of(executor: &Executor) -> bool {
     executor.get_env("HISTTIMEFORMAT").is_some()
 }
 
+/// variables.c:6168-6177 sv_histtimefmt: history_comment_char is armed
+/// by the first bind that leaves HISTTIMEFORMAT existing and is never
+/// disarmed afterwards — the sticky latch on ShellState, or the
+/// variable existing right now (its bind armed the latch at the latest
+/// by the per-command boundary, but a face running inside that very
+/// command — a prefix bind's own `history -r` — must see it too).
+fn comment_char_armed_of(executor: &Executor) -> bool {
+    executor.shell_state.history_comment_char_armed || write_timestamps_of(executor)
+}
+
 /// GNU's remember_on_history as the `history -s` pop gate in
 /// push_history sees it (builtins/history.def:435-439): the
 /// `set -o history` option, minus every parse unit GNU runs with
@@ -425,7 +435,13 @@ pub(in crate::executor) fn execute_history_session(
             if !operands.is_empty() {
                 let control = executor.get_env("HISTCONTROL").unwrap_or_default();
                 let ignore = executor.get_env("HISTIGNORE").unwrap_or_default();
-                let was_recorded = shell.record(&command, &control, &ignore, histsize);
+                let was_recorded = shell.record(
+                    &command,
+                    &control,
+                    &ignore,
+                    histsize,
+                    comment_char_armed_of(executor),
+                );
                 // push_history goes through check_add_history ->
                 // really_add_history (bashhist.c:961), which sets
                 // hist_last_line_added = 1 for the pushed entry, and
@@ -560,10 +576,20 @@ pub(in crate::executor) fn execute_history_session(
                 // (rubash#1049: GNU re-appends them at exit).
                 HistoryMode::Write => shell.write_file(&path, write_ts).map(|_| 0),
                 HistoryMode::Read => shell
-                    .read_file_with_arming(&path, histsize, write_ts)
+                    .read_file_with_arming(
+                        &path,
+                        histsize,
+                        write_ts,
+                        comment_char_armed_of(executor),
+                    )
                     .map(|_| 0),
                 HistoryMode::ReadNew => shell
-                    .read_new_file_with_arming(&path, histsize, write_ts)
+                    .read_new_file_with_arming(
+                        &path,
+                        histsize,
+                        write_ts,
+                        comment_char_armed_of(executor),
+                    )
                     .map(|_| 0),
                 _ => Ok(0),
             };

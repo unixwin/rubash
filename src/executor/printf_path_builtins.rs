@@ -67,6 +67,34 @@ impl Executor {
             &mut log.stderr_writer(),
             Some(&mut pass_boundary),
         )?;
+        // GNU variables.c:5820/6257-6266 sv_strict_posix via
+        // builtins/printf.def:112-113: the post-bind hook is keyed on
+        // the -v operand AS WRITTEN, so only a bare POSIXLY_CORRECT
+        // operand re-derives the mode; an element operand's text
+        // carries the subscript and matches no special variable
+        // (rubash#3661).
+        {
+            let mut index = 0;
+            while index < words.len() {
+                let word = &words[index];
+                let operand = if word == "-v" {
+                    index += 1;
+                    words.get(index).map(String::as_str)
+                } else if let Some(fused) = word.strip_prefix("-v") {
+                    (!fused.is_empty()).then_some(fused)
+                } else {
+                    None
+                };
+                if let Some(operand) = operand {
+                    let operand = crate::builtins::arrayref::take_arrayref_flag(operand).1;
+                    if operand == "POSIXLY_CORRECT" {
+                        self.sync_posix_mode_from_variable();
+                        break;
+                    }
+                }
+                index += 1;
+            }
+        }
         self.write_buffered_builtin_output_chunks(cmd, &log)?;
         // GNU builtins/printf.def printf_builtin returns
         // sh_chkwrite(format/operands success): a failed flush (a closed
@@ -453,13 +481,25 @@ impl Executor {
         // in the live shell for every redirect shape (`cd dir > f`, `>>f`,
         // `2>f`, ...), exactly as for the unredirected form. Every branch
         // must therefore funnel through the one sync point below.
+        let cwd_before = self.shell_state.cwd.clone();
         let status = self.execute_cd_redirect_bound(cmd)?;
         self.sync_cd_variables();
         // rubash#3198: warm the cwd inode anchor at the moment the
         // directory is entered, so a later unlink of the directory
         // cannot strand every spawn on a path that no longer resolves
         // (see stamp_spawn_cwd in external_inner.rs).
-        if status == 0 {
+        //
+        // rubash#3421: the gate is the MOVE, not the status — the
+        // #3384 union gate ("cwd 变即刷新") applied to pushd's
+        // wrapper but not here. A readonly-bind failure still leaves
+        // the chdir standing (cd.def bindpwd runs after the chdir),
+        // so a `cd` that moved under a failed bind must warm the
+        // anchor for the entered directory, or a later relative walk
+        // from the deleted cwd (e.g. `cd ../b`) strands on the dead
+        // spelling. A failed cd moves nothing, so the gate stays shut
+        // there; a no-op success (`cd .` in a live dir) keeps the
+        // already-warm anchor.
+        if self.shell_state.cwd != cwd_before {
             self.refresh_cwd_anchor();
         }
         Ok(status)

@@ -186,6 +186,19 @@ impl Executor {
         // the previous shell variable values (both the legacy env_vars value
         // and the typed shell_state.variables owner, so parameter expansion
         // does not keep seeing a leaked temporary value).
+        // variables.c:6168-6177 sv_histtimefmt: a temporary (prefix)
+        // bind of HISTTIMEFORMAT is still a bind — GNU arms
+        // history_comment_char while the variable exists and never
+        // disarms it, so the arming must latch NOW, before
+        // restore_temporary_assignments removes the variable and the
+        // per-command boundary in execute_command can no longer see
+        // that it ever existed (rubash#3535).
+        if assignments
+            .iter()
+            .any(|(name, _)| assignment_name_and_append(name).0 == "HISTTIMEFORMAT")
+        {
+            self.shell_state.history_comment_char_armed = true;
+        }
         self.tempenv_marks.push(self.tempenv_names.len());
         // rubash#3071: the bound-value frame for this apply, popped by
         // restore_temporary_assignments in lockstep with the mark. The
@@ -827,6 +840,28 @@ impl Executor {
             };
             self.shell_state.env_vars.remove(name);
             self.shell_state.variables.remove(name);
+            // rubash#2771: GNU's merge_temporary_env pops the tempvar
+            // before its bind_variable replay (variables.c:4662), so the
+            // rebind runs with no temporary cell in scope — the dynamic
+            // assign hook then fires on the kept value. A kept command's
+            // tempenv frame is still live here (keep means no restore
+            // popped its mark), so the name's registration would still
+            // shadow the dynamic cell: dynamic_bind_targets_plain_cell
+            // stands the hook down and the replay would land a second
+            // plain cell (`SECONDS=100 :` under posix read back a static
+            // 100). Retire the tempvar's frame registration — and the
+            // frame's pre-bind snapshot, which no restore will consume —
+            // exactly the pop GNU performs.
+            if let Some(mark) = self.tempenv_marks.last().copied() {
+                let mut index = self.tempenv_names.len();
+                while index > mark {
+                    index -= 1;
+                    if self.tempenv_names[index] == name {
+                        self.tempenv_names.remove(index);
+                    }
+                }
+            }
+            self.tempenv_previous.remove(name);
             self.apply_shell_assignment(name, value, None);
         }
     }
@@ -1459,6 +1494,15 @@ impl Executor {
         // re-bind handled in the tempenv restore path.
         if result && base == "PATH" {
             crate::builtins::hash::flush_command_hash_table(&mut self.shell_state.env_vars);
+        }
+        // GNU variables.c:5820 { "POSIXLY_CORRECT", sv_strict_posix }
+        // -> variables.c:6257-6266: every successful bind of the name
+        // (scalar, append, element or compound — this funnel carries
+        // them all, plus the read/for/select/getopts binds) re-derives
+        // posixly_correct from the variable's isset-ness and runs
+        // posix_initialize + set_shellopts (rubash#3661).
+        if result && base == "POSIXLY_CORRECT" {
+            self.sync_posix_mode_from_variable();
         }
         result
     }

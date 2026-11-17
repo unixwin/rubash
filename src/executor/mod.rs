@@ -5,11 +5,12 @@
 pub(crate) mod arithmetic;
 pub(crate) mod glob;
 pub(crate) mod path;
+pub(crate) mod strmatch;
 pub(crate) mod types;
 pub(crate) mod wait_status;
 use arithmetic::{
     arithmetic_division_by_zero_token, arithmetic_unbound_variable, eval_conditional_arith_value,
-    eval_conditional_arith_value_categorized, eval_conditional_arith_value_categorized_with_writes,
+    eval_conditional_arith_value_categorized_with_writes,
     eval_conditional_arith_value_categorized_with_writes_and_state,
     eval_conditional_arith_value_with_writes,
 };
@@ -102,7 +103,7 @@ mod init;
 pub(crate) use init::spawner_stamp_value;
 pub use init::{
     respawn_provenance_validated_from_process_env, FD_DELIVERY_AT_STAMPED_KEY, RESPAWNED_CHILD,
-    RESPAWN_SPAWNER_PID_KEY,
+    RESPAWN_PROOF_FD_KEY, RESPAWN_PROOF_KEY, RESPAWN_SPAWNER_PID_KEY,
 };
 pub mod profiler;
 // rubash#331: the binary crate renders its self-produced path values
@@ -256,6 +257,7 @@ pub(crate) use execution_misc::RandomGen;
 // own spawn faces (rubash#3148).
 use execution_misc::*;
 pub(crate) use external_inner::spawn_error_diagnostic;
+pub(crate) use external_inner::ChildFdSetup;
 // Shared with builtins::exec (rubash#3401 face 3): the simulated-exec
 // waits route through the executor's draining wait; the function lives
 // in external_inner, so it is re-exported here like spawn_error_diagnostic.
@@ -945,6 +947,18 @@ pub struct Executor {
     current_conditional_redirects: Option<Vec<crate::parser::Redirect>>,
     pending_scalar_assignment: bool,
     suppress_errexit: usize,
+    /// rubash#3605: GNU's `comsub_ignore_return` (execute_cmd.c:252)
+    /// counter — raised while expanding the words of a
+    /// CMD_IGNORE_RETURN-flagged simple command (execute_cmd.c:4616)
+    /// and a flagged `[[ ]]`'s operand words (execute_cmd.c:4012,
+    /// :4060, :4067), so a command substitution spawned inside an
+    /// inverted/exempt expansion stamps CMD_IGNORE_RETURN on every
+    /// command its parse_and_execute loop yields
+    /// (builtins/evalstring.c:496) — `! x=$(set -e; false; echo hi)`
+    /// prints hi. Rubash raises it wherever suppress_errexit covers
+    /// word expansion; the comsub boundary consumes it instead of
+    /// clearing the child's inherited suppression.
+    comsub_ignore_return: usize,
     /// rubash#1563: depth of GNU's CMD_IGNORE_RETURN clearing frame for
     /// eval/source (execute_cmd.c:5004-5016): when the builtin is
     /// dispatched under CMD_IGNORE_RETURN outside a subshell environment,
@@ -1200,6 +1214,20 @@ pub struct Executor {
     /// opted in (builtins::exec::enable_process_replacement) and the
     /// live context passes the dispatcher's gates.
     owns_process_image: bool,
+    /// rubash#3605: depth of in-process GNU-fork regions enclosing this
+    /// dispatch — pipeline elements (pipeline_exec.rs), in-process
+    /// `${THIS_SH}`/script children (external_finish.rs), and
+    /// shared-executor command-substitution interiors
+    /// (command_substitution.rs). While nonzero — or on a fork-copy
+    /// executor (`!owns_process_image`) or a flat `( )` layer
+    /// (`subshell_depth > 0`) — the ulimit builtin must not move the
+    /// real rlimits: a child's hard-limit drop is irreversible without
+    /// CAP_SYS_RESOURCE and would leak into the parent, where GNU's
+    /// real child takes it to the grave. ulimit_virtualized() is the
+    /// predicate; the virtualized set applies only the SOFT side to the
+    /// kernel (always restorable) and records the effective pair in
+    /// `__RUBASH_ULIMIT_*` env cells (builtins/ulimit.rs).
+    pub(crate) emulated_child_depth: std::cell::Cell<u32>,
     /// GNU execute_cmd.c:330 sourcenest — active `.`/source frames.
     source_nest_depth: usize,
     /// Child-death notifications that arrived while the SIGCHLD trap action
@@ -1218,6 +1246,14 @@ pub struct Executor {
     /// (print_pipeline JLIST_STANDARD), everything else is silent.
     /// (pid, signal, command text, foreground).
     pending_signal_notices: std::cell::RefCell<Vec<(u32, i32, String, bool)>>,
+    /// rubash#3637: pids a `wait` resolved through the already-completed
+    /// arm of wait_for_background_pid. Their signal-death notices were
+    /// queued at an earlier boundary, so execute_wait drains them for
+    /// exactly these pids (GNU jobs.c:3385 wait_for's
+    /// notify_and_cleanup(job) for the waited job); other jobs' notices
+    /// keep the boundary route. Cleared at each wait's entry, read at
+    /// its exit.
+    wait_notice_pids: Vec<u32>,
     /// Depth of `with_traps_suspended` scopes currently active. GNU has no
     /// notion of host housekeeping commands: when an embedding host runs
     /// internal commands through execute_ast (startup/shutdown hooks,
@@ -1735,6 +1771,15 @@ pub struct Executor {
     /// restricted shell must never create — GNU refuses the member inside
     /// its subshell before do_redirections, so nothing opens.
     pipeline_stage_restricted_refused: Cell<bool>,
+    /// rubash#3499: set by the stage wrapper's bad-substitution harvest:
+    /// a bad substitution in the element's words DISCARDs the element
+    /// (subst.c:10277-10288), and GNU runs expand_words before
+    /// do_redirections, so the element's redirects never apply — the
+    /// driver then skips `route_pipeline_stage_streams` for the stage,
+    /// because the routing walk would OPEN the `>file` target and
+    /// materialize the very file the discarded element must never
+    /// create. Same shape as `pipeline_stage_restricted_refused` above.
+    pipeline_stage_bad_substitution_discarded: Cell<bool>,
     /// Tracks the source of the last heredoc EOF warning emitted from
     /// command_substitution_heredoc_output_mut_typed, to avoid duplicate
     /// warnings when the same comsub is expanded through multiple paths
@@ -1999,12 +2044,14 @@ pub struct Executor {
     /// byte char (e.g. U+009C for byte 0x9C) is indistinguishable from
     /// a genuine char of the same code point in the folded literal,
     /// so the spelling cannot be re-derived at open time
-    /// (rubash#3218). Keyed by the folded literal; every later
-    /// literal outcome for the same string in the same command span
-    /// replaces the record — and a no-transport outcome clears it —
-    /// because the redirect walks expand and open in list order, so
-    /// an open must see its OWN redirect's verdict, never an earlier
-    /// same-spelling target's (rubash#3218 face 2). Cleared at each
+    /// (rubash#3218). Keyed by the folded literal; a later
+    /// transport-carrying outcome for the same string in the same
+    /// command span overwrites the record, but a no-transport outcome
+    /// does NOT remove it (note_redirect_target_transport returns
+    /// early) — so this map can hand one redirect another same-string
+    /// redirect's verdict, and every consumer that holds the node must
+    /// read `redirect_target_node_spellings` instead (rubash#3218 face
+    /// 2, rubash#3372). Cleared at each
     /// execute_command entry like redirect_target_memo. Only the
     /// literal arms of expand_redirect_operand_fields record it;
     /// glob matches, procsub carriers and heredoc delimiters never
@@ -2233,6 +2280,28 @@ pub struct Executor {
     /// around the stage call; never set for a stage whose own redirects
     /// claim fd 2, nor while an enclosing stderr capture is armed.
     pipeline_stage_stderr_live: bool,
+    /// rubash#2693: the just-finished stage's stdin feed ended on a
+    /// broken pipe — the consumer closed the inter-member pipe early.
+    /// In GNU the feed's bytes are the PREVIOUS element's own writes:
+    /// a producer whose consumer goes away dies by SIGPIPE
+    /// (execute_cmd.c:1670 reset_signal_handlers leaves it SIG_DFL)
+    /// and reports 141, never the completed status the emulation
+    /// recorded. The stage's writer thread sets the flag; the pipeline
+    /// driver consumes it to rewrite the preceding status. Set only by
+    /// a feed carrying an upstream stage's output (never a stage-0
+    /// heredoc/FUNCTION_STDIN payload — the flag lands on
+    /// `statuses[..]`, which stage 0's feed predates).
+    pipeline_stage_feed_sigpipe: Cell<bool>,
+    /// rubash#3091: the stage just executed was a member that died
+    /// without running (command lookup miss, exec classification, or
+    /// a failed spawn — GNU's forked child reporting shell_execve's
+    /// verdict and exiting 126/127). Its inter-member pipe read end
+    /// was closed before the upstream element wrote, so the stage
+    /// loop's producer-SIGPIPE verdict applies the dead-reader
+    /// branch: any produced payload dies on EPIPE unless the
+    /// producer was an in-process simple builtin whose write beat
+    /// the dead child's exit.
+    pipeline_stage_spawn_dead: Cell<bool>,
     /// niubash#144: outcome of the external stdio plan from the last
     /// `apply_external_redirects` (ordered-walk shared handles), consumed
     /// by the immediately following `spawn_external_process`. `Some(..)`

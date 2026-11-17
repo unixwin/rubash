@@ -121,6 +121,26 @@ src/executor/read_split.rs::\(\*byte as char\)\.to_string\(\)
 # passed to a predicate.
 src/executor/read_helpers.rs::StdinUnit::Char\(byte as char\)
 src/executor/shift_echo_builtins.rs::\+ 0x40\) as char
+# strmatch.rs (#3839): the five `as char` sites in the strmatch port are
+# the deliberate Latin-1 lift of GNU's single-byte compile (smatch.c:301-304
+# FOLD is TOLOWER over `unsigned char`; smatch.c:585-603 xstrmatch routes
+# here only when the input is single-byte or unconvertible). The lifted
+# chars flow into gmatch() with FNM_WIDE stripped (strmatch_bytes), where
+# every predicate is ASCII-only (`is_ascii_*`, `(c as u32) <= 0x7F`, i32
+# range compares) — a widened continuation byte can never satisfy one —
+# and the wide compile (FNM_WIDE, `to_lowercase`/`isw*`) only ever sees
+# real chars decoded by `from_utf8` in xstrmatch, never widened bytes.
+# :135/:136 lift pattern/string bytes into the matcher's char domain;
+# equality and ordering are preserved by the bijection, exactly GNU's
+# `unsigned char` domain. :158 folds only after `c.is_ascii_uppercase()`,
+# so (c as u8) + 32 is 0x61..=0x7A by construction. :284 compares a
+# POSIX_COLLSYMS table byte (all ASCII) for equality only. :285 returns a
+# POSIX_COLLSYMS code byte (all <= 0x7F) as a char.
+src/executor/strmatch.rs::let pat: Vec<char> = pattern\.iter\(\)\.map\(\|&b\| b as char\)\.collect\(\);
+src/executor/strmatch.rs::let s: Vec<char> = string\.iter\(\)\.map\(\|&b\| b as char\)\.collect\(\);
+src/executor/strmatch.rs::\(\(c as u8\) \+ 32\) as char
+src/executor/strmatch.rs::a as char == b
+src/executor/strmatch.rs::return Some\(code as char\);
 # windows_drive.rs: bare `D:` command rewritten to the `D:/` drive root
 # (niubash#481/#483); the same `bytes[0].is_ascii_alphabetic()` guard pins the
 # widened byte to ASCII, never a UTF-8 continuation byte.
