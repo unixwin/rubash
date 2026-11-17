@@ -355,3 +355,32 @@ fn question_tail_fatals_on_unset_target_naming_the_source() {
         );
     }
 }
+
+/// `${!?<op>}` — the first `?` is the indirect SOURCE ($?), so the error
+/// operator is the character after it (subst.c:9920 want_indir with
+/// subst.c:122 VALID_INDIR_PARAM). `$?` is `0`, which names `$0`: a
+/// set parameter, so both the bare and the colon form expand to the
+/// shell/script name. The operator family's `?` split used to take the
+/// SOURCE `?` for the operator and return an empty value.
+#[test]
+fn question_source_bang_question_expands_through_status() {
+    // `$0` under `-c` is the shell path, so compare the three forms
+    // against `$0` itself rather than against a literal name.
+    let out = run("true; echo \"$0|${!??v}|${!?:?v}|${!?#0}\"");
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let fields: Vec<&str> = stdout.trim_end().split('|').collect();
+    assert_eq!(
+        fields.len(),
+        4,
+        "got {stdout:?} stderr {:?}",
+        stderr_text(&out)
+    );
+    assert!(
+        fields
+            .iter()
+            .all(|field| *field == fields[0] && !field.is_empty()),
+        "every form must equal $0; got {fields:?} stderr {:?}",
+        stderr_text(&out)
+    );
+    assert_eq!(out.code, 0, "stderr {:?}", stderr_text(&out));
+}
