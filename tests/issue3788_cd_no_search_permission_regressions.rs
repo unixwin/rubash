@@ -352,18 +352,16 @@ fn issue3788_pushd_no_search_permission_refused() {
             &format!("pushd {operand} >/dev/null; echo \"rc=$?\"; dirs; echo \"PWD=$PWD\"\n"),
         );
         // pushd prints no dirs listing on failure: the first line is
-        // the rc, the second the unchanged stack (just the work dir).
+        // the rc, the second the unchanged stack (just the work dir,
+        // which dirs abbreviates to `~` because HOME is the work dir
+        // here — GNU-verified; pwd/$PWD stay absolute).
         let mut lines = stdout.lines();
         assert_eq!(
             lines.next(),
             Some("rc=1"),
             "{label}: stdout was: {stdout:?}"
         );
-        assert_eq!(
-            lines.next(),
-            Some(work.as_str()),
-            "{label}: stdout was: {stdout:?}"
-        );
+        assert_eq!(lines.next(), Some("~"), "{label}: stdout was: {stdout:?}");
         assert_eq!(
             lines.next(),
             Some(format!("PWD={work}").as_str()),
@@ -386,7 +384,7 @@ fn issue3788_pushd_no_search_permission_refused() {
     );
     let mut lines = stdout.lines();
     assert_eq!(lines.next(), Some("rc=1"), "stdout was: {stdout:?}");
-    assert_eq!(lines.next(), Some(work.as_str()), "stdout was: {stdout:?}");
+    assert_eq!(lines.next(), Some("~"), "stdout was: {stdout:?}");
     assert_eq!(code, Some(0), "script rc was: {code:?}");
     assert!(
         stderr.contains("Permission denied"),
@@ -544,7 +542,7 @@ fn issue3788_pushd_rotation_onto_unsearchable_entry_refused() {
     let (stdout, stderr, code) = run_script(
         &ctx,
         &tree,
-        "pushd d555 >/dev/null; pushd d111 >/dev/null; chmod 000 ../d555; pushd +1; echo \"rc=$?\"; pwd; echo \"PWD=$PWD\"; dirs\n",
+        "pushd d555 >/dev/null; pushd ../d111 >/dev/null; chmod 000 ../d555; pushd +1; echo \"rc=$?\"; pwd; echo \"PWD=$PWD\"; dirs\n",
     );
     let d111 = format!("{work}/d111");
     let mut lines = stdout.lines();
@@ -566,7 +564,7 @@ fn issue3788_pushd_rotation_onto_unsearchable_entry_refused() {
     let (stdout, stderr, code) = run_script(
         &ctx,
         &tree,
-        "pushd d555 >/dev/null; pushd d111 >/dev/null; chmod 000 ../d555; pushd; echo \"rc=$?\"; pwd; echo \"PWD=$PWD\"\n",
+        "chmod 555 d555; pushd d555 >/dev/null; pushd ../d111 >/dev/null; chmod 000 ../d555; pushd; echo \"rc=$?\"; pwd; echo \"PWD=$PWD\"\n",
     );
     let mut lines = stdout.lines();
     assert_eq!(lines.next(), Some("rc=1"), "stdout was: {stdout:?}");
