@@ -1973,7 +1973,6 @@ impl Executor {
                 // as the stage-loop merge below). rubash#3403: only while
                 // fd 1 is still the object fd 2 was dup'd from.
                 if self.ambient_stderr_merges_into_pipeline_output() {
-                    input = prefix_output;
                     ambient_stderr.push_str(&prefix_stderr);
                 } else if !prefix_stderr.is_empty() {
                     // rubash#3308: prefix members' stderr is the shell's
@@ -1985,9 +1984,15 @@ impl Executor {
                             &prefix_stderr,
                         ),
                     );
-                } else {
-                    input = prefix_output;
                 }
+                // rubash#3566: the prefix's stdout payload feeds the
+                // remaining stages regardless of whether its stderr
+                // was produced — GNU execute_pipeline gives each
+                // element an independent fd-1 pipe while fd 2 stays
+                // the shell's stderr (execute_cmd.c:2620; the pipe
+                // itself at :2646, do_piping below). Relaying stderr
+                // must not consume the stdout half.
+                input = prefix_output;
                 statuses = prefix_statuses;
                 first_stage = prefix_len;
             }
@@ -2994,7 +2999,8 @@ impl Executor {
         // would break the profiler's stack discipline — the members' wall
         // time overlaps, which a sequential frame stack cannot represent.
         let _profiler_external_pipeline = super::profiler::enter_external("pipeline");
-        let Some(mut results) = self.spawn_wait_concurrent_external_stages(commands, specs, true)?
+        let Some(mut results) =
+            self.spawn_wait_concurrent_external_stages(commands, specs, true)?
         else {
             return Ok(None);
         };
@@ -4086,7 +4092,9 @@ impl Executor {
             OutputTarget::SharedFile(file) => {
                 let handle = crate::fd::duplicate_handle_inheritable(file.handle)
                     .map_err(ExecuteError::IoError)?;
-                process.stderr(crate::executor::pipeline_stages::stdio_from_fd_handle(handle));
+                process.stderr(crate::executor::pipeline_stages::stdio_from_fd_handle(
+                    handle,
+                ));
             }
             OutputTarget::Stdout => {
                 // `2>&1` on an intermediate member: both streams must land
@@ -4095,7 +4103,9 @@ impl Executor {
                 if let Some(raw) = outgoing_stdout {
                     let handle = crate::fd::duplicate_handle_inheritable(raw)
                         .map_err(ExecuteError::IoError)?;
-                    process.stderr(crate::executor::pipeline_stages::stdio_from_fd_handle(handle));
+                    process.stderr(crate::executor::pipeline_stages::stdio_from_fd_handle(
+                        handle,
+                    ));
                 }
             }
             OutputTarget::Stderr
