@@ -480,12 +480,12 @@ impl Executor {
             if ifs_set_empty && !quoted {
                 return Some(values);
             }
-            let separator = if ifs_set_empty {
-                " ".to_string()
-            } else {
-                self.ifs_first_char_separator()
-            };
-            return Some(vec![values.join(&separator)]);
+            // GNU string_list_pos_params (subst.c:3030-3057): a modified `*`
+            // form joins on ifs_firstchar — the empty string under a set-
+            // empty IFS — even quoted; the Posix-888 dollar_at ' ' fallback
+            // belongs to the UNQUOTED expansion only (handled by the early
+            // return above).
+            return Some(vec![values.join(&self.ifs_first_char_separator())]);
         }
         if quoted && var_name == "*" {
             if transform == ParameterTransform::Assignment {
@@ -672,12 +672,18 @@ impl Executor {
             .unwrap_or_default()
     }
 
+    /// Returns the expanded fields plus a `fields_final` flag: the raw-word
+    /// segment scan resolves quote state that the cooked word can lose
+    /// (`''"${@}"` cooks to a bare `${@}`), and its expander already ran the
+    /// GNU field split, so its results must not be re-split by the caller's
+    /// cooked-word unquoted-list predicates. The cooked-word fallback
+    /// returns unsplit values and reports `fields_final == false`.
     pub(in crate::executor) fn quoted_positional_at_word_values_with_raw(
         &mut self,
         word: &str,
         raw: Option<&str>,
         kind: Option<&TokenKind>,
-    ) -> Option<Vec<String>> {
+    ) -> Option<(Vec<String>, bool)> {
         // The raw-word scan is self-guarding: it returns None unless the raw
         // word has a top-level quoted "$@"/"${@}" segment, so whole-word
         // `${...}` forms (including `${@:off:len}`) fall through to the
@@ -697,7 +703,6 @@ impl Executor {
             let mut alternate_fields: Vec<Vec<String>> = Vec::new();
             for segment in &segments {
                 if let QuotedPositionalAtSegment::BracedAlternate(inner, _) = segment {
-                    let inner = inner.clone();
                     let fields = match self.embedded_braced_alternate_fields(&inner) {
                         Some(fields) => fields,
                         // A body the parts-parser declines still expands as
@@ -745,10 +750,50 @@ impl Executor {
                     |literal| self.expand_embedded_parameters(literal),
                 )
             };
-            return Some(values);
+            return Some((values, true));
         }
 
         self.quoted_positional_at_word_values(word, kind)
+            .map(|values| (values, false))
+    }
+
+    /// Whether `raw` carries a top-level QUOTED word-list source (`"$@"`,
+    /// `"${@}"`, `"${name[@]}"`, `"${name[*]}"`, quoted slices / modified
+    /// forms). Cooking strips the quote bytes — `''"${a[@]}"` reaches the
+    /// argv path as a bare `${a[@]}` — so the cooked word cannot tell a
+    /// quoted at-source from an unquoted one; the raw segment scan already
+    /// resolves that verdict (each list segment carries `quoted`).
+    pub(in crate::executor) fn raw_word_has_quoted_at_list_source(
+        &self,
+        raw: Option<&str>,
+    ) -> bool {
+        let Some(raw) = raw else {
+            return false;
+        };
+        // A quoted at-source requires a `"` byte (`$"..."` included);
+        // `'${a[@]}'` is literal text, never an expansion.
+        if !raw.contains('"') {
+            return false;
+        }
+        let Some(segments) =
+            quoted_positional_at_segments(raw, &self.shell_state.env_vars, &|name| {
+                self.nameref_target_name(name)
+            })
+        else {
+            return false;
+        };
+        segments.iter().any(|segment| {
+            matches!(
+                segment,
+                QuotedPositionalAtSegment::PositionalAt(true)
+                    | QuotedPositionalAtSegment::ArrayAt(_, true)
+                    | QuotedPositionalAtSegment::ArrayAtSlice(_, true)
+                    | QuotedPositionalAtSegment::PositionalAtSlice(_, true)
+                    | QuotedPositionalAtSegment::AtModified(_, true)
+                    | QuotedPositionalAtSegment::BracedAlternate(_, true)
+                    | QuotedPositionalAtSegment::ArrayStar(_, true)
+            )
+        })
     }
 
     pub(in crate::executor) fn join_array_parameter_values(
@@ -1725,7 +1770,8 @@ fn quoted_positional_at_segments(
                 if body.first() == Some(&'$')
                     && body.get(1) == Some(&'{')
                     && body.len() > 6
-                    && body[body.len() - 4..] == ['[', '@', ']', '}']
+                    && (body[body.len() - 4..] == ['[', '@', ']', '}']
+                        || body[body.len() - 4..] == ['[', '*', ']', '}'])
                 {
                     let array_name: String = body[2..body.len() - 4].iter().collect();
                     if is_shell_name(&array_name) {
@@ -1734,7 +1780,11 @@ fn quoted_positional_at_segments(
                             &chars[literal_start..index],
                             false,
                         )?;
-                        segments.push(QuotedPositionalAtSegment::ArrayAt(array_name, true));
+                        segments.push(if body[body.len() - 3] == '*' {
+                            QuotedPositionalAtSegment::ArrayStar(array_name, true)
+                        } else {
+                            QuotedPositionalAtSegment::ArrayAt(array_name, true)
+                        });
 
                         saw_positional_at = true;
                         index = end + 1;
@@ -1844,7 +1894,8 @@ fn quoted_positional_at_segments(
                 if body.first() == Some(&'$')
                     && body.get(1) == Some(&'{')
                     && body.len() > 6
-                    && body[body.len() - 4..] == ['[', '@', ']', '}']
+                    && (body[body.len() - 4..] == ['[', '@', ']', '}']
+                        || body[body.len() - 4..] == ['[', '*', ']', '}'])
                 {
                     let array_name: String = body[2..body.len() - 4].iter().collect();
                     if is_shell_name(&array_name) {
@@ -1853,7 +1904,11 @@ fn quoted_positional_at_segments(
                             &chars[literal_start..index],
                             false,
                         )?;
-                        segments.push(QuotedPositionalAtSegment::ArrayAt(array_name, true));
+                        segments.push(if body[body.len() - 3] == '*' {
+                            QuotedPositionalAtSegment::ArrayStar(array_name, true)
+                        } else {
+                            QuotedPositionalAtSegment::ArrayAt(array_name, true)
+                        });
                         saw_positional_at = true;
                         index = end + 1;
                         literal_start = index;
@@ -1940,7 +1995,10 @@ fn quoted_positional_at_segments(
                                 continue;
                             }
                         }
-                        if inner.len() > 3 && inner[inner.len() - 3..] == ['[', '@', ']'] {
+                        if inner.len() > 3
+                            && (inner[inner.len() - 3..] == ['[', '@', ']']
+                                || inner[inner.len() - 3..] == ['[', '*', ']'])
+                        {
                             let array_name: String = inner[..inner.len() - 3].iter().collect();
                             if is_shell_name(&array_name) {
                                 push_quoted_positional_literal_segment(
@@ -1948,8 +2006,11 @@ fn quoted_positional_at_segments(
                                     &chars[literal_start..index],
                                     false,
                                 )?;
-                                segments
-                                    .push(QuotedPositionalAtSegment::ArrayAt(array_name, false));
+                                segments.push(if inner[inner.len() - 2] == '*' {
+                                    QuotedPositionalAtSegment::ArrayStar(array_name, false)
+                                } else {
+                                    QuotedPositionalAtSegment::ArrayAt(array_name, false)
+                                });
                                 saw_positional_at = true;
                                 index = raw[..=close_byte].chars().count();
                                 literal_start = index;
@@ -2138,11 +2199,18 @@ fn quoted_body_positional_at_segments(
                             continue;
                         }
                     }
-                    if token.len() > 3 && token[token.len() - 3..] == ['[', '@', ']'] {
+                    if token.len() > 3
+                        && (token[token.len() - 3..] == ['[', '@', ']']
+                            || token[token.len() - 3..] == ['[', '*', ']'])
+                    {
                         let name: String = token[..token.len() - 3].iter().collect();
                         if is_shell_name(&name) {
                             push_body_piece(&mut segments, &body[piece_start..index], true)?;
-                            segments.push(QuotedPositionalAtSegment::ArrayAt(name, true));
+                            segments.push(if token[token.len() - 2] == '*' {
+                                QuotedPositionalAtSegment::ArrayStar(name, true)
+                            } else {
+                                QuotedPositionalAtSegment::ArrayAt(name, true)
+                            });
 
                             saw_positional_at = true;
                             index += 2 + close + 1;

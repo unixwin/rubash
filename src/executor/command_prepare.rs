@@ -2741,6 +2741,24 @@ impl Executor {
                 }
             }
             if let Some(values) = self.array_at_word_values(word) {
+                // `''"${a[@]}"` cooks to a bare `${a[@]}`: the quoted
+                // at-source lost its quote bytes, so the unquoted join+split
+                // below would drop the quoted-null anchor and split quoted
+                // elements (GNU subst.c:12026-12035 had_quoted_null,
+                // 12098-12160 deferred splitting). A quoted at-source's
+                // values are already final fields — `[@]` keeps one word
+                // per element, `[*]` joins them with IFS[0]
+                // (string_list_dollar_star, subst.c:2902-2930).
+                if self.raw_word_has_quoted_at_list_source(raw) {
+                    let values = if word.contains("[*]") {
+                        vec![values.join(&self.ifs_first_char_separator())]
+                    } else {
+                        values
+                    };
+                    // rubash#3649: commit deferred substring-offset writes.
+                    self.apply_pending_subscript_writes();
+                    return values;
+                }
                 if word_is_unquoted_array_list_expansion(word) {
                     // rubash#3649: commit deferred substring-offset writes.
                     self.apply_pending_subscript_writes();
@@ -2822,7 +2840,7 @@ impl Executor {
                 return values;
             }
         }
-        if let Some(values) = if declare_assignment_word {
+        if let Some((values, fields_final)) = if declare_assignment_word {
             None
         } else {
             self.quoted_positional_at_word_values_with_raw(word, raw, cmd.word_kinds.get(index))
@@ -2838,8 +2856,14 @@ impl Executor {
                 self.apply_pending_subscript_writes();
                 return vec![String::new()];
             }
-            if self.word_is_unquoted_positional_modified_list_expansion(word)
-                || self.word_is_unquoted_positional_list_expansion(word)
+            // The cooked word cannot carry quote state the raw scan already
+            // resolved (`''"${@}"` cooks to a bare `${@}`), so the
+            // unquoted-list field split only applies to the cooked-word
+            // fallback's unsplit values — the segment expander ran GNU's
+            // split itself (subst.c:12098-12160 deferred splitting).
+            if !fields_final
+                && (self.word_is_unquoted_positional_modified_list_expansion(word)
+                    || self.word_is_unquoted_positional_list_expansion(word))
             {
                 // rubash#3649: commit deferred substring-offset writes.
                 self.apply_pending_subscript_writes();
@@ -3938,7 +3962,7 @@ impl Executor {
         } else {
             format!("\"{alternate}\"")
         };
-        let values =
+        let (values, _fields_final) =
             self.quoted_positional_at_word_values_with_raw(alternate, Some(&synthetic_raw), None)?;
         // GNU subst.c:12026-12035: this word is \x1d-marked (fully
         // double-quoted), so a zero-field alternate still yields one empty

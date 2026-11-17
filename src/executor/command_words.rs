@@ -443,7 +443,9 @@ impl Executor {
                 return Ok(values);
             }
         }
-        if let Some(values) = self.quoted_positional_at_word_values_with_raw(word, raw, None) {
+        if let Some((values, _fields_final)) =
+            self.quoted_positional_at_word_values_with_raw(word, raw, None)
+        {
             // The segment expander is shared with the argv path, where
             // pathname expansion runs as a later stage; the for-list path
             // returns final values, so a whole-word UNQUOTED ${a[@]}/${a[*]}
