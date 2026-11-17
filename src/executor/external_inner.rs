@@ -3841,10 +3841,31 @@ impl Executor {
             // probe_input_redirect_readwrite's NullDevice fall-through
             // to the raw mapped open), so dropping the binding here
             // only manufactured EBADF in the child.
-            if redirect_target_fd(&target).is_some()
-                || is_closed_redirect_target(&target)
-                || target.starts_with("<(")
-            {
+            // rubash#3560: a numbered `N>&-` / `N<&-` revokes the
+            // slot for THIS child — GNU services it with
+            // r_close_this inside the ordered do_redirections walk
+            // (redir.c:237; the close itself at redir.c:1239
+            // close_buffered_fd), so the ambient stamps the pass
+            // above already wrote and any earlier in-list delivery
+            // for the slot must be withdrawn exactly like a {var}
+            // pending close. The table step snapshots into
+            // fd_var_close_restore, so undo_child_fd_var_redirects
+            // replays the parent's binding at command end — the
+            // close is child-scoped, never a parent `exec N>&-`.
+            if is_closed_redirect_target(&target) {
+                apply_pending_close_at(
+                    self,
+                    &mut process,
+                    &mut command_fd_pins,
+                    &mut walk_opened,
+                    &mut numbered_dup_bindings,
+                    &mut fd_carriers,
+                    &mut dead_carriers,
+                    fd,
+                );
+                continue;
+            }
+            if redirect_target_fd(&target).is_some() || target.starts_with("<(") {
                 continue;
             }
             let mut write = !matches!(
