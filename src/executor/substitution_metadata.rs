@@ -1178,6 +1178,10 @@ pub(in crate::executor) fn scan_substitution_spans(raw: &str) -> Vec<Substitutio
             // never reaches token recognition, so a `)` inside it does not
             // close the span (issue #513).
             let mut inner_token_boundary = true;
+            // rubash#3605: paren depth of a `$(` nested inside the case
+            // context (`$(case $(w) in e) ...`) — arm-for-arm with the
+            // parser extractor (nested_case_subst).
+            let mut inner_nested_case_subst = 0usize;
             while cursor < chars.len() {
                 let (_, inner) = chars[cursor];
                 if inner == '\\' && !inner_single {
@@ -1269,6 +1273,32 @@ pub(in crate::executor) fn scan_substitution_spans(raw: &str) -> Vec<Substitutio
                         && chars.get(cursor + 1).is_some_and(|(_, next)| *next == '(')
                     {
                         depth += 1;
+                        if inner_case_depth > 0 {
+                            inner_nested_case_subst += 1;
+                        }
+                        // rubash#3605: the `(` of `$(` is a token boundary
+                        // for the case word machine (a reserved word may
+                        // follow, parse.y:4451 parse_comsub reads the body
+                        // as fresh input). Skipping it left word_boundary
+                        // false, so `$(case` never armed the tracker and the
+                        // pattern `)` closed this span one `)` early
+                        // (`$(echo $(case w in e) x;; esac))`).
+                        crate::executor::embedded_mutations::update_command_substitution_case_depth_region(
+                            '(',
+                            inner_single,
+                            inner_double,
+                            &mut inner_word,
+                            &mut inner_case_depth,
+                            &mut inner_word_boundary,
+                            &mut inner_current_word_boundary,
+                            &raw[chars[cursor].0 + inner.len_utf8() + '('.len_utf8()..],
+                            &mut inner_case_in_stage,
+                            &mut inner_case_pattern_region,
+                            inner_prev_sig,
+                        );
+                        if crate::lexer::esac_prev_token_char('(') {
+                            inner_prev_sig = Some('(');
+                        }
                         cursor += 2;
                         inner_token_boundary = false;
                         continue;
@@ -1283,11 +1313,25 @@ pub(in crate::executor) fn scan_substitution_spans(raw: &str) -> Vec<Substitutio
                     // first inner `)` and the fragment expander ran
                     // `printf "%b" @(hugo` as the body (printf.tests line
                     // 359 red gate).
-                    if !inner_single && !inner_double && inner == '(' && inner_case_depth == 0 {
+                    if !inner_single
+                        && !inner_double
+                        && inner == '('
+                        && (inner_case_depth == 0 || inner_nested_case_subst > 0)
+                    {
                         depth += 1;
+                        if inner_nested_case_subst > 0 {
+                            inner_nested_case_subst += 1;
+                        }
                     }
-                    if !inner_single && !inner_double && inner == ')' && inner_case_depth == 0 {
+                    if !inner_single
+                        && !inner_double
+                        && inner == ')'
+                        && (inner_case_depth == 0 || inner_nested_case_subst > 0)
+                    {
                         depth = depth.saturating_sub(1);
+                        if inner_nested_case_subst > 0 {
+                            inner_nested_case_subst -= 1;
+                        }
                         if depth == 0 {
                             spans.push(SubstitutionSpan {
                                 start,

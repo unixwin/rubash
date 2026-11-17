@@ -177,7 +177,27 @@ impl Executor {
             #[cfg(windows)]
             "tput" | "/bin/tput" | "/usr/bin/tput" => self.external_tput(cmd),
             _ => Ok(false),
-        }?;
+        };
+        // GNU: every arm above stands in for a forked disk child
+        // (execute_cmd.c:5522 execute_disk_command), so an output write
+        // that meets a pipe with no readers is the child's SIGPIPE
+        // death — the forked child resets SIGPIPE to SIG_DFL
+        // (execute_cmd.c:1670 -> trap.c:1480 reset_signal_handlers) and
+        // dies silently with status 141, the wait status the parent
+        // records. It is NOT the main shell's write failure — only a
+        // shell's own write stays SIG_IGN and reports `Broken pipe'
+        // with status 1 (rubash#440) — so the emulation converts the
+        // EPIPE-class error into the child's verdict: status 141, no
+        // diagnostic, the list continues (rubash#3475 platform debt).
+        let handled = match handled {
+            Err(ExecuteError::IoError(error))
+                if super::shell_options::is_broken_pipe_error(&error) =>
+            {
+                self.exit_code = 141;
+                true
+            }
+            other => other?,
+        };
         // rubash#2518: only an ANSWERED invocation may record — the
         // emulation stood in for the PATH binary the way GNU's single
         // search_for_command would have resolved it. A decline (Ok(false))
@@ -1658,7 +1678,7 @@ impl Executor {
                     status = 1;
                     let _ = writeln!(
                         stderr,
-                        "cp: cannot create '{}': {}",
+                        "cp: cannot create regular file '{}': {}",
                         target_node.display_path().display(),
                         crate::posix_errors::message(&error)
                     );
@@ -1774,7 +1794,7 @@ impl Executor {
                                 Err(error) => {
                                     let _ = writeln!(
                                         stderr,
-                                        "cp: cannot create '{}': {}",
+                                        "cp: cannot create regular file '{}': {}",
                                         target.display_path().display(),
                                         crate::posix_errors::message(&error)
                                     );
@@ -1890,9 +1910,18 @@ impl Executor {
                         }
                     }
                     Err(error) => {
+                        // GNU coreutils copy.c copy_internal names the
+                        // kind it failed to create: `cannot create
+                        // regular file` for plain targets, `cannot
+                        // create directory` for the tree branch.
+                        let kind = if source.is_dir() {
+                            "directory"
+                        } else {
+                            "regular file"
+                        };
                         let _ = writeln!(
                             stderr,
-                            "cp: cannot create '{}': {}",
+                            "cp: cannot create {kind} '{}': {}",
                             target.display_path().display(),
                             crate::posix_errors::message(&error)
                         );
