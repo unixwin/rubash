@@ -634,7 +634,12 @@ fn resolve_printf_indexed_subscript(
         return None;
     }
 
-    let raw_index = crate::executor::arithmetic::eval_conditional_arith_value(subscript, env_vars)?;
+    // GNU arrayfunc.c:1373-1377 array_expand_index clears
+    // this_command_name around evalexp (rubash#3295).
+    let raw_index = {
+        let _arith_label = crate::executor::arithmetic::arith_eval_label_scope(None);
+        crate::executor::arithmetic::eval_conditional_arith_value(subscript, env_vars)?
+    };
     if raw_index >= 0 {
         return usize::try_from(raw_index).ok();
     }

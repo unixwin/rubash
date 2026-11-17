@@ -21,8 +21,16 @@ use std::collections::HashMap;
 #[derive(Clone, Debug)]
 pub(crate) enum ArithEvalEvent {
     /// A non-fatal diagnostic produced during evaluation
-    /// (`` `a[]': not a valid identifier ``, `a[]: bad array subscript`).
-    Diag(ArithEvalDiag),
+    /// (`` `a[]': not a valid identifier ``, `a[]: bad array subscript`),
+    /// stamped with the `this_command_name` label in force at its
+    /// production point (GNU builtin_error_prolog, builtins/common.c:85-97):
+    /// `((`/`let`/`[[`/varname at entry boundaries, NULL inside the
+    /// arithsub (subst.c:10873-10878) and array_expand_index
+    /// (arrayfunc.c:1373-1377) windows (rubash#3295).
+    Diag {
+        diag: ArithEvalDiag,
+        label: Option<String>,
+    },
     /// A locale-family scalar bind: (written name, stored value,
     /// LC_ALL value at bind time, LC_ALL array mark at bind time,
     /// LC_ALL assoc mark at bind time). GNU expr.c:352 runs the
@@ -69,6 +77,18 @@ thread_local! {
     /// evaluation boundary drains it once, in order.
     static ARITH_EVAL_EVENTS: std::cell::RefCell<Vec<ArithEvalEvent>> =
         const { std::cell::RefCell::new(Vec::new()) };
+
+    /// GNU `this_command_name` as seen by arithmetic diagnostics
+    /// (execute_cmd.c:3903/3931 `((`, :3204/:3231 arith-for, :4164
+    /// `[[`, the varname windows in subst.c parameter expansion, and
+    /// the NULL windows at subst.c:10873-10878 arithsub and
+    /// arrayfunc.c:1373-1377 array_expand_index). Read when a
+    /// diagnostic is produced so each event carries the label that
+    /// was in force at that moment — an expansion-time diagnostic
+    /// inside an outer `(( ))` must not inherit the entry label
+    /// (rubash#3295).
+    static ARITH_EVAL_LABEL: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
 
     /// First-knife arithmetic parse cache (rubash#156 follow-up): one
     /// thread-local entry holding at most one CmpLT (`i<N`), one PostInc
@@ -150,9 +170,33 @@ pub(in crate::executor) fn clear_arith_eval_events() {
 }
 
 /// Record one non-fatal diagnostic at its production point, in
-/// evaluation order (rubash#3078).
+/// evaluation order (rubash#3078), stamped with the
+/// `this_command_name` label currently in force (rubash#3295).
 pub(super) fn record_arith_eval_diag(diag: ArithEvalDiag) {
-    ARITH_EVAL_EVENTS.with(|slot| slot.borrow_mut().push(ArithEvalEvent::Diag(diag)));
+    let label = ARITH_EVAL_LABEL.with(|slot| slot.borrow().clone());
+    ARITH_EVAL_EVENTS.with(|slot| {
+        slot.borrow_mut().push(ArithEvalEvent::Diag { diag, label });
+    });
+}
+
+/// Save/restore guard for the arithmetic diagnostic label — the Rust
+/// mirror of GNU's `savecmd`/`this_command_name` pairs (subst.c:10873-10878
+/// arithsub, arrayfunc.c:1373-1377 array_expand_index). `None` installs
+/// the NULL window where GNU clears this_command_name around a nested
+/// evaluation.
+pub(crate) struct ArithEvalLabelGuard(Option<String>);
+
+impl Drop for ArithEvalLabelGuard {
+    fn drop(&mut self) {
+        ARITH_EVAL_LABEL.with(|slot| *slot.borrow_mut() = self.0.take());
+    }
+}
+
+/// Install `label` as the arithmetic diagnostic label for the enclosed
+/// scope, restoring the previous one on exit.
+pub(crate) fn arith_eval_label_scope(label: Option<String>) -> ArithEvalLabelGuard {
+    let saved = ARITH_EVAL_LABEL.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), label));
+    ArithEvalLabelGuard(saved)
 }
 
 /// Record a readonly bind failure at its bind point, in evaluation
@@ -934,6 +978,13 @@ impl Executor {
         let _ = take_arith_eval_error();
         clear_arith_eval_events();
         clear_arith_subscript_unbound();
+        // GNU execute_cmd.c:3903/3931 (execute_arith_command),
+        // :3204/:3231 (arith-for) and let.def's evalexp all evaluate
+        // under this_command_name = the entry label for the WHOLE
+        // entry — expansion phase included; the nested arithsub /
+        // array_expand_index windows clear it themselves at their own
+        // call sites (rubash#3295).
+        let _arith_label = arith_eval_label_scope(label.map(str::to_string));
         // Stale nested-subscript failure marker (lvalue.rs records the
         // subscript text so evalerror reports it, GNU array_expand_index
         // style); each new evaluation starts clean.
@@ -1213,8 +1264,10 @@ impl Executor {
         // they surface even when the expression succeeds
         // (`(( a[]=24 ))` -> status 0). One ordered drain of the
         // event log (diagnostics, locale warnings, the readonly
-        // line) reproduces that order (rubash#3078).
-        self.drain_arith_eval_events(label);
+        // line) reproduces that order (rubash#3078); each diagnostic
+        // renders the label stamped at its production point
+        // (rubash#3295).
+        self.drain_arith_eval_events();
 
         // Sync any variable changes from env_vars to shell_state.variables
         // so that subsequent variable expansions see the updated values.
@@ -1231,10 +1284,13 @@ impl Executor {
     }
 
     /// Drain the evaluation-order event log once, rendering every
-    /// event at its recorded position (rubash#3078). `label` is
-    /// this_command_name (`((`, `let`, `[[`) or None — GNU's
-    /// subscript/bind helpers run with this_command_name NULL inside
-    /// array_expand_index (arrayfunc.c:1374-1378), so
+    /// event at its recorded position (rubash#3078). Each diagnostic
+    /// carries the `this_command_name` label stamped at its
+    /// production point (rubash#3295): entry labels (`((`, `let`,
+    /// `[[`, varname) at entry boundaries, NULL inside the arithsub
+    /// (subst.c:10873-10878) and array_expand_index
+    /// (arrayfunc.c:1373-1377) windows — GNU's subscript/bind
+    /// helpers run with this_command_name NULL there, so
     /// expansion-context diagnostics carry no command label.
     ///
     /// This replaces the former three-stage boundary (readonly
@@ -1242,12 +1298,12 @@ impl Executor {
     /// inside the write sync): GNU emits all three classes at their
     /// evaluation points, so only a single ordered drain reproduces
     /// interleavings such as diag -> warning -> diag.
-    pub(in crate::executor) fn drain_arith_eval_events(&mut self, label: Option<&str>) {
+    pub(in crate::executor) fn drain_arith_eval_events(&mut self) {
         let mut printed = false;
         for event in take_arith_eval_events() {
             match event {
-                ArithEvalEvent::Diag(diag) => {
-                    self.print_arith_diag(&diag, label);
+                ArithEvalEvent::Diag { diag, label } => {
+                    self.print_arith_diag(&diag, label.as_deref());
                     printed = true;
                 }
                 ArithEvalEvent::LocaleBind(name, value, lc_all, lc_all_array, lc_all_assoc) => {
@@ -1365,8 +1421,8 @@ impl Executor {
     /// Legacy name for the ordered drain, kept for the `[[ ]]`
     /// boundary in conditional.rs, whose four call sites drain after
     /// each operand evaluation and then sync writes.
-    pub(in crate::executor) fn flush_arith_diags(&mut self, label: Option<&str>) {
-        self.drain_arith_eval_events(label);
+    pub(in crate::executor) fn flush_arith_diags(&mut self) {
+        self.drain_arith_eval_events();
     }
 
     /// GNU arrayfunc.c:1353-1391 `array_expand_index` -> subst.c:3981
@@ -1515,20 +1571,27 @@ impl Executor {
         self.reconcile_pipestatus_mirror();
         ARITH_WRITES.with(|log| log.borrow_mut().clear());
         let dynamic_values = self.arith_dynamic_context();
-        let (value, category) = eval_mutable_arith_value_with_random_flags(
-            &expression,
-            &mut self.shell_state.env_vars,
-            Some(&self.shell_state.random_state),
-            Some(&dynamic_values),
-            true,
-            Some(&self.shell_state.variables),
-        );
+        // GNU arrayfunc.c:1373-1377 array_expand_index clears
+        // this_command_name around evalexp — diagnostics this
+        // evaluation produces carry no command label even inside an
+        // enclosing `(( ))` (rubash#3295).
+        let (value, category) = {
+            let _arith_label = arith_eval_label_scope(None);
+            eval_mutable_arith_value_with_random_flags(
+                &expression,
+                &mut self.shell_state.env_vars,
+                Some(&self.shell_state.random_state),
+                Some(&dynamic_values),
+                true,
+                Some(&self.shell_state.variables),
+            )
+        };
         self.shell_state
             .arithmetic_last_error_category
             .set(category);
         self.report_arithmetic_unbound_variable_error(category);
         self.report_arithmetic_noassign_error();
-        self.drain_arith_eval_events(None);
+        self.drain_arith_eval_events();
         sync_arith_writes_to_shell_state(self);
         if let Some(key) = memo_key {
             crate::executor::expand_braced_indices::sub_idx_store(
@@ -1699,6 +1762,28 @@ impl Executor {
     /// before evaluation (`$(( "1" + 1 ))` is `2`), while the command
     /// context (`for (( ... ))` headers) keeps them and rejects them.
     pub(crate) fn eval_arithmetic_expansion_value(&mut self, expression: &str) -> Option<i128> {
+        self.eval_arithmetic_expansion_value_window(expression, true)
+    }
+
+    /// Same `$(( ... ))` pipeline, but the evalexp inherits the caller's
+    /// diagnostic label instead of installing arithsub's NULL window —
+    /// for callers whose GNU evaluation does NOT run inside arithsub:
+    /// the `${var:offset:length}` offset/length evalexp executes under
+    /// parameter_brace_expand's `this_command_name = varname`
+    /// (subst.c:9372-9378), so its diagnostics carry the parameter name
+    /// (rubash#3295).
+    pub(crate) fn eval_arithmetic_expansion_value_inherit_label(
+        &mut self,
+        expression: &str,
+    ) -> Option<i128> {
+        self.eval_arithmetic_expansion_value_window(expression, false)
+    }
+
+    fn eval_arithmetic_expansion_value_window(
+        &mut self,
+        expression: &str,
+        null_window: bool,
+    ) -> Option<i128> {
         self.shell_state.arithmetic_last_error_category.set(None);
         let _ = take_arith_eval_error();
         clear_arith_eval_events();
@@ -1801,14 +1886,23 @@ impl Executor {
         // evaluates under evalexp's already-expanded rules — a surviving
         // `$name`/`$(...)` is "operand expected" data, not a re-expansion.
         let dynamic_values = self.arith_dynamic_context();
-        let (value, category) = eval_mutable_arith_value_with_random_flags(
-            &expression,
-            &mut self.shell_state.env_vars,
-            Some(&self.shell_state.random_state),
-            Some(&dynamic_values),
-            true,
-            Some(&self.shell_state.variables),
-        );
+        // GNU subst.c:10873-10878 arithsub clears this_command_name
+        // around evalexp — diagnostics this evaluation produces carry
+        // no command label (rubash#3295). Callers whose GNU window is
+        // not arithsub (the `${var:off:len}` substring evalexp runs
+        // under this_command_name = varname, subst.c:9372-9378) pass
+        // null_window = false and inherit the caller's label.
+        let (value, category) = {
+            let _arith_label = null_window.then(|| arith_eval_label_scope(None));
+            eval_mutable_arith_value_with_random_flags(
+                &expression,
+                &mut self.shell_state.env_vars,
+                Some(&self.shell_state.random_state),
+                Some(&dynamic_values),
+                true,
+                Some(&self.shell_state.variables),
+            )
+        };
         self.shell_state
             .arithmetic_last_error_category
             .set(category);
@@ -1818,7 +1912,7 @@ impl Executor {
         // $(( )), so bind/subscript diagnostics carry no command label.
         // A failed nameref bind is already in the event log (recorded
         // at the bind point, rubash#3246) and drains above, in order.
-        self.drain_arith_eval_events(None);
+        self.drain_arith_eval_events();
 
         // Sync any variable changes from env_vars to shell_state.variables
         // so that subsequent parameter expansions see arithmetic side effects

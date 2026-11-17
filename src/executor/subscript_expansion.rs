@@ -536,17 +536,24 @@ impl Executor {
         // sees dynamic variables — `${a[RANDOM%3]}` draws from the same RNG
         // state as `$((RANDOM%3))` (rubash#299).
         let dynamic_values = self.arith_dynamic_context();
-        let (result, writes) = eval_conditional_arith_value_with_writes(
-            &resolved,
-            &overlaid,
-            Some(&self.shell_state.random_state),
-            Some(&dynamic_values),
-            if matches!(&overlaid, std::borrow::Cow::Borrowed(_)) {
-                Some(&self.shell_state.variables)
-            } else {
-                None
-            },
-        );
+        // GNU arrayfunc.c:1373-1377 array_expand_index clears
+        // this_command_name around evalexp — the subscript's own
+        // diagnostics carry no command label even inside an
+        // enclosing `(( ))` (rubash#3295).
+        let (result, writes) = {
+            let _arith_label = crate::executor::arithmetic::arith_eval_label_scope(None);
+            eval_conditional_arith_value_with_writes(
+                &resolved,
+                &overlaid,
+                Some(&self.shell_state.random_state),
+                Some(&dynamic_values),
+                if matches!(&overlaid, std::borrow::Cow::Borrowed(_)) {
+                    Some(&self.shell_state.variables)
+                } else {
+                    None
+                },
+            )
+        };
         if !writes.is_empty() {
             crate::executor::expand_braced_indices::PENDING_SUBSCRIPT_WRITES
                 .with(|pending| pending.borrow_mut().extend(writes));

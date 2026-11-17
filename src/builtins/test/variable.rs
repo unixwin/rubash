@@ -187,7 +187,13 @@ pub(crate) fn variable_is_set(
         }
 
         if arrays.iter().any(|marked| marked == name) || is_array_storage(value) {
-            return crate::executor::arithmetic::eval_conditional_arith_value(subscript, env_vars)
+            // GNU arrayfunc.c:1373-1377 array_expand_index clears
+            // this_command_name around evalexp (rubash#3295).
+            let index = {
+                let _arith_label = crate::executor::arithmetic::arith_eval_label_scope(None);
+                crate::executor::arithmetic::eval_conditional_arith_value(subscript, env_vars)
+            };
+            return index
                 .and_then(|index| resolve_array_index(value, index))
                 .map(|index| array_index_is_set(value, index))
                 .unwrap_or(false);

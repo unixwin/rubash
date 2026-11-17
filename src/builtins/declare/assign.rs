@@ -399,7 +399,14 @@ pub(super) fn assign_declare_names(
                     // assign_error after assign_array_element fails).
                     None
                 } else {
-                    eval_conditional_arith_value(index_expression, variables)
+                    {
+                        // GNU arrayfunc.c:1373-1377 array_expand_index
+                        // clears this_command_name around evalexp
+                        // (rubash#3295).
+                        let _arith_label =
+                            crate::executor::arithmetic::arith_eval_label_scope(None);
+                        eval_conditional_arith_value(index_expression, variables)
+                    }
                 };
                 let index = match evaluated_index {
                     Some(value) if value >= 0 => usize::try_from(value).ok(),
