@@ -441,9 +441,18 @@ impl Executor {
             self.exit_code = code;
             return Err(ExecuteError::ExitCode(code));
         }
-        if self.last_command_substitution_status.get() == Some(2)
-            && self.last_command_substitution_parse_error.get()
-        {
+        // rubash#3756: the verdict is the LATCH, not the per-substitution
+        // status slot — a later substitution in the same word list
+        // overwrites `last_command_substitution_status' with its own
+        // child exit (the documented left-to-right `$?' overlay), which
+        // used to mask a fatal `$(' body error and let the command run
+        // (`echo $(case x in a|) $(echo ok)' printed `ok'). GNU's body
+        // grammar failure is read-time and fatal for the enclosing
+        // command (parse.y:4451 parse_comsub -> DISCARD), so the latch
+        // alone decides; `status == Some(2)' is implied — every latch
+        // site sets it (report_comsub_body_error_if_any,
+        // function_substitute, the heredoc-overflow arm).
+        if self.last_command_substitution_parse_error.get() {
             // A BACKTICK body's parse error killed only the substituted
             // child (GNU subst.c string_locale -> parse_and_execute: the
             // child reports `command substitution: line N: ...' at its own
