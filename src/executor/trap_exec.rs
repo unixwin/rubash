@@ -6443,6 +6443,17 @@ impl Executor {
                             .insert(fd_closed_key(fd), "1".to_string());
                         continue;
                     }
+                    // rubash#3806: rebinding an fd that still holds an
+                    // output process substitution closes the old write
+                    // descriptor in GNU — dup2 onto the redirector
+                    // replaces it wholesale (redir.c
+                    // do_redirection_internal), so the substitution
+                    // reader sees EOF and its body finishes. Run the
+                    // deferred body BEFORE the input bind below
+                    // retires the write arm and clears the
+                    // registration, or `exec 2> >(cat > f);
+                    // exec 2<input; exec 2>&-` loses the body entirely.
+                    self.flush_persistent_output_process_substitution(fd)?;
                     // rubash#2385: a ReadWrite PATH spelling naming a
                     // pipe read end is ONE O_RDWR open in GNU — the
                     // dup copy below would bind the read direction
