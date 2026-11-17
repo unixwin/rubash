@@ -24,7 +24,7 @@ fn run_with_env(
     env_vars: &crate::shell::var_table::VarTable,
 ) -> (i32, String) {
     let mut stderr = Vec::new();
-    let status = execute_with_stderr(args, bracket, env_vars, &mut stderr).unwrap();
+    let status = execute_with_stderr(args, bracket, env_vars, 0, &mut stderr).unwrap();
     (status, String::from_utf8(stderr).unwrap())
 }
 
@@ -58,7 +58,7 @@ fn bench_arith_three_paths() {
         let mut sink = 0;
         for _ in 0..200_000 {
             let mut stderr = Vec::new();
-            sink += execute_with_stderr(&args, true, &env_vars, &mut stderr).unwrap();
+            sink += execute_with_stderr(&args, true, &env_vars, 0, &mut stderr).unwrap();
         }
         eprintln!("{}: {:?} (sink={})", label, start.elapsed(), sink);
     }

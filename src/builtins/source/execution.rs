@@ -73,7 +73,12 @@ fn run_source_groups(
     {
         let line_offset = start_line.saturating_sub(1);
         let pre_alias_text = pending.clone();
-        let exec_text = crate::script_driver::expand_group_aliases(executor, &pending);
+        // GNU pushes alias text and consumes it through shell_getc — the
+        // yy_readline_get line_number bump (parse.y:2504) only fires on
+        // real input fetches, so expansion newlines must not advance
+        // line stamps (rubash#3605 run-nquote).
+        let (exec_text, expansion_newlines) =
+            crate::script_driver::expand_group_aliases_marked(executor, &pending);
         if exec_text.trim().is_empty() {
             continue;
         }
@@ -113,7 +118,12 @@ fn run_source_groups(
         // decision it could only confirm. Groups with neither (extglob
         // toggle, parked-fallback breaks) keep the exact re-check and
         // routing they had.
+        // The feeder tokenized the stream-expanded text without the
+        // expansion-newline marks — its stamps are inflated when an
+        // expansion introduced newlines, so reuse is refused there (a
+        // false negative only costs the fresh re-lex, never semantics).
         let gatherer_certified = feeder_tokens.is_some()
+            && expansion_newlines.is_empty()
             && (exec_text == pre_alias_text
                 || gather_info.certified_expanded.as_deref() == Some(exec_text.as_str()));
         let group_complete = gatherer_certified
@@ -155,7 +165,7 @@ fn run_source_groups(
             let saved_extended_glob = crate::lexer::parse_extended_glob();
             crate::lexer::set_parse_extended_glob(gather_info.entry_extended_glob);
             let status = executor.with_xtrace_indirection(|executor| {
-                crate::script_driver::run_source_with_line_offset(
+                crate::script_driver::run_source_with_line_offset_marked(
                     executor,
                     &exec_text,
                     false,
@@ -166,6 +176,7 @@ fn run_source_groups(
                     } else {
                         Some(pre_alias_text.as_str())
                     },
+                    &expansion_newlines,
                 )
             });
             crate::lexer::set_parse_extended_glob(saved_extended_glob);
@@ -281,9 +292,15 @@ fn run_source_groups(
             for token in &mut tokens {
                 token.position += line_offset;
                 token.column += line_offset;
+                // rubash#3605: end_position shifts with position (same line
+                // space) — see script_driver.rs.
+                token.end_position += line_offset;
                 // rubash#1186: keep logical_line in the same (absolute)
                 // line space as position; see script_driver.rs.
                 token.logical_line += line_offset;
+                // rubash#3605: heredoc_end_line shares that space — see
+                // script_driver.rs.
+                token.heredoc_end_line = token.heredoc_end_line.map(|line| line + line_offset);
             }
         }
         // GNU builtins/evalfile.c:296: a sourced file runs through

@@ -212,9 +212,11 @@ impl Executor {
             }
             // Same compound-claim gate as above (rubash#3034).
             if compound_assignment {
-                if let Some(expanded) =
-                    self.expand_compound_positional_at_assignment(raw_value, false)
-                {
+                if let Some(expanded) = self.expand_compound_positional_at_assignment(
+                    raw_value,
+                    false,
+                    self.compound_assignment_is_assoc(name),
+                ) {
                     let marker = COMPOUND_ASSIGNMENT_MARKER.to_string();
                     return format!("{name}={marker}{expanded}");
                 }
@@ -652,11 +654,32 @@ impl Executor {
         adjusted > bound || adjusted < 0
     }
 
+    /// Probe/verdict-only parse of a `${var:offset:length}` form: the
+    /// offset/length are evaluated (so the verdict sees the same
+    /// operands), but any arithmetic writes they produce are DISCARDED
+    /// -- a probe must never apply a side effect the real expansion
+    /// will apply itself, or the write would land twice (rubash#3649).
     pub(in crate::executor) fn parse_parameter_substring<'a>(
         &self,
         name: &'a str,
     ) -> Option<(&'a str, isize, Option<isize>)> {
-        self.parse_parameter_substring_impl(name, false)
+        let mut writes = Vec::new();
+        self.parse_parameter_substring_impl(name, false, &mut writes)
+    }
+
+    /// Like [`Executor::parse_parameter_substring`], but returns the
+    /// arithmetic writes (name, new value) the offset/length evaluation
+    /// produced, so the caller that USES the parsed result can commit
+    /// them exactly once via `queue_pending_subscript_writes`
+    /// (rubash#3649). A caller whose parse is only a probe must use the
+    /// plain parse instead.
+    pub(in crate::executor) fn parse_parameter_substring_with_writes<'a>(
+        &self,
+        name: &'a str,
+    ) -> Option<((&'a str, isize, Option<isize>), Vec<(String, String)>)> {
+        let mut writes = Vec::new();
+        let parsed = self.parse_parameter_substring_impl(name, false, &mut writes);
+        parsed.map(|parsed| (parsed, writes))
     }
 
     /// Verdict-scan twin of [`Executor::parse_parameter_substring`]: the
@@ -683,13 +706,17 @@ impl Executor {
         &self,
         name: &'a str,
     ) -> Option<(&'a str, isize, Option<isize>)> {
-        self.parse_parameter_substring_impl(name, true)
+        // The scan is verdict-only: discard the offset/length writes
+        // (rubash#3649) -- the real expansion applies them.
+        let mut writes = Vec::new();
+        self.parse_parameter_substring_impl(name, true, &mut writes)
     }
 
     fn parse_parameter_substring_impl<'a>(
         &self,
         name: &'a str,
         scan_mode: bool,
+        writes_out: &mut Vec<(String, String)>,
     ) -> Option<(&'a str, isize, Option<isize>)> {
         // Use split_top_level_colon to skip `:` inside $(...), ${...}, and
         // quoted regions — a plain split_once(':') would match `$( : )` in
@@ -784,8 +811,12 @@ impl Executor {
             lit
         } else {
             match self.eval_parameter_substring_offset(offset_str) {
-                Some(value) => value,
-                None => {
+                (Some(value), writes) => {
+                    writes_out.extend(writes);
+                    value
+                }
+                (None, writes) => {
+                    writes_out.extend(writes);
                     // GNU subst.c verify_substring_values: an invalid offset
                     // expression is an arithmetic error (expok == 0), not a
                     // "not a substring" result. parameter_brace_substring
@@ -824,8 +855,12 @@ impl Executor {
             Some(lit)
         } else {
             match self.eval_parameter_substring_offset(length_str) {
-                Some(value) => Some(value),
-                None => {
+                (Some(value), writes) => {
+                    writes_out.extend(writes);
+                    Some(value)
+                }
+                (None, writes) => {
+                    writes_out.extend(writes);
                     if self
                         .shell_state
                         .arithmetic_last_error_category
@@ -846,7 +881,7 @@ impl Executor {
     pub(in crate::executor) fn eval_parameter_substring_offset(
         &self,
         value: &str,
-    ) -> Option<isize> {
+    ) -> (Option<isize>, Vec<(String, String)>) {
         // GNU verify_substring_values (subst.c:8395) hands the RAW operand
         // text to expand_arith_string/evalexp; evalerror (expr.c:1526-1537)
         // skips only the expression's LEADING whitespace at display time
@@ -879,8 +914,18 @@ impl Executor {
         // before arithmetic evaluation (Bash evaluates the slice offset as
         // an arithmetic expression after parameter expansion).
         let expression = self.expand_embedded_parameters(&expression);
-        let (evaluated, category) =
-            eval_conditional_arith_value_categorized(&expression, &self.shell_state.env_vars);
+        // rubash#3649: the offset/length arithmetic runs against a
+        // snapshot env on this `&self` path, so its writes (e.g. `i+=1`)
+        // must ride back out with the result instead of being dropped --
+        // the caller that USES the parsed substring commits them exactly
+        // once (see parse_parameter_substring_with_writes). Deliberately
+        // NO overlay of queued writes here: the same fragment is parsed
+        // more than once by layered fan-out probes, and every parse must
+        // read the same live value.
+        let (evaluated, writes, category) = eval_conditional_arith_value_categorized_with_writes(
+            &expression,
+            &self.shell_state.env_vars,
+        );
         if evaluated.is_none() {
             self.shell_state
                 .arithmetic_last_error_category
@@ -891,7 +936,10 @@ impl Executor {
             // `${HOME:`echo }`}` → offset `}` not `` `echo }` ``).
             *self.arithmetic_last_error_expression.borrow_mut() = expression.to_string();
         }
-        isize::try_from(evaluated?).ok()
+        let Some(evaluated) = evaluated else {
+            return (None, writes);
+        };
+        (isize::try_from(evaluated).ok(), writes)
     }
 
     /// `&self` counterpart of
@@ -1409,55 +1457,34 @@ pub(in crate::executor) fn current_shell_command_substitution_span(word: &str) -
         }
         let after_open = start + 2;
         let first = word.get(after_open..)?.chars().next()?;
-        // Bash 5.3 param_expand (parser.h FUNSUB_CHAR) treats `${` followed
-        // by whitespace or `|` as a foreground current-shell command
-        // substitution (`${ command; }` / `${|command;}`), not a parameter
-        // expansion. Every other character keeps the classic parameter
-        // spelling (`${-3}`, `${#:}` stay `bad substitution` candidates).
-        if !(first == '|' || first.is_whitespace()) {
+        // Bash 5.3 param_expand (parser.h:85 FUNSUB_CHAR) treats `${`
+        // followed by blank/newline/`|` as a foreground current-shell
+        // command substitution (`${ command; }` / `${|command;}`), not a
+        // parameter expansion. Every other character keeps the classic
+        // parameter spelling (`${-3}`, `${#:}` stay `bad substitution`
+        // candidates).
+        if super::command_substitution::funsub_introducer(first).is_none() {
             search_start = after_open;
             continue;
         }
-        let bytes = word.as_bytes();
-        let mut index = after_open;
-        let mut depth = 1usize;
-        let mut single = false;
-        let mut double = false;
-        let mut escaped = false;
-        while index < bytes.len() {
-            let ch = bytes[index] as char;
-            if escaped {
-                escaped = false;
-                index += 1;
-                continue;
-            }
-            if ch == '\\' && !single {
-                escaped = true;
-                index += 1;
-                continue;
-            }
-            match ch {
-                '\'' if !double => single = !single,
-                '"' if !single => double = !double,
-                '$' if !single && !double && bytes.get(index + 1) == Some(&b'{') => {
-                    depth += 1;
-                    index += 1;
-                }
-                // Plain command-group braces inside the body (`${ f() { :; }
-                // }`) must nest the depth as well, or the function body's `}`
-                // would close the substitution span early.
-                '{' if !single && !double => depth += 1,
-                '}' if !single && !double => {
-                    depth = depth.saturating_sub(1);
-                    if depth == 0 {
-                        return word.get(start..=index);
-                    }
-                }
-                _ => {}
-            }
-            index += 1;
-        }
-        return None;
+        // The extent must come from the SAME scan the collectors run
+        // (extract_funsub_body_tail): `#` comments and heredoc bodies are
+        // opaque and `}` closes only in command position. The previous
+        // depth count read a `'` in `# don't` or `it's` as an opening
+        // quote and ran to EOF, so funsub words carrying comments or
+        // heredocs fell through to `bad substitution` (rubash#3823
+        // f1/h2/h3).
+        let mut chars = word[after_open..].chars().peekable();
+        let (body, _valsub) = super::command_substitution::extract_funsub_body(&mut chars)?;
+        // extract_funsub_body consumed the introducer, the verbatim body,
+        // and the closing `}` — every consumed char but the `}` is pushed
+        // into `body`, so the `}` sits body.chars().count() + 1 chars
+        // past the introducer within the tail slice.
+        let close_in_tail = word[after_open..]
+            .char_indices()
+            .nth(body.chars().count() + 1)
+            .map(|(offset, _)| offset)?;
+        return word.get(start..after_open + close_in_tail + 1);
     }
     None
 }
@@ -1536,6 +1563,13 @@ mod current_shell_detector_tests {
         assert_eq!(current_shell_command_substitution_span(word), Some(word));
         assert!(word_contains_current_shell_command_substitution(word));
         assert!(word_contains_current_shell_command_substitution(
+            "prefix${| echo reply; }suffix"
+        ));
+        // `${| echo reply }suffix`: the `}` is glued to `suffix` — a word
+        // BEGINNING with `}` is required to close (parse.y:5400-5416), so
+        // the body never terminates and there is no funsub span (GNU
+        // 5.3.20: `unexpected EOF while looking for matching `}'`, rc 2).
+        assert!(!word_contains_current_shell_command_substitution(
             "prefix${| echo reply }suffix"
         ));
     }
