@@ -232,6 +232,70 @@ fn dup_write_only_fd_cat_in_pipeline_stage0() {
 }
 
 #[test]
+fn dup_write_only_fd_head_line_in_pipeline() {
+    // Line-mode head: the inline Head slot arm ACCEPTS this shape
+    // (only byte mode declines), so this pin separates the
+    // stage-dispatch route from the arm's own serve. GNU bash
+    // 5.3.20: `head: error reading 'standard input': Bad file
+    // descriptor`, rc=1.
+    let (stdout, stderr, code) = run_script(
+        "head-line-pipe",
+        "exec 3>f1; printf 'x\\n' | head -1 <&3; echo \"rc=$?\"\n",
+    );
+    assert_eq!(stdout, "rc=1\n", "stderr: {stderr}");
+    assert!(
+        stderr.contains("head:") && stderr.contains("Bad file descriptor"),
+        "expected head's own EBADF diagnostic, got: {stderr}"
+    );
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn dup_write_only_fd_wc_in_pipeline() {
+    // GNU bash 5.3.20: wc prints the zero count, reports
+    // `wc: 'standard input': Bad file descriptor`, rc=1.
+    let (stdout, stderr, code) = run_script(
+        "wc-pipe",
+        "exec 3>f1; printf 'x\\n' | wc -c <&3; echo \"rc=$?\"\n",
+    );
+    assert_eq!(stdout, "0\nrc=1\n", "stderr: {stderr}");
+    assert!(
+        stderr.contains("wc:") && stderr.contains("Bad file descriptor"),
+        "expected wc's own EBADF diagnostic, got: {stderr}"
+    );
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn dup_write_only_fd_tr_in_pipeline() {
+    // GNU bash 5.3.20: `tr: read error: Bad file descriptor`, rc=1.
+    let (stdout, stderr, code) = run_script(
+        "tr-pipe",
+        "exec 3>f1; printf 'x\\n' | tr a b <&3; echo \"rc=$?\"\n",
+    );
+    assert_eq!(stdout, "rc=1\n", "stderr: {stderr}");
+    assert!(
+        stderr.contains("tr:") && stderr.contains("Bad file descriptor"),
+        "expected tr's own EBADF diagnostic, got: {stderr}"
+    );
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn dup_write_only_fd_dd_in_pipeline() {
+    // dd has no inline slot arm: a pipeline dd stage always reaches
+    // the external stage spawner, so this pin isolates the spawner's
+    // own fd-0 adjudication for the ambient write-only dup.
+    let (stdout, stderr, code) = run_script(
+        "dd-pipe",
+        "exec 3>f1; printf 'x\\n' | dd bs=1 count=2 <&3 2>/dev/null; echo \"rc=$?\"\n",
+    );
+    assert_eq!(stdout, "rc=1\n", "stderr: {stderr}");
+    assert_eq!(stderr, "", "dd's own stderr is redirected away: {stderr}");
+    assert_eq!(code, Some(0));
+}
+
+#[test]
 fn dup_readable_fd_cat_in_pipeline_control() {
     // Control: a dup of a READABLE fd in a pipeline still serves the
     // descriptor's stream (the write-only route must not overreach).
