@@ -960,6 +960,61 @@ impl Executor {
                 status = 1;
             }
         }
+        // rubash#2761: a wordless command carrying a here-document /
+        // here-string never reached the stdin pre-expansion funnel
+        // (preexpand_command_stdin, the GNU do_redirections point the
+        // word-bearing path runs at command_execute.rs:583) — the
+        // empty-words arm returns through this function before word
+        // expansion, so the bodies were never expanded at all: no
+        // command substitution ran, no `:=` bound. Expand them here, at
+        // the same point in the null command's order: after the
+        // assignments above are bound (GNU expand_words runs before
+        // do_redirections, so a body sees the command's own assignments)
+        // and after the adjudicated assignment-error arms (#2369/#1542/
+        // #402) have had their chance to discard the command first —
+        // the expansion goes THROUGH that error handling, not around
+        // it. The funnel itself classifies the context (#2681): an fd-0
+        // heredoc forces the fork boundary
+        // (null_command_redirects_force_fork), so its effects run but
+        // do not persist; a numbered-fd body expands in the shell, so
+        // its bindings persist. The redirect application below then
+        // consumes the pre-expanded node, exactly as the word-bearing
+        // path does. Commands without stdin bodies skip this entirely —
+        // their behavior is unchanged.
+        let owned;
+        let cmd = if cmd.heredoc.is_some()
+            || !cmd.heredoc_redirects.is_empty()
+            || cmd.here_string.is_some()
+        {
+            let mut expanded = cmd.clone();
+            let heredoc_forked_exit = self.preexpand_command_stdin(&mut expanded);
+            // rubash#2763: take the main-shell latch NOW, before
+            // abort_on_expansion_errors can return early — otherwise a
+            // funsub `exit` latched by a main-shell body would leak into
+            // the next command.
+            let heredoc_main_shell_exit = self.current_shell_substitution_exit.take();
+            self.abort_on_expansion_errors()?;
+            if let Some(code) = heredoc_main_shell_exit {
+                // A `${ ...; exit N; }` inside a body that expands in
+                // the MAIN shell aborts the enclosing shell with N (same
+                // arm as the word-bearing path).
+                self.exit_code = code;
+                return Err(ExecuteError::ExitCode(code));
+            }
+            if let Some(code) = heredoc_forked_exit {
+                // A `${ ...; exit N; }` inside a body that expands in
+                // the FORKED child kills the child during
+                // do_redirections before the command runs, so the command
+                // never runs and N is its status; the script continues
+                // (same arm as the word-bearing path).
+                self.exit_code = code;
+                return Ok(());
+            }
+            owned = expanded;
+            &owned
+        } else {
+            cmd
+        };
         // GNU applies a null command's redirections too (execute_cmd.c
         // execute_null_command -> do_redirections), so `> $nope` under set
         // -u reports the unbound redirect word and ends the script — the
