@@ -103,7 +103,7 @@ mod init;
 pub(crate) use init::spawner_stamp_value;
 pub use init::{
     respawn_provenance_validated_from_process_env, FD_DELIVERY_AT_STAMPED_KEY, RESPAWNED_CHILD,
-    RESPAWN_SPAWNER_PID_KEY,
+    RESPAWN_PROOF_FD_KEY, RESPAWN_PROOF_KEY, RESPAWN_SPAWNER_PID_KEY,
 };
 pub mod profiler;
 // rubash#331: the binary crate renders its self-produced path values

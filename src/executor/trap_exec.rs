@@ -5459,6 +5459,15 @@ impl Executor {
         let Ok((reader, writer)) = std::io::pipe() else {
             return None;
         };
+        // rubash#3300: mint the respawn proof FIRST, before any
+        // carrier dup is created (the ambient loop below takes the
+        // lowest free fds; the mint's F_DUPFD_CLOEXEC >= 100 can never
+        // collide with them). A mint failure is fail-open (None):
+        // the spawn proceeds without proof keys, i.e. today's
+        // behavior.
+        #[cfg(unix)]
+        let respawn_proof =
+            crate::fd::mint_respawn_proof(&crate::builtins::kill::new_background_wrapper_nonce());
         let mut child = Command::new(&exe);
         child.arg("-c").arg(source);
         // rubash#2356: gather the respawn environment into a Vec
@@ -5514,6 +5523,20 @@ impl Executor {
             super::RESPAWN_SPAWNER_PID_KEY.to_string(),
             super::spawner_stamp_value(),
         ));
+        // rubash#3300: the per-spawn proof pair (fd number + nonce).
+        // Per-spawn, never forwarded — NOT in FORK_TRANSPORT_KEYS /
+        // rubash_spawn_inherited_state. Never appended to
+        // ambient_pins: the proof fd is NOT a carrier fd, and the
+        // pin pass skips anonymous pipes by design (it would drop
+        // the proof's own fd).
+        #[cfg(unix)]
+        if let Some((proof_fd, proof_nonce)) = &respawn_proof {
+            env_entries.push((
+                super::RESPAWN_PROOF_FD_KEY.to_string(),
+                proof_fd.to_string(),
+            ));
+            env_entries.push((super::RESPAWN_PROOF_KEY.to_string(), proof_nonce.clone()));
+        }
         // subst.c:6362 process_substitute: the producer is a forked
         // child one subshell level deeper than its parent, like the
         // consumer form (external_setup.rs) — this builder never
@@ -5686,6 +5709,12 @@ impl Executor {
                 _ => {}
             }
         }
+        // rubash#3300: the parent's proof copy closes with the other
+        // ambient dups after the spawn attempt (both arms below).
+        #[cfg(unix)]
+        if let Some((proof_fd, _)) = respawn_proof {
+            ambient_fd_dups.push(proof_fd);
+        }
         // rubash#2356: spill + apply the gathered environment (see
         // the gather above).
         let argv_bytes = exe.as_os_str().len() + source.len() + 8;
@@ -5709,6 +5738,24 @@ impl Executor {
             unsafe {
                 child.pre_exec(move || {
                     super::external_inner::pin_ambient_fds_in_child(&pins).map(|_| ())
+                });
+            }
+        }
+        // rubash#3300: a SEPARATE pre_exec closure for the proof —
+        // never appended to ambient_pins (the pin pass skips
+        // anonymous pipes, so the proof would be dropped there). The
+        // mint already cleared CLOEXEC; re-clear here so the fd
+        // survives exec at its number.
+        #[cfg(unix)]
+        if let Some((proof_fd, _)) = respawn_proof {
+            use std::os::unix::process::CommandExt;
+            unsafe {
+                child.pre_exec(move || {
+                    let flags = libc::fcntl(proof_fd, libc::F_GETFD);
+                    if flags >= 0 {
+                        libc::fcntl(proof_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+                    }
+                    Ok(())
                 });
             }
         }
