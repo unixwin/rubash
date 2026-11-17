@@ -51,7 +51,7 @@ fn shell_bin() -> PathBuf {
 struct Output {
     stdout: String,
     stderr: String,
-    code: Option<i32>,
+    _code: Option<i32>,
 }
 
 /// Run one `-c` script in `dir` with an explicit PATH (never the
@@ -70,7 +70,7 @@ fn run(dir: &Path, path: &str, script: &str) -> Output {
     Output {
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
         stderr: String::from_utf8_lossy(&output.stderr).replace('\r', ""),
-        code: output.status.code(),
+        _code: output.status.code(),
     }
 }
 

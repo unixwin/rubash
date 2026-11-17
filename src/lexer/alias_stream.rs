@@ -224,10 +224,31 @@ pub(crate) fn expand_aliases_in_source(
     lookup: &AliasLookup<'_>,
     posix: bool,
 ) -> String {
+    expand_aliases_in_source_marked(source, lookup, posix).0
+}
+
+/// `expand_aliases_in_source` plus the byte offsets of every `\n` the
+/// expansion itself introduced (second element of the pair, ascending).
+/// GNU's line_number only advances when yy_readline_get fetches a REAL
+/// input line (parse.y:2504); pushed alias text is consumed by
+/// shell_getc without the bump — those newlines are line separators to
+/// the parser but not line advances for diagnostics. The lexer skips
+/// them when stamping tokens. Newlines the `$(`/`${ ' body pre-pass
+/// (expand_comsub_alias_bodies) introduces are NOT tracked yet: comsub
+/// bodies re-lex at runtime with their own line base, a separate
+/// accounting.
+pub(crate) fn expand_aliases_in_source_marked(
+    source: &str,
+    lookup: &AliasLookup<'_>,
+    posix: bool,
+) -> (String, Vec<usize>) {
     let source = expand_comsub_alias_bodies(source, lookup, posix);
     let source = source.as_str();
     let mut buf: Vec<char> = source.chars().collect();
     let mut pos = 0usize;
+    // Char offsets (in `buf`) of newlines that arrived inside spliced
+    // alias text — see the doc above for why they must not count.
+    let mut expansion_newlines: Vec<usize> = Vec::new();
     // Live parse-time extglob gate (shopt.def:640 `extglob_flag' ->
     // reset_parser parse.y:3502 `extended_glob'). Sampled once per pass:
     // the grouped driver runs the pre-pass per command group, after the
@@ -333,6 +354,7 @@ pub(crate) fn expand_aliases_in_source(
                                 &mut buf,
                                 &mut bounds,
                                 &mut expanding,
+                                &mut expansion_newlines,
                                 ws,
                                 end,
                                 &word,
@@ -636,6 +658,7 @@ pub(crate) fn expand_aliases_in_source(
                             &mut buf,
                             &mut bounds,
                             &mut expanding,
+                            &mut expansion_newlines,
                             ws,
                             end,
                             &word,
@@ -692,7 +715,20 @@ pub(crate) fn expand_aliases_in_source(
             }
         }
     }
-    buf.iter().collect()
+    // Convert the char-offset marks into byte offsets of the output
+    // string (sorted by construction order of the walk below).
+    expansion_newlines.sort_unstable();
+    let mut marked = Vec::with_capacity(expansion_newlines.len());
+    let mut next_mark = 0usize;
+    let mut byte = 0usize;
+    for (index, ch) in buf.iter().enumerate() {
+        if next_mark < expansion_newlines.len() && expansion_newlines[next_mark] == index {
+            marked.push(byte);
+            next_mark += 1;
+        }
+        byte += ch.len_utf8();
+    }
+    (buf.iter().collect(), marked)
 }
 
 /// push_string (parse.y:2055): replace the just-scanned word at `ws..end`
@@ -702,10 +738,16 @@ pub(crate) fn expand_aliases_in_source(
 /// value-final digit from merging with a `<`/`>` of the outer input
 /// (y.tab.c:8085): `alias foo='echo 0'` + `foo>&2` is `echo 0 >&2`,
 /// printing `0` on stderr.
+/// `expansion_newlines` accumulates the char offsets (in `buf`) of every
+/// `\n` the spliced text carries — GNU consumes pushed text through
+/// shell_getc without the yy_readline_get line_number bump
+/// (parse.y:2504), so those newlines are non-advancing. Earlier marks
+/// shift by the splice delta exactly like `bounds`.
 fn splice_alias_value(
     buf: &mut Vec<char>,
     bounds: &mut Vec<Boundary>,
     expanding: &mut Vec<String>,
+    expansion_newlines: &mut Vec<usize>,
     ws: usize,
     end: usize,
     word: &str,
@@ -722,11 +764,27 @@ fn splice_alias_value(
     }
     let vlen = value_chars.len();
     let removed = end - ws;
+    // Positions of the new text's newlines in post-splice `buf` space.
+    let spliced_newlines: Vec<usize> = value_chars
+        .iter()
+        .enumerate()
+        .filter(|(_, ch)| **ch == '\n')
+        .map(|(i, _)| ws + i)
+        .collect();
     buf.splice(ws..end, value_chars);
     let delta = vlen as isize - removed as isize;
     for b in bounds.iter_mut() {
         b.end = (b.end as isize + delta) as usize;
     }
+    // Marks earlier than the splice point stay; marks at/after it ride
+    // the same delta as `bounds` (a mark can never sit inside the
+    // replaced word — scan_word terminates at '\n').
+    for mark in expansion_newlines.iter_mut() {
+        if *mark >= ws {
+            *mark = (*mark as isize + delta) as usize;
+        }
+    }
+    expansion_newlines.extend(spliced_newlines);
     bounds.push(Boundary {
         end: ws + vlen,
         expander: word.to_string(),
@@ -1791,10 +1849,17 @@ impl<'a> MainAliasScanner<'a> {
         expand_next: bool,
         fd_boundary: bool,
     ) {
+        // The streaming output is String-only (take_committed returns no
+        // marks), so expansion-newline tracking drops here — unobservable:
+        // the only consumers of stream-expanded text are the gather's
+        // completeness machines and the feeder-token reuse, which the
+        // exec callers refuse whenever an expansion newline exists.
+        let mut dropped_newlines = Vec::new();
         splice_alias_value(
             &mut self.buf,
             &mut self.bounds,
             &mut self.expanding,
+            &mut dropped_newlines,
             ws,
             end,
             word,

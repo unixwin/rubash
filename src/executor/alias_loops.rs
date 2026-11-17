@@ -98,7 +98,23 @@ impl Executor {
             } else {
                 strip_unterminated_heredoc_marker(strip_quoted_heredoc_marker(&body)).to_string()
             };
-            saved_fd_inputs.push((fd, self.fd_table.entries.get(&fd).cloned()));
+            // rubash#3725: the saved entry duplicates the displaced
+            // descriptor (FdTable::saved_entry, introduced for
+            // rubash#3706/#3723) — a plain clone shares the descriptor
+            // the heredoc bind's open_input retires, so the restore
+            // would replay a dead entry. A dup failure unwinds the
+            // heredocs this loop already bound (GNU
+            // undo_partial_redirects, execute_cmd.c:855) before the
+            // error propagates — the caller never sees a half-bound
+            // list.
+            let saved = match self.fd_table.saved_entry(fd) {
+                Ok(saved) => saved,
+                Err(error) => {
+                    self.restore_loop_heredoc_fd_inputs(std::mem::take(&mut saved_fd_inputs));
+                    return Err(ExecuteError::IoError(error));
+                }
+            };
+            saved_fd_inputs.push((fd, saved));
             self.fd_table
                 .open_input(fd, FdReadEndpoint::text(&body), true);
         }
@@ -181,16 +197,7 @@ impl Executor {
             }
         });
 
-        for (fd, old_entry) in saved_fd_inputs {
-            match old_entry {
-                Some(entry) => {
-                    self.fd_table.entries.insert(fd, entry);
-                }
-                None => {
-                    self.fd_table.entries.remove(&fd);
-                }
-            }
-        }
+        self.restore_loop_heredoc_fd_inputs(saved_fd_inputs);
         loop_result?;
 
         if !ran_body {
@@ -206,6 +213,26 @@ impl Executor {
             self.exit_code = last_body_status;
         }
         Ok(Some(done_index + 1))
+    }
+
+    /// rubash#3725: replay a loop-heredoc save list — the post-loop
+    /// restore and the dup-failure unwind in execute_simple_loop
+    /// share it, so a failed snapshot never leaves a half-bound
+    /// heredoc list behind.
+    fn restore_loop_heredoc_fd_inputs(
+        &mut self,
+        saved: Vec<(u32, Option<crate::executor::fd_table::FdEntry>)>,
+    ) {
+        for (fd, old_entry) in saved {
+            match old_entry {
+                Some(entry) => {
+                    self.fd_table.entries.insert(fd, entry);
+                }
+                None => {
+                    self.fd_table.entries.remove(&fd);
+                }
+            }
+        }
     }
 
     pub(in crate::executor) fn execute_alias_introduced_for(
@@ -278,7 +305,13 @@ impl Executor {
                 return Ok(Some(done_index + 1));
             }
         }
-        if words.first().map(String::as_str) != Some("for") {
+        // rubash#3557: literal `for` head (quoted — parser froze it as a
+        // plain word) is a command name, not a loop opener; only an
+        // alias-introduced `for` re-lexes as syntax (parse.y:3249
+        // alias_expand_token -> push_string).
+        if words.first().map(String::as_str) != Some("for")
+            || command.words.first().map(String::as_str) == Some("for")
+        {
             return Ok(None);
         }
         let do_index = scan_do_index(command_index + 1);
