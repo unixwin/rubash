@@ -721,8 +721,19 @@ pub(super) fn assign_declare_names(
                     }
                 }
             } else if integer {
-                (eval_integer_value(&current, variables) + eval_integer_value(value, variables))
-                    .to_string()
+                // The sum itself is intmax_t (variables.c:2936-2946
+                // `rval += lval; retval = itos (rval)`), so it wraps at
+                // INT64_MAX instead of storing the out-of-range i128
+                // decimal (rubash#3782/#3866): `declare -i x+=1` and
+                // `local -i y+=1` on INT64_MAX stored
+                // "9223372036854775808" verbatim. The array arms self-heal
+                // through their trailing re-eval; this scalar arm stores
+                // the sum directly, so the narrowing must happen here.
+                crate::executor::arithmetic::intmax_append_sum(
+                    eval_integer_value(&current, variables),
+                    eval_integer_value(value, variables),
+                )
+                .to_string()
             } else {
                 let mut current = current;
                 current.push_str(value);
