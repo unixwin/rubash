@@ -1171,28 +1171,34 @@ impl Executor {
             return Some(values);
         }
         if !quoted_array_word {
-            if let Some((name, offset, length)) =
+            if let Some(((name, offset, length), writes)) =
                 crate::executor::parameter_ops::whole_word_braced_parameter_body(word)
-                    .and_then(|name| self.parse_parameter_substring(name))
+                    .and_then(|name| self.parse_parameter_substring_with_writes(name))
             {
                 if let Some(array_name) = name
                     .strip_suffix("[@]")
                     .or_else(|| name.strip_suffix("[*]"))
                 {
+                    // rubash#3649: this parse's result is the expansion,
+                    // so commit its offset/length arithmetic writes.
+                    self.queue_pending_subscript_writes(writes);
                     return self.array_subscript_range_values(array_name, offset, length);
                 }
             }
         }
         if quoted_array_word {
-            if let Some((name, offset, length)) =
+            if let Some(((name, offset, length), writes)) =
                 crate::executor::parameter_ops::whole_word_braced_parameter_body(word)
-                    .and_then(|name| self.parse_parameter_substring(name))
+                    .and_then(|name| self.parse_parameter_substring_with_writes(name))
             {
                 if let Some(indirect_name) = name.strip_prefix('!') {
                     let target_expr = self.shell_state.env_vars.get(indirect_name)?;
                     let expands_as_array = target_expr.ends_with("[@]")
                         || (!quoted_array_word && target_expr.ends_with("[*]"));
                     if expands_as_array {
+                        // rubash#3649: this parse's result is the
+                        // expansion, so commit its offset/length writes.
+                        self.queue_pending_subscript_writes(writes);
                         return Some(slice_array_values(
                             self.indirect_target_values(target_expr),
                             offset,
@@ -1202,12 +1208,18 @@ impl Executor {
                 }
                 if let Some(array_name) = name.strip_suffix("[@]") {
                     if array_name == "GROUPS" {
+                        // rubash#3649: this parse's result is the
+                        // expansion, so commit its offset/length writes.
+                        self.queue_pending_subscript_writes(writes);
                         return Some(slice_array_values(
                             self.groups_words(),
                             offset,
                             length.and_then(|length| usize::try_from(length).ok()),
                         ));
                     }
+                    // rubash#3649: this parse's result is the expansion,
+                    // so commit its offset/length arithmetic writes.
+                    self.queue_pending_subscript_writes(writes);
                     return self.array_subscript_range_values(array_name, offset, length);
                 }
             }
@@ -1517,7 +1529,7 @@ impl Executor {
             // carries the QUOTED_NULL marker and GNU diagnoses
             // (follow-up #3581). The scalar entry point already gates
             // this way; the list entry point expanded unconditionally.
-            if self.pattern_word_is_silent(var_name, !quoted_array_word) {
+            if self.pattern_word_is_silent(var_name, true, quoted_array_word) {
                 return Some(vec![]);
             }
             let pattern = self.expand_parameter_pattern_word(pattern);
@@ -1533,7 +1545,7 @@ impl Executor {
             // GNU subst.c:9362-9367 parameter_brace_patsub returns NULL
             // before getpattern when the value is absent (rubash#3501):
             // an empty list is absent, but a one-"" list is present.
-            if self.pattern_word_is_silent(var_name, false) {
+            if self.pattern_word_is_silent(var_name, false, false) {
                 return Some(vec![]);
             }
             let pattern = self.expand_parameter_pattern_word(pattern);
@@ -1549,7 +1561,7 @@ impl Executor {
             }
             // GNU subst.c:9604-9608 parameter_brace_casemod: same
             // absent-value gate as patsub (rubash#3501).
-            if self.pattern_word_is_silent(var_name, false) {
+            if self.pattern_word_is_silent(var_name, false, false) {
                 return Some(vec![]);
             }
             let pattern = self.expand_embedded_parameters(pattern);

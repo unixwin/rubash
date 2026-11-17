@@ -39,14 +39,27 @@ impl Executor {
         // field). The old $PWD-verbatim echo fast path is gone: it
         // printed the variable's non-canonical spelling, which is
         // exactly the #2797 divergence.
-        crate::builtins::pwd::execute_with_env_and_io(
+        let outcome = crate::builtins::pwd::execute_with_env_and_io(
             args.iter().map(String::as_str),
             &self.shell_state.env_vars,
             &self.shell_state.cwd,
             self.shell_state.logical_cwd.as_deref(),
             stdout,
             stderr,
-        )
+        )?;
+        if outcome.physical_resolution_failed {
+            // rubash#3349: GNU builtins/cd.def:183-191 resetpwd — a
+            // failed physical resolution frees
+            // the_current_working_directory and leaves it NULL. The
+            // session's logical cache is poisoned, not merely stale:
+            // clear it so the next default / -L face re-derives
+            // through the getcwd gate (and fails the same way) instead
+            // of printing the stale value. The poison rides the Clone
+            // fork boundary (shell/state.rs:204), so a subshell's
+            // failure poisons only the clone, never the parent.
+            self.shell_state.logical_cwd = None;
+        }
+        Ok(outcome.status)
     }
 
     pub(in crate::executor) fn execute_loop_control(

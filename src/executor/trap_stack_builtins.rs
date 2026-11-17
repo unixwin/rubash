@@ -52,6 +52,19 @@ impl OrderedOutputLog {
         }
     }
 
+    /// rubash#3453: a write on this channel appends a pass-boundary
+    /// marker chunk (fd u8::MAX). GNU printf.def:819 checks
+    /// `ferror (stdout)` at pass boundaries only, so the chunk route
+    /// must know where one rendering pass ends to fold the abort into
+    /// the buffered stream — same-pass diagnostics still print,
+    /// later passes' renderings die.
+    pub(in crate::executor) fn pass_boundary_writer(&self) -> OrderedChunkWriter {
+        OrderedChunkWriter {
+            fd: u8::MAX,
+            log: self.chunks.clone(),
+        }
+    }
+
     pub(in crate::executor) fn is_empty(&self) -> bool {
         self.chunks.borrow().is_empty()
     }
@@ -222,8 +235,9 @@ impl Executor {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         for (fd, bytes) in &decoded {
-            match fd {
+            match *fd {
                 1 => stdout.extend_from_slice(bytes),
+                u8::MAX => {}
                 _ => stderr.extend_from_slice(bytes),
             }
         }
@@ -527,13 +541,32 @@ impl Executor {
         // value, the make_absolute base falls back to the physical
         // spelling (a symlinked pushd entry binds "$R/a/real/."
         // instead of "$R/link/."). -n moves nothing and dirs never
-        // moves, so both updates are gated on an actual move; the
-        // bound PWD is the logical value, exactly as cd's bindpwd
-        // binds it.
-        let moved = status == 0 && self.shell_state.cwd != cwd_before;
+        // moves, so the update is gated on an actual move.
+        //
+        // rubash#3421: the gate is the MOVE, not the status, and the
+        // value is the move's logical spelling, not the env PWD.
+        // GNU updates tcwd in change_to_directory (builtins/cd.def
+        // :600-619) before bindpwd runs, so a readonly-bind failure
+        // (status 1, chdir standing) still leaves tcwd at the new
+        // directory — and bindpwd reads that value, it does not
+        // rewrite it. The env PWD is stale exactly then (the bind
+        // never landed), so reading it would keep the stale value;
+        // the stack carrier's element 0 is the move's logical
+        // spelling on every move path (Dir/rotation/swap/popd-top:
+        // pushd.rs saves it even on its bind-failure early
+        // returns), so it is the value tcwd must follow. With the
+        // stale value, a later `cd .` probed "$D/." (which
+        // canonicalizes) instead of "$D/a/." (which does not), so the
+        // deleted-dot arm never fired and the getcwd diagnostic was
+        // lost; `pwd -L` likewise read the stale spelling.
+        let moved = self.shell_state.cwd != cwd_before;
         if moved {
-            if let Some(pwd) = self.shell_state.env_vars.get("PWD").cloned() {
-                self.shell_state.logical_cwd = Some(pwd);
+            let logical = crate::builtins::pushd::load_stack_carrier(&self.shell_state.env_vars)
+                .into_iter()
+                .next()
+                .or_else(|| self.shell_state.env_vars.get("PWD").cloned());
+            if let Some(logical) = logical {
+                self.shell_state.logical_cwd = Some(logical);
             }
         }
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;

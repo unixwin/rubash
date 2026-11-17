@@ -903,7 +903,7 @@ fn parameter_name_tail_len(bytes: &[u8]) -> usize {
 /// is only a delimiter at top level — backslash pairs, backquotes,
 /// single/double quotes, `$(...)`, `${...}` and process substitutions are
 /// skipped as units, so a `/` inside any of them stays word text.
-fn split_parameter_separator(value: &str) -> Option<(&str, &str)> {
+pub(in crate::executor) fn split_parameter_separator(value: &str) -> Option<(&str, &str)> {
     let chars: Vec<(usize, char)> = value.char_indices().collect();
     let mut index = 0;
     while index < chars.len() {

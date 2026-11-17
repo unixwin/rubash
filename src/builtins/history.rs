@@ -56,6 +56,7 @@ where
     let mut index = 0;
     let mut file_flags = 0_u8;
     let mut delete_arg: Option<String> = None;
+    let mut clear = false;
     while let Some(arg) = args.get(index) {
         if arg == "--" {
             index += 1;
@@ -71,7 +72,7 @@ where
                 'n' => file_flags |= 0x02,
                 'r' => file_flags |= 0x04,
                 'w' => file_flags |= 0x08,
-                'c' => {}
+                'c' => clear = true,
                 'd' => {
                     // internal_getopt("acd:npsrw"): -d's optarg is the rest
                     // of the cluster when attached (-d5), else the next word.
@@ -119,6 +120,13 @@ where
         return Ok(EXECUTION_FAILURE);
     }
 
+    // history.def:169-173: -c clears first and, with no remaining
+    // words, returns success before the -d arm validates anything —
+    // `history -c -d bad` clears and never checks "bad".
+    if clear && args.get(index).is_none() {
+        return Ok(EXECUTION_SUCCESS);
+    }
+
     // history.def:164-264: -d validates its offset or inclusive range
     // before deleting. The executor's provider path performs in-range
     // deletions; this layer reports malformed arguments (sh_erange /
@@ -148,8 +156,12 @@ where
     // display_history -> get_numeric_arg(list, 0, &limit): the operand is
     // validated as a number first (sh_neednumarg), then no_args() rejects
     // any further operands with `too many arguments`. no_args jumps to
-    // DISCARD, so the listing never runs on the error paths.
-    if let Some(arg) = args.get(index) {
+    // DISCARD, so the listing never runs on the error paths. The display
+    // arm itself is gated by `(flags & (AFLAG|RFLAG|NFLAG|WFLAG|CFLAG))
+    // == 0` (history.def:267): with -c set, surplus operands are ignored
+    // entirely and never reach get_numeric_arg / no_args.
+    if !clear && args.get(index).is_some() {
+        let arg = &args[index];
         if !is_valid_number(arg) {
             writeln!(
                 stderr,
@@ -167,6 +179,13 @@ where
             *surplus = true;
             return Ok(EX_USAGE);
         }
+    }
+
+    // With -c and surviving operands there is no display arm to fall
+    // into — GNU continues past the gate to the file arms (none set
+    // here), so the remaining words are ignored with success.
+    if clear {
+        return Ok(EXECUTION_SUCCESS);
     }
 
     let limit = args

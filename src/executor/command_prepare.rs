@@ -244,8 +244,22 @@ impl Executor {
         if let Some(coproc_cmd) = &cmd.coproc_command {
             return Some(self.execute_coproc_command(cmd, coproc_cmd));
         }
+        // GNU execute_cmd.c:854 do_redirections runs for cm_cond like any
+        // other command — a `[[ ]]` whose redirects carry `<(`/`>(`
+        // process substitutions (parse.y:5494-5524 read_token_word's
+        // shellexp arm) must run the materializing path so the
+        // substitution is spawned and its `/dev/fd/N` name bound as the
+        // redirect target. The fast entry bypasses that machinery and
+        // would open the literal `<(…)` text as a file, so it admits only
+        // commands with no node-level substitutions; operand
+        // substitutions inside the `[[ ]]` expression live in the
+        // ConditionalCommand's own arg metadata and keep this path.
         if let Some(conditional_command) = &cmd.conditional_command {
-            return Some(self.execute_conditional_command_with_redirects(cmd, conditional_command));
+            if cmd.process_substitutions.is_empty() {
+                return Some(
+                    self.execute_conditional_command_with_redirects(cmd, conditional_command),
+                );
+            }
         }
         if let Some(function_command) = &cmd.function_command {
             return Some(self.define_function(cmd, function_command));
@@ -322,6 +336,13 @@ impl Executor {
         cmd: &CommandNode,
         conditional_command: &ConditionalCommand,
     ) -> Result<(), ExecuteError> {
+        // rubash#3454: same `set -u` unbound-target gate as `if` —
+        // `[[ ... ]] > $nope` aborts in GNU's compound do_redirections
+        // (execute_cmd.c:854) before the fd-var allocation or any
+        // expansion side effect below.
+        if self.compound_redirect_nounset_fatal(cmd)? {
+            return Err(ExecuteError::ExitCode(1));
+        }
         // GNU redir.c do_redirections → redir_varassign: `[[ ]] {fd}<f`
         // allocates and assigns the dynamic fd like any other command.
         // This path bypasses the simple-command dispatch, so apply the
@@ -346,8 +367,24 @@ impl Executor {
         // redirections bind the real descriptors for the duration of the
         // test, then restore. Bind fd 1/2 so `[[ ]]`'s own diagnostics
         // reach `2>f`.
-        let saved_stdout = self.fd_table.entries.get(&1).cloned();
-        let saved_stderr = self.fd_table.entries.get(&2).cloned();
+        // rubash#3730 (same hazard as rubash#3706): the save below
+        // must be a kernel dup, not a bare Rc clone. `[[ ]]`'s own
+        // redirections bind fd 1/2 through open_output/close/dup,
+        // which retire the displaced File endpoints
+        // (retire_write_arm, rubash#3213) — a cloned entry shares
+        // the very descriptor the bind closes, so the restore loops
+        // below would re-insert a retired entry and the next spawn's
+        // pin pass would dup2 whatever recycled that kernel number
+        // (fd 1 lands on the `[[ ]]` redirect's target file). GNU's
+        // undo save IS a kernel dup (`fcntl (fd, F_DUPFD,
+        // SHELL_FD_BASE)`, redir.c:965/1082/1144, recorded by
+        // add_undo_redirect for undo_redirections; the conditional
+        // stamps its line only once its redirections have bound,
+        // execute_cmd.c:4138). A dup failure fails the command (GNU
+        // REDIRECTION_ERROR) via `?` — the saved dup is dropped
+        // (closed) on the bind-error path, so nothing leaks.
+        let saved_stdout = self.fd_table.saved_entry(1)?;
+        let saved_stderr = self.fd_table.saved_entry(2)?;
         // rubash#2131: stash the command's redirection list for the
         // fd-alias sync's own-redirect overlay — `[[ ]]` binds only
         // fds 1/2, so without the list the sync answers its fd-0
@@ -365,6 +402,13 @@ impl Executor {
         if let Err(error) = self.bind_conditional_stdio_redirects(cmd) {
             self.current_conditional_redirects = saved_conditional_redirects;
             return Err(error);
+        }
+        // GNU execute_cmd.c:4138 SET_LINE_NUMBER(cond_command->line):
+        // the conditional stamps line_number_for_err_trap only once its
+        // own redirections have bound — reaching this point means the
+        // :1141-frame do_redirections succeeded (rubash#3553).
+        if !self.error_trap_running {
+            self.err_trap_line.set(cmd.line);
         }
         self.exit_code = self.execute_conditional_command(conditional_command);
         // rubash#1130: a [[ ]] operand hit a FATAL word-expansion error
@@ -414,6 +458,27 @@ impl Executor {
                 }
             }
         }
+        // rubash#3382: a fatal arithmetic evalerror latched while
+        // expanding this `[[ ]]` command's operands belongs to THIS
+        // command — GNU's evalerror jumps DISCARD for the current
+        // command only (expr.c evalerror -> eval.c:111 reader_loop).
+        // Consume the flags here and abandon the command with the
+        // DISCARD class, so the next command starts clean instead of
+        // being discarded by `abort_on_expansion_errors`. First-error
+        // wins against the #1422 check below: a conditional_error set
+        // means later operands were skipped, so no later arith error
+        // can be latched; an arith error latched means later operands
+        // still ran, so conditional_error may be set later too — the
+        // arith DISCARD takes precedence (the command is already
+        // abandoned either way, and the arith class must arm the
+        // errexit exemption for the list loop).
+        if self.take_conditional_arith_evalerror() {
+            self.exit_code = 1;
+            // rubash#439: an expansion error, not a failed command —
+            // no ERR trap for it.
+            self.command_expansion_failed.set(true);
+            return Err(ExecuteError::ExpansionFailure(1));
+        }
         // rubash#1422: a non-fatal expansion error in a [[ ]] operand
         // (recorded by expand_conditional_word) abandons the current
         // command list with the recorded status — DISCARD, so the next
@@ -428,6 +493,40 @@ impl Executor {
             return result;
         }
         Ok(())
+    }
+
+    /// rubash#3383: GNU arrayfunc.c:507-517 assign_array_from_string runs
+    /// find_or_make_array_variable BEFORE assign_array_var_from_string
+    /// expands the elements, so a brand-new compound target is bound as
+    /// an empty indexed array even when an element's expansion fails and
+    /// the command is abandoned. The nonfatal arm in
+    /// execute_empty_words_command already kept this contract; the fatal
+    /// arm returned without binding, so `a=($((1/0)) 2)` left `a` unbound
+    /// where GNU leaves `declare -a a=()`. A pre-existing target — or a
+    /// declared-but-unset one — keeps its prior state (niubash #121).
+    fn bind_empty_array_for_failed_compound_assignment(&mut self, name: &str, value: &str) {
+        if !value.starts_with(COMPOUND_ASSIGNMENT_MARKER) {
+            return;
+        }
+        let stripped = name.strip_suffix('+').unwrap_or(name);
+        let base = stripped.split_once('[').map_or(stripped, |(base, _)| base);
+        if self.shell_state.env_vars.contains_key(base)
+            || is_marked_var(&self.shell_state.env_vars, DECLARED_UNSET_VARS, base)
+        {
+            return;
+        }
+        self.shell_state.env_vars.insert(
+            base.to_string(),
+            format_indexed_array_storage(BTreeMap::new()),
+        );
+        mark_env_name(&mut self.shell_state.env_vars, ARRAY_VARS, base);
+        // Keep the structured cell in lockstep (empty array).
+        crate::executor::arrays::sync_typed_indexed_array(
+            &mut self.shell_state.variables,
+            base,
+            &std::collections::BTreeMap::new(),
+        );
+        self.shell_state.env_vars.clear_array_cells_dirty();
     }
 
     pub(in crate::executor) fn execute_empty_words_command(
@@ -592,7 +691,19 @@ impl Executor {
         // last_command_substitution_status; the assignment loop below
         // overwrites it per assignment and the redirect arms overwrite
         // it on failure, preserving GNU's ordering.
-        if let Some(substitution_status) = vanished_substitution_status {
+        // rubash#3021: only the in-shell branch of execute_null_command
+        // returns last_command_subst_status (execute_cmd.c:4268-4276).
+        // When a redirect forces the fork (execute_cmd.c:4209-4216: an
+        // fd-0 redirector or a `{var}` varassign), the parent waits for
+        // the child that only runs do_redirections and exits
+        // EXECUTION_SUCCESS / EXECUTION_FAILURE (execute_cmd.c:4244-4247,
+        // waited at execute_cmd.c:982 wait_for) — the substitution status
+        // from the words and the assignment RHSs is discarded:
+        // `$(false) <<EOF` and `x=$(false) </dev/null` are status 0.
+        let substitution_status_survives = !Self::null_command_redirects_force_fork(cmd);
+        if let Some(substitution_status) =
+            vanished_substitution_status.filter(|_| substitution_status_survives)
+        {
             status = substitution_status;
         }
         // assignment_raws stays index-aligned with assignments when every
@@ -644,7 +755,21 @@ impl Executor {
                 }
                 None => value.as_str(),
             };
+            // rubash#3605: GNU's expand_words bracket — a bare
+            // `x=$(...)` command expands its RHS inside the same
+            // expand_words call the CMD_IGNORE_RETURN check wraps
+            // (execute_cmd.c:4616), so a comsub in an exempt
+            // assignment stamps CMD_IGNORE_RETURN on its body
+            // (builtins/evalstring.c:496). Pure-assignment commands
+            // reach this loop without expand_command_words, so they
+            // need their own bracket.
+            if self.suppress_errexit > 0 {
+                self.comsub_ignore_return += 1;
+            }
             let assignment_result = self.expand_assignment_value_result_with_raw(name, value, raw);
+            if self.comsub_ignore_return > 0 {
+                self.comsub_ignore_return -= 1;
+            }
             // GNU subst.c:10277-10288: a bad substitution raised while
             // expanding the assignment RHS is an expand_word_error. The
             // flag is checked after word expansion in execute_command, but
@@ -660,6 +785,9 @@ impl Executor {
                 return Err(ExecuteError::ExpansionFailure(1));
             }
             if self.shell_state.parameter_bad_substitution.replace(false) {
+                // rubash#3499: consuming the verdict spends the print
+                // budget with it (see abort_on_expansion_errors).
+                self.shell_state.bad_substitution_reported.set(false);
                 if self.posix_mode_enabled()
                     && !self.invocation_interactive()
                     && crate::builtins::shopt::compatibility_level(&self.shell_state.env_vars) > 43
@@ -694,6 +822,11 @@ impl Executor {
                 // prints "after"), matching the plain-parameter nounset path;
                 // other fatal categories abandon only the command list
                 // (probe a6: `x=$((1/0)); echo after` prints "after").
+                // rubash#3383: a compound target is created BEFORE its
+                // elements expand (arrayfunc.c:507-517), so bind the empty
+                // array here too — before every return below — exactly as
+                // the nonfatal arm does.
+                self.bind_empty_array_for_failed_compound_assignment(name, value);
                 if self.shell_state.arithmetic_nounset_error.replace(false) {
                     // expr.c:1208-1216: interactive_shell DISCARDs — the
                     // assignment is abandoned with status 1, the session
@@ -742,32 +875,15 @@ impl Executor {
                 // elements — same contract as fail_compound_array_assignment
                 // (failglob, niubash #121).
                 self.exit_code = 1;
-                if value.starts_with(COMPOUND_ASSIGNMENT_MARKER) {
-                    let stripped = name.strip_suffix('+').unwrap_or(name);
-                    let base = stripped.split_once('[').map_or(stripped, |(base, _)| base);
-                    if !self.shell_state.env_vars.contains_key(base)
-                        && !is_marked_var(&self.shell_state.env_vars, DECLARED_UNSET_VARS, base)
-                    {
-                        self.shell_state.env_vars.insert(
-                            base.to_string(),
-                            format_indexed_array_storage(BTreeMap::new()),
-                        );
-                        mark_env_name(&mut self.shell_state.env_vars, ARRAY_VARS, base);
-                        // Keep the structured cell in lockstep (empty array).
-                        crate::executor::arrays::sync_typed_indexed_array(
-                            &mut self.shell_state.variables,
-                            base,
-                            &std::collections::BTreeMap::new(),
-                        );
-                        self.shell_state.env_vars.clear_array_cells_dirty();
-                    }
-                }
+                self.bind_empty_array_for_failed_compound_assignment(name, value);
                 // rubash#1518: same evalerror class as the word funnel
                 // (`v=${#a[1/0]}` discards and continues under `set -e`).
                 self.evalerror_arith_pending.set(true);
                 return Err(ExecuteError::ExpansionFailure(1));
             }
-            if let Some(substitution_status) = substitution_status {
+            if let Some(substitution_status) =
+                substitution_status.filter(|_| substitution_status_survives)
+            {
                 status = substitution_status;
             }
             // GNU subst.c do_assignment_internal: expand once (3565), trace
@@ -1730,6 +1846,12 @@ impl Executor {
         // as an ARRAYREF_FLAG prefix so it survives word splitting the way
         // GNU copies word->flags to each output word.
         let arrayref_marks = self.arrayref_operand_marks(cmd);
+        // rubash#3500: install the declare-assoc hint for this command's
+        // word expansion (see declare_assoc_operand_names); dropped right
+        // after the per-word expansion below.
+        let _declare_assoc_guard = crate::executor::expand_word::DeclareAssocHintGuard::new(
+            declare_assoc_operand_names(cmd),
+        );
         let expanded_words = cmd
             .words
             .iter()
@@ -1796,18 +1918,32 @@ impl Executor {
                     }
                     _ => word.as_str(),
                 };
-                self.expand_command_word(cmd, index, word, raw)
-                    .into_iter()
-                    .map(move |word| {
-                        let word = if arrayref_marked {
-                            format!("{}{word}", crate::builtins::arrayref::ARRAYREF_FLAG)
-                        } else {
-                            word
-                        };
-                        (word, suppress_glob)
-                    })
+                // rubash#3019 — GNU subst.c:4288-4296
+                // call_expand_word_internal: the FIRST word-expansion
+                // error sentinel (bad substitution / no closing brace)
+                // unwinds the command via exp_jump_to_top_level(DISCARD)
+                // — no later word of the command is expanded, so a second
+                // bad substitution can never raise its diagnostic
+                // (`${(aO)foo} ${(s/x/)foo}` reports only the first).
+                if self.shell_state.parameter_bad_substitution.get()
+                    || self.no_closing_brace_failure.get()
+                {
+                    Vec::new()
+                } else {
+                    self.expand_command_word(cmd, index, word, raw)
+                }
+                .into_iter()
+                .map(move |word| {
+                    let word = if arrayref_marked {
+                        format!("{}{word}", crate::builtins::arrayref::ARRAYREF_FLAG)
+                    } else {
+                        word
+                    };
+                    (word, suppress_glob)
+                })
             })
             .collect::<Vec<_>>();
+        drop(_declare_assoc_guard);
         // GNU subst.c:9955-9956 + 4288-4296: a bad array subscript in a
         // length expansion (${#arr[bad]}) returns &expand_wdesc_error, which
         // exp_jump_to_top_level(DISCARD) uses to abandon the entire command
@@ -2278,9 +2414,10 @@ impl Executor {
                     .strip_prefix(COMPOUND_ASSIGNMENT_MARKER)
                     .unwrap_or(value);
                 if value.starts_with('(') && value.ends_with(')') {
-                    if let Some(flattened) =
-                        self.expand_compound_positional_at_assignment_bare(value)
-                    {
+                    if let Some(flattened) = self.expand_compound_positional_at_assignment_bare(
+                        value,
+                        self.compound_assignment_is_assoc(name),
+                    ) {
                         return vec![format!("{name}={flattened}")];
                     }
                 }
@@ -2540,16 +2677,22 @@ impl Executor {
         if !declare_assignment_word {
             if !word.starts_with(STORAGE_WORD_PREFIX) {
                 if let Some(values) = self.braced_alternate_word_values(word, raw) {
+                    // rubash#3649: commit deferred substring-offset writes.
+                    self.apply_pending_subscript_writes();
                     return values;
                 }
             }
             if let Some(values) = self.array_at_word_values(word) {
                 if word_is_unquoted_array_list_expansion(word) {
+                    // rubash#3649: commit deferred substring-offset writes.
+                    self.apply_pending_subscript_writes();
                     return field_split_array_values_with_ifs(
                         values,
                         self.shell_state.env_vars.get("IFS").map(String::as_str),
                     );
                 }
+                // rubash#3649: commit deferred substring-offset writes.
+                self.apply_pending_subscript_writes();
                 return values;
             }
         }
@@ -2633,16 +2776,22 @@ impl Executor {
             if values.is_empty()
                 && raw.is_some_and(|raw| raw_quoted_at_word_has_quoted_null(raw, self))
             {
+                // rubash#3649: commit deferred substring-offset writes.
+                self.apply_pending_subscript_writes();
                 return vec![String::new()];
             }
             if self.word_is_unquoted_positional_modified_list_expansion(word)
                 || self.word_is_unquoted_positional_list_expansion(word)
             {
+                // rubash#3649: commit deferred substring-offset writes.
+                self.apply_pending_subscript_writes();
                 return field_split_positional_values_with_ifs(
                     values,
                     self.shell_state.env_vars.get("IFS").map(String::as_str),
                 );
             }
+            // rubash#3649: commit deferred substring-offset writes.
+            self.apply_pending_subscript_writes();
             return values;
         }
         // A fully double-quoted `${op...}` word whose alternate embeds `$@`
@@ -2653,11 +2802,15 @@ impl Executor {
         // param_expand carries `quoted` into the alternate word).
         if word.starts_with(STORAGE_WORD_PREFIX) {
             if let Some(values) = self.quoted_braced_alternate_positional_at_values(word) {
+                // rubash#3649: commit deferred substring-offset writes.
+                self.apply_pending_subscript_writes();
                 return values;
             }
             // A fully double-quoted "${a[@]:-y}" still expands to the
             // element list when the array is set (array22.sub).
             if let Some(values) = self.braced_alternate_word_values(word, raw) {
+                // rubash#3649: commit deferred substring-offset writes.
+                self.apply_pending_subscript_writes();
                 return values;
             }
             // A whole-word ${op...} the lexer marked wholly quoted but whose
@@ -2667,6 +2820,8 @@ impl Executor {
             // two empty args; subst.c list_string:3181-3186).
             if !raw_word_is_quoted(raw) {
                 if let Some(values) = self.unquoted_outer_braced_alternate_values(word) {
+                    // rubash#3649: commit deferred substring-offset writes.
+                    self.apply_pending_subscript_writes();
                     return values;
                 }
             }
@@ -2985,7 +3140,35 @@ impl Executor {
         // the generic `expanded` text already carries the transform result
         // and splits through field_split_values_with_ifs below, matching
         // GNU's quote_escapes+field-split pipeline (subst.c:8705).
+        // GNU subst.c:12026-12048 (expand_word_internal end-of-word): a
+        // word whose whole expansion is null survives as one empty field
+        // only under had_quoted_null or PARTIALLY_QUOTED state — an
+        // UNQUOTED word (or quoted_dollar_at) discards. Quoting bytes
+        // inside the word's own `${...}`/`$(...)` are inner syntax, so a
+        // QUOTED_NULL_MARKER produced by `${v=''}` does not anchor the
+        // OUTER field: strip bare markers before the empty/split verdicts
+        // when the word itself is unquoted (`[[` operands skip field
+        // semantics entirely — the `[[` guard in removes_unquoted_null_word
+        // keeps its own rule).
+        let word_is_unquoted = !cmd.words.first().is_some_and(|word| word == "[[")
+            && !raw_word_is_partially_quoted(raw);
+        let expanded = if word_is_unquoted {
+            crate::executor::markers::restore_bare_sentinel_cow(
+                &expanded,
+                crate::executor::markers::QUOTED_NULL_MARKER,
+                "",
+            )
+        } else {
+            std::borrow::Cow::Borrowed(expanded.as_str())
+        };
+        let expanded = expanded.as_ref();
         if expanded.is_empty() && self.removes_unquoted_null_word(cmd, index) {
+            Vec::new()
+        } else if expanded.is_empty() && word_is_unquoted {
+            // The Variable-kind admission of removes_unquoted_null_word
+            // only models part of the GNU discard: a non-Variable
+            // unquoted word (`${v=$*}` with one empty positional) whose
+            // expansion is empty vanishes the same way.
             Vec::new()
         } else if raw_word_contains_process_substitution(raw)
             && expanded_word_has_process_substitution(&expanded)
@@ -4103,6 +4286,10 @@ impl Executor {
             return true;
         }
         if self.execute_array_element_assignment(cmd) {
+            // GNU variables.c:5820/6257-6266 sv_strict_posix: an
+            // element bind of POSIXLY_CORRECT re-derives the mode
+            // (rubash#3661).
+            self.sync_posix_mode_if_assignment_operands(&cmd.words);
             self.bind_underscore("");
             // rubash#1523: same finish as the assignment-words arm.
             let _ = self.finish_assignment_output_process_substitutions_for_command(cmd);
@@ -4177,6 +4364,11 @@ impl Executor {
                 if self.exit_code != 0 {
                     return true;
                 }
+                // GNU variables.c:5820/6257-6266 sv_strict_posix: an
+                // element bind of POSIXLY_CORRECT inside a mixed
+                // assignment statement re-derives the mode
+                // (rubash#3661).
+                self.sync_posix_mode_if_assignment_operands(&single.words);
             } else if let Some((name, value)) = split_assignment_word(&cmd.words[index]) {
                 let assignment = vec![(name.to_string(), value.to_string())];
                 if !self.apply_permanent_assignments(&assignment, None) {
@@ -4293,6 +4485,77 @@ fn assignment_builtin_receives_assignment_word(
         cmd.words.first().map(String::as_str),
         Some("export" | "readonly" | "declare" | "typeset" | "local")
     )
+}
+
+/// Operand names this command is about to declare as associative arrays
+/// (rubash#3500): a `declare -A` / `typeset -A` / `local -A` operand's
+/// compound value expands during command word expansion — before the
+/// builtin runs and marks ASSOC_VARS — so the expansion-time assoc check
+/// would otherwise see a fresh name as indexed. `expand_command_words`
+/// installs the returned names as the declare-assoc hint for the
+/// command's word expansion. Only the ordered flag scan is modelled
+/// (flags before the first operand; `-A` after an operand is not picked
+/// up — GNU declare.def's getopt order — and `-f`/`-F`/`-p` end the scan
+/// since their operands are not assignments). `command`/`builtin`
+/// wrappers around a declaration builtin are recognised; anything else
+/// yields no names.
+fn declare_assoc_operand_names(cmd: &CommandNode) -> Vec<String> {
+    let words = &cmd.words;
+    let mut index = match words.first().map(String::as_str) {
+        Some("declare" | "typeset" | "local") => 1,
+        Some("command" | "builtin")
+            if matches!(
+                words.get(1).map(String::as_str),
+                Some("declare" | "typeset" | "local")
+            ) =>
+        {
+            2
+        }
+        _ => return Vec::new(),
+    };
+    let mut assoc = false;
+    let mut flags_done = false;
+    let mut names = Vec::new();
+    while index < words.len() {
+        let word = &words[index];
+        index += 1;
+        if !flags_done {
+            if word == "--" {
+                flags_done = true;
+                continue;
+            }
+            if word.len() > 1 && (word.starts_with('-') || word.starts_with('+')) {
+                let negated = word.starts_with('+');
+                let mut stop = false;
+                for flag in word[1..].chars() {
+                    match flag {
+                        'A' => assoc = !negated,
+                        'a' => assoc = false,
+                        'f' | 'F' | 'p' => {
+                            stop = true;
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                if stop {
+                    break;
+                }
+                continue;
+            }
+            flags_done = true;
+        }
+        if assoc {
+            if let Some((name, _)) = split_assignment_word(word) {
+                let base = name.strip_suffix('+').unwrap_or(name);
+                let base = base.split('[').next().unwrap_or(base);
+                if is_shell_name(base) {
+                    names.push(base.to_string());
+                }
+            }
+        }
+    }
+    names
 }
 
 /// Quote state carried across the literal fragments of
@@ -4899,6 +5162,48 @@ fn raw_has_quoted_empty_suffix(raw: &str) -> bool {
     raw.ends_with("''") || raw.ends_with("\"\"")
 }
 
+/// GNU expand_word_internal's `quoted_state != UNQUOTED` at the word's top
+/// level: any `'...'`/`"..."` span, a `$'...'`/`$"..."` construct, or a
+/// backslash escape makes the word PARTIALLY_QUOTED — which keeps one
+/// empty field when the whole expansion is null (subst.c:12026-12048).
+/// Quoting bytes inside `${...}`/`$(...)`/`` `...` `` belong to the inner
+/// construct and do not count (`${v=''}` is an UNQUOTED word).
+fn raw_word_is_partially_quoted(raw: Option<&str>) -> bool {
+    let Some(raw) = raw else {
+        return false;
+    };
+    if !raw
+        .bytes()
+        .any(|b| matches!(b, b'\'' | b'"' | b'\\' | b'$' | b'`'))
+    {
+        return false;
+    }
+    let chars: Vec<char> = raw.chars().collect();
+    let mut index = 0usize;
+    while index < chars.len() {
+        match chars[index] {
+            '\'' | '"' | '\\' => return true,
+            '$' if chars.get(index + 1) == Some(&'\'') => return true,
+            '$' if chars.get(index + 1) == Some(&'"') => return true,
+            '$' if chars.get(index + 1) == Some(&'{') => {
+                index = skip_raw_braced_parameter(&chars, index + 2);
+                continue;
+            }
+            '$' if chars.get(index + 1) == Some(&'(') => {
+                index = skip_raw_command_substitution(&chars, index + 2);
+                continue;
+            }
+            '`' => {
+                index = skip_raw_backtick(&chars, index + 1);
+                continue;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    false
+}
+
 /// Whitelist predicates for the IFS-marking skip in `expand_command_word`
 /// (rubash#117 discipline: doubt falls through to the full passes).
 /// `ifs_literal_marks_possible` is false exactly when `mark_literal_ifs_chars`
@@ -5257,6 +5562,10 @@ fn copy_comsub_body_verbatim_for_ifs_marking(
     // GNU read_token (parse.y:3630-3643): `#` opens a comment only at a
     // token boundary (issue #513). The verbatim copy carries its bytes.
     let mut token_boundary = true;
+    // rubash#3605: paren depth of a `$(` nested inside the case context
+    // (`$(case $(w) in e) ...`) — arm-for-arm with the parser extractor
+    // (nested_case_subst).
+    let mut nested_case_subst = 0usize;
     while *index < raw_chars.len() {
         let ch = raw_chars[*index];
         simulated.push(ch);
@@ -5334,6 +5643,30 @@ fn copy_comsub_body_verbatim_for_ifs_marking(
                 simulated.push('(');
                 *index += 1;
                 depth += 1;
+                if case_depth > 0 {
+                    nested_case_subst += 1;
+                }
+                // rubash#3605: feed the skipped `(` to the case word
+                // machine — `(` ends a token, so `case` right after `$(`
+                // is a command-position keyword; otherwise `$(case` never
+                // armed the tracker and the pattern `)` closed the body
+                // one `)` early.
+                update_command_substitution_case_depth(
+                    '(',
+                    false,
+                    false,
+                    &mut word,
+                    &mut case_depth,
+                    &mut word_boundary,
+                    &mut current_word_boundary,
+                    raw_chars.get(*index).copied(),
+                    &mut case_in_stage,
+                    &mut case_pattern_region,
+                    prev_sig,
+                );
+                if esac_prev_token_char('(') {
+                    prev_sig = Some('(');
+                }
                 token_boundary = false;
             }
             '\'' => {
@@ -5407,12 +5740,18 @@ fn copy_comsub_body_verbatim_for_ifs_marking(
                 word_boundary = false;
                 token_boundary = false;
             }
-            '(' if case_depth == 0 => {
+            '(' if case_depth == 0 || nested_case_subst > 0 => {
                 depth += 1;
+                if nested_case_subst > 0 {
+                    nested_case_subst += 1;
+                }
                 token_boundary = true;
             }
-            ')' if case_depth == 0 => {
+            ')' if case_depth == 0 || nested_case_subst > 0 => {
                 depth = depth.saturating_sub(1);
+                if nested_case_subst > 0 {
+                    nested_case_subst -= 1;
+                }
                 if depth == 0 {
                     break;
                 }
