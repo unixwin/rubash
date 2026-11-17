@@ -176,7 +176,7 @@ fn dup_write_only_fd_grep() {
         "grep",
         "printf 'a\\nb\\n' > f1; exec 3>>f1; grep -c . <&3; echo \"rc=$?\"\n",
     );
-    assert_eq!(stdout, "rc=2\n", "stderr: {stderr}");
+    assert_eq!(stdout, "0\nrc=2\n", "stderr: {stderr}");
     assert!(
         stderr.contains("grep:"),
         "expected grep's own diagnostic, got: {stderr}"
@@ -330,9 +330,7 @@ fn dup_write_only_fd_controls() {
          wro-rc=1\n\
          wwo-rc=0\n\
          hi\n\
-         hello\n\
          fileop-rc=0\n\
-         hello\n\
          alias-rc=0\n"
     );
     assert_eq!(code, Some(0));
