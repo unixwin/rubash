@@ -50,7 +50,7 @@ fn stdout_of(tag: &str) -> (Vec<u8>, PathBuf) {
     let script = dir.join("probe.sh");
     std::fs::write(
         &script,
-        "cd \"$1\" || exit 1\na=\"$(printf 'x\\\\234')\"\nb=x$'\\u009c'\n\
+        "cd \"$1\" || exit 1\na=\"$(printf 'x\\234')\"\nb=x$'\\u009c'\n\
          printf '#!/bin/sh\\necho RAW\\n' > \"$a\"; chmod +x \"$a\"\n\
          printf '#!/bin/sh\\necho UTF\\n' > \"$b\"; chmod +x \"$b\"\n\
          PATH=\"$1:$PATH\"\n\

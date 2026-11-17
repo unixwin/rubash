@@ -97,8 +97,8 @@ fn marker(name: &[u8], contents: &str) -> (Vec<u8>, Vec<(Vec<u8>, String)>) {
     )
 }
 
-const PRELUDE_PLAIN: &str = "a=\"$(printf 'x\\\\234')\"\nb=x$'\\u009c'";
-const PRELUDE_MIXED: &str = "a=\"é$(printf '\\\\234')\"\nb=\"éx\"$'\\u009c'";
+const PRELUDE_PLAIN: &str = "a=\"$(printf 'x\\234')\"\nb=x$'\\u009c'";
+const PRELUDE_MIXED: &str = "a=\"é$(printf '\\234')\"\nb=\"éx\"$'\\u009c'";
 
 const BODY: &str = "mkdir \"$a\" \"$b\"\ncd \"$a\" || exit 99\nprintf 'RAW-MARKER' > marker\ncd ..\ncd \"$b\" || exit 98\nprintf 'UTF-MARKER' > marker\ncd ..";
 

@@ -66,8 +66,8 @@ fn stdout_of(tag: &str, body: &str, prelude: &str) -> Vec<u8> {
     output.stdout
 }
 
-const PRELUDE_PLAIN: &str = "a=\"$(printf 'x\\\\234')\"\nb=x$'\\u009c'";
-const PRELUDE_MIXED: &str = "a=\"é$(printf '\\\\234')\"\nb=\"éx\"$'\\u009c'";
+const PRELUDE_PLAIN: &str = "a=\"$(printf 'x\\234')\"\nb=x$'\\u009c'";
+const PRELUDE_MIXED: &str = "a=\"é$(printf '\\234')\"\nb=\"éx\"$'\\u009c'";
 
 const BODY_PLAIN: &str = "printf 'RAW' > \"$a\"\nprintf 'UTF' > \"$b\"\nx=$(<\"$a\"); printf 'sub-a=[%s]\\n' \"$x\"\ny=$(<\"$b\"); printf 'sub-b=[%s]\\n' \"$y\"";
 const BODY_MIXED: &str = "printf 'MIXED-RAW' > \"$a\"\nprintf 'MIXED-UTF' > \"$b\"\nx=$(<\"$a\"); printf 'sub-a=[%s]\\n' \"$x\"\ny=$(<\"$b\"); printf 'sub-b=[%s]\\n' \"$y\"";

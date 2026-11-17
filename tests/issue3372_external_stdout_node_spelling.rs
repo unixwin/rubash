@@ -47,7 +47,7 @@ fn listing(tag: &str, body: &str) -> Vec<(Vec<u8>, String)> {
     let script = dir.join("probe.sh");
     std::fs::write(
         &script,
-        format!("cd \"$1\" || exit 1\na=\"$(printf 'x\\\\234')\"\nb=x$'\\u009c'\n{body}\n"),
+        format!("cd \"$1\" || exit 1\na=\"$(printf 'x\\234')\"\nb=x$'\\u009c'\n{body}\n"),
     )
     .expect("write script");
     let output = Command::new(BIN)
