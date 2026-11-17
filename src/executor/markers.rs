@@ -1341,6 +1341,23 @@ pub(crate) fn strip_ansi_c_ifs_guard(value: &str) -> String {
     replace_ansi_c_ifs_guard(value, "")
 }
 
+/// Decode transport word text to the literal characters a re-LEXER must
+/// see — the source-text boundary used by respawn rendering
+/// (`redirect_target_source_text`) and the here-document delimiter
+/// (`heredoc_delimiter_text`, rubash#1151): CTLESC pairs reduce to their
+/// data character, the DATA_*/ANSI-C quote carriers become what they
+/// denote, the `$name` terminator PARAM_NAME_END_MARKER is dropped (the
+/// re-lex regenerates it from the quoting), and the ANSI_C_IFS_GUARD
+/// field-split transport is stripped. Engine carriers are pre-expansion
+/// artifacts; transporting them into a child that re-parses the text
+/// made the child tag a protocol byte as literal data (rubash#3816).
+pub(crate) fn decode_transport_word_text(value: &str) -> String {
+    let decoded = decode_word_position_carriers(value);
+    let decoded = dequote_ctlesc_pairs(&decoded);
+    let decoded = decoded.replace(PARAM_NAME_END_MARKER, "");
+    strip_ansi_c_ifs_guard(&decoded)
+}
+
 /// Borrowing form of [`strip_ansi_c_ifs_guard`] for hot paths: a value with
 /// no guard byte is returned borrowed.
 pub(crate) fn strip_ansi_c_ifs_guard_cow(value: &str) -> std::borrow::Cow<'_, str> {
