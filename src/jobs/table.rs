@@ -605,15 +605,37 @@ impl JobTable {
         self.delivered_signals.push((pid, signal));
     }
 
-    /// Consume the delivery record for `pid` at its completion
-    /// (rubash#3802); `None` means the shell's own `kill` is not what
-    /// ended the process, so a plain nonzero exit keeps `Exit <code>`.
-    pub fn take_delivered_signal(&mut self, pid: u32) -> Option<i32> {
+    /// Consume the delivery record for `pid` at its completion and
+    /// return the signal ONLY when the reaped `status` is that
+    /// signal's `128+signal` death (rubash#3802). GNU decides the
+    /// jobs wording from the wait status itself: `printable_job_status`
+    /// (jobs.c:1969-2015) calls `j_strsignal(WTERMSIG(p->status))`
+    /// only in the `WIFSIGNALED` arm and renders `Exit %d` from
+    /// `WEXITSTATUS` otherwise — so a process that survived the
+    /// signal we delivered (ignored it, trapped it, or was already
+    /// past it) keeps its real exit status. A mismatch therefore
+    /// means the delivery did not end the process; the record is
+    /// consumed either way so a recycled pid cannot borrow it.
+    ///
+    /// Only a platform whose wait status has NO `WIFSIGNALED` trace
+    /// may call this: a normal `exit 143` is indistinguishable from
+    /// a SIGTERM death by the code alone, so where the kernel status
+    /// exists ([`Self::discard_delivered_signal`]) it is authoritative.
+    pub fn take_delivered_signal(&mut self, pid: u32, status: i32) -> Option<i32> {
         let position = self
             .delivered_signals
             .iter()
             .position(|(marked, _)| *marked == pid)?;
-        Some(self.delivered_signals.remove(position).1)
+        let (_, signal) = self.delivered_signals.remove(position);
+        (status == 128 + signal).then_some(signal)
+    }
+
+    /// Drop the delivery record for `pid` at its completion without
+    /// applying it (rubash#3802). Used where the kernel wait status is
+    /// authoritative (`WIFSIGNALED`/`WTERMSIG` present): the record
+    /// must not override it, and must not outlive the completion.
+    pub fn discard_delivered_signal(&mut self, pid: u32) {
+        self.delivered_signals.retain(|(marked, _)| *marked != pid);
     }
 
     /// Publish deferred marks at an observation event

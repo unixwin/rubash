@@ -2319,6 +2319,36 @@ impl Executor {
     /// Make one reaped child's completion visible in the job table:
     /// the term-signal record, the jobs.c:4625 death notice, the
     /// completion mark, the CHLD trap, coproc retirement.
+    /// rubash#3802: the signal to attribute at a completion from the
+    /// shell's own `kill` delivery record.
+    ///
+    /// The owner of "did this process die by that signal?" is the wait
+    /// status — GNU's `WIFSIGNALED`/`WTERMSIG`, the only arm of
+    /// `printable_job_status (jobs.c:1969-2015)` that prints
+    /// `j_strsignal`. Unix wait statuses carry it (`exit_status_signal`),
+    /// so the record is merely consumed there and can never override a
+    /// `WIFEXITED` status: a trapped/ignored SIGTERM that ends in
+    /// `exit 143` is indistinguishable from a SIGTERM death by code
+    /// alone, and GNU renders `Exit 143`. Windows `ExitStatus` has no
+    /// signal bit — rubash's own `kill` encodes the delivery as
+    /// `TerminateProcess(128+signal)` (builtins/kill.rs
+    /// signal_process) — so the record supplies the signal, but only
+    /// when the reaped code is exactly that signal's `128+signal`.
+    fn delivered_term_signal(&mut self, pid: u32, status: i32) -> Option<i32> {
+        #[cfg(unix)]
+        {
+            let _ = status;
+            self.shell_state.job_table.discard_delivered_signal(pid);
+            None
+        }
+        #[cfg(not(unix))]
+        {
+            self.shell_state
+                .job_table
+                .take_delivered_signal(pid, status)
+        }
+    }
+
     fn apply_job_completion(
         &mut self,
         pid: u32,
@@ -2337,8 +2367,15 @@ impl Executor {
         // printable_job_status (jobs.c:1969-1985, `j_strsignal
         // (WTERMSIG (p->status))`) renders `Killed` / `Terminated`;
         // a job that simply exited keeps `Exit 137`.
-        let term_signal =
-            term_signal.or_else(|| self.shell_state.job_table.take_delivered_signal(pid));
+        //
+        // The delivery record only supplies the signal when the reaped
+        // status IS that signal's 128+signal death: GNU's WIFSIGNALED
+        // arm is decided by the wait status, so a process that
+        // ignored/trapped the delivered signal and exited on its own
+        // keeps `Exit <code>` (rubash#3802). The record is consumed
+        // unconditionally so a recycled pid cannot borrow it.
+        let delivered = self.delivered_term_signal(pid, status);
+        let term_signal = term_signal.or(delivered);
         if let Some(signal) = term_signal {
             self.shell_state.job_table.note_term_signal(pid, signal);
         }
