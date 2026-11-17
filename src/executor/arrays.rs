@@ -1043,8 +1043,8 @@ impl ElementCase {
 
     fn apply(&self, value: String) -> String {
         match self {
-            ElementCase::Upper => value.to_uppercase(),
-            ElementCase::Lower => value.to_lowercase(),
+            ElementCase::Upper => crate::locale::simple_uppercase(&value),
+            ElementCase::Lower => crate::locale::simple_lowercase(&value),
             ElementCase::Capitalize => super::variable_state::capitalize_value(&value),
             ElementCase::None => value,
         }
