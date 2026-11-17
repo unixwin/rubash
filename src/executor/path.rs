@@ -690,16 +690,23 @@ pub fn find_user_command(name: &str, env_vars: &HashMap<String, String>) -> Opti
                 // walk below then re-records (hash -p ./gone NAME falls
                 // through the same way). builtins::hash owns the arm; the
                 // mirror stores only the fs path. The served spelling is
-                // returned VERBATIM — GNU shell_execve runs the recorded
-                // string as-is, so diagnostics and post-`cd` ENOENT keep
-                // the `./elem/name` form (rubash#2696).
+                // what GNU shell_execve runs verbatim (execute_cmd.c:6133
+                // hands the recorded string to execve unchanged), so this
+                // lookup returns its FILESYSTEM form: on unix the hash
+                // spelling already is that path; on Windows the table
+                // stores the shell-domain display form (/d/...,
+                // ./elem/name) and shell_path_to_windows — the same
+                // funnel record_command_resolution used to build the
+                // mirror — yields the spawnable path. Relative spellings
+                // stay relative, so a post-`cd` ENOENT keeps the
+                // `./elem/name` re-resolution of rubash#2696.
                 match crate::builtins::hash::phash_search(env_vars, name) {
                     None => {
                         mirror.remove(name);
                         cache.results.remove(name);
                     }
                     Some(served) => {
-                        let served = PathBuf::from(served);
+                        let served = shell_path_to_windows(&served, env_vars);
                         // checkhash probes the served spelling anchored
                         // at the session cwd (G-02).
                         if crate::builtins::shopt::checkhash_enabled()
@@ -8437,6 +8444,53 @@ mod tests {
             shell_pwd_display_path(r"\\?\UNC\server\share\dir"),
             "//server/share/dir"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn hash_consult_returns_spawnable_fs_path_for_display_spelling() {
+        // rubash#3845 (introduced by #3554's verbatim-served return):
+        // the hash-table consult must hand back the FILESYSTEM path of
+        // the served spelling. The table stores the shell-domain
+        // display form (/x/...) for `hash -t` fidelity; feeding that
+        // spelling to Command::new spawn routes ENOENTs — the
+        // issue1230 comsub pipeline-stage diagnostic on stderr.
+        // GNU execute_cmd.c:6133 shell_execve execve()s the recorded
+        // string, which on unix already IS the fs path; on Windows the
+        // fs form comes from shell_path_to_windows, the same funnel
+        // record_command_resolution used to build the mirror.
+        let dir = std::env::temp_dir().join(format!("rubash-3845-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let tool = dir.join("rubash3845tool.exe");
+        fs::write(&tool, b"MZ").unwrap();
+
+        let mut env_vars = HashMap::new();
+        env_vars.insert("PATH".to_string(), dir.to_string_lossy().into_owned());
+        env_vars.insert("PWD".to_string(), dir.to_string_lossy().into_owned());
+        // The recorded spelling is the shell-domain display form,
+        // exactly what record_command_resolution stores for a
+        // PATH-walk hit; the mirror entry is its fs-path twin.
+        let display = crate::executor::execution_misc::shell_display_path(
+            &tool.to_string_lossy().replace('\\', "/"),
+        );
+        let sep = crate::executor::markers::HASH_ENV_FIELD_SEP;
+        env_vars.insert(
+            "__RUBASH_HASH_TABLE".to_string(),
+            format!("rubash3845tool={display}{sep}1{sep}0{sep}0"),
+        );
+        set_command_lookup_cache("rubash3845tool", Some(tool.clone()), &env_vars);
+
+        let found =
+            find_user_command("rubash3845tool", &env_vars).expect("hashed command resolves");
+        assert!(
+            found.is_file(),
+            "hash consult must return the spawnable fs path, got {}",
+            found.display()
+        );
+        assert_eq!(found.canonicalize().unwrap(), tool.canonicalize().unwrap());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     fn windows_shell_path(path: &Path) -> String {
