@@ -2057,7 +2057,7 @@ impl Executor {
         // aliases at that read, so the driver's streamed-batch marker must
         // not reach the child's executor-level expansion.
         shell_state.env_vars.remove("__RUBASH_ALIAS_STREAMED");
-        let mut fd_table = self.fd_table.clone();
+        let mut fd_table = self.fd_table.saved_table();
         // GNU subst.c:7320 command_substitute: after the fork the child
         // installs the capture pipe with `dup2 (fildes[1], 1)` — fd 1
         // becomes a NEW open file description and inherits none of the

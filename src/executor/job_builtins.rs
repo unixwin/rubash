@@ -5513,7 +5513,7 @@ impl Executor {
                             // (the #1090/#1041 hazard — it was already
                             // erasing this very warning on the will_run
                             // path).
-                            framed_fd_table = Some(self.fd_table.clone());
+                            framed_fd_table = Some(self.fd_table.saved_table());
                             if let Err(error) = self.bind_conditional_stdio_redirects(cmd) {
                                 self.fd_table = framed_fd_table.take().unwrap();
                                 return Err(error);
