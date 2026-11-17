@@ -11,6 +11,15 @@ pub(in crate::executor) struct SavedNumberedFd {
     fd_stdin: Option<String>,
     fd_stdin_offset: Option<String>,
     fd_dynamic: Option<String>,
+    /// rubash#3806: the input bind retires the slot's write arm
+    /// (open_input is a wholesale dup2), so the scoped bind clears the
+    /// output ledger — but a compound scope RESTORES the pre-command
+    /// entry afterwards, write arm and deferred `>(...)` registration
+    /// included. Save both output keys with the rest of the slot's
+    /// state or the restored endpoint is left pointing at a body that
+    /// can never run (same union SavedDynamicClose keeps).
+    fd_output: Option<String>,
+    fd_procsub: Option<String>,
     fd_closed: Option<String>,
 }
 
@@ -1328,6 +1337,12 @@ impl Executor {
                 .env_vars
                 .get(&fd_dynamic_input_key(fd))
                 .cloned(),
+            fd_output: self.shell_state.env_vars.get(&fd_output_key(fd)).cloned(),
+            fd_procsub: self
+                .shell_state
+                .env_vars
+                .get(&fd_output_process_substitution_key(fd))
+                .cloned(),
             fd_closed: self.shell_state.env_vars.get(&fd_closed_key(fd)).cloned(),
         });
         Ok(())
@@ -1749,6 +1764,16 @@ impl Executor {
                 &mut self.shell_state.env_vars,
                 &fd_dynamic_input_key(saved.fd),
                 saved.fd_dynamic,
+            );
+            restore_optional_env_var(
+                &mut self.shell_state.env_vars,
+                &fd_output_key(saved.fd),
+                saved.fd_output,
+            );
+            restore_optional_env_var(
+                &mut self.shell_state.env_vars,
+                &fd_output_process_substitution_key(saved.fd),
+                saved.fd_procsub,
             );
             restore_optional_env_var(
                 &mut self.shell_state.env_vars,
