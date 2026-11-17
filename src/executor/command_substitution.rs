@@ -2718,6 +2718,18 @@ impl Executor {
         // high-byte name must probe as raw bytes here.
         let file_word_had_transport =
             crate::executor::markers::contains_decodable_transport(file_word);
+        // rubash#3372: the byte spelling is computed from the pre-fold
+        // word — folding first and converting afterwards
+        // (path_buf_from_folded_name) cannot tell a folded byte char
+        // from a genuine char of the same code point, so a name mixing
+        // both (genuine `é` beside a raw byte 0x9C) misspelled the
+        // genuine char as its single byte (see
+        // `transport_name_spelling_bytes`). A pure raw-byte name
+        // spelled the same either way; the mixed name is the face
+        // this changes.
+        let file_word_spelling = file_word_had_transport.then(|| {
+            crate::executor::substitution_metadata::transport_name_spelling_bytes(file_word)
+        });
         let folded_file_word =
             crate::executor::substitution_metadata::fold_literal_char_escapes(file_word);
         let file_word: &str = &folded_file_word;
@@ -2726,12 +2738,27 @@ impl Executor {
         // returns NULL with EXECUTION_SUCCESS — a directory operand is
         // silent, empty, rc 0. Windows CreateFile on a directory would
         // surface "Permission denied" instead.
-        let read_path = if file_word_had_transport {
-            crate::executor::path::path_buf_from_folded_name(
-                &shell_path_to_windows(file_word, &self.shell_state.env_vars).to_string_lossy(),
-            )
-        } else {
-            shell_path_to_windows(file_word, &self.shell_state.env_vars)
+        let read_path = match file_word_spelling {
+            Some(ref spelling) => {
+                // rubash#3372: on unix the pre-fold byte spelling IS
+                // the path (the redirect faces' transport_spelling_path
+                // rule); off unix the folded string is already the
+                // WTF-8 spelling, so the old folded route stands.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::ffi::OsStrExt;
+                    std::path::PathBuf::from(std::ffi::OsStr::from_bytes(spelling))
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = spelling;
+                    crate::executor::path::path_buf_from_folded_name(
+                        &shell_path_to_windows(file_word, &self.shell_state.env_vars)
+                            .to_string_lossy(),
+                    )
+                }
+            }
+            None => shell_path_to_windows(file_word, &self.shell_state.env_vars),
         };
         // A materialized input process substitution resolves to /dev/fd/N
         // (subst.c process_substitute + move_to_high_fd): the bytes live in

@@ -103,7 +103,11 @@ impl Executor {
             // Classified append open (rubash#1964): the raw mapped
             // open this replaces could not reach /dev/tcp targets
             // (their mapped name is not a file).
-            let file = self.open_append_target(&target)?;
+            // rubash#3372: the node form (see open_cat_output_sink
+            // above) — the create arm in this same function already
+            // takes it, and the append arm's string record is the
+            // same collision.
+            let file = self.open_append_target_for(Some(redirect), &target)?;
             crate::fd::write_file_all(&file, output)?;
         } else {
             self.write_default_stdout(output)?;
@@ -123,13 +127,24 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<Option<File>, ExecuteError> {
-        let (target, clobber, append) = match (&cmd.redirect_out, &cmd.append) {
+        // rubash#3372: keep the node alongside the expanded target —
+        // the sink's opens below resolve the node's own recorded
+        // spelling, never the folded-string record (a sibling
+        // `2>"$a"` expansion would otherwise steer this `>"$b"` /
+        // `>>"$b"` open onto the raw-byte file).
+        let (target, clobber, append, redirect) = match (&cmd.redirect_out, &cmd.append) {
             (Some(redirect), _) => (
                 self.expand_redirect_target(redirect),
                 redirect.clobber,
                 false,
+                Some(redirect),
             ),
-            (None, Some(append)) => (self.expand_redirect_target(append), true, true),
+            (None, Some(append)) => (
+                self.expand_redirect_target(append),
+                true,
+                true,
+                Some(append),
+            ),
             (None, None) => return Ok(None),
         };
         if crate::executor::execution_misc::is_closed_redirect_target(&target) {
@@ -143,9 +158,11 @@ impl Executor {
         if append {
             // Classified append open (rubash#1964), the streaming
             // twin of write_cat_output's append arm.
-            return Ok(Some(self.open_append_target(&target)?));
+            return Ok(Some(self.open_append_target_for(redirect, &target)?));
         }
-        Ok(Some(self.create_redirect_output(&target, clobber)?))
+        Ok(Some(
+            self.create_redirect_output_for(redirect, &target, clobber)?,
+        ))
     }
 
     pub(in crate::executor) fn finish_external_error(

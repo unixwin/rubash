@@ -16,9 +16,10 @@ use crate::builtins::pushd::{load_stack, save_stack, DIR_STACK};
 use crate::expand::tilde::tilde::expand_tilde_segment;
 
 use paths::{
-    current_logical_pwd, filesystem_path_for_display, logical_canon_erased_components_exist,
-    logical_destination_display, logical_pwd_var_display, set_shell_env, shell_display_path,
-    shell_pwd_display_path, shell_var, starts_with_dot_component, validated_logical_pwd,
+    cd_filesystem_path, current_logical_pwd, filesystem_path_for_display,
+    logical_canon_erased_components_exist, logical_destination_display, logical_pwd_var_display,
+    set_shell_env, shell_display_path, shell_pwd_display_path, shell_var,
+    starts_with_dot_component, validated_logical_pwd,
 };
 use std::env;
 use std::io::{self, Write};
@@ -696,6 +697,19 @@ where
     Ok(Ok((mode, index)))
 }
 
+/// rubash#3372: the pre-fold byte spelling of a cd pathname, when it
+/// carried raw-byte transport — the exact bytes
+/// `transport_name_spelling_bytes` computes from the word the fold
+/// receives. None when the word carried no transport, so the caller
+/// keeps the folded road (a genuine non-ASCII name keeps UTF-8 bytes).
+fn cd_operand_spelling(word: &str) -> Option<Vec<u8>> {
+    if crate::executor::markers::contains_decodable_transport(word) {
+        Some(crate::executor::substitution_metadata::transport_name_spelling_bytes(word))
+    } else {
+        None
+    }
+}
+
 fn resolve_target<W>(
     operand: Option<&str>,
     env_vars: &HashMap<String, String>,
@@ -711,9 +725,10 @@ where
             // fold a stored E400 pair in it like an operand's
             // (rubash#3076).
             Some(home) => {
+                let home_spelling = cd_operand_spelling(&home);
                 let home = crate::executor::substitution_metadata::fold_literal_char_escapes(&home);
                 Ok(Some(Target {
-                    path: filesystem_path_for_display(&home, env_vars),
+                    path: cd_filesystem_path(home_spelling.as_deref(), &home, env_vars),
                     display: Some(PathBuf::from(home)),
                     print: PrintPath::Never,
                 }))
@@ -741,10 +756,11 @@ where
         }
         Some("-") => match shell_var(env_vars, "OLDPWD") {
             Some(old_pwd) => {
+                let old_pwd_spelling = cd_operand_spelling(&old_pwd);
                 let old_pwd =
                     crate::executor::substitution_metadata::fold_literal_char_escapes(&old_pwd);
                 Ok(Some(Target {
-                    path: filesystem_path_for_display(&old_pwd, env_vars),
+                    path: cd_filesystem_path(old_pwd_spelling.as_deref(), &old_pwd, env_vars),
                     display: Some(PathBuf::from(old_pwd)),
                     print: PrintPath::Always,
                 }))
@@ -770,11 +786,14 @@ where
             // The operand is a pathname from here on: fold a stored
             // E400 pair to the raw char so the probe, the CDPATH joins
             // downstream, and the failure diagnostic all name the real
-            // directory (rubash#3076).
+            // directory (rubash#3076). rubash#3372: the byte spelling
+            // is taken before the fold, so a raw-byte directory is
+            // probed by its bytes, not its UTF-8 re-encoding.
+            let dir_spelling = cd_operand_spelling(dir);
             let dir = crate::executor::substitution_metadata::fold_literal_char_escapes(dir);
             let dir = windows_bare_drive_operand(&dir);
             Ok(Some(Target {
-                path: filesystem_path_for_display(&dir, env_vars),
+                path: cd_filesystem_path(dir_spelling.as_deref(), &dir, env_vars),
                 display: Some(PathBuf::from(dir)),
                 print: PrintPath::Never,
             }))
@@ -1029,9 +1048,11 @@ fn resolve_cdable_vars(
     let value = shell_var(env_vars, name)?;
     // The variable's VALUE becomes the pathname (cd.def LCD_DOVARS):
     // fold a stored E400 pair in it (rubash#3076).
+    // rubash#3372: byte spelling before the fold, as in resolve_target.
+    let value_spelling = cd_operand_spelling(&value);
     let value = crate::executor::substitution_metadata::fold_literal_char_escapes(&value);
     Some(Target {
-        path: filesystem_path_for_display(&value, env_vars),
+        path: cd_filesystem_path(value_spelling.as_deref(), &value, env_vars),
         display: Some(PathBuf::from(value)),
         print: PrintPath::Always,
     })
