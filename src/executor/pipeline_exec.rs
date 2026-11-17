@@ -5705,9 +5705,9 @@ impl Executor {
     ///
     /// shell_execve names the filename it handed execve: the as-typed
     /// word when it carries a separator (`./pnoexec`), else the
-    /// resolved pathname the PATH walk produced (execute_cmd.c:6139;
+    /// PATH-joined form the walk produced (execute_cmd.c:6139;
     /// findcmd.c:385-387) — the same rule report_external_spawn_error
-    /// applies on the simple-command path.
+    /// applies on the simple-command path (rubash#3827).
     pub(in crate::executor) fn member_spawn_failure(
         &self,
         program: &std::path::Path,
@@ -5722,7 +5722,17 @@ impl Executor {
         let report_name = if crate::executor::path::has_path_separator(expanded_name) {
             expanded_name.to_string()
         } else {
-            program.display().to_string()
+            // rubash#3827: the same rule as report_external_spawn_error —
+            // a relative PATH entry reports the walk's as-written join
+            // (`sub/mycmd`), not the session-cwd-anchored absolute
+            // form; the shared funnel declines when the resolution did
+            // not itself produce the join, keeping the anchored display.
+            crate::executor::path::spawn_exec_name(
+                expanded_name,
+                program,
+                &self.shell_state.env_vars,
+            )
+            .unwrap_or_else(|| program.display().to_string())
         };
         let prefix = if sys_error {
             self.sys_error_prefix()
