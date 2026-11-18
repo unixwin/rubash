@@ -2848,6 +2848,7 @@ impl Executor {
             .collect();
         let underlay = self.tempenv_listing_underlay();
         let dynamic_set_views = self.dynamic_set_views();
+        let function_set_views = self.function_set_views();
         let row = crate::executor::builtin_table::builtin_table_row("local").expect("local row");
         let mut diag = crate::executor::builtin_diag::Diag::new(row, stderr);
         let prolog = self.diagnostic_prolog_parts();
@@ -2863,6 +2864,7 @@ impl Executor {
             &[],
             &dynamic_views,
             &dynamic_set_views,
+            &function_set_views,
             &underlay,
             &mut oob_word,
             written_hints,
