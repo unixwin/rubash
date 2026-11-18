@@ -257,7 +257,7 @@ pub(super) fn quote_listing_value(value: &str) -> String {
     // quoters (see builtins/declare/storage.rs quote_declare_value)
     // — a lone U+E000 in the visible text is user data and must not
     // be re-folded into a byte by the exactly-once decode.
-    let transport = crate::executor::substitution_metadata::escape_marker_zone_chars(&visible);
+    let transport = crate::executor::substitution_metadata::escape_marker_zone_chars_for_display(&visible);
     if crate::executor::ansic_shouldquote(&transport) {
         return crate::executor::ansic_quote(&transport);
     }
