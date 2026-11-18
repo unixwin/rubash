@@ -910,6 +910,30 @@ impl Executor {
         }
     }
 
+    /// rubash#3792: a duplicate of fd `fd`'s write endpoint for the
+    /// `<&N` dup arm, when the fd carries no read endpoint (a
+    /// write-only descriptor, `exec 3>f`). GNU dup2 (redir.c:1193)
+    /// dups any open descriptor regardless of access mode, so the
+    /// child inherits the write-only description and its own reads
+    /// fail EBADF. Returns None when the fd has no write endpoint
+    /// either (truly absent/closed — the caller's EBADF stands) or
+    /// when the write endpoint is symbolic (no handle to dup).
+    fn dup_write_only_fd_for_stdin(&self, fd: u32) -> Option<crate::fd::HANDLE> {
+        match self.fd_table.write_endpoint(fd) {
+            Some(FdWriteEndpoint::File(file_fd)) => {
+                crate::fd::duplicate_handle(file_fd.handle).ok()
+            }
+            Some(FdWriteEndpoint::CoprocStdin { fd: file_fd, .. }) => {
+                crate::fd::duplicate_handle_inheritable(file_fd.handle).ok()
+            }
+            Some(endpoint @ (FdWriteEndpoint::Stdout | FdWriteEndpoint::Stderr)) => {
+                let (handle, _) = endpoint.standard_backing()?;
+                crate::fd::duplicate_handle_inheritable(handle).ok()
+            }
+            _ => None,
+        }
+    }
+
     pub(in crate::executor) fn apply_external_stdin_redirect(
         &mut self,
         cmd: &CommandNode,
@@ -1074,6 +1098,29 @@ impl Executor {
                             if let Some(file_fd) = self.own_numbered_input_binding(cmd, fd, &target)
                             {
                                 let dup = crate::fd::duplicate_handle(file_fd.handle)?;
+                                process.stdin(Stdio::from(crate::fd::handle_to_file(dup)));
+                                return Ok(());
+                            }
+                            // rubash#3792: no READ endpoint, but the
+                            // descriptor may still be open write-only
+                            // (`exec 3>f`). GNU's dup2 (redir.c:1193)
+                            // takes no access-mode argument — it dups
+                            // ANY open descriptor onto the redirector,
+                            // and the access-mode failure surfaces
+                            // later, in the child's own read (EBADF).
+                            // The read-endpoint match above must not
+                            // turn that into a redirection failure:
+                            // dup the write endpoint's own handle into
+                            // the child's stdin, so the child inherits
+                            // the write-only description and reports
+                            // the failure itself, with its own
+                            // diagnostic and exit status. Only
+                            // handle-backed write endpoints can cross
+                            // (a symbolic one — process substitution,
+                            // /dev/full, a pipe channel — has no
+                            // descriptor to dup and keeps the EBADF
+                            // below; see REPORT).
+                            if let Some(dup) = self.dup_write_only_fd_for_stdin(fd) {
                                 process.stdin(Stdio::from(crate::fd::handle_to_file(dup)));
                                 return Ok(());
                             }

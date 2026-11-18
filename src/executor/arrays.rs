@@ -1043,8 +1043,8 @@ impl ElementCase {
 
     fn apply(&self, value: String) -> String {
         match self {
-            ElementCase::Upper => value.to_uppercase(),
-            ElementCase::Lower => value.to_lowercase(),
+            ElementCase::Upper => crate::locale::simple_uppercase(&value),
+            ElementCase::Lower => crate::locale::simple_lowercase(&value),
             ElementCase::Capitalize => super::variable_state::capitalize_value(&value),
             ElementCase::None => value,
         }
@@ -1529,7 +1529,13 @@ pub(super) fn array_assignment_index(
     else {
         return ArrayAssignmentIndex::Unresolved;
     };
-    let Some(index) = eval_conditional_arith_value(expression, env_vars) else {
+    // GNU arrayfunc.c:1373-1377 array_expand_index clears
+    // this_command_name around evalexp (rubash#3295).
+    let index = {
+        let _arith_label = crate::executor::arithmetic::arith_eval_label_scope(None);
+        eval_conditional_arith_value(expression, env_vars)
+    };
+    let Some(index) = index else {
         return ArrayAssignmentIndex::Unresolved;
     };
     if index >= 0 {

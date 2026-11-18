@@ -1417,11 +1417,15 @@ impl Executor {
         texts.extend(cmd.assignment_values().map(String::as_str));
         for text in texts {
             for body in speculative_arithmetic_bodies(text) {
-                let (value, _writes, _category) =
+                // Probe mirrors the arithsub evalexp window: NULL
+                // this_command_name (rubash#3295).
+                let (value, _writes, _category) = {
+                    let _arith_label = crate::executor::arithmetic::arith_eval_label_scope(None);
                     crate::executor::arithmetic::eval_conditional_arith_value_categorized_with_writes(
                         &body,
                         &self.shell_state.env_vars,
-                    );
+                    )
+                };
                 if value.is_none() {
                     return true;
                 }
@@ -2405,6 +2409,64 @@ impl Executor {
         crate::executor::expand_braced_indices::scan_sim_record(name.to_string(), value);
     }
 
+    /// Whether the #3855 bad-substitution gate must defer to the real
+    /// expansion for this span instead of emitting the scan's verdict
+    /// (rubash#3864). GNU's `bad substitution` default
+    /// (subst.c:10276-10288) reports the WORD BEING EXPANDED with the
+    /// error class of the context; the scan's whole-word display and
+    /// status 1 coincide with that only when none of these hold:
+    ///
+    /// - the scanned word is (or contains) a compound assignment
+    ///   value: GNU expands elements individually (arrayfunc.c:557
+    ///   `expand_compound_array_assignment`) and the diagnostic names
+    ///   the element word (`\[0\]=${-x}`), which the scan's whole-word
+    ///   display cannot name (issue3500);
+    /// - the span's name head is a `$'...'` literal the real expansion
+    ///   decodes: subst.c:7583 `valid_brace_expansion_word` judges the
+    ///   extracted NAME, and the real expansion decodes `$'x1'` to
+    ///   `x1` in a quoted context — the gate on the raw literal
+    ///   misjudges it (issue2650);
+    /// - the verdict is POSIX-fatal: subst.c:10285-10286 makes a bad
+    ///   substitution FORCE_EOF when POSIX + non-interactive + compat
+    ///   > 43, which the scan's status 1 cannot express (audit
+    ///   B4-F08). The predicate mirrors the fatal arm in
+    ///   command_execute.rs.
+    ///
+    /// Every deferral restores the pre-#3855 behavior for that slice:
+    /// the scan returns nothing here and the real expansion reports
+    /// (or stays silent for an unevaluated word), exactly as it did
+    /// when the census was green.
+    fn scan_bad_substitution_defers_to_expansion(&self, word: &str, inner: &str) -> bool {
+        // Compound assignment value: the parser's compound marker at
+        // the value start, an unmarked parenthesised value, or a
+        // `name=<marker>(...)` declare operand (the marker sits after
+        // the `=` there). Prefix checks only — no textual `.contains`
+        // on the marker, per the #2885 E7 blind-consumer lint.
+        if word.starts_with(crate::executor::markers::COMPOUND_ASSIGNMENT_MARKER)
+            || word.starts_with('(')
+            || word.split_once('=').is_some_and(|(_, rhs)| {
+                rhs.starts_with(crate::executor::markers::COMPOUND_ASSIGNMENT_MARKER)
+                    || rhs.starts_with('(')
+            })
+        {
+            return true;
+        }
+        // A `$'name'` head the real expansion decodes to a valid name.
+        let head = crate::executor::expand_word::brace_name_head(inner.as_bytes());
+        if head.starts_with(b"$'")
+            && std::str::from_utf8(head).is_ok_and(|head_str| {
+                crate::executor::expand_word::resolve_dollar_quoted_parameter_name(head_str)
+                    .is_some()
+            })
+        {
+            return true;
+        }
+        // POSIX-fatal class the scan cannot express.
+        self.posix_mode_enabled()
+            && !self.invocation_interactive()
+            && crate::builtins::shopt::compatibility_level(&self.shell_state.env_vars) > 43
+    }
+
     fn parameter_expansion_error_in_word_context(
         &self,
         word: &str,
@@ -2473,6 +2535,47 @@ impl Executor {
                 break;
             };
             let after_start = &rest[start + 2..];
+            // GNU subst.c:10775-10798 param_expand `case LBRACE`:
+            // `${` + FUNSUB_CHAR (parser.h:85 — blank/newline/`|`)
+            // routes to function_substitute (subst.c:6917) BEFORE
+            // parameter_brace_expand ever runs, so the
+            // valid_brace_expansion_word gate (subst.c:10053/7583)
+            // and every operator arm below see command text, never a
+            // parameter name — `${ cmd; }` bodies must not be judged
+            // by braced_name_is_bad_substitution (rubash#3502
+            // follow-up: the scan read ` case x in x) esac; ` as an
+            // illegal name). Mirror the real path's admission —
+            // expand_word.rs / embedded_parameters.rs run the same
+            // three steps: funsub_introducer, extract_funsub_body,
+            // funsub_body_is_terminated. An introducer-led span that
+            // fails them is not a funsub and falls through to the
+            // parameter checks unchanged.
+            let mut funsub_chars = after_start.chars().peekable();
+            if funsub_chars
+                .peek()
+                .copied()
+                .and_then(crate::executor::command_substitution::funsub_introducer)
+                .is_some()
+            {
+                if let Some((body, _)) =
+                    crate::executor::command_substitution::extract_funsub_body(&mut funsub_chars)
+                {
+                    if crate::executor::command_substitution::funsub_body_is_terminated(&body) {
+                        // The funsub extent is introducer + body + `}`;
+                        // the `}` sits body.chars().count() + 1 chars
+                        // into after_start (introducer at 0, body
+                        // 1..=N, `}` at N+1) — the offset arithmetic
+                        // current_shell_command_substitution_span
+                        // (parameter_core.rs) already uses.
+                        if let Some((close, _)) =
+                            after_start.char_indices().nth(body.chars().count() + 1)
+                        {
+                            rest = &after_start[close + 1..];
+                            continue;
+                        }
+                    }
+                }
+            }
             let Some(end) = matching_parameter_brace(after_start) else {
                 return Some((
                     "${".to_string() + after_start + "}",
@@ -3005,8 +3108,14 @@ impl Executor {
             // parameter_brace_expand_error (subst.c:8224-8228) before the
             // outer `name: word` report can run (rubash#3502:
             // `${v:?${-x}}` prints only `${-x}: bad substitution`,
-            // never `v: `).
-            if crate::executor::expand_word::braced_name_is_bad_substitution(inner) {
+            // never `v: `). The scan may only emit that verdict when it
+            // coincides with the real expansion's — same name judgment,
+            // same display word, same error class (rubash#3864); where
+            // it cannot, the check defers and the real expansion reports
+            // (see scan_bad_substitution_defers_to_expansion).
+            if !self.scan_bad_substitution_defers_to_expansion(word, inner)
+                && crate::executor::expand_word::braced_name_is_bad_substitution(inner)
+            {
                 return Some((
                     crate::executor::expand_word::bad_substitution_display(word),
                     "bad substitution".to_string(),
