@@ -171,4 +171,60 @@ impl Executor {
             false
         }
     }
+
+    /// rubash#3467 (Windows only): the stop bookkeeping shared by the
+    /// two non-unix foreground-stop arms (the external-child wait and
+    /// the virtual sleep) — the mirror of the unix
+    /// `wait_fg_child_job_control` / `wait_pipeline_job_control`
+    /// Stopped branch (jobs.c:3243, 3385, 4057): register the job if
+    /// it is not one yet, flag it job-controlled so fg/bg accept it,
+    /// mark it Stopped (which also makes it current), flip it to
+    /// background, apply the SIGTSTP loop-breaking count (rubash#2851),
+    /// and print the stop notice. The caller parks the child's handle
+    /// in `background_children` after this returns (the unix arms park
+    /// after the notice too) and reports 128 + the stop signal.
+    #[cfg(not(unix))]
+    pub(in crate::executor) fn windows_mark_fg_stopped(
+        &mut self,
+        pid: u32,
+        command: &str,
+        stop_signal: i32,
+    ) {
+        if self.shell_state.job_table.job_id_for_pid(pid).is_none() {
+            self.shell_state.job_table.register_process_with_stages(
+                pid,
+                command.to_string(),
+                false,
+                pid,
+                vec![command.to_string()],
+            );
+        }
+        self.shell_state.job_table.set_job_control(pid, true);
+        self.shell_state
+            .job_table
+            .mark_stopped(pid, Some(stop_signal));
+        if let Some(job_id) = self.shell_state.job_table.job_id_for_pid(pid) {
+            if let Some(entry) = self.shell_state.job_table.jobs.get_mut(&job_id) {
+                entry.foreground = false;
+                entry.background = true;
+            }
+        }
+        // rubash#2851: SIGTSTP with loop_level > 0 sets
+        // breaking = loop_level, read across the fork as
+        // `subshell_saved_loop_depth + live loop_depth`.
+        if stop_signal == crate::builtins::kill::SIGTSTP_NUMBER {
+            let depth = self.shell_state.subshell_saved_loop_depth + self.shell_state.loop_depth;
+            if depth > 0 {
+                self.stopped_loop_breaking = depth;
+            }
+        }
+        // The stop notice prints here, as the wait completes
+        // (jobs.c:3385) — see format_stopped_job_notice for why it
+        // cannot ride the boundary flush. GNU jobs.c:4690-4691 prints
+        // a leading "\n" before the JSTOPPED job line (rubash#2834).
+        if let Some(line) = self.format_stopped_job_notice(pid) {
+            self.write_diagnostic_fd2(b"\n");
+            self.write_diagnostic_fd2(line.as_bytes());
+        }
+    }
 }

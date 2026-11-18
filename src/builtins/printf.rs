@@ -62,6 +62,13 @@ struct FormatSpec {
 enum PrintfSegment {
     Text(String),
     Error(String),
+    /// GNU printf.def:819 checks `ferror (stdout)` once per rendering
+    /// pass, so a failed fd-1 write aborts the builtin at a PASS
+    /// boundary: the failing pass's diagnostics still print while
+    /// later passes' renderings die. The ordered-output route needs
+    /// those boundaries to fold the same verdict into a buffered
+    /// stream (rubash#3453) — one marker per pass after the first.
+    PassBoundary,
 }
 
 #[derive(Debug, Clone)]
@@ -104,7 +111,7 @@ impl RenderedPrintf {
             .iter()
             .filter_map(|segment| match segment {
                 PrintfSegment::Error(body) => Some(body.clone()),
-                PrintfSegment::Text(_) => None,
+                PrintfSegment::Text(_) | PrintfSegment::PassBoundary => None,
             })
             .collect()
     }
@@ -173,7 +180,7 @@ where
     W: Write,
     E: Write,
 {
-    execute_with_io_and_store(args, env_vars, None, stdout, stderr)
+    execute_with_io_and_store(args, env_vars, None, stdout, stderr, None)
 }
 
 pub(crate) fn execute_with_io_and_store<'a, I, W, E>(
@@ -182,6 +189,7 @@ pub(crate) fn execute_with_io_and_store<'a, I, W, E>(
     mut variables: Option<&mut VariableStore>,
     stdout: &mut W,
     stderr: &mut E,
+    pass_boundary: Option<&mut dyn Write>,
 ) -> io::Result<i32>
 where
     I: IntoIterator<Item = &'a str>,
@@ -316,6 +324,7 @@ where
             stderr,
         )?;
     } else {
+        let mut pass_boundary = pass_boundary;
         for segment in &rendered.segments {
             match segment {
                 PrintfSegment::Text(text) => {
@@ -323,6 +332,14 @@ where
                 }
                 PrintfSegment::Error(body) => {
                     writeln!(stderr, "{body}")?;
+                }
+                PrintfSegment::PassBoundary => {
+                    // A one-byte marker on the boundary channel becomes
+                    // a pass-boundary chunk in the ordered log
+                    // (rubash#3453); no boundary sink means no markers.
+                    if let Some(boundary) = pass_boundary.as_mut() {
+                        let _ = boundary.write_all(&[0]);
+                    }
                 }
             }
         }
@@ -423,14 +440,17 @@ fn printf_attribute_value(
             .to_string();
     }
     if is_marked(env_vars, "__RUBASH_UPPERCASE_VARS", name) {
-        output.to_uppercase()
+        crate::locale::simple_uppercase(&output)
     } else if is_marked(env_vars, "__RUBASH_LOWERCASE_VARS", name) {
-        output.to_lowercase()
+        crate::locale::simple_lowercase(&output)
     } else if is_marked(env_vars, "__RUBASH_CAPCASE_VARS", name) {
+        // GNU sh_modcase CASE_CAPITALIZE: first character
+        // simple-uppercased, the rest simple-lowercased (rubash#3790).
         let mut chars = output.chars();
         match chars.next() {
             Some(first) => {
-                first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase()
+                crate::locale::simple_case_upper(first).to_string()
+                    + &crate::locale::simple_lowercase(chars.as_str())
             }
             None => output,
         }
@@ -614,7 +634,12 @@ fn resolve_printf_indexed_subscript(
         return None;
     }
 
-    let raw_index = crate::executor::arithmetic::eval_conditional_arith_value(subscript, env_vars)?;
+    // GNU arrayfunc.c:1373-1377 array_expand_index clears
+    // this_command_name around evalexp (rubash#3295).
+    let raw_index = {
+        let _arith_label = crate::executor::arithmetic::arith_eval_label_scope(None);
+        crate::executor::arithmetic::eval_conditional_arith_value(subscript, env_vars)?
+    };
     if raw_index >= 0 {
         return usize::try_from(raw_index).ok();
     }
@@ -891,12 +916,19 @@ fn render(
     let mut arg_index = 0;
     let mut conversion_error = false;
 
+    // printf.def:819's ferror abort is pass-granular — one PassBoundary
+    // segment per pass so the ordered-output route can both locate the
+    // failing pass and tell a printf log from an unmarked builtin's
+    // (rubash#3453). The marker precedes each pass's own segments, so
+    // even a single-pass render carries it.
     if args.is_empty() {
+        segments.push(PrintfSegment::PassBoundary);
         return render_one_pass(format, args, &mut arg_index, segments, env_vars);
     }
 
     while arg_index < args.len() {
         let before_arg = arg_index;
+        segments.push(PrintfSegment::PassBoundary);
         let rendered = render_one_pass(format, args, &mut arg_index, segments, env_vars);
         segments = rendered.segments;
         conversion_error |= rendered.conversion_error;
@@ -1129,7 +1161,7 @@ fn render_one_pass(
                             .iter()
                             .filter_map(|segment| match segment {
                                 PrintfSegment::Text(text) => Some(text.chars().count()),
-                                PrintfSegment::Error(_) => None,
+                                PrintfSegment::Error(_) | PrintfSegment::PassBoundary => None,
                             })
                             .sum();
                         env_vars.insert(name.to_string(), written.to_string());

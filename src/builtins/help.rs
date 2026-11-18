@@ -605,7 +605,7 @@ const HELP_ENTRIES: &[&str] = &[
     "popd [-n] [+N | -N]",
     "printf [-v var] format [arguments]",
     "pushd [-n] [+N | -N | dir]",
-    "pwd [-LP]",
+    "pwd [-LPW]",
     "read [-Eers] [-a array] [-d delim] [-i text] [-n nchars] [-N nchars] [-p prompt] [-t timeout] [-u fd] [name ...]",
     "readarray [-d delim] [-n count] [-O origin] [-s count] [-t] [-u fd] [-C callback] [-c quantum] [array]",
     "readonly [-aAf] [name[=value] ...] or readonly -p",

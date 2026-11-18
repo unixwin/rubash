@@ -155,8 +155,18 @@ fn spawn_issue2197_fake_child(script: &str) -> Child {
 /// includes this module, so each converged binary proves it.
 #[test]
 fn issue2197_wait_bounded_bounds_post_exit_pipe_drain() {
-    let mut child =
-        spawn_issue2197_fake_child("echo issue2197-orphan-marker\nsleep 120 &\nexit 0\n");
+    // rubash#3568: `sleep` is not a dispatchable builtin — as a plain
+    // `-c` command or `&` job it resolves through PATH, and
+    // minimal_path() only guarantees System32 (+ Git's usr/bin when
+    // installed). Windows machines without Git at that location get
+    // 127 instead of an orphan. `ping.exe` lives in System32 on every
+    // Windows, so `ping -n 10` is the bounded orphan there; unix keeps
+    // `sleep 120`.
+    #[cfg(windows)]
+    let script = "echo issue2197-orphan-marker\nping -n 10 127.0.0.1 &\nexit 0\n";
+    #[cfg(not(windows))]
+    let script = "echo issue2197-orphan-marker\nsleep 120 &\nexit 0\n";
+    let mut child = spawn_issue2197_fake_child(script);
     let started = Instant::now();
     let out = wait_bounded(&mut child, Duration::from_secs(3));
     let elapsed = started.elapsed();
@@ -184,9 +194,16 @@ fn issue2197_wait_bounded_bounds_post_exit_pipe_drain() {
 /// with zero evidence.
 #[test]
 fn issue2197_wait_bounded_kills_never_exiting_child_with_partial_output() {
-    let mut child = spawn_issue2197_fake_child(
-        "echo issue2197-out-marker\necho issue2197-err-marker >&2\nsleep 120\n",
-    );
+    // rubash#3568: same PATH constraint as the orphan pin — `sleep`
+    // needs an external binary the minimal Windows PATH does not
+    // guarantee. A builtin `while` loop never exits on its own and
+    // dies with the process when wait_bounded kills it, so it needs
+    // no external at all; unix keeps `sleep 120`.
+    #[cfg(windows)]
+    let script = "echo issue2197-out-marker\necho issue2197-err-marker >&2\nwhile :; do :; done";
+    #[cfg(not(windows))]
+    let script = "echo issue2197-out-marker\necho issue2197-err-marker >&2\nsleep 120\n";
+    let mut child = spawn_issue2197_fake_child(script);
     let pid = child.id();
     let started = Instant::now();
     let out = wait_bounded(&mut child, Duration::from_secs(3));

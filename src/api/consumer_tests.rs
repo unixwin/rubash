@@ -3483,6 +3483,40 @@ fn issue2859_jobs_face_procsub_child_does_not_count() {
     );
 }
 
+/// rubash#3292: the cell needs a real rubash binary for its `<(`
+/// child, and a lib-only run (`cargo test --lib`) on a fresh target
+/// builds none — so fail fast naming the precondition instead of
+/// letting the spawn fall back to the lib-test binary, which
+/// rejects `-c` with a misleading error.
+fn issue2875_require_rubash_binary() {
+    let binary_name = if cfg!(windows) {
+        "rubash.exe"
+    } else {
+        "rubash"
+    };
+    let env_arm = crate::executor::test_rubash_binary_from_env();
+    let exe_arm = crate::executor::test_rubash_binary_from_current_exe();
+    let current = std::env::current_exe().ok();
+    let resolved = env_arm
+        .clone()
+        .or(exe_arm.clone())
+        .or_else(|| current.clone());
+    let is_rubash = resolved
+        .as_ref()
+        .is_some_and(|path| path.file_name().and_then(|name| name.to_str()) == Some(binary_name));
+    assert!(
+        is_rubash,
+        "issue2875 precondition (rubash#3292): no rubash binary found — on a fresh target run `cargo build --locked --bin rubash` first, or run the full `cargo test` so cargo builds the bin; otherwise the `<(` child falls back to the lib-test binary, which rejects `-c`.\n\
+         diagnostics: CARGO_BIN_EXE_rubash={:?} env_arm={:?} exe_arm={:?} current_exe={:?} resolved={:?}",
+        std::env::var_os("CARGO_BIN_EXE_rubash"),
+        env_arm,
+        exe_arm,
+        current,
+        resolved,
+    );
+}
+
+#[test]
 /// rubash#2875: an input process-substitution child must be a real
 /// rubash shell, not the lib-test binary. The `<(` spawn resolved
 /// its exe as `CARGO_BIN_EXE_rubash` -> `current_exe()` with no
@@ -3492,8 +3526,8 @@ fn issue2859_jobs_face_procsub_child_does_not_count() {
 /// `-c`: it printed `error: Unrecognized option: 'c'` and wrote
 /// nothing to the pipe, so the body never ran. With the fallback
 /// the child is the real rubash binary and the body executes.
-#[test]
 fn issue2875_input_procsub_child_runs_as_rubash_shell() {
+    issue2875_require_rubash_binary();
     let mut session = issue863_gap6_session();
     issue863_gap6_run(
         &mut session,
@@ -5449,6 +5483,57 @@ fn issue863_gap13_register_binding_reads_back_through_bind_view() {
     );
     let view = session.bind_view();
     assert_eq!(issue863_gap3_entry(&view, r"\C-b").keymap, "vi-movement");
+}
+
+// rubash#3013: the view carries a keymap-valued kind — a
+// `prefix-meta` registration reads back as `BindKindView::Keymap`
+// with its real target map, and the kind round-trips through
+// `register_binding` verbatim.
+#[test]
+fn issue3013_keymap_kind_round_trips_through_the_view() {
+    let mut session = issue863_gap3_session();
+    // The old-style keyname arm is the one GNU's PREFIX_META_HACK
+    // intercepts (bind.c:1845-1855): it binds the key to the
+    // emacs-meta KEYMAP (ISKMAP), not to a function name.
+    issue863_gap3_run(&mut session, r#"bind 'Control-v: prefix-meta'"#);
+    let view = session.bind_view();
+    let entry = view
+        .entries
+        .iter()
+        .find(|entry| matches!(entry.kind, BindKindView::Keymap { .. }))
+        .expect("a Keymap entry registered");
+    match &entry.kind {
+        BindKindView::Keymap { name } => {
+            assert_eq!(name, "emacs-meta");
+        }
+        _ => unreachable!(),
+    }
+    // The ISKMAP slot keeps its raw-byte keyseq form.
+    assert_eq!(entry.bytes, vec![0x16]);
+    // GNU's dumper still prints the ISKMAP slot as `prefix-meta`.
+    assert!(
+        entry.dump.ends_with(": prefix-meta"),
+        "dump={:?}",
+        entry.dump
+    );
+
+    // The write face accepts the kind too (GAP-13 register path).
+    session.register_binding(
+        r"\C-w",
+        BindKindView::Keymap {
+            name: "vi-insert".to_string(),
+        },
+        Some("emacs"),
+    );
+    let view = session.bind_view();
+    let entry = issue863_gap3_entry(&view, r"\C-w");
+    assert_eq!(entry.keymap, "emacs-standard");
+    assert_eq!(
+        entry.kind,
+        BindKindView::Keymap {
+            name: "vi-insert".to_string()
+        }
+    );
 }
 
 #[test]

@@ -141,7 +141,21 @@ impl Executor {
         // bodies, loop bodies, pipeline stages) funnels through here, so
         // this is the executor's recursion hub — grow the host thread's
         // stack on demand instead of overflowing it (src/stack_growth.rs).
-        crate::stack_growth::ensure_stack(|| self.execute_ast_inner_walk(commands))
+        //
+        // rubash#3325: the timed-dispatch deferral (timed_dispatch_depth,
+        // rubash#1611) belongs to the timed command ITSELF — GNU
+        // execute_cmd.c time_command hands the timed command to
+        // execute_command_internal and adjudicates only that command's
+        // status; every command inside its body is an ordinary command
+        // there, whose own failure reaches run_error_trap
+        // (execute_cmd.c:854-883 compound redirect failure, :993-1010
+        // simple command) without knowing it is timed. A nested list is
+        // exactly that boundary, so the depth is masked for the walk and
+        // restored on return (the walk's `?` exits all land here).
+        let saved_timed_dispatch_depth = self.timed_dispatch_depth.replace(0);
+        let result = crate::stack_growth::ensure_stack(|| self.execute_ast_inner_walk(commands));
+        self.timed_dispatch_depth.set(saved_timed_dispatch_depth);
+        result
     }
 
     fn execute_ast_inner_walk(&mut self, commands: &[CommandNode]) -> Result<(), ExecuteError> {
@@ -251,6 +265,22 @@ impl Executor {
         command: &CommandNode,
         error: &std::io::Error,
     ) -> Result<(), ExecuteError> {
+        // GNU: a respawned `rubash -c` child emulates a FORK (async `&`,
+        // coproc, both process-substitution forms): the forked child
+        // restores every signal's startup disposition
+        // (execute_cmd.c:1670 -> trap.c:1480 reset_signal_handlers), so
+        // SIGPIPE is SIG_DFL and a write that meets a pipe with no
+        // readers is the child's SIGPIPE death — silent, status 141.
+        // The report path below is the MAIN shell's model instead:
+        // SIGPIPE stays ignored there (rubash#440), so the failed write
+        // prints `line N: Broken pipe' and continues with status 1.
+        // Unwind the SIGPIPE-shaped verdict; the -c/script driver maps
+        // it to the child's 141 with no diagnostic.
+        if crate::executor::init::RESPAWNED_CHILD.load(std::sync::atomic::Ordering::Relaxed)
+            && super::shell_options::is_broken_pipe_error(error)
+        {
+            return Err(ExecuteError::BrokenPipe);
+        }
         let mut owner = command;
         loop {
             if let Some(inner) = &owner.inverted_command {
@@ -1024,10 +1054,21 @@ impl Executor {
                             });
                     }
                 }
-                // GNU eval.c:181 (reader_loop/parse_and_execute): stdin_redir
-                // is cleared before each top-level command, so a redirected
-                // control structure's flag never leaks into the next command.
-                self.shell_state.stdin_redir.set(false);
+                // GNU eval.c:181 (reader_loop ONLY — evalstring.c's
+                // parse_and_execute does not clear it): stdin_redir is
+                // cleared before each top-level command, so a redirected
+                // control structure's flag never leaks into the next
+                // command. A subshell clone's outermost walk also lands
+                // at exec_depth 1 — but its body is a pre-parsed element
+                // list, never a reader loop, and GNU's forked element
+                // child keeps the flag its dispatch set (execute_cmd.c:
+                // 4570 `|= pipe_in`, the :826/:1733 assigns). Skip the
+                // clear on clones: subshell_depth > 0 marks them (the
+                // in-place ( )/`{ }` regions run on this executor at
+                // walk depth >= 2, so they never reach this line).
+                if self.shell_state.subshell_depth.get() == 0 {
+                    self.shell_state.stdin_redir.set(false);
+                }
                 // rubash#846: same per-command hygiene for the
                 // compound-redirect-failure mark — a stale mark (set by a
                 // previous command whose `!` consult never ran) must never
@@ -1161,7 +1202,7 @@ impl Executor {
                         .insert("__RUBASH_CURRENT_COMMAND".to_string(), region_text);
                 }
                 subshell_state = Some(self.shell_state.clone_for_child_save());
-                subshell_fd_table = Some(self.fd_table.clone());
+                subshell_fd_table = Some(self.fd_table.saved_table());
                 subshell_timed_stdin = Some(self.timed_stdin.clone());
                 // rubash#2851: bank the enclosing loop depth across
                 // the boundary (see the field doc on ShellState): the
@@ -1646,13 +1687,21 @@ impl Executor {
                 // execute_time_ast_command; it is flushed below, after
                 // the ERR trap adjudication (GNU's order).
                 self.defer_list_time_report = true;
-                let execution_result = if command.and_or().is_some() {
-                    self.with_errexit_suppressed(|executor| {
-                        executor.execute_time_ast_command(time_command)
-                    })
-                } else {
-                    self.execute_time_ast_command(time_command)
-                };
+                // rubash#3325: a `!` on the timed command suppresses
+                // errexit / ERR for everything it runs, exactly like the
+                // untimed inverted dispatch (GNU execute_cmd.c:655-656
+                // `if (exit_immediately_on_error && invert) command->flags
+                // |= CMD_IGNORE_RETURN`). Body commands adjudicate
+                // themselves now (nested lists mask the timed deferral),
+                // so the inversion must reach them.
+                let execution_result =
+                    if command.and_or().is_some() || command.inverted || time_command.inverted {
+                        self.with_errexit_suppressed(|executor| {
+                            executor.execute_time_ast_command(time_command)
+                        })
+                    } else {
+                        self.execute_time_ast_command(time_command)
+                    };
                 match execution_result {
                     Ok(()) => {}
                     Err(ExecuteError::Break(_) | ExecuteError::Continue(_))
@@ -1736,7 +1785,14 @@ impl Executor {
                 // timed command's own `!` (time_command.inverted, already
                 // folded into exit_code by execute_time_ast_command)
                 // exempts the command like an outer inversion.
-                self.maybe_run_error_trap(command)?;
+                // rubash#3325: a statement-compound root that completed
+                // without its own redirect failing already had its
+                // failing inner commands fire the trap (GNU adjudicates
+                // inside the command, never again at the time level).
+                let body_verdict = self.timed_err_owned_by_body.take();
+                if body_verdict.is_none() {
+                    self.maybe_run_error_trap(command)?;
+                }
                 // rubash#1277: flush the queued timing report(s) AFTER the
                 // ERR trap (GNU: the trap fires inside the inner
                 // execute_command, execute_time_command prints after it
@@ -1777,6 +1833,7 @@ impl Executor {
                     && !command.inverted
                     && !time_command.inverted
                     && command.and_or().is_none()
+                    && body_verdict.unwrap_or(true)
                 {
                     // DE-06 (design 9.3; PLAN row 12): the errexit
                     // decision for a timed command is made here —
@@ -2563,6 +2620,19 @@ impl Executor {
                             }
                         }
                     }
+                    // rubash#3382: the DISCARD has been absorbed — the
+                    // rest of this logical line was skipped and the
+                    // errexit exemption above already ran for THIS
+                    // command. Consume the arith-evalerror exemption
+                    // here so it cannot leak into the NEXT command's
+                    // errexit adjudication: GNU's evalerror jumps
+                    // DISCARD for the current command only (expr.c), so
+                    // `set -e; x=$(( 1/0 )); false; echo after` exits
+                    // at `false` instead of exempting it. Without this
+                    // the flag survived every DISCARD source (assignment
+                    // and argument forms included) and wrongly exempted
+                    // later failures under `set -e`.
+                    self.evalerror_arith_pending.set(false);
                 }
                 Err(ExecuteError::IoError(error)) => {
                     // rubash#440: a closed output (SIGPIPE analogue) is this

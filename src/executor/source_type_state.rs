@@ -189,7 +189,14 @@ impl Executor {
                 return Err(ExecuteError::ExpansionFailure(1));
             }
             if redirect_target_fd(&target).is_none() {
-                self.create_redirect_output_prepared(&target, redirect.clobber)?;
+                // rubash#3828: retain the prepare open — the bind walk
+                // adopts it as this entry's one open (GNU
+                // do_redirections opens each entry once).
+                if let Some(file) =
+                    self.create_redirect_output_prepared_open_for(None, &target, redirect.clobber)?
+                {
+                    self.retain_prepared_output_file(command, redirect, &target, file);
+                }
             }
         }
         Ok(())
@@ -230,7 +237,13 @@ impl Executor {
                 return Err(ExecuteError::ExpansionFailure(1));
             }
             if redirect_target_fd(&target).is_none() && !is_null_device(&target) {
-                self.create_redirect_output_prepared(&target, redirect.clobber)?;
+                // rubash#3828: retain the prepare open — the bind walk
+                // adopts it as this entry's one open.
+                if let Some(file) =
+                    self.create_redirect_output_prepared_open_for(None, &target, redirect.clobber)?
+                {
+                    self.retain_prepared_output_file(command, redirect, &target, file);
+                }
             }
             // rubash#826: GNU do_redirection_internal (redir.c:767-955)
             // rebinds fd 2 to the opened target at application time, so
