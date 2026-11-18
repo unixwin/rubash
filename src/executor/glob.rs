@@ -735,7 +735,14 @@ fn globstar_expand(
     } else if prefix == "/" {
         "/".to_string()
     } else {
-        prefix.trim_end_matches('/').to_string()
+        // GNU glob_filename hands glob_vector the directory string
+        // verbatim (glob.c:1293-1299 dir_name + glob.c:1058-1109
+        // glob_dir_to_array dir+name join): `sub//` + `**` emits
+        // `sub//`-prefixed names, with the `**`'s own separator
+        // supplying exactly one `/`. Drop only that boundary slash —
+        // stripping every trailing slash loses the empty pathname
+        // components GNU preserves (rubash#2709).
+        prefix.strip_suffix('/').unwrap_or(prefix).to_string()
     };
     // G-02: the walk's physical root anchors at the session cwd.
     let physical_base_dir = anchored_physical(&logical_base_dir, env_vars, cwd);
@@ -826,11 +833,19 @@ fn expand_multi_globstar(
     let mut segments: Vec<&str> = Vec::new();
     let mut collapsed = false;
     for segment in core.split('/') {
-        if segment.is_empty() {
-            continue;
-        }
-        if segment == "**" && segments.last() == Some(&"**") {
+        // Empty components are kept: inside a contiguous literal prefix
+        // they are part of the verbatim directory string GNU hands to
+        // glob_vector (`sub//` in `sub//**/x`), and after a `**` they
+        // are the `//` boundary that changes `**`'s arity (`**//x`
+        // demands at least one directory level). Only `**` separated
+        // from a previous `**` solely by slashes folds — glob.c:1188-
+        // 1210 skips `**`+`/`* sequences, so the empty components
+        // between the folded `**`s are dropped with them (rubash#2709).
+        if segment == "**" && segments.iter().rfind(|s| !s.is_empty()) == Some(&"**") {
             collapsed = true;
+            while segments.last() == Some(&"") {
+                segments.pop();
+            }
             continue;
         }
         segments.push(segment);
@@ -898,6 +913,8 @@ fn expand_multi_globstar(
         globskipdots,
         absolute,
         env_vars,
+        true,
+        false,
     );
     crate::locale::sort_collated(&mut matches);
     let matches = apply_globignore(matches, env_vars);
@@ -956,6 +973,15 @@ fn star_descend(
 // consuming transitions as separate recursive branches preserves GNU's real
 // multiplicity for non-adjacent globstars; the final sort restores pathname
 // expansion ordering after those branches have been concatenated.
+//
+// `literal_run` tracks whether every component consumed so far has been a
+// non-glob literal — GNU's dir_name, which glob_vector uses verbatim: a `//`
+// inside that run is a real `/` in the result (`x//y` → `x//y`), while a `//`
+// after a `**` or a matched glob component is only a frame boundary
+// (`s*//c.txt` → `sub/c.txt`). `self_slash` carries, for a pattern ending in
+// `**`, whether that `**`'s directory string ends at a literal boundary —
+// GNU emits the dir verbatim (`x/**` → `x/`, `x//**` → `x//`) while a dir
+// reached by matching has no extra separator (`x/*/**` → `x/y`).
 #[allow(clippy::too_many_arguments)]
 fn collect_multi_globstar_paths(
     segments: &[&str],
@@ -969,19 +995,36 @@ fn collect_multi_globstar_paths(
     globskipdots: bool,
     absolute: bool,
     env_vars: &std::collections::HashMap<String, String>,
+    literal_run: bool,
+    self_slash: bool,
 ) {
     if index == segments.len() {
         if logical != "." && (!dirs_only || physical.is_dir()) {
-            matches.push(if dirs_only {
-                format!("{}/", logical)
-            } else {
-                logical.to_string()
-            });
+            matches.push(
+                if dirs_only || (self_slash && segments.last() == Some(&"**")) {
+                    format!("{}/", logical)
+                } else {
+                    logical.to_string()
+                },
+            );
         }
         return;
     }
     let segment = segments[index];
-    if segment == "**" {
+    if segment.is_empty() {
+        // Empty pathname component: still the verbatim literal prefix —
+        // it contributes a real `/` (`x//` + `y` → `x//y`). After a
+        // `**` or glob-matched component it is only GNU's frame
+        // boundary and changes nothing in the name (`sub//**` keeps
+        // `sub//` via the earlier literal-run components, `s*//x` →
+        // `sub/x`). rubash#2709.
+        let next_logical;
+        let logical = if literal_run {
+            next_logical = format!("{logical}/");
+            &next_logical
+        } else {
+            logical
+        };
         collect_multi_globstar_paths(
             segments,
             index + 1,
@@ -994,7 +1037,42 @@ fn collect_multi_globstar_paths(
             globskipdots,
             absolute,
             env_vars,
+            literal_run,
+            self_slash,
         );
+        return;
+    }
+    if segment == "**" {
+        // GNU glob_vector adds the scanned directory itself to the `**`
+        // enumeration (GX_ADDCURDIR, glob.c:772-784, 936-959). When `**`
+        // is followed by empty components (`**//x`) the folded `**/`
+        // frame is in directory position and the `""` cwd placeholder
+        // is dropped — the `dname[0]=='\0' && filename[0]` rescue at
+        // glob.c:1348-1417 does not fire because the frame's filename
+        // is empty. The `**` then must consume at least one real level:
+        // `**//e.txt` yields `sub/deep/e.txt`, never `e.txt` itself,
+        // while `**/e.txt` still matches at depth zero (rubash#2709).
+        let cwd_self_blocked = logical == "."
+            && segments
+                .get(index + 1)
+                .map_or(false, |next| next.is_empty());
+        if !cwd_self_blocked {
+            collect_multi_globstar_paths(
+                segments,
+                index + 1,
+                logical,
+                physical,
+                dirs_only,
+                matches,
+                nocaseglob,
+                dotglob,
+                globskipdots,
+                absolute,
+                env_vars,
+                false,
+                literal_run,
+            );
+        }
         let entries = match shell_directory_entries_in(physical) {
             Ok(entries) => entries,
             Err(_) => return,
@@ -1048,6 +1126,8 @@ fn collect_multi_globstar_paths(
                         globskipdots,
                         absolute,
                         env_vars,
+                        false,
+                        self_slash,
                     );
                 }
                 // All-`**` prefix with segments remaining: the link
@@ -1071,8 +1151,34 @@ fn collect_multi_globstar_paths(
                 globskipdots,
                 absolute,
                 env_vars,
+                false,
+                self_slash,
             );
         }
+        return;
+    }
+    // `.`/`..` are literal directory components, not entry names: GNU's
+    // dir_name carries them verbatim and the frame recurses into the same
+    // or the parent directory (`.//**//e.txt` → `.//e.txt` +
+    // `.//sub/deep/e.txt`). They never appear in a directory listing, so
+    // they must bypass the entry match below. rubash#2709.
+    if segment == "." || segment == ".." {
+        let child_logical = join_path_segment(if logical == "." { "" } else { logical }, segment);
+        collect_multi_globstar_paths(
+            segments,
+            index + 1,
+            &child_logical,
+            &physical.join(segment),
+            dirs_only,
+            matches,
+            nocaseglob,
+            dotglob,
+            globskipdots,
+            absolute,
+            env_vars,
+            literal_run,
+            self_slash,
+        );
         return;
     }
     let entries = match shell_directory_entries_in(physical) {
@@ -1107,6 +1213,11 @@ fn collect_multi_globstar_paths(
                 continue;
             }
         }
+        // Once a glob-bearing component has been matched, the verbatim
+        // literal dir prefix is over: later `//`s are frame boundaries
+        // (`s*//c.txt` → `sub/c.txt`, glob.c's dir_name recursion).
+        let child_literal_run =
+            literal_run && !unquoted_glob_pattern_p(segment, shopt_enabled(env_vars, "extglob"));
         collect_multi_globstar_paths(
             segments,
             index + 1,
@@ -1119,6 +1230,8 @@ fn collect_multi_globstar_paths(
             globskipdots,
             absolute,
             env_vars,
+            child_literal_run,
+            self_slash,
         );
     }
 }
@@ -1530,281 +1643,28 @@ fn apply_globignore(
 }
 
 fn ignore_pattern_matches(pattern: &str, word: &str, extglob: bool, nocase: bool) -> bool {
-    if extglob && super::parameter_decode::pattern_uses_extglob_syntax(pattern) {
-        if nocase {
-            return super::conditional::extglob_case_pattern_matches_nocase(pattern, word);
-        }
-        return super::conditional::extglob_case_pattern_matches(pattern, word);
+    // pathexp.c:543-546 glob_name_is_acceptable(): GNU runs EVERY
+    // GLOBIGNORE spec through `strmatch(pattern, name, FNM_PATHNAME |
+    // FNMATCH_EXTFLAG | FNMATCH_NOCASEGLOB)` — one matcher, not a
+    // separate engine for extglob patterns. Routing extglob specs through
+    // the conditional case-pattern engine let `*`/`@(...)` reach across
+    // `/` positions strmatch never tries (e.g. `*@(/)cd/efg` vs
+    // `ab/cd/efg`); the unified strmatch port keeps the PATHNAME
+    // `n < endp` bound (sm_loop.c:284-290).
+    let mut flags = super::strmatch::FNM_PATHNAME;
+    if extglob {
+        flags |= super::strmatch::FNM_EXTMATCH;
     }
-    // Plain patterns go through the strmatch FNM_PATHNAME port below —
-    // the case-pattern engine lets `*` cross `/`, which would wrongly
-    // ignore `d/x/inner` under a GLOBIGNORE of `*/inner`.
-    // rubash#1533: byte locale — ASCII-only fold and byte-unit staging
-    // (see glob_vector_expand / case_pattern_matches_nocase).
-    let byte_locale = !crate::locale::is_utf8();
-    let stage = |text: &str| -> Vec<char> {
-        if byte_locale {
-            super::conditional::pattern::split_text_chars_into_byte_units(text.chars().collect())
-        } else {
-            text.chars().collect()
-        }
-    };
     if nocase {
-        let (pattern_lower, word_lower) = if byte_locale {
-            (pattern.to_ascii_lowercase(), word.to_ascii_lowercase())
-        } else {
-            (pattern.to_lowercase(), word.to_lowercase())
-        };
-        return strmatch_pathname(&stage(&pattern_lower), &stage(&word_lower));
+        flags |= super::strmatch::FNM_CASEFOLD;
     }
-    strmatch_pathname(&stage(pattern), &stage(word))
-}
-
-/// Port of bash lib/glob GMATCH (sm_loop.c) under FNM_PATHNAME, as
-/// used by pathexp.c glob_name_is_acceptable() for GLOBIGNORE. The
-/// rules that differ from the case-pattern engine:
-/// - `?`, `[...]` and a `*` followed by more pattern never match `/`.
-/// - A `*` that is the LAST pattern character matches the entire
-///   remainder of the name, slashes included (sm_loop.c case '*':
-///   `if (p == pe) return 0` before the collapse loop).
-/// - A wildcard run ending the pattern (`x*?`, `x**`) likewise
-///   succeeds once its `?`s have consumed their characters
-///   (`if (p == pe && (c == '?' || c == '*')) return 0`).
-/// - `**` is not special: a second `*` in a run is checked against
-///   the current character like any other run member.
-/// FNM_PERIOD/FNM_DOTDOT/FNM_LEADING_DIR are not in the
-/// glob_name_is_acceptable flag set and are not modeled.
-fn strmatch_pathname(pattern: &[char], name: &[char]) -> bool {
-    let mut p = pattern;
-    let mut s = name;
-    while let Some(&c) = p.first() {
-        p = &p[1..];
-        let sc = s.first().copied();
-        match c {
-            '?' => match sc {
-                None | Some('/') => return false,
-                Some(_) => s = &s[1..],
-            },
-            '\\' => {
-                // sm_loop case '\\': a trailing backslash matches a
-                // single trailing backslash in the name; otherwise
-                // the next pattern character is a literal.
-                if p.is_empty() {
-                    return s.len() == 1 && s[0] == '\\';
-                }
-                let lit = p[0];
-                p = &p[1..];
-                if sc != Some(lit) {
-                    return false;
-                }
-                s = &s[1..];
-            }
-            '[' => match parse_bracket_match(p) {
-                Some(class) => {
-                    match sc {
-                        None | Some('/') => return false,
-                        Some(ch) => {
-                            if !bracket_class_matches(&class.body, ch) {
-                                return false;
-                            }
-                        }
-                    }
-                    p = &p[class.pattern_len..];
-                    s = &s[1..];
-                }
-                None => {
-                    // Unterminated: literal '['.
-                    if sc != Some('[') {
-                        return false;
-                    }
-                    s = &s[1..];
-                }
-            },
-            '*' => {
-                if p.is_empty() {
-                    // `*` is the last pattern character.
-                    return true;
-                }
-                // Collapse the following `?`/`*` run (sm_loop.c):
-                // each run member first checks the current character
-                // is not `/`; `?` additionally consumes one char.
-                let mut rest = p;
-                let mut cur = s;
-                let mut next: char;
-                loop {
-                    let Some(&cc) = rest.first() else {
-                        // Unreachable for plain patterns (the run
-                        // exit below fires first); kept for parity
-                        // with sm_loop's c == '\0' arm: the wildcards
-                        // are the last element, so the match succeeds
-                        // only if the remaining name has no `/`.
-                        return !cur.contains(&'/');
-                    };
-                    rest = &rest[1..];
-                    next = cc;
-                    if cc != '?' && cc != '*' {
-                        break;
-                    }
-                    if cur.first() == Some(&'/') {
-                        return false;
-                    }
-                    if cc == '?' {
-                        match cur.first() {
-                            None | Some('/') => return false,
-                            Some(_) => cur = &cur[1..],
-                        }
-                    }
-                    if rest.is_empty() {
-                        // Run reached the end of the pattern:
-                        // sm_loop `if (p == pe && (c == '?' || c ==
-                        // '*')) return 0`.
-                        return true;
-                    }
-                }
-                if next == '/' {
-                    // sm_loop: consume the name up to the next `/`
-                    // and continue after it.
-                    let mut j = 0;
-                    while j < cur.len() && cur[j] != '/' {
-                        j += 1;
-                    }
-                    if j >= cur.len() {
-                        return false;
-                    }
-                    return strmatch_pathname(rest, &cur[j + 1..]);
-                }
-                // General case: the `*` spans a slash-free prefix of
-                // the current component; retry matching at `next`
-                // from each position in the component.
-                let comp_end = cur.iter().position(|&ch| ch == '/').unwrap_or(cur.len());
-                let mut retry: Vec<char> = Vec::with_capacity(rest.len() + 1);
-                retry.push(next);
-                retry.extend_from_slice(rest);
-                for k in 0..=comp_end {
-                    if strmatch_pathname(&retry, &cur[k..]) {
-                        return true;
-                    }
-                }
-                return false;
-            }
-            literal => {
-                if sc != Some(literal) {
-                    return false;
-                }
-                s = &s[1..];
-            }
-        }
-    }
-    s.is_empty()
-}
-
-struct BracketMatch {
-    /// Pattern length consumed by the whole `[...]` (relative to the
-    /// pattern slice starting just after the `[`).
-    pattern_len: usize,
-    /// The class body including any leading `!`/`^` negation.
-    body: Vec<char>,
-}
-
-/// Parse a `[...]` bracket expression; `pattern` starts just after
-/// the `[`. Returns the consumed length (including the closing `]`,
-/// relative to `pattern`) and the class body. `None` when
-/// unterminated.
-fn parse_bracket_match(pattern: &[char]) -> Option<BracketMatch> {
-    let mut i = 0;
-    if i < pattern.len() && (pattern[i] == '!' || pattern[i] == '^') {
-        i += 1;
-    }
-    // A `]` as the first class character is a literal.
-    if i < pattern.len() && pattern[i] == ']' {
-        i += 1;
-    }
-    while i < pattern.len() {
-        if pattern[i] == '\\' && i + 1 < pattern.len() {
-            i += 2;
-            continue;
-        }
-        if pattern[i] == ']' {
-            return Some(BracketMatch {
-                pattern_len: i + 1,
-                body: pattern[..i].to_vec(),
-            });
-        }
-        i += 1;
-    }
-    None
-}
-
-/// Test one character against a bracket class body (the text between
-/// `[` and `]`, including any leading `!`/`^` negation and any POSIX
-/// `[:class:]` items).
-fn bracket_class_matches(class: &[char], ch: char) -> bool {
-    let (negate, body) = match class.first() {
-        Some('!') | Some('^') => (true, &class[1..]),
-        _ => (false, class),
-    };
-    let mut i = 0;
-    let mut matched = false;
-    while i < body.len() {
-        // POSIX character class [:alpha:] etc.
-        if body[i] == '[' && i + 1 < body.len() && body[i + 1] == ':' {
-            if let Some(end) = (i + 2..body.len().saturating_sub(1))
-                .find(|&j| body[j] == ':' && body[j + 1] == ']')
-            {
-                let name: String = body[i + 2..end].iter().collect();
-                if posix_class_matches(&name, ch) {
-                    matched = true;
-                }
-                i = end + 2;
-                continue;
-            }
-        }
-        let lo = if body[i] == '\\' && i + 1 < body.len() {
-            i += 1;
-            body[i]
-        } else {
-            body[i]
-        };
-        if i + 2 < body.len() && body[i + 1] == '-' && body[i + 2] != ']' {
-            let hi = if body[i + 2] == '\\' && i + 3 < body.len() {
-                body[i + 3]
-            } else {
-                body[i + 2]
-            };
-            if lo <= ch && ch <= hi {
-                matched = true;
-            }
-            i += if body[i + 2] == '\\' && i + 3 < body.len() {
-                4
-            } else {
-                3
-            };
-            continue;
-        }
-        if lo == ch {
-            matched = true;
-        }
-        i += 1;
-    }
-    matched != negate
-}
-
-fn posix_class_matches(name: &str, ch: char) -> bool {
-    match name {
-        "alpha" => ch.is_alphabetic(),
-        "digit" => ch.is_ascii_digit(),
-        "alnum" => ch.is_alphanumeric(),
-        "space" => ch.is_whitespace(),
-        "upper" => ch.is_uppercase(),
-        "lower" => ch.is_lowercase(),
-        "xdigit" => ch.is_ascii_hexdigit(),
-        "punct" => ch.is_ascii_punctuation(),
-        "print" => !ch.is_control(),
-        "graph" => !ch.is_control() && ch != ' ',
-        "cntrl" => ch.is_control(),
-        "blank" => ch == ' ' || ch == '\t',
-        _ => false,
-    }
+    // smatch.c:585-603 xstrmatch(): the one dispatch point for every
+    // matcher call. GNU's GLOBIGNORE path is `strmatch()` (pathexp.c:546),
+    // which calls xstrmatch, which stays on internal_strmatch unless the
+    // locale is multibyte and the data is not (a both-single-byte pattern
+    // with only POSIX classes). `xstrmatch` carries that decision, so the
+    // call site no longer re-derives it.
+    super::strmatch::xstrmatch(pattern.as_bytes(), word.as_bytes(), flags)
 }
 
 fn synthetic_dot_names(pattern: &str, globskipdots: bool) -> Vec<String> {

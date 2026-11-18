@@ -257,11 +257,20 @@ impl Executor {
         } else {
             pre_attrs
         };
-        if name == "BASH_ALIASES" {
+        // rubash#3573: an unbound dynamic variable stays unbound
+        // (variables.c:3839) — the element bind lands on the plain
+        // variable GNU's generic path builds (indexed, arithmetic
+        // subscript), never in the alias table.
+        if name == "BASH_ALIASES"
+            && !is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, name)
+        {
             // TODO(variables.c/alias.c): BASH_ALIASES is a dynamic
             // associative array backed by the alias table. Keep this narrow
             // bridge here so array assignment does not swallow alias.tests'
-            // invalid-name diagnostic.
+            // invalid-name diagnostic. A severed name (explicit `unset`,
+            // or a whole-name bind — variables.c:3839 makes it an ordinary
+            // variable for the rest of the shell's lifetime, rubash#3573)
+            // falls through to the normal element bind instead.
             let alias_name = index
                 .trim_end_matches(']')
                 .trim_matches('\'')
@@ -458,7 +467,12 @@ impl Executor {
             self.exit_code = 0;
             return true;
         }
-        if name == "BASH_CMDS" {
+        // rubash#3573: same unbind stand-down as the BASH_ALIASES arm
+        // above — the element bind lands on the plain variable
+        // (variables.c:3839), never in the hashed-command table.
+        if name == "BASH_CMDS"
+            && !is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, name)
+        {
             let command_name = index
                 .trim_end_matches(']')
                 .trim_matches('\'')
@@ -545,9 +559,9 @@ impl Executor {
                 // conversion, exactly like the indexed branch's #1401
                 // handling below) — `declare -uA h; h[k]=abc` stores ABC.
                 let stored = if attrs.uppercase {
-                    stored.to_uppercase()
+                    crate::locale::simple_uppercase(&stored)
                 } else if attrs.lowercase {
-                    stored.to_lowercase()
+                    crate::locale::simple_lowercase(&stored)
                 } else if is_marked_var(&self.shell_state.env_vars, CAPCASE_VARS, name) {
                     // rubash#1619: capcase has no typed-cell bit (it lives
                     // only in the marker list), so the #1400 chain missed
@@ -680,9 +694,9 @@ impl Executor {
             // this `value` is the final stored text for both `=` and the
             // `+=` combined result (GNU converts the post-append value).
             let value = if attrs.uppercase {
-                value.to_uppercase()
+                crate::locale::simple_uppercase(&value)
             } else if attrs.lowercase {
-                value.to_lowercase()
+                crate::locale::simple_lowercase(&value)
             } else if is_marked_var(&self.shell_state.env_vars, CAPCASE_VARS, name) {
                 // rubash#1619: capcase on the canonical assoc path too.
                 super::variable_state::capitalize_value(&value)
@@ -1044,9 +1058,9 @@ impl Executor {
         // (GNU applies the case attribute on element store, not just
         // compound init and scalar assignment).
         let element = if attrs.uppercase {
-            element.to_uppercase()
+            crate::locale::simple_uppercase(&element)
         } else if attrs.lowercase {
-            element.to_lowercase()
+            crate::locale::simple_lowercase(&element)
         } else if is_marked_var(&self.shell_state.env_vars, CAPCASE_VARS, name) {
             // rubash#1619: `declare -c a; a[0]=hello` stores Hello — the
             // capcase attribute lives only in the marker list (no typed

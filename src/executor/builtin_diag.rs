@@ -160,10 +160,24 @@ impl PrologParts {
                 // the shared basename derivation (the old cells
                 // printed the shell-name carrier VERBATIM as the
                 // interactive name, rubash#3256).
-                let script_file = variables
-                    .get("__RUBASH_SCRIPT_NAME")
-                    .cloned()
-                    .or_else(|| std::env::var("__RUBASH_SCRIPT_NAME").ok());
+                // rubash#3048: the file arm is the FRAME file — the
+                // __RUBASH_CURRENT_FILE carrier the executor stamps per
+                // command (BASH_SOURCE[0], the definition file inside a
+                // function) — with __RUBASH_SCRIPT_NAME only as the
+                // fallback, the same pairing prefix::error_file_name and
+                // Executor::current_error_file_name compose. Reading
+                // SCRIPT_NAME alone attributed the definition file's
+                // line to the top-level script (the unset/readonly
+                // shapes of this pin).
+                let script_file = {
+                    let get = |key: &str| {
+                        variables
+                            .get(key)
+                            .cloned()
+                            .or_else(|| std::env::var(key).ok())
+                    };
+                    crate::builtins::prefix::error_file_name(&get)
+                };
                 let get = |key: &str| variables.get(key).cloned();
                 Prolog {
                     interactive: variables.get("__RUBASH_INTERACTIVE").is_some(),

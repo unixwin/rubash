@@ -24,11 +24,16 @@
 //! probes in the cluster workdir: p2294_stage0, p2294_mid and
 //! the v_append / v_last2294 / v_three / v_control cells).
 
+#[cfg(unix)]
 use std::io::Write;
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::{Command, Stdio};
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
 fn test_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("rubash-issue2294-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -36,6 +41,7 @@ fn test_dir(tag: &str) -> PathBuf {
     dir
 }
 
+#[cfg(unix)]
 fn rubash_stdin(script: &str) -> (String, String, Option<i32>) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .stdin(Stdio::piped())
@@ -71,11 +77,13 @@ fn rubash_stdin(script: &str) -> (String, String, Option<i32>) {
 }
 
 /// Run `body` as a script inside `dir`.
+#[cfg(unix)]
 fn run_in(dir: &Path, body: &str) -> (String, String, Option<i32>) {
     rubash_stdin(&format!("cd {} || exit 1\n{body}", dir.display()))
 }
 
 /// Poll until `path` has exactly `expected` contents or the deadline.
+#[cfg(unix)]
 fn wait_file_contents(path: &Path, expected: &str) -> bool {
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {

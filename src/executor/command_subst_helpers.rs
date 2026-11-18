@@ -374,6 +374,33 @@ pub(in crate::executor) fn collect_braced_parameter_body_into(
             body.push('\'');
             continue;
         }
+        if ch == '$' && chars.peek().copied() == Some('(') {
+            // A `$(...)` inside `${...}` is a command list of its own
+            // (subst.c:1825 extract_dollar_brace_string hands the
+            // substitution span to parse_comsub, parse.y:4451): its `#`
+            // comments and heredoc bodies are opaque, so a quote character
+            // inside them must not leak into this brace scan. Skip the
+            // whole unit with the corrected paren scanner (which carries
+            // the comment/heredoc arms) instead of quote-tracking through
+            // it — without this, the `'` in `# don't` opened a phantom
+            // single-quote that swallowed the closing `}` and the `}`
+            // leaked into the default word (rubash#3823 d1). Unbalanced
+            // input falls through to the literal push below (the old
+            // behavior); the `(` is then ordinary text.
+            let rest: Vec<char> = (*chars).clone().collect();
+            if let Some(end) = crate::lexer::skip_parenthesized_unit_corrected(&rest, 0) {
+                body.push('$');
+                for c in rest[..end].iter() {
+                    body.push(*c);
+                }
+                for _ in 0..end {
+                    chars.next();
+                }
+                continue;
+            }
+            body.push(ch);
+            continue;
+        }
         if ch == '\'' {
             single = true;
             body.push(ch);

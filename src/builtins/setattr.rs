@@ -35,10 +35,20 @@ fn diag_prolog(env_vars: &crate::shell::var_table::VarTable) -> Prolog {
     // (the old cells printed the shell-name carrier VERBATIM as
     // the interactive name and a hard-coded "rubash" as the error
     // name, rubash#3256).
-    let script_file = env_vars
-        .get("__RUBASH_SCRIPT_NAME")
-        .cloned()
-        .or_else(|| std::env::var("__RUBASH_SCRIPT_NAME").ok());
+    // rubash#3048: the file arm is the FRAME file — the
+    // __RUBASH_CURRENT_FILE carrier the executor stamps per command
+    // (BASH_SOURCE[0], the definition file inside a function) — with
+    // __RUBASH_SCRIPT_NAME only as the fallback
+    // (prefix::error_file_name, the same pairing
+    // Executor::current_error_file_name composes). Reading
+    // SCRIPT_NAME alone attributed a sourced function's error line to
+    // the top-level script.
+    let script_file = crate::builtins::prefix::error_file_name(&|key: &str| {
+        env_vars
+            .get(key)
+            .cloned()
+            .or_else(|| std::env::var(key).ok())
+    });
     let get = |key: &str| env_vars.get(key).cloned();
     Prolog {
         interactive: env_vars.get("__RUBASH_INTERACTIVE").is_some(),

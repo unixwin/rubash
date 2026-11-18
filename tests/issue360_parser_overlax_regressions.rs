@@ -85,7 +85,7 @@ fn bang_after_pipe_rejected() {
     let (stderr, code) = rubash_n("true | ! true");
     assert_eq!(
         stderr,
-        "bash: -c: line 1: syntax error near unexpected token `!'\n"
+        "bash: -c: line 1: syntax error near unexpected token `!'\nbash: -c: line 1: `true | ! true'\n"
     );
     assert_eq!(code, Some(2));
 }

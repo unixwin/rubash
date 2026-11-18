@@ -1072,17 +1072,51 @@ where
         // no-assignment `declare 'a[]'` stays InvalidId, and
         // export/readonly keep InvalidId (setattr.def never splits
         // subscripts).
+        //
+        // rubash#3494: GNU does NOT drop the operand — for a valued word
+        // assignment() already validated the `name[subscript]` shape, so
+        // declare.def skips valid_array_reference and only checks
+        // valid_identifier on the bare name; making_array_special /
+        // convert_var_to_array and VSETATTR then run BEFORE
+        // assign_array_element rejects the empty subscript
+        // (declare.def:988-1011 -> arrayfunc.c:1422 array_variable_name),
+        // leaving `a` bound as an empty array (`declare -a a=()`, an
+        // existing scalar promoted to [0], -A -> `declare -A a=()`). The
+        // diagnostic is reported here so operand order is preserved; the
+        // assign stage treats the empty subscript like the
+        // FAILED_SUBSCRIPT_SENTINEL arm — created-then-failed, silent.
+        // Two carve-outs keep GNU's earlier gates: a readonly base is
+        // refused by err_readonly before the subscript is ever parsed
+        // (no badsub, nothing bound), and an unquoted `a[]=(...)` compound
+        // operand is rejected during declaration-argument expansion
+        // before declare_builtin runs, so it keeps the prior drop.
         if !print && name.contains('=') {
-            if let Some((assign_lhs, _)) = name.split_once('=') {
+            if let Some((assign_lhs, value)) = name.split_once('=') {
                 let assign_lhs = assign_lhs.strip_suffix('+').unwrap_or(assign_lhs);
                 if let Some(base) = assign_lhs.strip_suffix("[]") {
                     if valid_identifier(base) {
-                        bare_diag_line(
-                            diag,
-                            prolog,
-                            variables,
-                            &format!("{base}[]: bad array subscript"),
-                        );
+                        if value.starts_with(COMPOUND_ASSIGNMENT_MARKER) {
+                            bare_diag_line(
+                                diag,
+                                prolog,
+                                variables,
+                                &format!("{base}[]: bad array subscript"),
+                            );
+                        } else if variables.is_marked(READONLY_VARS, base) {
+                            diag.error(DiagKind::Readonly(base.to_string()));
+                        } else {
+                            bare_diag_line(
+                                diag,
+                                prolog,
+                                variables,
+                                &format!("{base}[]: bad array subscript"),
+                            );
+                            // declare.def:978-981: an array-shaped operand
+                            // drops the deferred -n, so `declare -n 'a[]=x'`
+                            // yields `declare -a a=()`, not `-an`.
+                            drop_nameref_attrs.push(base.to_string());
+                            assign_names.push(*name);
+                        }
                         attr_status = EXECUTION_FAILURE;
                         continue;
                     }
