@@ -1714,6 +1714,41 @@ impl Executor {
         self.exit_code = saved_exit_code;
     }
 
+    /// Create an OS pipe for a pipeline stage boundary, matching GNU bash's
+    /// `pipe()` failure handling (`sys_error("pipe error")` + exit 129).
+    fn create_pipeline_pipe(
+        &mut self,
+    ) -> Result<(os_pipe::PipeReader, os_pipe::PipeWriter), ExecuteError> {
+        os_pipe::pipe().map_err(|err| {
+            let message = format!(
+                "{}pipe error: {}\n",
+                self.sys_error_prefix(),
+                crate::posix_errors::message(&err)
+            );
+            let _ = self.write_default_stderr(message.as_bytes());
+            ExecuteError::ExitCode(129)
+        })
+    }
+
+    /// Verify that the process has enough free file descriptors to create the
+    /// OS pipes a pipeline of `stage_count` stages requires (2 fds for 2
+    /// stages, 3 concurrent fds for 3+ stages as the previous pipe's read end
+    /// remains open while the next pipe is created).
+    fn verify_pipeline_pipes(&mut self, stage_count: usize) -> Result<(), ExecuteError> {
+        if stage_count < 2 {
+            return Ok(());
+        }
+        let (read0, write0) = self.create_pipeline_pipe()?;
+        drop(write0);
+        if stage_count >= 3 {
+            let (read1, write1) = self.create_pipeline_pipe()?;
+            drop(write1);
+            drop(read1);
+        }
+        drop(read0);
+        Ok(())
+    }
+
     pub(in crate::executor) fn execute_simple_pipeline(
         &mut self,
         commands: &[CommandNode],
@@ -1861,6 +1896,13 @@ impl Executor {
             .collect();
         let commands: Vec<&CommandNode> = normalized.iter().collect();
         let first = commands[0];
+        // rubash#3819: GNU execute_pipeline (execute_cmd.c) creates OS pipes
+        // across stage boundaries before executing stages and dies with
+        // "pipe error: <strerror>" (exit 129) if pipe(2) fails (e.g. under
+        // RLIMIT_NOFILE exhaustion). Verify pipe creation upfront so neither
+        // the in-memory sequential loop nor Stdio::piped() spawn failures
+        // silently run or misclassify fd exhaustion as rc 126.
+        self.verify_pipeline_pipes(commands.len())?;
         // rubash#1540: the fast-path attempts below expand member words
         // speculatively on this executor. When an attempt declines, its
         // expansion must leave no trace in the DISCARD latch family —
@@ -3287,7 +3329,7 @@ impl Executor {
         let mut pipes: Vec<(Option<os_pipe::PipeReader>, Option<os_pipe::PipeWriter>)> =
             Vec::with_capacity(consumer_count);
         for _ in 0..consumer_count {
-            let (read, write) = os_pipe::pipe().map_err(ExecuteError::IoError)?;
+            let (read, write) = self.create_pipeline_pipe()?;
             pipes.push((Some(read), Some(write)));
         }
         let capture_intermediate_stderr =
@@ -4150,7 +4192,7 @@ impl Executor {
         let mut pipes: Vec<(Option<os_pipe::PipeReader>, Option<os_pipe::PipeWriter>)> =
             Vec::with_capacity(commands.len() - 1);
         for _ in 0..commands.len() - 1 {
-            let (read, write) = os_pipe::pipe().map_err(ExecuteError::IoError)?;
+            let (read, write) = self.create_pipeline_pipe()?;
             pipes.push((Some(read), Some(write)));
         }
 
@@ -4662,7 +4704,7 @@ impl Executor {
         let mut pipes: Vec<(Option<os_pipe::PipeReader>, Option<os_pipe::PipeWriter>)> =
             Vec::with_capacity(tail_index);
         for _ in 0..tail_index {
-            let (read, write) = os_pipe::pipe().map_err(ExecuteError::IoError)?;
+            let (read, write) = self.create_pipeline_pipe()?;
             pipes.push((Some(read), Some(write)));
         }
 
@@ -5152,7 +5194,7 @@ impl Executor {
         let mut pipes: Vec<(Option<os_pipe::PipeReader>, Option<os_pipe::PipeWriter>)> =
             Vec::with_capacity(last_index);
         for _ in 0..last_index {
-            let (read, write) = os_pipe::pipe().map_err(ExecuteError::IoError)?;
+            let (read, write) = self.create_pipeline_pipe()?;
             pipes.push((Some(read), Some(write)));
         }
         // Spawn every external member before the shell stage runs, so
