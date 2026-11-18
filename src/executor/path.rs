@@ -1820,29 +1820,73 @@ pub fn should_run_with_shell(path: &Path) -> bool {
 /// "cannot execute binary file" / 126).
 ///
 /// Thin images, both byte orders: MH_MAGIC_64 (CF FA ED FE /
-/// FE ED FA CF) and MH_MAGIC (CE FA ED FE / FE ED FA CE).
+/// FE ED FA CF, `sizeof(struct mach_header_64)` = 32 bytes) and
+/// MH_MAGIC (CE FA ED FE / FE ED FA CE, `sizeof(struct mach_header)` =
+/// 28 bytes).
 ///
-/// The fat/universal wrapper shares its magic with Java class files
-/// (CAFEBABE); the arch count in bytes 4..8 disambiguates — a real fat
-/// binary carries a handful of slices, a class file carries a major
-/// version (>= 45) there. The count reads big-endian under FAT_MAGIC
-/// and little-endian under FAT_CIGAM.
+/// Fat/universal wrappers: FAT_MAGIC / FAT_CIGAM (CAFEBABE / BEBAFECA,
+/// `fat_header` 8 bytes + `nfat_arch * 20` bytes) and FAT_MAGIC_64 /
+/// FAT_CIGAM_64 (CAFEBABF / BFBAFECA, `fat_header` 8 bytes +
+/// `nfat_arch * 32` bytes). The arch count in bytes 4..8 also
+/// disambiguates CAFEBABE from Java class files (major version >= 45).
+/// Truncated headers fail validation so XNU's ENOEXEC refusal is
+/// preserved (rubash#3625).
+pub(crate) const MACHO_SNIFF_BYTES: usize = 8 + 16 * 32;
+
+pub(crate) fn read_exec_sniff_head(file: &mut std::fs::File, buf: &mut [u8]) -> usize {
+    use std::io::Read;
+    let mut total = 0;
+    while total < buf.len() {
+        match file.read(&mut buf[total..]) {
+            Ok(0) => break,
+            Ok(n) => total += n,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+    total
+}
+
 pub(crate) fn is_macho_binary_magic(head: &[u8]) -> bool {
     if head.len() < 4 {
         return false;
     }
-    match &head[..4] {
-        [0xCF, 0xFA, 0xED, 0xFE]
-        | [0xFE, 0xED, 0xFA, 0xCF]
-        | [0xCE, 0xFA, 0xED, 0xFE]
-        | [0xFE, 0xED, 0xFA, 0xCE] => true,
-        [0xCA, 0xFE, 0xBA, 0xBE] => {
-            head.len() >= 8
-                && (1..=16).contains(&u32::from_be_bytes([head[4], head[5], head[6], head[7]]))
-        }
-        [0xBE, 0xBA, 0xFE, 0xCA] => {
-            head.len() >= 8
-                && (1..=16).contains(&u32::from_le_bytes([head[4], head[5], head[6], head[7]]))
+    let magic = [head[0], head[1], head[2], head[3]];
+    match magic {
+        // Thin 32-bit: MH_MAGIC / MH_CIGAM (`sizeof(struct mach_header)` = 28).
+        [0xFE, 0xED, 0xFA, 0xCE] | [0xCE, 0xFA, 0xED, 0xFE] => head.len() >= 28,
+        // Thin 64-bit: MH_MAGIC_64 / MH_CIGAM_64 (`sizeof(struct mach_header_64)` = 32).
+        [0xFE, 0xED, 0xFA, 0xCF] | [0xCF, 0xFA, 0xED, 0xFE] => head.len() >= 32,
+        // Fat 32-bit (20-byte fat_arch) and Fat 64-bit (32-byte fat_arch_64).
+        [0xCA, 0xFE, 0xBA, 0xBE]
+        | [0xBE, 0xBA, 0xFE, 0xCA]
+        | [0xCA, 0xFE, 0xBA, 0xBF]
+        | [0xBF, 0xBA, 0xFE, 0xCA] => {
+            if head.len() < 8 {
+                return false;
+            }
+            let is_be = magic[0] == 0xCA;
+            let arch_size: usize = if magic[3] == 0xBF || magic[0] == 0xBF {
+                32
+            } else {
+                20
+            };
+            let count_bytes = [head[4], head[5], head[6], head[7]];
+            let nfat_arch = if is_be {
+                u32::from_be_bytes(count_bytes)
+            } else {
+                u32::from_le_bytes(count_bytes)
+            };
+            if !(1..=16).contains(&nfat_arch) {
+                return false;
+            }
+            let Some(required) = (nfat_arch as usize)
+                .checked_mul(arch_size)
+                .and_then(|n| n.checked_add(8))
+            else {
+                return false;
+            };
+            head.len() >= required
         }
         _ => false,
     }
@@ -1863,18 +1907,16 @@ pub(crate) fn is_macho_binary_magic(head: &[u8]) -> bool {
 /// execute binary file" refusal). Unreadable files answer true — the spawn
 /// error path below reports those, as today.
 pub fn program_execs_directly(path: &Path) -> bool {
-    use std::io::Read;
     let Ok(mut file) = std::fs::File::open(path) else {
         return true;
     };
-    let mut prefix = [0u8; 8];
-    // Read, not read_exact: a 4-7 byte file must still be judged on its
-    // real prefix (the pre-rework read_exact(4) did so; read_exact(8)
-    // returns true for every sub-8-byte file, so a 7-byte `echo hi`
-    // script would have been misread as directly exec-able). A file
-    // shorter than 4 bytes matches no magic and falls through to the
-    // script path, as GNU does (rubash#3510 rework).
-    let n = file.read(&mut prefix).unwrap_or(0);
+    let mut prefix = [0u8; MACHO_SNIFF_BYTES];
+    // Read until EOF or MACHO_SNIFF_BYTES (not read_exact): a short file
+    // must still be judged on its real prefix (e.g. a 7-byte `echo hi`
+    // script or a truncated Mach-O header). A file shorter than 4 bytes
+    // matches no magic and falls through to the script path, as GNU does
+    // (rubash#3510 rework, rubash#3625).
+    let n = read_exec_sniff_head(&mut file, &mut prefix);
     let prefix = &prefix[..n];
     prefix.starts_with(b"#!")
         || prefix.starts_with(&[0x7F, b'E', b'L', b'F'])
@@ -5200,34 +5242,88 @@ mod tests {
         assert_eq!(process_path_to_shell("/usr/bin:/bin"), "/usr/bin:/bin");
     }
 
-    /// rubash#3510 rework: Mach-O native-image magics — thin 32/64-bit in
-    /// both byte orders, plus the fat/universal wrapper disambiguated from
-    /// Java class files (same CAFEBABE magic) by the arch count.
+    /// rubash#3510 rework + rubash#3625: Mach-O native-image magics —
+    /// thin 32/64-bit in both byte orders (28/32-byte mach_header),
+    /// plus fat/fat64 wrappers (8-byte fat_header + nfat_arch * 20/32)
+    /// disambiguated from Java class files (same CAFEBABE magic) by the
+    /// arch count. Truncated headers must be rejected.
     #[test]
     fn macho_binary_magic_recognizes_thin_and_fat_images() {
-        // Thin 64-bit, little- and big-endian.
-        assert!(is_macho_binary_magic(&[0xCF, 0xFA, 0xED, 0xFE]));
-        assert!(is_macho_binary_magic(&[0xFE, 0xED, 0xFA, 0xCF]));
-        // Thin 32-bit, little- and big-endian.
-        assert!(is_macho_binary_magic(&[0xCE, 0xFA, 0xED, 0xFE]));
-        assert!(is_macho_binary_magic(&[0xFE, 0xED, 0xFA, 0xCE]));
-        // Fat, 2 slices — the universal-binary shape.
-        assert!(is_macho_binary_magic(&[
-            0xCA, 0xFE, 0xBA, 0xBE, 0x00, 0x00, 0x00, 0x02
-        ]));
-        assert!(is_macho_binary_magic(&[
-            0xBE, 0xBA, 0xFE, 0xCA, 0x02, 0x00, 0x00, 0x00
-        ]));
+        let with_len = |magic: [u8; 4], len: usize| {
+            let mut buf = vec![0u8; len];
+            buf[..4].copy_from_slice(&magic);
+            buf
+        };
+        let fat_with_len = |magic: [u8; 4], count_bytes: [u8; 4], len: usize| {
+            let mut buf = vec![0u8; len];
+            buf[..4].copy_from_slice(&magic);
+            buf[4..8].copy_from_slice(&count_bytes);
+            buf
+        };
+
+        // Thin 64-bit, little- and big-endian: requires 32 bytes.
+        for magic in [[0xCF, 0xFA, 0xED, 0xFE], [0xFE, 0xED, 0xFA, 0xCF]] {
+            assert!(!is_macho_binary_magic(&magic));
+            assert!(!is_macho_binary_magic(&with_len(magic, 31)));
+            assert!(is_macho_binary_magic(&with_len(magic, 32)));
+        }
+        // Thin 32-bit, little- and big-endian: requires 28 bytes.
+        for magic in [[0xCE, 0xFA, 0xED, 0xFE], [0xFE, 0xED, 0xFA, 0xCE]] {
+            assert!(!is_macho_binary_magic(&magic));
+            assert!(!is_macho_binary_magic(&with_len(magic, 27)));
+            assert!(is_macho_binary_magic(&with_len(magic, 28)));
+        }
+        // Fat 32-bit, 2 slices: requires 8 + 2 * 20 = 48 bytes.
+        for (magic, count) in [
+            ([0xCA, 0xFE, 0xBA, 0xBE], 2u32.to_be_bytes()),
+            ([0xBE, 0xBA, 0xFE, 0xCA], 2u32.to_le_bytes()),
+        ] {
+            assert!(!is_macho_binary_magic(&magic));
+            assert!(!is_macho_binary_magic(&fat_with_len(magic, count, 8)));
+            assert!(!is_macho_binary_magic(&fat_with_len(magic, count, 47)));
+            assert!(is_macho_binary_magic(&fat_with_len(magic, count, 48)));
+        }
+        // Fat 64-bit, 2 slices: requires 8 + 2 * 32 = 72 bytes.
+        for (magic, count) in [
+            ([0xCA, 0xFE, 0xBA, 0xBF], 2u32.to_be_bytes()),
+            ([0xBF, 0xBA, 0xFE, 0xCA], 2u32.to_le_bytes()),
+        ] {
+            assert!(!is_macho_binary_magic(&magic));
+            assert!(!is_macho_binary_magic(&fat_with_len(magic, count, 8)));
+            assert!(!is_macho_binary_magic(&fat_with_len(magic, count, 71)));
+            assert!(is_macho_binary_magic(&fat_with_len(magic, count, 72)));
+        }
+        // Max supported fat64 slice count (16): requires 8 + 16 * 32 = 520 bytes.
+        assert!(!is_macho_binary_magic(&fat_with_len(
+            [0xCA, 0xFE, 0xBA, 0xBF],
+            16u32.to_be_bytes(),
+            519,
+        )));
+        assert!(is_macho_binary_magic(&fat_with_len(
+            [0xCA, 0xFE, 0xBA, 0xBF],
+            16u32.to_be_bytes(),
+            520,
+        )));
         // A Java class file shares FAT_MAGIC but carries a major version
         // (>= 45) where the arch count sits — not a Mach-O image.
-        assert!(!is_macho_binary_magic(&[
-            0xCA, 0xFE, 0xBA, 0xBE, 0x00, 0x00, 0x00, 0x34
-        ]));
-        assert!(!is_macho_binary_magic(&[
-            0xCA, 0xFE, 0xBA, 0xBE, 0x00, 0x00, 0x00, 0x00
-        ]));
-        // A 4-byte fat prefix cannot carry the count — not recognized.
-        assert!(!is_macho_binary_magic(&[0xCA, 0xFE, 0xBA, 0xBE]));
+        assert!(!is_macho_binary_magic(&fat_with_len(
+            [0xCA, 0xFE, 0xBA, 0xBE],
+            0x34u32.to_be_bytes(),
+            128,
+        )));
+        // Invalid / out-of-range arch counts (0, 17, u32::MAX) are rejected.
+        for count in [0u32, 17, u32::MAX] {
+            assert!(!is_macho_binary_magic(&fat_with_len(
+                [0xCA, 0xFE, 0xBA, 0xBE],
+                count.to_be_bytes(),
+                64,
+            )));
+            assert!(!is_macho_binary_magic(&fat_with_len(
+                [0xCA, 0xFE, 0xBA, 0xBF],
+                count.to_be_bytes(),
+                64,
+            )));
+        }
         // Everything else is not Mach-O.
         assert!(!is_macho_binary_magic(&[0x7F, b'E', b'L', b'F']));
         assert!(!is_macho_binary_magic(b"#!/bin/sh"));
@@ -5237,14 +5333,12 @@ mod tests {
         assert!(!is_macho_binary_magic(&[0xCF, 0xFA, 0xED]));
     }
 
-    /// rubash#3510 rework: the two pre-emptive native-binary classifiers
-    /// treat Mach-O images by platform — admitted on macOS, where the
-    /// Darwin kernel execs them (the macOS face where /bin/sleep,
-    /// MH_MAGIC_64, was refused as "cannot execute binary file" / 126
-    /// before any execve was attempted), and still refused elsewhere,
-    /// where the kernel answers ENOEXEC and GNU's post-ENOEXEC binary
-    /// refusal (126) applies. A Java class file (FAT_MAGIC, major
-    /// version in the count slot) stays a non-native file on both.
+    /// rubash#3510 rework + rubash#3625: the two pre-emptive native-binary
+    /// classifiers treat valid Mach-O images by platform — admitted on
+    /// macOS, where the Darwin kernel execs them, and still refused
+    /// elsewhere, where the kernel answers ENOEXEC. Truncated Mach-O
+    /// headers (< mach_header / < fat_header + nfat_arch * arch) are
+    /// rejected on every platform, matching XNU's ENOEXEC refusal.
     #[cfg(unix)]
     #[test]
     fn native_binary_classifiers_admit_macho_images() {
@@ -5257,36 +5351,34 @@ mod tests {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
             path
         };
-        // Thin Mach-O 64-bit (the /bin/sleep shape: magic + arm64 cputype).
-        let thin = write_exec(
-            "thin-macho",
-            &[
-                0xCF, 0xFA, 0xED, 0xFE, 0x0C, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
-            ],
-        );
-        // Fat universal binary, 2 slices.
-        let fat = write_exec(
-            "fat-macho",
-            &[
-                0xCA, 0xFE, 0xBA, 0xBE, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00,
-            ],
-        );
+        // Thin Mach-O 64-bit (32-byte mach_header_64).
+        let mut thin_bytes = vec![0u8; 32];
+        thin_bytes[..8].copy_from_slice(&[0xCF, 0xFA, 0xED, 0xFE, 0x0C, 0x00, 0x00, 0x01]);
+        let thin = write_exec("thin-macho", &thin_bytes);
+        // Fat universal binary, 2 slices (8 + 2 * 20 = 48 bytes).
+        let mut fat_bytes = vec![0u8; 48];
+        fat_bytes[..8].copy_from_slice(&[0xCA, 0xFE, 0xBA, 0xBE, 0x00, 0x00, 0x00, 0x02]);
+        let fat = write_exec("fat-macho", &fat_bytes);
+        // Fat64 universal binary, 2 slices (8 + 2 * 32 = 72 bytes).
+        let mut fat64_bytes = vec![0u8; 72];
+        fat64_bytes[..8].copy_from_slice(&[0xCA, 0xFE, 0xBA, 0xBF, 0x00, 0x00, 0x00, 0x02]);
+        let fat64 = write_exec("fat64-macho", &fat64_bytes);
+        // Truncated Mach-O files: magic matches, header is incomplete.
+        let truncated_thin = write_exec("truncated-thin", &thin_bytes[..12]);
+        let truncated_fat = write_exec("truncated-fat", &fat_bytes[..12]);
+        let truncated_fat64 = write_exec("truncated-fat64", &fat64_bytes[..40]);
         // Java class file: same FAT_MAGIC, major version 52 in the count slot.
-        let class = write_exec(
-            "java-class",
-            &[
-                0xCA, 0xFE, 0xBA, 0xBE, 0x00, 0x00, 0x00, 0x34, 0x00, 0x00, 0x00, 0x00,
-            ],
-        );
+        let mut class_bytes = vec![0u8; 64];
+        class_bytes[..8].copy_from_slice(&[0xCA, 0xFE, 0xBA, 0xBE, 0x00, 0x00, 0x00, 0x34]);
+        let class = write_exec("java-class", &class_bytes);
         // Shebangless text: the genuine ENOEXEC-candidate shape.
         let text = write_exec("plain-text", b"echo hi\n");
         // Sub-8-byte shebangless scripts: judged on their real prefix, not
-        // on a short-read failure (read_exact(8) misread these as directly
-        // exec-able). `echo hi` without a trailing newline is 7 bytes.
+        // on a short-read failure.
         let short_text = write_exec("short-text", b"echo hi");
         let tiny_text = write_exec("tiny-text", b"abc");
         if cfg!(target_os = "macos") {
-            for path in [&thin, &fat] {
+            for path in [&thin, &fat, &fat64] {
                 assert!(program_execs_directly(path), "{}", path.display());
                 assert!(
                     !crate::executor::external_inner::is_enoexec_candidate(path),
@@ -5297,7 +5389,7 @@ mod tests {
         } else {
             // Off macOS the kernel refuses Mach-O with ENOEXEC, so both
             // classifiers keep it on the refusal path (GNU: 126).
-            for path in [&thin, &fat] {
+            for path in [&thin, &fat, &fat64] {
                 assert!(!program_execs_directly(path), "{}", path.display());
                 assert!(
                     crate::executor::external_inner::is_enoexec_candidate(path),
@@ -5305,6 +5397,14 @@ mod tests {
                     path.display()
                 );
             }
+        }
+        for path in [&truncated_thin, &truncated_fat, &truncated_fat64] {
+            assert!(!program_execs_directly(path), "{}", path.display());
+            assert!(
+                crate::executor::external_inner::is_enoexec_candidate(path),
+                "{}",
+                path.display()
+            );
         }
         assert!(!program_execs_directly(&class));
         assert!(crate::executor::external_inner::is_enoexec_candidate(
@@ -5320,7 +5420,18 @@ mod tests {
                 path.display()
             );
         }
-        for path in [&thin, &fat, &class, &text, &short_text, &tiny_text] {
+        for path in [
+            &thin,
+            &fat,
+            &fat64,
+            &truncated_thin,
+            &truncated_fat,
+            &truncated_fat64,
+            &class,
+            &text,
+            &short_text,
+            &tiny_text,
+        ] {
             let _ = std::fs::remove_file(path);
         }
     }
