@@ -687,6 +687,24 @@ impl Executor {
         if !crate::executor::markers::contains_decodable_transport(expanded) {
             return;
         }
+        // The `>&`/`<&` stored operand carries a synthetic leading `&`
+        // (parser/redirections.rs redirect_target /
+        // input_redirect_target) that is operator syntax, never
+        // filename content — GNU redir.c:832-838 opens `word` for
+        // `>&word`. The recorded spelling is the filename's bytes,
+        // so the `&` comes off before decoding; every `&`-stripping
+        // consumer (and the node-aware opens) then resolves the same
+        // name GNU opens. A literal `&` inside the word survives:
+        // `>&"&$a"` stores `&&...` and loses only the synthetic one.
+        let expanded = match redirect.kind {
+            crate::parser::RedirectKind::DuplicateInput
+            | crate::parser::RedirectKind::DuplicateOutput
+            | crate::parser::RedirectKind::CloseInput
+            | crate::parser::RedirectKind::CloseOutput => {
+                expanded.strip_prefix('&').unwrap_or(expanded)
+            }
+            _ => expanded,
+        };
         let decoded = crate::executor::markers::decode_word_position_carriers(
             &expanded.replace(crate::executor::markers::CTLESC, ""),
         );

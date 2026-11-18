@@ -6115,6 +6115,7 @@ impl Executor {
                             if !is_null_device(&target) {
                                 crate::executor::shell_options::probe_output_redirect(
                                     self,
+                                    Some(redirect),
                                     &target,
                                     redirect.clobber,
                                 )?;
@@ -6320,6 +6321,7 @@ impl Executor {
                         let probed = if !is_null_device(&path) {
                             crate::executor::shell_options::probe_output_redirect_file(
                                 self,
+                                Some(redirect),
                                 &path,
                                 redirect.clobber,
                             )?
@@ -6328,15 +6330,10 @@ impl Executor {
                         };
                         self.flush_persistent_output_process_substitution(1)?;
                         match probed {
-                            Some(file) => self.set_fd_output_file_from_file(
-                                1,
-                                path.clone(),
-                                false,
-                                file,
-                            )?,
-                            None => {
-                                self.set_fd_output_file(1, path.clone(), false, false)?
+                            Some(file) => {
+                                self.set_fd_output_file_from_file(1, path.clone(), false, file)?
                             }
+                            None => self.set_fd_output_file(1, path.clone(), false, false)?,
                         }
                         self.flush_persistent_output_process_substitution(2)?;
                         self.share_fd_output_file(1, 2, &path, false);
@@ -6405,6 +6402,7 @@ impl Executor {
                     let probed = if !is_null_device(&target) && !append {
                         crate::executor::shell_options::probe_output_redirect_file(
                             self,
+                            Some(redirect),
                             &target,
                             redirect.clobber,
                         )?
@@ -6416,15 +6414,10 @@ impl Executor {
                     // substitution's deferred body (rubash#1336).
                     self.flush_persistent_output_process_substitution(fd)?;
                     match probed {
-                        Some(file) => self.set_fd_output_file_from_file(
-                            fd,
-                            target.clone(),
-                            fd >= 10,
-                            file,
-                        )?,
-                        None => {
-                            self.set_fd_output_file(fd, target.clone(), fd >= 10, append)?
+                        Some(file) => {
+                            self.set_fd_output_file_from_file(fd, target.clone(), fd >= 10, file)?
                         }
+                        None => self.set_fd_output_file(fd, target.clone(), fd >= 10, append)?,
                     }
                     if matches!(
                         redirect.kind,
@@ -6474,6 +6467,7 @@ impl Executor {
                         let probed = if !is_null_device(&path) {
                             crate::executor::shell_options::probe_output_redirect_file(
                                 self,
+                                Some(redirect),
                                 &path,
                                 redirect.clobber,
                             )?
@@ -6482,15 +6476,10 @@ impl Executor {
                         };
                         self.flush_persistent_output_process_substitution(1)?;
                         match probed {
-                            Some(file) => self.set_fd_output_file_from_file(
-                                1,
-                                path.clone(),
-                                false,
-                                file,
-                            )?,
-                            None => {
-                                self.set_fd_output_file(1, path.clone(), false, false)?
+                            Some(file) => {
+                                self.set_fd_output_file_from_file(1, path.clone(), false, file)?
                             }
+                            None => self.set_fd_output_file(1, path.clone(), false, false)?,
                         }
                         self.flush_persistent_output_process_substitution(2)?;
                         self.share_fd_output_file(1, 2, &path, false);
@@ -9389,6 +9378,7 @@ impl Executor {
                 let probed = if redirect.kind != crate::parser::RedirectKind::Append {
                     crate::executor::shell_options::probe_output_redirect_file(
                         self,
+                        Some(redirect),
                         &target,
                         redirect.clobber,
                     )?
