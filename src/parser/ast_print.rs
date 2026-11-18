@@ -61,12 +61,39 @@ pub fn multiline_function_def_text_with(
     body_kind: Option<crate::parser::FunctionBodyKind>,
     def_redirects: &[Redirect],
 ) -> String {
+    multiline_function_def_text_inner(name, body, body_kind, def_redirects, false)
+}
+
+/// The bare `set`/`declare` listing form (print_func_list,
+/// variables.c:1079-1090): GNU calls named_function_string with name=NULL,
+/// so the `name && *name` gate (print_cmd.c:1419-1425) skips BOTH the
+/// `function ` fallback and the name itself — print_func_list supplies the
+/// `name ` prefix itself. A function whose name is an assignment word
+/// (`function a=b { ...; }`) therefore lists as `a=b () ` here even though
+/// `declare -f a=b` prints `function a=b () `.
+pub fn multiline_function_listing_text(
+    name: &str,
+    body: &[CommandNode],
+    body_kind: Option<crate::parser::FunctionBodyKind>,
+    def_redirects: &[Redirect],
+) -> String {
+    multiline_function_def_text_inner(name, body, body_kind, def_redirects, true)
+}
+
+fn multiline_function_def_text_inner(
+    name: &str,
+    body: &[CommandNode],
+    body_kind: Option<crate::parser::FunctionBodyKind>,
+    def_redirects: &[Redirect],
+    listing_form: bool,
+) -> String {
     let mut printer = Printer::new();
     // named_function_string: prefix `function ` when the name is not a valid
     // function name (general.c valid_function_name with pflags=0/4 —
     // POSIX_RESTRICT_FUNCNAME is off in the 5.3 build, so only the
-    // assignment-word check fires, e.g. `a=2`).
-    if is_assignment_word_name(name) {
+    // assignment-word check fires, e.g. `a=2`). The listing form never
+    // reaches this branch: print_func_list passes name=NULL.
+    if !listing_form && is_assignment_word_name(name) {
         printer.cprintf("function ");
     }
     printer.cprintf(&format!("{name} () \n"));

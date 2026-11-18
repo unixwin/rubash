@@ -216,3 +216,27 @@ fn declare_f_still_prints_definition() {
         "declare -f output regressed:\n{out}"
     );
 }
+
+#[test]
+fn bare_declare_listing_never_prints_function_keyword() {
+    // print_func_list calls named_function_string(NULL, ...) — the
+    // name==NULL gate (print_cmd.c:1419-1425) skips the `function `
+    // fallback entirely, so an assignment-word function name lists as
+    // `a=b () ` even though `declare -f a=b` prints `function a=b () `.
+    let dir = scratch("fnkw");
+    let script = "\
+function a=b { echo hi; }
+myfn() { echo body; }
+declare
+";
+    let (out, err, ok) = run_full(&dir, script);
+    assert!(ok, "bare declare failed: {err}");
+    assert!(
+        block_index(&out, &["a=b () ", "{ ", "    echo hi", "}"]).is_some(),
+        "assignment-word name must list without the `function ` prefix:\n{out}"
+    );
+    assert!(
+        line_index(&out, "function a=b () ").is_none(),
+        "listing must not carry the named-form `function ` prefix:\n{out}"
+    );
+}
