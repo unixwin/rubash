@@ -319,6 +319,171 @@ pub(crate) struct UnclosedInput {
     pub(crate) outermost_line: usize,
 }
 
+/// rubash#3905: does the `(` at `chars[i]` open a compound assignment —
+/// a `name=(` / `name+=(` / `name[sub]=(` word in a position where GNU's
+/// read_token_word hands it to parse_compound_assignment? GNU's gate is
+/// parse.y:5653: the word being read is token_is_assignment (parse.y:5270,
+/// via assignment() in variables.c: an identifier or subscripted name
+/// directly followed by `=`/`+=`) AND assignment_acceptable(last_read_token)
+/// (parse.y:3163: command_token_position, parse.y:3156-3161, and not
+/// PST_CASEPAT) or PST_ASSIGNOK (the command word was declare / local /
+/// export / readonly / typeset) holds. The scans in this file do not feed
+/// their word machine inside a delimiter body, so the nested `(` arm
+/// judges the shape from the raw text: scan back over the assignment
+/// word, then judge the position from what precedes it (a command
+/// boundary, a command keyword, an assignment builtin, or another
+/// assignment word).
+fn nested_compassign_opener(chars: &[char], i: usize) -> bool {
+    if i == 0 || chars[i - 1] != '=' {
+        return false;
+    }
+    let mut end = i - 1;
+    if end > 0 && chars[end - 1] == '+' {
+        end -= 1;
+    }
+    // The assignment target ends at `end`: an identifier run, or a
+    // subscripted name `name[...]` whose `]` sits directly before `=`.
+    let start = if end > 0 && chars[end - 1] == ']' {
+        let mut depth = 0usize;
+        let mut open = None;
+        let mut j = end;
+        while j > 0 {
+            j -= 1;
+            match chars[j] {
+                ']' => depth += 1,
+                '[' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        open = Some(j);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(open) = open else { return false };
+        match identifier_run_start(chars, open) {
+            Some(s) => s,
+            None => return false,
+        }
+    } else {
+        match identifier_run_start(chars, end) {
+            Some(s) => s,
+            None => return false,
+        }
+    };
+    // Position of the assignment word: start of input, or directly after
+    // a command boundary, is a command token position.
+    if start == 0 {
+        return true;
+    }
+    let b = chars[start - 1];
+    if matches!(b, '(' | ';' | '&' | '|' | '\n' | '{' | '}') {
+        return true;
+    }
+    if b != ' ' && b != '\t' {
+        return false;
+    }
+    // After whitespace the preceding significant token decides: a
+    // boundary char, a command keyword (reserved_word_acceptable), an
+    // assignment builtin (PST_ASSIGNOK), or another assignment word
+    // (ASSIGNMENT_WORD is itself a command token position).
+    let mut p = start;
+    while p > 0 && (chars[p - 1] == ' ' || chars[p - 1] == '\t') {
+        p -= 1;
+    }
+    if p == 0 {
+        return true;
+    }
+    let pb = chars[p - 1];
+    if matches!(pb, '(' | ')' | ';' | '&' | '|' | '\n' | '{' | '}') {
+        return true;
+    }
+    let mut w = p;
+    while w > 0 {
+        let c = chars[w - 1];
+        if c.is_whitespace() || matches!(c, '(' | ')' | ';' | '&' | '|' | '<' | '>' | '{' | '}') {
+            break;
+        }
+        w -= 1;
+    }
+    if w == p {
+        return false;
+    }
+    let word: String = chars[w..p].iter().collect();
+    matches!(
+        word.as_str(),
+        "if" | "then"
+            | "else"
+            | "elif"
+            | "while"
+            | "until"
+            | "do"
+            | "!"
+            | "time"
+            | "coproc"
+            | "declare"
+            | "local"
+            | "export"
+            | "readonly"
+            | "typeset"
+    ) || word_is_assignment_shaped(&word)
+}
+
+/// Start of the identifier run that ends at `end` (exclusive), or None
+/// when the run is empty or does not start with [A-Za-z_]. A
+/// backslash-newline pair inside the run is a line continuation: GNU
+/// reads the joined token (`a\<NL>=(` is one assignment word), so the
+/// pair is skipped like an identifier char.
+fn identifier_run_start(chars: &[char], end: usize) -> Option<usize> {
+    let mut k = end;
+    while k > 0 {
+        let c = chars[k - 1];
+        if c == '_' || c.is_ascii_alphanumeric() {
+            k -= 1;
+        } else if c == '\n' && k > 1 && chars[k - 2] == '\\' {
+            k -= 2;
+        } else {
+            break;
+        }
+    }
+    if k == end {
+        return None;
+    }
+    let first = chars[k];
+    if first == '_' || first.is_ascii_alphabetic() {
+        Some(k)
+    } else {
+        None
+    }
+}
+
+/// True when `word` is itself an assignment word (`name=...`,
+/// `name+=...`, `name[sub]=...`): an assignment word is a command token
+/// position (parse.y:3156-3164 command_token_position), so a following
+/// `name=(` continues the same assignment statement.
+fn word_is_assignment_shaped(word: &str) -> bool {
+    let Some(eq) = word.find('=') else {
+        return false;
+    };
+    let mut head = &word[..eq];
+    if let Some(stripped) = head.strip_suffix('+') {
+        head = stripped;
+    }
+    if let Some(bracket) = head.find('[') {
+        if !head.ends_with(']') {
+            return false;
+        }
+        head = &head[..bracket];
+    }
+    !head.is_empty()
+        && head
+            .chars()
+            .next()
+            .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
+        && head.chars().all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
 /// Returns the innermost pending construct's verdict for `input`, or None
 /// when every matched-pair construct is closed.
 pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Option<UnclosedInput> {
@@ -1115,6 +1280,24 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
                 // text, instead of posing as a command subshell whose
                 // yyerror report lands on the EOF line.
                 let arith_group = !procsub && top.is_some_and(|d| d.arith);
+                // rubash#3905: a `name=(` in command position inside the
+                // body is a compound assignment, not a nested subshell:
+                // GNU hands it to parse_compound_assignment (parse.y:5653),
+                // whose EOF report is the matched-pair one at the list's
+                // line (parse.y:7151-7152) with EXECUTION_FAILURE
+                // (parse.y:7167-7169) — the split the array_list bit
+                // drives, exactly like the top-level arm's array frame.
+                // The word machine is not fed inside a body, so the shape
+                // is judged from the raw text (nested_compassign_opener).
+                // Inside an array list the same text is element text (the
+                // token-error family, #3904 A29), and a case pattern
+                // admits no assignment (PST_CASEPAT, parse.y:3163) — both
+                // keep the subshell reading.
+                let compassign = !arith_group
+                    && !procsub
+                    && !top.is_some_and(|d| d.array_list)
+                    && !(case_depth > 0 && case_pattern_region)
+                    && nested_compassign_opener(&chars, i);
                 stack.push(UnclosedDelim {
                     close: ')',
                     open_line: if arith_group {
@@ -1126,12 +1309,17 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
                     // `((x` arithmetic takes parse_matched_pair's
                     // start_lineno report like `$((` does; a real nested
                     // subshell reports the EOF line (yyerror).
-                    report_open: arith_group || (!procsub && i > 0 && chars[i - 1] == '('),
+                    report_open: compassign
+                        || arith_group
+                        || (!procsub && i > 0 && chars[i - 1] == '('),
                     funsub: false,
-                    command: !arith_group && !procsub && !(i > 0 && chars[i - 1] == '('),
+                    command: !compassign
+                        && !arith_group
+                        && !procsub
+                        && !(i > 0 && chars[i - 1] == '('),
                     term_ready: false,
                     case_depth_at_push: case_depth,
-                    array_list: false,
+                    array_list: compassign,
                     pattern_paren: case_depth > 0 && case_pattern_region,
                     arith: arith_group || (!procsub && i > 0 && chars[i - 1] == '('),
                 });
@@ -5947,6 +6135,15 @@ pub(crate) fn close_char_residuals_advance(
                 // start_lineno, parse.y:3908-3915, is the report line),
                 // never a command subshell.
                 let arith_group = !procsub && top.is_some_and(|d| d.arith);
+                // rubash#3905: mirror of the one-shot scan's compassign
+                // rule — a `name=(` in command position inside the body
+                // is a compound assignment (parse.y:5653), pushed as an
+                // array_list frame like the top-level arm's.
+                let compassign = !arith_group
+                    && !procsub
+                    && !top.is_some_and(|d| d.array_list)
+                    && !(state.case_depth > 0 && state.case_pattern_region)
+                    && nested_compassign_opener(&chars, i);
                 state.stack.push(UnclosedDelim {
                     close: ')',
                     open_line: if arith_group {
@@ -5958,12 +6155,17 @@ pub(crate) fn close_char_residuals_advance(
                     // `((x` arithmetic takes parse_matched_pair's
                     // start_lineno report like `$((` does; a real nested
                     // subshell reports the EOF line (yyerror).
-                    report_open: arith_group || (!procsub && i > 0 && chars[i - 1] == '('),
+                    report_open: compassign
+                        || arith_group
+                        || (!procsub && i > 0 && chars[i - 1] == '('),
                     funsub: false,
-                    command: !arith_group && !procsub && !(i > 0 && chars[i - 1] == '('),
+                    command: !compassign
+                        && !arith_group
+                        && !procsub
+                        && !(i > 0 && chars[i - 1] == '('),
                     term_ready: false,
                     case_depth_at_push: state.case_depth,
-                    array_list: false,
+                    array_list: compassign,
                     pattern_paren: state.case_depth > 0 && state.case_pattern_region,
                     arith: arith_group || (!procsub && i > 0 && chars[i - 1] == '('),
                 });
