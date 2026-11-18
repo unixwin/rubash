@@ -1573,7 +1573,13 @@ impl Executor {
                             || call_cmd
                                 .heredoc_redirects
                                 .iter()
-                                .any(|redirect| redirect.fd.is_none() || redirect.fd == Some(0))
+                                // rubash#3894: a `{var}<<` twin binds an
+                                // allocated fd, never fd 0 — it is not
+                                // an fd-0 stdin body of the call.
+                                .any(|redirect| {
+                                    redirect.fd_var.is_none()
+                                        && (redirect.fd.is_none() || redirect.fd == Some(0))
+                                })
                     }
                 };
             if !call_has_own_stdin_body

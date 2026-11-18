@@ -514,9 +514,23 @@ pub(in crate::executor) fn stdio_output_target(fd: u32) -> Option<&'static str> 
 }
 
 pub(in crate::executor) fn command_has_unterminated_heredoc(cmd: &CommandNode) -> bool {
-    cmd.heredoc
+    // GNU redir.c REDIR_VARASSIGN: a `{var}<<` body never takes the
+    // fd-0 mirror (`cmd.heredoc`, rubash#3894), but its gather still
+    // warns at EOF exactly like a plain `<<` — so the marker lives in
+    // the twins too, and both carriers must be consulted.
+    if cmd
+        .heredoc
         .as_deref()
         .is_some_and(|body| strip_quoted_heredoc_marker(body).starts_with(DATA_DOLLAR))
+    {
+        return true;
+    }
+    cmd.heredoc_redirects.iter().any(|redirect| {
+        redirect
+            .body
+            .as_deref()
+            .is_some_and(|body| strip_quoted_heredoc_marker(body).starts_with(DATA_DOLLAR))
+    })
 }
 
 /// True when the here-document delimiter was found but not on a line by
@@ -525,9 +539,20 @@ pub(in crate::executor) fn command_has_unterminated_heredoc(cmd: &CommandNode) -
 /// as a truly unterminated heredoc.  The `\x1e` marker is inserted by the
 /// lexer for this case.
 pub(in crate::executor) fn command_has_warned_heredoc(cmd: &CommandNode) -> bool {
-    cmd.heredoc.as_deref().is_some_and(|body| {
+    // Same twin fallback as command_has_unterminated_heredoc (rubash#3894):
+    // a `{var}<<` body never takes the fd-0 mirror, but its warned
+    // marker still lives in the twin.
+    if cmd.heredoc.as_deref().is_some_and(|body| {
         strip_quoted_heredoc_marker(body)
             .starts_with(crate::executor::markers::HEREDOC_WARNED_BODY_PREFIX)
+    }) {
+        return true;
+    }
+    cmd.heredoc_redirects.iter().any(|redirect| {
+        redirect.body.as_deref().is_some_and(|body| {
+            strip_quoted_heredoc_marker(body)
+                .starts_with(crate::executor::markers::HEREDOC_WARNED_BODY_PREFIX)
+        })
     })
 }
 

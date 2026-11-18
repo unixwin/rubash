@@ -191,7 +191,11 @@ fn command_has_input_redirects(command: &CommandNode) -> bool {
         || command
             .heredoc_redirects
             .iter()
-            .any(|redirect| redirect.fd.is_none() && redirect.body.is_some())
+            // rubash#3894: a `{var}<<` twin binds an allocated fd,
+            // never fd 0 — it is not an input redirect of the command.
+            .any(|redirect| {
+                redirect.fd_var.is_none() && redirect.fd.is_none() && redirect.body.is_some()
+            })
 }
 
 fn execute_and_or_if_condition(

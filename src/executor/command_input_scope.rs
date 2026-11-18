@@ -2461,7 +2461,10 @@ impl Executor {
         cmd.heredoc_redirects
             .iter()
             .rev()
-            .find(|redirect| redirect.fd.is_none())
+            // GNU redir.c:963-968 (REDIR_VARASSIGN): a `{var}<<` twin
+            // binds a freshly allocated descriptor, never fd 0 — it is
+            // not this command's stdin body (rubash#3894).
+            .find(|redirect| redirect.fd_var.is_none() && redirect.fd.is_none())
             .map(|redirect| {
                 if redirect.body_carrier.is_some() {
                     if redirect.here_string {

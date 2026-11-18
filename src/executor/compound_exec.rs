@@ -1082,14 +1082,21 @@ fn strip_consumed_redirects(command: &mut CommandNode, consumed: &[bool]) {
             }
         });
         if !remaining.iter().any(|redirect| {
-            redirect.fd.is_none() && matches!(redirect.kind, crate::parser::RedirectKind::HereDoc)
+            // rubash#3894: a `{var}<<` entry never owns the fd-0
+            // mirror, so it must not keep it alive during the prune.
+            redirect.fd_var.is_none()
+                && redirect.fd.is_none()
+                && matches!(redirect.kind, crate::parser::RedirectKind::HereDoc)
         }) {
             command.heredoc = None;
             command.heredoc_body = None;
             command.heredoc_delimiter = None;
         }
         if !remaining.iter().any(|redirect| {
-            redirect.fd.is_none()
+            // rubash#3894: see the HereDoc arm above — a `{var}<<<`
+            // entry never owns the fd-0 mirror either.
+            redirect.fd_var.is_none()
+                && redirect.fd.is_none()
                 && matches!(redirect.kind, crate::parser::RedirectKind::HereString)
         }) {
             command.here_string = None;
