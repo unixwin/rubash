@@ -49,19 +49,32 @@ pub(crate) fn process_env_pairs() -> Vec<(String, String)> {
 ///   would have in a script file.
 /// * every other (user) value takes the DATA encoding
 ///   (entry_encode_value_text, the bytes_to_shell_text parity).
+/// Per-name entry encoding for a single RAW host/env value (rubash#3207):
+/// the channel rule `entry_encode_imported_env` applies to the whole
+/// imported environment, factored out so the host API faces
+/// (`SessionBuilder` env seeds, `VariablesView::set` / `set_array` /
+/// `set_assoc`) encode each value at their own boundary instead of
+/// landing it bare in storage (rubash#3105's contract, extended here).
+/// `__RUBASH_*` names are the shell's own cross-process transport and
+/// pass verbatim; `BASH_FUNC_*%%` names take the SOURCE encoding; every
+/// other (user) value takes the DATA encoding.
+pub(crate) fn entry_encode_imported_env_value(name: &str, value: &str) -> String {
+    if name.starts_with("__RUBASH_") {
+        value.to_string()
+    } else if super::function_env::imported_function_name(name).is_some() {
+        crate::executor::substitution_metadata::escape_marker_zone_chars(value)
+    } else {
+        crate::executor::substitution_metadata::entry_encode_value_text(value)
+    }
+}
+
 pub(in crate::executor) fn entry_encode_imported_env(
     values: HashMap<String, String>,
 ) -> HashMap<String, String> {
     values
         .into_iter()
         .map(|(name, value)| {
-            let value = if name.starts_with("__RUBASH_") {
-                value
-            } else if super::function_env::imported_function_name(&name).is_some() {
-                crate::executor::substitution_metadata::escape_marker_zone_chars(&value)
-            } else {
-                crate::executor::substitution_metadata::entry_encode_value_text(&value)
-            };
+            let value = entry_encode_imported_env_value(&name, &value);
             (name, value)
         })
         .collect()
@@ -154,11 +167,23 @@ pub(in crate::executor) fn is_initial_export_candidate(name: &str) -> bool {
     !(name.starts_with("__RUBASH_") || is_bash_managed_shell_var(name))
 }
 
+/// Names the shell re-derives at birth and that an inherited environment
+/// value does not mark exported.
+///
+/// SHELLOPTS and BASHOPTS are deliberately NOT here (rubash#3517): GNU
+/// variables.c:506-517 initialize_shell_variables binds an imported
+/// SHELLOPTS/BASHOPTS like every other valid-name entry, with
+/// `att_exported | att_imported` (the `ro` branch only adds ASS_FORCE and
+/// re-asserts att_readonly), and the rebuilds that follow
+/// (builtins/set.def set_shellopts, builtins/shopt.def set_bashopts) go
+/// through bind_variable, which keeps the attributes. The imported value
+/// is consumed by the option replay in initialize_fresh_shell_env_vars and
+/// then rebuilt in place, so the export mark survives and `set -o` /
+/// `shopt -s` changes reach child shells through it.
 pub(in crate::executor) fn is_bash_managed_shell_var(name: &str) -> bool {
     matches!(
         name,
         "BASH"
-            | "BASHOPTS"
             | "BASH_ALIASES"
             | "BASH_ARGC"
             | "BASH_ARGV"
@@ -183,7 +208,6 @@ pub(in crate::executor) fn is_bash_managed_shell_var(name: &str) -> bool {
             | "PPID"
             | "RANDOM"
             | "SECONDS"
-            | "SHELLOPTS"
             | "SRANDOM"
             | "UID"
             | "_"

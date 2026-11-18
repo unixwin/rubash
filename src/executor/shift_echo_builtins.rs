@@ -289,7 +289,8 @@ impl Executor {
                 )?;
                 return Ok(());
             }
-            let mut file = self.create_redirect_output(&target, redirect.clobber)?;
+            let mut file =
+                self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?;
             // rubash#1496: sh_chkwrite (builtins/common.c:320) — a failed
             // write is `echo: write error: <strerror>` from the builtin,
             // not a bare io error at the command boundary.
@@ -341,7 +342,7 @@ impl Executor {
                 return Ok(());
             }
             let mut file = open_redirect_append(
-                &self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars)),
+                &self.session_path(self.redirect_target_filesystem_path(&target)),
             )?;
             // rubash#1496: sh_chkwrite arm, as in the truncate path above.
             if let Err(error) = crate::builtins::echo::write_echo_decoded(

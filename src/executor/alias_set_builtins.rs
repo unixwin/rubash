@@ -5,12 +5,19 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<i32, ExecuteError> {
-        let stdout = Vec::new();
+        let mut stdout = Vec::new();
         let mut stderr = Vec::new();
+        // The dispatcher owns the prolog (Stage-2 ④ D3): the
+        // builtin layer's lib prolog reads the process env, whose
+        // carriers cannot express the interactive arm (rubash#2259),
+        // so the executor hands its composed prolog in (rubash#3256).
+        let prolog = self.diagnostic_prolog();
         let status = crate::builtins::alias::unalias_with_io(
             &cmd.words[1..],
             &mut self.shell_state.aliases,
+            &mut stdout,
             &mut stderr,
+            prolog,
         )?;
         self.clear_alias_definition_lines(&cmd.words[1..]);
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
@@ -61,12 +68,15 @@ impl Executor {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let posix = self.posix_mode_enabled();
+        // The dispatcher owns the prolog, as in execute_unalias above.
+        let prolog = self.diagnostic_prolog();
         let status = crate::builtins::alias::alias_with_io(
             &cmd.words[1..],
             &mut self.shell_state.aliases,
             &mut stdout,
             &mut stderr,
             posix,
+            prolog,
         )?;
         self.record_alias_definition_lines(&cmd.words[1..], cmd.line);
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
@@ -257,7 +267,16 @@ impl Executor {
             let histsize = crate::history::SessionHistory::size_limit(self.get_env("HISTSIZE"));
             let mut shell = session.borrow_mut();
             shell.histfile_loaded = true;
-            let _ = shell.load_file_with_arming(&resolved.to_string_lossy(), histsize, write_ts);
+            // sv_histtimefmt's comment-char arming is sticky (rubash#3535):
+            // a HISTTIMEFORMAT bound and unset earlier in the session
+            // still arms this load's timestamp recognition.
+            let comment_armed = self.shell_state.history_comment_char_armed || write_ts;
+            let _ = shell.load_file_with_arming(
+                &resolved.to_string_lossy(),
+                histsize,
+                write_ts,
+                comment_armed,
+            );
         }
     }
 
@@ -288,11 +307,14 @@ impl Executor {
         };
         let histsize = crate::history::SessionHistory::size_limit(self.get_env("HISTSIZE"));
         // The load reads with the caller's current comment-char arming
-        // (rubash#1669), like any other history file read.
+        // (rubash#1669), like any other history file read — including
+        // the sticky arming an earlier HISTTIMEFORMAT bind left behind
+        // (rubash#3535).
         let timestamps_armed = self.get_env("HISTTIMEFORMAT").is_some();
+        let comment_armed = self.shell_state.history_comment_char_armed || timestamps_armed;
         let mut shell = session.borrow_mut();
         shell.histfile_loaded = true;
-        let _ = shell.load_file_with_arming(&path, histsize, timestamps_armed);
+        let _ = shell.load_file_with_arming(&path, histsize, timestamps_armed, comment_armed);
     }
 
     /// flags.c:257: a `set -m`/`set +m` write routes through

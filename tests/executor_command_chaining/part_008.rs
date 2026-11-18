@@ -185,7 +185,10 @@ fn test_bash_call_stack_arrays_are_initialized() {
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
     let output = fs::read_to_string(output_path).unwrap();
-    assert!(output.contains("declare -a BASH_ARGC=()\n"));
+    // #2631: GNU 5.3.20 measures the top-level frame as BASH_ARGC=([0]="0")
+    // (the script itself is one frame whose argument count is 0). The old
+    // pin expected () and was wrong; the product matches GNU.
+    assert!(output.contains("declare -a BASH_ARGC=([0]=\"0\")\n"));
     assert!(output.contains("declare -a BASH_ARGV=()\n"));
     assert!(output.contains("declare -a BASH_LINENO=([0]=\"0\")\n"));
     assert!(output.contains("declare -a BASH_SOURCE=([0]=\"./call-stack.tests\")\n"));
@@ -211,9 +214,13 @@ fn test_bash_call_stack_arrays_ignore_assignment() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
+    // #2631: GNU 5.3.20 accepts the whole-array assignment BASH_ARGC=(xxx)
+    // (argc:0:1); the old pin expected it to be ignored (argc:0:0) and was
+    // wrong. The element writes to BASH_ARGV / BASH_SOURCE[0] are discarded
+    // on both shells (dynamic call-stack views), so those lines stand.
     assert_eq!(
         fs::read_to_string(output_path).unwrap(),
-        "argc:0:0\nargv:0:0\nsource:0:./call-stack.tests\n"
+        "argc:0:1\nargv:0:0\nsource:0:./call-stack.tests\n"
     );
     let _ = fs::remove_file(output_path);
 }

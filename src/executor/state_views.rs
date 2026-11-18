@@ -276,6 +276,43 @@ impl Executor {
             VariableValue::Unset
         } else {
             match (typed, &mirror) {
+                // An array/assoc-marked name whose typed cell is a
+                // plain Scalar holds no typed truth: the only Scalar
+                // cells such names ever carry are the environment
+                // import's verbatim copies of the mirror storage
+                // string (init.rs seeds BASH_VERSINFO / DIRSTACK /
+                // BASH_ALIASES / BASH_CMDS into the table as storage
+                // forms, then VariableStore::from_environment binds
+                // the whole seeded table as exported scalars —
+                // rubash#3083). GNU's import binds only the process
+                // environment's plain scalars (variables.c:368
+                // initialize_shell_variables); its own array cells
+                // are born as ARRAY objects (variables.c:1018
+                // make_vers_array; variables.c:1882
+                // init_dynamic_array_var for DIRSTACK). And the
+                // seeded mirror is itself only a birth snapshot for
+                // the materialized pair: DIRSTACK / BASH_ALIASES /
+                // BASH_CMDS are rebuilt on each named access by
+                // their storage arms (variables.c:1619 get_dirstack
+                // is the GNU shape), which is why the mirror-absent
+                // arm of the capture above already consults
+                // parameter_array_storage for exactly these names.
+                // So a named capture of this class reads through
+                // that same materializing storage arm, falling back
+                // to the mirror it would otherwise have parsed. A
+                // structured typed cell (the write paths' synced
+                // form) still wins, so user arrays are captured
+                // exactly as before.
+                (Some(variable), Some(text))
+                    if (attrs.array || attrs.assoc)
+                        && matches!(variable.value, crate::shell::ShellValue::Scalar(_)) =>
+                {
+                    let storage = self
+                        .parameter_array_storage(name)
+                        .filter(|storage| !storage.is_empty())
+                        .unwrap_or_else(|| text.clone());
+                    value_from_mirror(env_vars, name, &storage, &attrs)
+                }
                 (Some(variable), _) => value_from_typed(&variable.value),
                 (None, Some(text)) => value_from_mirror(env_vars, name, text, &attrs),
                 (None, None) => VariableValue::Unset,
@@ -616,6 +653,10 @@ impl Executor {
             // Same DIRSTACK unbind recording as the unset builtin's
             // leaf sequence (unset_arrays.rs, rubash#2434).
             || (name == "DIRSTACK" && !self.dirstack_shadowed())
+            // rubash#3573: same for the two dynamic assoc variables,
+            // which dynamic_parameter_is_set does not serve
+            // (owner-table-backed, not scalar-registry).
+            || matches!(name, "BASH_ALIASES" | "BASH_CMDS")
         {
             mark_env_name(&mut self.shell_state.env_vars, UNSET_DYNAMIC_VARS, name);
         }
@@ -634,9 +675,11 @@ impl Executor {
             }
         }
         let mut sink: Vec<u8> = Vec::new();
+        let mut out_sink: Vec<u8> = Vec::new();
         let _ = crate::builtins::set::unset_with_stderr(
             [name].into_iter(),
             &mut self.shell_state.env_vars,
+            &mut out_sink,
             &mut sink,
         );
         self.shell_state.variables.remove(name);
@@ -695,16 +738,37 @@ impl Executor {
         let arg = path.to_string_lossy().into_owned();
         let mut stdout: Vec<u8> = Vec::new();
         let mut stderr: Vec<u8> = Vec::new();
+        // rubash#3268: same anchor loan as execute_cd (the resolver
+        // only ever answers for a relative operand; this funnel's
+        // argument is absolute, so the loan is inert here today and
+        // keeps the two cd entries on one contract).
+        let anchor_cwd = self.shell_state.cwd.clone();
+        let anchor_cell = &self.shell_state.cwd_anchor;
+        let anchor_resolver = |operand: &std::path::Path| {
+            #[cfg(unix)]
+            {
+                super::external_inner::cd_target_via_cwd_anchor(anchor_cell, &anchor_cwd, operand)
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = (operand, anchor_cell, &anchor_cwd);
+                None
+            }
+        };
         let status = crate::builtins::cd::execute_with_io(
             [arg.as_str()].into_iter(),
             &mut self.shell_state.env_vars,
             &mut self.shell_state.cwd,
+            Some(&anchor_resolver),
+            &mut self.shell_state.logical_cwd,
             &mut stdout,
             &mut stderr,
         );
         match status {
             Ok(0) => {
                 self.sync_cd_variables();
+                // rubash#3198: see execute_cd's anchor warm-up.
+                self.refresh_cwd_anchor();
                 true
             }
             _ => false,

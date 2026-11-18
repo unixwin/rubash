@@ -351,6 +351,245 @@ pub(in crate::executor) fn assign_applied_clear() {
     FROZEN_FRAGMENTS.with(|map| map.borrow_mut().clear());
 }
 
+/// The simulated value of one `:=`/`=` binding the error pre-scan's
+/// in-order walk has passed (rubash#2762): either the exact bound value
+/// (the operator word was a literal, so it is known without evaluating
+/// anything) or set-ness only (the word needs evaluation, so only the
+/// fact that the parameter is now set is known).
+#[derive(Clone, Debug)]
+pub(in crate::executor) enum ScanSimValue {
+    Exact(String),
+    SetUnknown,
+}
+
+thread_local! {
+    /// Cross-pass carry for subscript resolutions computed by the
+    /// parameter-error pre-scan (rubash#2595): raw subscript text ->
+    /// queue of expanded texts, one entry per scan evaluation, consumed
+    /// in order by the real expansion's element fetches. The scan and
+    /// the real expansion are separate passes that GNU performs as one
+    /// walk (subst.c:9777 parameter_brace_expand fetches once), so the
+    /// scan's resolution of a command substitution inside a subscript
+    /// is the single evaluation and the real expansion must reuse it
+    /// instead of executing the substitution a second time. Only the
+    /// EXPANDED TEXT is carried, never the value: the element itself is
+    /// always read from the live environment at fetch time, so a
+    /// binding applied between the scan and the fetch is still seen.
+    /// An entry is stored only when the scan's resolution queued no
+    /// deferred subscript writes (otherwise the real expansion must
+    /// re-evaluate to apply them, e.g. `$((i++))`) and only when the
+    /// raw text cannot observe state the scan has not yet seen (no
+    /// `$?`, no reference to a name the simulated-binding table below
+    /// has bound). Identical fragments queue separately, so two
+    /// identical `${a[$(...)]:?}` fragments still execute the
+    /// substitution once each, exactly as GNU does.
+    static SCAN_SUBSCRIPT_CARRY: std::cell::RefCell<
+        HashMap<String, std::collections::VecDeque<String>>,
+    > = std::cell::RefCell::new(HashMap::new());
+    /// Simulated `:=`/`=` bindings recorded by the error pre-scan's
+    /// in-order walk (rubash#2762): name -> simulated value state.
+    /// GNU expands one left-to-right walk (subst.c:13219
+    /// expand_word_list_internal), so a `:=`/`=` fragment binds before
+    /// the walk reaches a later `:?` fragment; the scan, which used to
+    /// judge every fragment against the pre-command environment, keeps
+    /// the same order by recording each bind as it passes it. The table
+    /// lives only for one scan call (cleared by `scan_ctx_begin`) and
+    /// is consulted only by the scan's own verdicts, never by the real
+    /// expansion, which binds for real.
+    static SCAN_SIM_BINDINGS: std::cell::RefCell<HashMap<String, ScanSimValue>> =
+        std::cell::RefCell::new(HashMap::new());
+    /// Pure mode for the pipeline-admission predicate
+    /// (`parameter_expansion_error_pending`, rubash#1540): its scan is
+    /// documented side-effect-free, so an undecidable `:?` span counts
+    /// as pending instead of being evaluated. Set only by the
+    /// predicate's guard, never by a reporting scan.
+    static SCAN_PURE_MODE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Begin one error pre-scan call: fresh simulated bindings and an empty
+/// subscript carry. Nested scans of the same walk (operator words,
+/// `:?` message words) share the context and must NOT call this.
+pub(in crate::executor) fn scan_ctx_begin() {
+    SCAN_SUBSCRIPT_CARRY.with(|map| map.borrow_mut().clear());
+    SCAN_SIM_BINDINGS.with(|map| map.borrow_mut().clear());
+}
+
+/// Record one simulated `:=`/`=` binding for the current scan walk.
+pub(in crate::executor) fn scan_sim_record(name: String, value: ScanSimValue) {
+    SCAN_SIM_BINDINGS.with(|map| {
+        map.borrow_mut().insert(name, value);
+    });
+}
+
+/// Look up one simulated binding for the current scan walk.
+pub(in crate::executor) fn scan_sim_lookup(name: &str) -> Option<ScanSimValue> {
+    SCAN_SIM_BINDINGS.with(|map| map.borrow().get(name).cloned())
+}
+
+/// Clear only the simulated bindings (niubash#993 §1): the simple-
+/// command pre-scan's nounset pass records each `:=`/`=` fragment it
+/// passes for its own in-order adjudication, and the per-word `${...}`
+/// error walk that follows must re-record them as IT reaches them — a
+/// `:?` earlier in the list than a `:=` still fires first. The
+/// subscript carry is untouched: its entries remain the real
+/// expansion's single-evaluation contract.
+pub(in crate::executor) fn scan_sim_clear() {
+    SCAN_SIM_BINDINGS.with(|map| map.borrow_mut().clear());
+}
+
+/// Snapshot the simulated bindings (niubash#993 §1). The nounset walk
+/// inside `parameter_expansion_error_in_word_context` records `:=`/`=`
+/// binds for its own left-to-right adjudication; restoring the
+/// snapshot after it returns keeps those records private to that pass
+/// while binds recorded by earlier fragments of the enclosing walk
+/// stay visible.
+pub(in crate::executor) fn scan_sim_snapshot() -> HashMap<String, ScanSimValue> {
+    SCAN_SIM_BINDINGS.with(|map| map.borrow().clone())
+}
+
+/// Restore a `scan_sim_snapshot` result.
+pub(in crate::executor) fn scan_sim_restore(snapshot: HashMap<String, ScanSimValue>) {
+    SCAN_SIM_BINDINGS.with(|map| *map.borrow_mut() = snapshot);
+}
+
+/// Whether the current scan walk is the pipeline-admission predicate's
+/// pure probe.
+pub(in crate::executor) fn scan_pure_mode() -> bool {
+    SCAN_PURE_MODE.with(|flag| flag.get())
+}
+
+/// RAII guard installing pure mode for the pipeline-admission predicate.
+pub(in crate::executor) struct ScanPureGuard {
+    saved: bool,
+}
+
+impl ScanPureGuard {
+    pub(in crate::executor) fn new() -> Self {
+        let saved = SCAN_PURE_MODE.with(|flag| flag.replace(true));
+        Self { saved }
+    }
+}
+
+impl Drop for ScanPureGuard {
+    fn drop(&mut self) {
+        SCAN_PURE_MODE.with(|flag| flag.set(self.saved));
+    }
+}
+
+/// Whether the raw subscript text may be carried from the scan to the
+/// real expansion: it must be able to execute (contain `$` or a
+/// backtick), must not read the volatile `$?` status (which changes as
+/// the expansion walk proceeds), and must not reference a name the
+/// simulated-binding table has bound (the scan evaluated it against
+/// the pre-command value, while the real expansion would see the
+/// bound one). Over-blocking is safe: the caller falls back to
+/// re-evaluating, which is today's behavior.
+pub(in crate::executor) fn scan_carry_may_store(raw: &str) -> bool {
+    if !raw.contains('$') && !raw.contains('`') {
+        return false;
+    }
+    if raw.contains("$?") || raw.contains("${?") {
+        return false;
+    }
+    SCAN_SIM_BINDINGS.with(|bindings| {
+        let bindings = bindings.borrow();
+        if bindings.is_empty() {
+            return true;
+        }
+        !bindings.keys().any(|name| {
+            let base = name.split('[').next().unwrap_or(name.as_str());
+            subscript_text_references_name(raw, base)
+        })
+    })
+}
+
+/// Whether the raw subscript text references the parameter `name`
+/// (`$name` / `${name...}` with a non-name character following).
+fn subscript_text_references_name(raw: &str, name: &str) -> bool {
+    let bytes = raw.as_bytes();
+    let name_bytes = name.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] != b'$' {
+            index += 1;
+            continue;
+        }
+        let after = index + 1;
+        // `${name...}` form.
+        if bytes.get(after) == Some(&b'{')
+            && after + 1 + name_bytes.len() <= bytes.len()
+            && &bytes[after + 1..after + 1 + name_bytes.len()] == name_bytes
+        {
+            return true;
+        }
+        // `$name` form: the name followed by a non-name character (or
+        // the end of the text).
+        if after + name_bytes.len() <= bytes.len()
+            && &bytes[after..after + name_bytes.len()] == name_bytes
+        {
+            let end = after + name_bytes.len();
+            // Byte-level form of `is_shell_name_char` (ASCII-only
+            // predicate): a byte >= 0x80 is never `_` or ASCII
+            // alphanumeric, so the check is exact without widening.
+            if end >= bytes.len() || !(bytes[end] == b'_' || bytes[end].is_ascii_alphanumeric()) {
+                return true;
+            }
+        }
+        index += 1;
+    }
+    false
+}
+
+/// Whether a word-expansion context is installed (rubash#2595): the
+/// real expansion's fetches run inside one; the error pre-scan's
+/// fetches run outside it, at command level. The subscript carry keys
+/// on this: only out-of-scope resolutions are stored, and only
+/// in-scope fetches consume them.
+pub(in crate::executor) fn word_ctx_active() -> bool {
+    CURRENT_WORD_CTX.with(|current| current.get()) != 0
+}
+
+/// Record one scan-resolved subscript expansion for the real expansion
+/// to consume. Called only by out-of-scope (pre-scan) fetches — a
+/// real-expansion fetch that re-expands must not hand its result to a
+/// later fragment (GNU evaluates the substitution once per fragment).
+pub(in crate::executor) fn scan_carry_store(raw: &str, expanded: String) {
+    SCAN_SUBSCRIPT_CARRY.with(|map| {
+        map.borrow_mut()
+            .entry(raw.to_string())
+            .or_default()
+            .push_back(expanded);
+    });
+}
+
+/// Consume one scan-resolved subscript expansion, in queue order.
+/// Called only by in-scope (real expansion) fetches: each fragment's
+/// fetch takes exactly one entry, so a later identical fragment
+/// re-expands — GNU evaluates the substitution once per fragment.
+pub(in crate::executor) fn scan_carry_take(raw: &str) -> Option<String> {
+    SCAN_SUBSCRIPT_CARRY.with(|map| {
+        let mut map = map.borrow_mut();
+        let queue = map.get_mut(raw)?;
+        let hit = queue.pop_front();
+        if queue.is_empty() {
+            map.remove(raw);
+        }
+        hit
+    })
+}
+
+/// Peek at the next scan-resolved expansion for `raw` without
+/// consuming it. Called only by out-of-scope (pre-scan) fetches:
+/// identical fragments share the scan's single evaluation, and the
+/// entry stays for the real expansion to consume.
+pub(in crate::executor) fn scan_carry_peek(raw: &str) -> Option<String> {
+    SCAN_SUBSCRIPT_CARRY.with(|map| {
+        map.borrow()
+            .get(raw)
+            .and_then(|queue| queue.front().cloned())
+    })
+}
+
 pub(in crate::executor) fn sub_idx_lookup(
     key: &(SubSite, String),
 ) -> Option<crate::executor::subscript_expansion::IndexedSubscript> {
@@ -379,7 +618,23 @@ impl Executor {
     /// env_vars. Called by the mutable parameter expansion path after
     /// `expand_braced_indexed_parameter` or `array_element_parameter_value`
     /// returns.
+    ///
+    /// The deferred `&self` subscript evaluation records its
+    /// evaluation-order events (rubash#3246: a failed nameref bind,
+    /// rubash#3078: a locale bind) in the shared ArithEvalEvent log,
+    /// but no arithmetic entry ever drains them — the subscript is
+    /// memoized, so the mutable entry never re-evaluates it. Drain
+    /// them here, at the same boundary where the evaluation's writes
+    /// land, with no command label: GNU array_expand_index runs with
+    /// this_command_name NULL (arrayfunc.c:1374-1378), so
+    /// expansion-context diagnostics carry none. The drain runs even
+    /// when the write queue is empty — a failed bind writes nothing —
+    /// and it can only see expansion-context events: the four call
+    /// sites are word-expansion/command boundaries, never inside an
+    /// arithmetic entry's clear-to-drain window, so no entry-owned
+    /// event can be in the log here.
     pub(in crate::executor) fn apply_pending_subscript_writes(&mut self) {
+        self.drain_arith_eval_events();
         let writes = PENDING_SUBSCRIPT_WRITES.with(|w| std::mem::take(&mut *w.borrow_mut()));
         for (name, value) in writes {
             if self.shell_state.env_vars.get(&name) != Some(&value) {
@@ -394,6 +649,22 @@ impl Executor {
                     let _ = self.shell_state.variables.set_scalar(&name, &value);
                 }
             }
+        }
+    }
+
+    /// rubash#3649: commit arithmetic writes a substring offset/length
+    /// evaluation produced. The `&self` substring parse evaluates the
+    /// offset against a snapshot env, so its writes ride with the parse
+    /// result (`parse_parameter_substring_with_writes`); only the caller
+    /// that actually USES the parsed result may call this -- a probe
+    /// that discards the result must never commit them, or the real
+    /// expansion's re-evaluation would apply the write twice.
+    pub(in crate::executor) fn queue_pending_subscript_writes(
+        &self,
+        writes: Vec<(String, String)>,
+    ) {
+        if !writes.is_empty() {
+            PENDING_SUBSCRIPT_WRITES.with(|pending| pending.borrow_mut().extend(writes));
         }
     }
 
@@ -465,6 +736,22 @@ impl Executor {
                     .unwrap_or_default(),
                 );
             }
+        }
+        // The substring form is tried BEFORE the `#`-prefix arms below:
+        // `${#:0:1}` is a substring of the `$#` value, but the `#` arm
+        // claims every `#`-initial name and returns None for non-length
+        // operands, so a substring arm placed after them never saw it
+        // (rubash#3063). The parse admits only a bare `#`
+        // name before the colon, so the length forms (`${#arr[@]}`,
+        // `${#?}`, `${#v}`) — none of which carry a top-level colon
+        // after a bare `#` — still fall through to the arms below.
+        if let Some(((var_name, offset, length), writes)) =
+            self.parse_parameter_substring_with_writes(name)
+        {
+            // rubash#3649: this parse's result is the expansion, so commit
+            // its offset/length arithmetic writes.
+            self.queue_pending_subscript_writes(writes);
+            return Some(self.expand_braced_substring_parameter(var_name, offset, length));
         }
         if let Some(array_name) = name.strip_prefix('#').and_then(|name| {
             name.strip_suffix("[@]")
@@ -564,9 +851,8 @@ impl Executor {
             }
             return None;
         }
-        if let Some((var_name, offset, length)) = self.parse_parameter_substring(name) {
-            return Some(self.expand_braced_substring_parameter(var_name, offset, length));
-        }
+        // (The substring form is handled near the top of this function,
+        // before the `#`-prefix arms — see the comment there.)
         // GNU valid_array_reference only treats NAME[...] as an array
         // subscript when NAME is a valid identifier. A pattern-replacement
         // word like `z//[^;]` extracts array name "z//" here; without the
@@ -721,17 +1007,22 @@ impl Executor {
                 // rubash#299).
                 let overlaid = env_vars_with_pending_subscript_writes(&self.shell_state.env_vars);
                 let dynamic_values = self.arith_dynamic_context();
-                let (result, writes) = eval_conditional_arith_value_with_writes(
-                    expr.trim(),
-                    &overlaid,
-                    Some(&self.shell_state.random_state),
-                    Some(&dynamic_values),
-                    if matches!(&overlaid, std::borrow::Cow::Borrowed(_)) {
-                        Some(&self.shell_state.variables)
-                    } else {
-                        None
-                    },
-                );
+                // GNU arrayfunc.c:1373-1377 array_expand_index clears
+                // this_command_name around evalexp (rubash#3295).
+                let (result, writes) = {
+                    let _arith_label = crate::executor::arithmetic::arith_eval_label_scope(None);
+                    eval_conditional_arith_value_with_writes(
+                        expr.trim(),
+                        &overlaid,
+                        Some(&self.shell_state.random_state),
+                        Some(&dynamic_values),
+                        if matches!(&overlaid, std::borrow::Cow::Borrowed(_)) {
+                            Some(&self.shell_state.variables)
+                        } else {
+                            None
+                        },
+                    )
+                };
                 if !writes.is_empty() {
                     PENDING_SUBSCRIPT_WRITES.with(|w| {
                         w.borrow_mut().extend(writes);
@@ -908,6 +1199,19 @@ impl Executor {
         if let Some(value) = self.array_element_parameter_value(var_name) {
             return parameter_substring(&value, offset, length);
         }
+        // GNU param_expand fetches the parameter's value generically
+        // BEFORE the substring dispatch and hands it to
+        // parameter_brace_substring (subst.c:9050, call site
+        // subst.c:10179) — special parameters included (`?` is
+        // itos(last_command_exit_value)). Resolve them here, in the
+        // callee, the same way expand_braced_length_parameter does:
+        // two of the call sites used to fetch the value on this
+        // function's behalf, but the plain-word dispatcher path did
+        // not, so the whole family sliced empty there (rubash#3063).
+        if is_special_parameter_name(var_name) || var_name.parse::<usize>().is_ok() {
+            let value = self.expand_parameter_named_value(var_name);
+            return parameter_substring(&value, offset, length);
+        }
         if is_shell_name(var_name) {
             // GNU variables.c get_string_value returns element [0] when a
             // bare array name is expanded without a subscript, so the slice
@@ -928,6 +1232,26 @@ impl Executor {
         length: Option<isize>,
     ) -> Option<String> {
         let indirect_name = var_name.strip_prefix('!')?;
+        // VALID_INDIR_PARAM specials (subst.c:122; subst.c:7839-7881
+        // parameter_brace_find_indir): `${!#:0:1}` resolves t through the
+        // special parameter's scalar value first, then slices the
+        // parameter t names — with $#=2 it is `${2:0:1}`, not a lookup of
+        // an env cell literally named `#`. An all-digit source is the
+        // same find_indir step through get_dollar_var_value
+        // (subst.c:3707): `${!00:1:2}` is `${$0:1:2}` (rubash#3784).
+        if indirect_name.len() == 1 && matches!(indirect_name, "#" | "?" | "@" | "*")
+            || !indirect_name.is_empty() && indirect_name.chars().all(|c| c.is_ascii_digit())
+        {
+            let Some(t) = self.indirect_holder_target_name(indirect_name) else {
+                return Some(String::new());
+            };
+            if !Self::is_valid_indirect_target(&t) {
+                // `<t>: invalid variable name` is diagnosed by the
+                // parameter-expansion error pre-scan.
+                return Some(String::new());
+            }
+            return Some(self.expand_braced_substring_parameter(&t, offset, length));
+        }
         if let Some(target_name) = self.nameref_target_name(indirect_name) {
             return Some(parameter_substring(&target_name, offset, length));
         }

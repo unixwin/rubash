@@ -1,0 +1,4 @@
+@test 'desc' {
+	multiple
+	statements
+}

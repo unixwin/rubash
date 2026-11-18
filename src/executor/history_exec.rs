@@ -54,6 +54,52 @@ fn write_timestamps_of(executor: &Executor) -> bool {
     executor.get_env("HISTTIMEFORMAT").is_some()
 }
 
+/// variables.c:6168-6177 sv_histtimefmt: history_comment_char is armed
+/// by the first bind that leaves HISTTIMEFORMAT existing and is never
+/// disarmed afterwards — the sticky latch on ShellState, or the
+/// variable existing right now (its bind armed the latch at the latest
+/// by the per-command boundary, but a face running inside that very
+/// command — a prefix bind's own `history -r` — must see it too).
+fn comment_char_armed_of(executor: &Executor) -> bool {
+    executor.shell_state.history_comment_char_armed || write_timestamps_of(executor)
+}
+
+/// GNU's remember_on_history as the `history -s` pop gate in
+/// push_history sees it (builtins/history.def:435-439): the
+/// `set -o history` option, minus every parse unit GNU runs with
+/// history remembering disabled. Trap actions execute through
+/// parse_and_execute with SEVAL_NOHIST (trap.c:494 signal traps,
+/// :1069 exit trap, :1195 _run_trap_internal), and
+/// evalstring.c:291-292 turns that flag into bash_history_disable()
+/// (bashhist.c:297-302) for the action's duration; the plain string
+/// units through execute_eval_source carry the same flag and are
+/// counted by nohist_parse_depth. Inside any such unit a `-s` only
+/// appends — it must not pop the line the enclosing reader recorded
+/// (rubash#2824: an EXIT trap's `history -s` ate the `trap ... EXIT`
+/// line itself).
+///
+/// This gate belongs to `-s` only. The `-p` delete at the head of
+/// expand_and_print_history (history.def:462) is conditioned on
+/// `hist_last_line_pushed == 0 && hist_last_line_added` alone — no
+/// remember_on_history term — so a `-p` inside a SEVAL_NOHIST unit
+/// still pops the enclosing line (an `eval 'history -p …'` loses its
+/// eval line). The Print arm below therefore keeps the plain option
+/// gate, not this helper.
+fn history_remembering(executor: &Executor) -> bool {
+    crate::builtins::set::shell_option_enabled(&executor.shell_state.env_vars, "history")
+        && executor.nohist_parse_depth.get() == 0
+        // PROMPT_COMMAND runs through execute_variable_command's own
+        // parse_and_execute (eval.c:305, SEVAL_NOHIST) rather than
+        // execute_eval_source; its runner raises this marker for the
+        // text's duration — the same disabled-remembering window.
+        && executor.get_env(Executor::PROMPT_COMMAND_NOHIST).is_none()
+        && !executor.debug_trap_running
+        && !executor.error_trap_running
+        && !executor.return_trap_running
+        && !executor.signal_trap_running
+        && !executor.exit_trap_running
+}
+
 /// Execute the history builtin against the session list.
 pub(in crate::executor) fn execute_history_session(
     executor: &Executor,
@@ -171,6 +217,22 @@ pub(in crate::executor) fn execute_history_session(
         return Ok(1);
     }
 
+    // history.def:169-173: `-c` clears FIRST and, with no remaining
+    // words (list == 0), returns success before the -d arm or any
+    // operand validation runs — `history -c -d bad` clears and never
+    // validates "bad". With words remaining, the CFLAG term in the
+    // display-arm gate `(flags & (AFLAG|RFLAG|NFLAG|WFLAG|CFLAG)) == 0`
+    // (history.def:267) keeps surplus operands out of get_numeric_arg /
+    // no_args while the -s/-p/-d/file arms still run against the
+    // cleared list (`history -c -s two` pushes onto it; `history -c
+    // -d 1 extra` eranges against the now-empty list).
+    if clear {
+        session.borrow_mut().clear();
+        if mode == HistoryMode::List || operands.is_empty() {
+            return Ok(0);
+        }
+    }
+
     // GNU display_history -> get_numeric_arg(list, 0, &limit): the operand
     // is validated as a number first (sh_neednumarg, EX_USAGE), then
     // no_args() rejects any further operands with `too many arguments`.
@@ -211,10 +273,6 @@ pub(in crate::executor) fn execute_history_session(
     let ctx = hist_ctx(executor);
     let histsize = histsize_of(executor);
     let mut shell = session.borrow_mut();
-
-    if clear {
-        shell.clear();
-    }
 
     match mode {
         HistoryMode::Delete => {
@@ -341,17 +399,21 @@ pub(in crate::executor) fn execute_history_session(
             }
         }
         HistoryMode::Save => {
-            // history.def:425-448: `-s` pops the last entry only when it
-            // was added by the command line currently executing —
-            // remember_on_history (set -o history) && hist_last_line_added
-            // && !hist_last_line_pushed. A non-interactive shell never
-            // pops, and a second -s in one line never pops the first -s's
-            // entry. The push goes through check_add_history (FORCE=1),
-            // i.e. record() with HISTCONTROL/HISTIGNORE honored.
-            let remember = crate::builtins::set::shell_option_enabled(
-                &executor.shell_state.env_vars,
-                "history",
-            );
+            // history.def push_history (:421; delete condition
+            // :435-439): `-s` pops the last entry only when it was
+            // added by the command line currently executing —
+            // remember_on_history (the history_remembering gate:
+            // set -o history with no SEVAL_NOHIST window open) &&
+            // hist_last_line_added && !hist_last_line_pushed. The C
+            // `== 0` on bash_delete_last_history() is a failure-only
+            // bail-out: the delete returns 1 on success
+            // (bashhist.c:361 bash_delete_histent), and a successful
+            // pop falls through to the append below. A non-interactive
+            // shell never pops, and a second -s in one line never pops
+            // the first -s's entry. The push goes through
+            // check_add_history (FORCE=1), i.e. record() with
+            // HISTCONTROL/HISTIGNORE honored.
+            let remember = history_remembering(executor);
             if remember
                 && !shell.last_line_pushed
                 && shell.last_line_added
@@ -361,10 +423,25 @@ pub(in crate::executor) fn execute_history_session(
                 shell.timestamps.pop();
             }
             let command = operands.join(" ");
-            if !command.is_empty() {
+            // history.def:175-178: bare `history -s` (no remaining
+            // words, list == NULL) is a no-op success — push_history
+            // is only called `if (list)`. But a present operand list
+            // is pushed even when it joins to the empty string:
+            // string_list (subst.c:2854) keeps empty words, and
+            // check_add_history has no emptiness check, so
+            // `history -s ''` is a real (empty) entry (rubash#3329).
+            // The gate is therefore on the operand list, not the
+            // joined string.
+            if !operands.is_empty() {
                 let control = executor.get_env("HISTCONTROL").unwrap_or_default();
                 let ignore = executor.get_env("HISTIGNORE").unwrap_or_default();
-                let was_recorded = shell.record(&command, &control, &ignore, histsize);
+                let was_recorded = shell.record(
+                    &command,
+                    &control,
+                    &ignore,
+                    histsize,
+                    comment_char_armed_of(executor),
+                );
                 // push_history goes through check_add_history ->
                 // really_add_history (bashhist.c:961), which sets
                 // hist_last_line_added = 1 for the pushed entry, and
@@ -378,8 +455,15 @@ pub(in crate::executor) fn execute_history_session(
             }
         }
         HistoryMode::Print => {
-            // history.def:462-463: `-p` pops the current-line entry under
-            // the same conditions as -s; failure to delete is a hard error.
+            // history.def:462 (expand_and_print_history): `-p` deletes
+            // the current-line entry under hist_last_line_pushed == 0
+            // && hist_last_line_added — with NO remember_on_history
+            // term, unlike the push_history `-s` delete (:435-439).
+            // A `-p` inside a SEVAL_NOHIST unit (an eval unit, a trap
+            // action) still pops the enclosing reader line. The delete
+            // returns 1 on success (bashhist.c:361 bash_delete_histent,
+            // `return discard != 0`); GNU's `== 0` comparison makes a
+            // failed delete (empty list) an EXECUTION_FAILURE.
             let remember = crate::builtins::set::shell_option_enabled(
                 &executor.shell_state.env_vars,
                 "history",
@@ -502,10 +586,20 @@ pub(in crate::executor) fn execute_history_session(
                 // (rubash#1049: GNU re-appends them at exit).
                 HistoryMode::Write => shell.write_file(&fs_path, write_ts).map(|_| 0),
                 HistoryMode::Read => shell
-                    .read_file_with_arming(&fs_path, histsize, write_ts)
+                    .read_file_with_arming(
+                        &fs_path,
+                        histsize,
+                        write_ts,
+                        comment_char_armed_of(executor),
+                    )
                     .map(|_| 0),
                 HistoryMode::ReadNew => shell
-                    .read_new_file_with_arming(&fs_path, histsize, write_ts)
+                    .read_new_file_with_arming(
+                        &fs_path,
+                        histsize,
+                        write_ts,
+                        comment_char_armed_of(executor),
+                    )
                     .map(|_| 0),
                 _ => Ok(0),
             };

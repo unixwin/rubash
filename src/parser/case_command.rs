@@ -28,7 +28,13 @@ pub(super) fn parse_case_command(
     if !is_keyword(tokens, i, "in") {
         match tokens.get(i) {
             None => {
-                let command = super::parse_loop::unclosed_keyword_eof_node(tokens, start, "case");
+                let command = super::parse_loop::unclosed_keyword_eof_node(
+                    tokens,
+                    start,
+                    "case",
+                    source.map(|v| &**v),
+                    source_line_offset,
+                );
                 return Some((command, tokens.len()));
             }
             Some(_) => {
@@ -133,6 +139,15 @@ pub(super) fn parse_case_command(
         let mut current_raw_pattern = String::new();
         let mut current_pattern_has_token = false;
         let mut in_extglob = 0i32;
+        // rubash#3235: GNU reads every pattern word at command position
+        // (the pattern_list newline_list leaves last_read_token at '\n',
+        // which reserved_word_acceptable accepts — parse.y:5900-5903),
+        // so read_token_word plants `simplecmd_lineno` with the pattern
+        // word's END line each time (parse.y:5850-5851); the last
+        // alternative's last word wins. Track the end line of the last
+        // pattern-content token — `|` separators between alternatives
+        // are not words and plant nothing.
+        let mut pattern_plant_line = 0usize;
         while i < tokens.len() {
             // Check if this is a ) that ends the case pattern (not inside extglob)
             if is_keyword(tokens, i, ")") && in_extglob == 0 {
@@ -394,6 +409,13 @@ pub(super) fn parse_case_command(
                 }
                 _ => {}
             }
+            // rubash#3235: every token the pattern loop consumes except
+            // a top-level `|' separator is pattern-word content (the
+            // extglob/procsub collectors leave `i` on the span's last
+            // token, so `end_position` is the word's finishing line).
+            if tokens[i].kind != TokenKind::Pipe || in_extglob != 0 {
+                pattern_plant_line = tokens[i].end_position;
+            }
             i += 1;
         }
         if i >= tokens.len() {
@@ -463,21 +485,26 @@ pub(super) fn parse_case_command(
         let body_start = i;
         let (body_end, stray_close) = case_body_end(tokens, i);
         if let Some(stray) = stray_close {
-            // The body scan ran into the next clause's pattern close
-            // with no valid terminator in between (rubash#1656): GNU
-            // parse.y:1237-1256 case_clause_sequence admits only
+            // The body scan ran into a token the clause grammar cannot
+            // admit with no valid terminator in between (rubash#1656):
+            // GNU parse.y:1237-1256 case_clause_sequence admits only
             // SEMI_SEMI/SEMI_AND/SEMI_SEMI_AND or ESAC after a clause's
-            // compound_list, so this is a syntax error at that `)',
+            // compound_list, so this is a syntax error at that token,
             // reported via the same channel as rubash#1641 above.
             // Verified against GNU bash 5.3.20 (rc 2) for both spelled
             // seeds `a) echo A;\;& b) ...' and `a) echo A;\;\& b) ...'.
+            // The offender is usually the next clause's pattern close
+            // `)', but a list operator at command position inside the
+            // body trips the grammar earlier and is named instead
+            // (rubash#3031: `1) a;| 2) ...' names the `|').
             let mut command = CommandNode::new();
             command.line = tokens.get(start).map(|token| token.position);
             command.logical_line = tokens.get(start).map(|token| token.logical_line);
             command.insert_assignment(
                 "__RUBASH_PARSE_ERROR_NEAR__".to_string(),
                 format!(
-                    "){}{}",
+                    "{}{}{}",
+                    case_offender_text(&tokens[stray]),
                     crate::executor::markers::PARSE_ERROR_FIELD_SEP,
                     tokens[stray].position
                 ),
@@ -493,11 +520,23 @@ pub(super) fn parse_case_command(
             ));
         }
         i = body_end;
-        let body = super::parse_loop::parse_body_with_diagnostics(
+        let mut body = super::parse_loop::parse_body_with_diagnostics(
             &tokens[body_start..i],
             source,
             source_line_offset,
         );
+        // rubash#3235: the clause body's first redirect-first simple
+        // command keeps the pattern word's planted stamp — a
+        // redirection element captures `simplecmd_lineno` only while it
+        // is unset (parse.y:810-811), and nothing between `)' and the
+        // body re-plants it (the redirect target and the command word
+        // after it are not read at command position). Restamp through
+        // the #3209 walk: wrappers consume nothing, the first simple
+        // command ends the plant, and a nested case/function blocks it
+        // (its own pattern/name plants instead).
+        if pattern_plant_line != 0 {
+            restamp_function_body_first_command(&mut body, pattern_plant_line);
+        }
         let terminator_text = case_terminator(tokens, i).map(|_| tokens[i].value.clone());
         let terminator_metadata =
             case_terminator(tokens, i).map(|_| build_keyword_metadata(&tokens[i]));
@@ -973,6 +1012,17 @@ pub(super) fn collect_extglob_pattern_from_bang(tokens: &[Token], i: &mut usize)
 pub(super) fn case_body_end(tokens: &[Token], mut index: usize) -> (usize, Option<usize>) {
     let mut stack = Vec::new();
     let mut paren_depth = 0usize;
+    // rubash#3031: whether the walk sits at a command position of the
+    // clause's compound_list (parse.y:1262) — at body start, or just
+    // after a top-level separator/joiner. A list operator met there has
+    // no command on its left, so it cannot continue the grammar: it is
+    // the token GNU's yyerror names (`case i in 1) a;| 2) ...' names
+    // the `|', not the next clause's pattern close the stray-`)` walk
+    // below used to reach). Tracked only at the flat level: nested
+    // compounds ride `stack`, subshell parens ride `paren_depth`, and
+    // the token that OPENED such a construct already counts as the
+    // command a following joiner continues.
+    let mut at_command_start = true;
     while index < tokens.len() {
         if stack.is_empty()
             && (is_case_terminator(tokens, index)
@@ -996,6 +1046,21 @@ pub(super) fn case_body_end(tokens: &[Token], mut index: usize) -> (usize, Optio
             break;
         }
 
+        let flat = stack.is_empty() && paren_depth == 0;
+        if flat
+            && at_command_start
+            && matches!(
+                tokens[index].kind,
+                TokenKind::Pipe
+                    | TokenKind::PipeErr
+                    | TokenKind::And
+                    | TokenKind::Or
+                    | TokenKind::Background
+            )
+        {
+            return (index, Some(index));
+        }
+
         if tokens[index].kind == TokenKind::Keyword && is_unquoted_operator(&tokens[index], ")") {
             if paren_depth == 0 && stack.is_empty() {
                 return (index, Some(index));
@@ -1005,6 +1070,22 @@ pub(super) fn case_body_end(tokens: &[Token], mut index: usize) -> (usize, Optio
             && is_unquoted_operator(&tokens[index], "(")
         {
             paren_depth += 1;
+        }
+
+        if flat {
+            // Separators and joiners alike leave the list expecting a
+            // command (a joiner with no following command is the same
+            // error one token later); every other token is command
+            // material and ends the position.
+            at_command_start = matches!(
+                tokens[index].kind,
+                TokenKind::Semicolon
+                    | TokenKind::And
+                    | TokenKind::Or
+                    | TokenKind::Pipe
+                    | TokenKind::PipeErr
+                    | TokenKind::Background
+            );
         }
 
         update_compound_boundary_stack(tokens, index, &mut stack);

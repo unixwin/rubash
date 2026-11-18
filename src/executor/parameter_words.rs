@@ -209,7 +209,17 @@ fn parameter_assignment_target_form(name: &str) -> bool {
     if is_shell_name(bare) {
         return true;
     }
-    matches!(parse_array_subscript(bare), Some((base, _)) if is_shell_name(base))
+    if matches!(parse_array_subscript(bare), Some((base, _)) if is_shell_name(base)) {
+        return true;
+    }
+    // GNU parameter_brace_expand_rhs with an indirect parameter binds the
+    // parameter the SOURCE VALUE names (subst.c:8529 get_var_and_type ->
+    // parameter_brace_find_indir, subst.c:8151 bind_variable), so a
+    // positional/special source is an assignment form too:
+    // `${!0:=d}` binds the parameter $0 names (rubash#3784).
+    name.starts_with('!')
+        && (!bare.is_empty() && bare.chars().all(|c| c.is_ascii_digit())
+            || matches!(bare, "#" | "?" | "@" | "*"))
 }
 
 /// Whether a `${...}` body is side-effect-free to evaluate during the
@@ -302,7 +312,12 @@ impl Executor {
         // that distinction and made `a=(${v:-"a b"})` two elements where GNU
         // stores ONE (rubash#212; arrayfunc.c:610 expand_words_no_vars
         // splits only unquoted expansion whitespace).
-        let expanded = self.expand_embedded_parameters_protect_ifs(word);
+        // rubash#3088: the walk also carries expansion-result and
+        // single-quoted-span backslashes as U+E30D (see
+        // expand_embedded_parameters_protect_ifs_and_data); the final
+        // unescape below must not fold them as source escapes, so the
+        // carrier is restored after it.
+        let expanded = self.expand_embedded_parameters_protect_ifs_and_data(word);
         // GNU subst.c:4807 dequote_string: quote removal ran inside the
         // expansion pass, so `'`/`"` left in its output are
         // expansion-produced data, not syntax. Mark them \x17/\x18 before
@@ -320,6 +335,7 @@ impl Executor {
         // admission-list unescape kept `\@`/`\q` pairs outside the
         // whole-word argument position.
         let expanded = unescape_unquoted_rhs_escapes(&decode_parameter_word_quotes(&expanded));
+        let expanded = restore_deferred_operator_backslashes(&expanded);
         tilde_expand::expand_assignment_tilde_value(&expanded, &self.shell_state.env_vars, false)
     }
 
@@ -402,6 +418,30 @@ impl Executor {
         Some((values.join(&separator), non_empty))
     }
 
+    /// Quoted-operator-word expansion with expansion-result backslash
+    /// protection (rubash#3088): the `&self` quoted chain's operator arms
+    /// (`:-`/`:+`/`-`/`+`, for regular and list-operand names alike)
+    /// expand the alternate word with the data-protecting non-mut walk
+    /// and restore the carrier after the double-quote unescape, so a
+    /// `$y` result's backslashes survive it (GNU subst.c:4773
+    /// quote_string CTLESC-protects expansion results; subst.c:4807
+    /// dequote_string strips only CTLESC). Live source escapes still
+    /// resolve in the pass — the walk's fall-through backslash arm stays
+    /// unprotected, so source `\}` still folds to `}`.
+    fn expand_quoted_operator_word_protected(&self, word: &str) -> String {
+        restore_deferred_operator_backslashes(&unescape_parameter_operator_result(
+            &self.expand_embedded_parameters_protect_data(
+                &decode_double_quotes_in_quoted_parameter_word(
+                    word,
+                    self.posix_mode_enabled(),
+                    false,
+                ),
+            ),
+            SubstitutionQuoteContext::DoubleQuoted,
+            self.shell_state.env_vars.get("IFS").map(String::as_str),
+        ))
+    }
+
     pub(in crate::executor) fn expand_quoted_parameter_word(&self, word: &str) -> String {
         // TODO(subst.c/parse.y): Quoted parameter expansion should carry
         // CTLESC/CTLQUOTEMARK state from the parser. This preserves the
@@ -443,35 +483,13 @@ impl Executor {
                     if !joined.is_empty() {
                         return joined;
                     }
-                    return unescape_parameter_operator_result(
-                        &self.expand_embedded_parameters(
-                            &decode_double_quotes_in_quoted_parameter_word(
-                                default,
-                                self.posix_mode_enabled(),
-                                false,
-                            ),
-                        ),
-                        SubstitutionQuoteContext::DoubleQuoted,
-                        self.shell_state.env_vars.get("IFS").map(String::as_str),
-                    );
+                    return self.expand_quoted_operator_word_protected(default);
                 }
                 return self
                     .parameter_operator_value(var_name)
                     .filter(|value| !value.is_empty())
                     .map(|value| shell_safe_value(&value))
-                    .unwrap_or_else(|| {
-                        unescape_parameter_operator_result(
-                            &self.expand_embedded_parameters(
-                                &decode_double_quotes_in_quoted_parameter_word(
-                                    default,
-                                    self.posix_mode_enabled(),
-                                    false,
-                                ),
-                            ),
-                            SubstitutionQuoteContext::DoubleQuoted,
-                            self.shell_state.env_vars.get("IFS").map(String::as_str),
-                        )
-                    });
+                    .unwrap_or_else(|| self.expand_quoted_operator_word_protected(default));
             }
         }
 
@@ -481,17 +499,7 @@ impl Executor {
             if is_parameter_error_name(var_name) {
                 if let Some((joined, _)) = self.list_operand_joined_word(var_name) {
                     if !joined.is_empty() {
-                        return unescape_parameter_operator_result(
-                            &self.expand_embedded_parameters(
-                                &decode_double_quotes_in_quoted_parameter_word(
-                                    alternate,
-                                    self.posix_mode_enabled(),
-                                    false,
-                                ),
-                            ),
-                            SubstitutionQuoteContext::DoubleQuoted,
-                            self.shell_state.env_vars.get("IFS").map(String::as_str),
-                        );
+                        return self.expand_quoted_operator_word_protected(alternate);
                     }
                     return String::new();
                 }
@@ -499,17 +507,7 @@ impl Executor {
                     .parameter_operator_value(var_name)
                     .is_some_and(|value| !value.is_empty())
                 {
-                    return unescape_parameter_operator_result(
-                        &self.expand_embedded_parameters(
-                            &decode_double_quotes_in_quoted_parameter_word(
-                                alternate,
-                                self.posix_mode_enabled(),
-                                false,
-                            ),
-                        ),
-                        SubstitutionQuoteContext::DoubleQuoted,
-                        self.shell_state.env_vars.get("IFS").map(String::as_str),
-                    );
+                    return self.expand_quoted_operator_word_protected(alternate);
                 }
                 return String::new();
             }
@@ -570,7 +568,12 @@ impl Executor {
             }
         }
 
-        if let Some((var_name, offset, length)) = self.parse_parameter_substring(name) {
+        if let Some(((var_name, offset, length), writes)) =
+            self.parse_parameter_substring_with_writes(name)
+        {
+            // rubash#3649: this parse's result is the expansion, so commit
+            // its offset/length arithmetic writes.
+            self.queue_pending_subscript_writes(writes);
             // `${#:offset}` / `${#?:0}` slice the special parameter value,
             // not a length expansion. expand_braced_substring_parameter does
             // not resolve special-parameter names, so fetch the value here.
@@ -633,32 +636,12 @@ impl Executor {
             if is_parameter_error_name(var_name) {
                 if let Some((_, non_empty)) = self.list_operand_joined_word(var_name) {
                     if non_empty {
-                        return unescape_parameter_operator_result(
-                            &self.expand_embedded_parameters(
-                                &decode_double_quotes_in_quoted_parameter_word(
-                                    alternate,
-                                    self.posix_mode_enabled(),
-                                    false,
-                                ),
-                            ),
-                            SubstitutionQuoteContext::DoubleQuoted,
-                            self.shell_state.env_vars.get("IFS").map(String::as_str),
-                        );
+                        return self.expand_quoted_operator_word_protected(alternate);
                     }
                     return String::new();
                 }
                 if self.parameter_operator_value(var_name).is_some() {
-                    return unescape_parameter_operator_result(
-                        &self.expand_embedded_parameters(
-                            &decode_double_quotes_in_quoted_parameter_word(
-                                alternate,
-                                self.posix_mode_enabled(),
-                                false,
-                            ),
-                        ),
-                        SubstitutionQuoteContext::DoubleQuoted,
-                        self.shell_state.env_vars.get("IFS").map(String::as_str),
-                    );
+                    return self.expand_quoted_operator_word_protected(alternate);
                 }
                 return String::new();
             }
@@ -672,38 +655,16 @@ impl Executor {
                     if non_empty {
                         return joined;
                     }
-                    return unescape_parameter_operator_result(
-                        &self.expand_embedded_parameters(
-                            &decode_double_quotes_in_quoted_parameter_word(
-                                default,
-                                self.posix_mode_enabled(),
-                                false,
-                            ),
-                        ),
-                        SubstitutionQuoteContext::DoubleQuoted,
-                        self.shell_state.env_vars.get("IFS").map(String::as_str),
-                    );
+                    return self.expand_quoted_operator_word_protected(default);
                 }
                 return self
                     .parameter_operator_value(var_name)
                     .map(|value| shell_safe_value(&value))
-                    .unwrap_or_else(|| {
-                        unescape_parameter_operator_result(
-                            &self.expand_embedded_parameters(
-                                &decode_double_quotes_in_quoted_parameter_word(
-                                    default,
-                                    self.posix_mode_enabled(),
-                                    false,
-                                ),
-                            ),
-                            SubstitutionQuoteContext::DoubleQuoted,
-                            self.shell_state.env_vars.get("IFS").map(String::as_str),
-                        )
-                    });
+                    .unwrap_or_else(|| self.expand_quoted_operator_word_protected(default));
             }
         }
 
-        if let Some(value) = self.expand_braced_pattern_or_transform_parameter(name) {
+        if let Some(value) = self.expand_braced_pattern_or_transform_parameter(name, true) {
             return value;
         }
 
@@ -774,14 +735,21 @@ impl Executor {
         context: SubstitutionQuoteContext,
     ) -> String {
         if !matches!(context, SubstitutionQuoteContext::Unquoted) {
-            return unescape_parameter_operator_result(
-                &self.expand_embedded_parameters_mut_with_context(
+            // rubash#3088: the walk must NOT restore expansion-result
+            // backslashes before the operator-result unescape below — it
+            // would fold them as source escapes (subst.c:4773
+            // quote_string CTLESC-protects expansion results; subst.c:4807
+            // dequote_string strips only CTLESC). The walk defers both
+            // carriers; the helper restores them after the pass.
+            let unescaped = unescape_parameter_operator_result(
+                &self.expand_embedded_parameters_mut_with_context_no_restore(
                     &self.decode_operator_word_for_context(word, context),
                     context,
                 ),
                 context,
                 self.shell_state.env_vars.get("IFS").map(String::as_str),
             );
+            return restore_deferred_operator_backslashes(&unescaped);
         }
         self.expand_embedded_parameters_alternate_mut(word)
     }
@@ -922,6 +890,29 @@ impl Executor {
         context: SubstitutionQuoteContext,
         spans_nonposix: bool,
     ) -> String {
+        // The fragment's pattern / replacement sub-words are expanded
+        // by the context-free embedded walker; record this fragment's
+        // quote context so a nested `$'name'` there is judged by the
+        // enclosing word's quoting, as GNU's read-time translation
+        // judges it (rubash#2650). Recorded HERE, at the routed entry,
+        // because fragment entries (the mutable walker's per-`${}`
+        // dispatch, heredoc bodies included) reach the routed body
+        // directly without passing the whole-word entry above.
+        crate::executor::expand_word::with_extquote_name_quoted_context(
+            matches!(
+                context,
+                SubstitutionQuoteContext::DoubleQuoted | SubstitutionQuoteContext::HereDocument
+            ),
+            || self.expand_quoted_parameter_word_mut_routed_body(word, context, spans_nonposix),
+        )
+    }
+
+    fn expand_quoted_parameter_word_mut_routed_body(
+        &mut self,
+        word: &str,
+        context: SubstitutionQuoteContext,
+        spans_nonposix: bool,
+    ) -> String {
         // GNU param_expand resolves one `${}` expansion once: memoize
         // array-element fetches for the duration of this word so repeated
         // helper-layer reads (operator set-checks, error probes) do not
@@ -1026,14 +1017,18 @@ impl Executor {
         // on the `bad substitution` default. Mirror of the same check in
         // expand_braced_parameter_word for the `\x1d`/whole-word entry.
         if crate::executor::expand_word::braced_name_ends_on_quote(name) {
-            self.write_diagnostic_fd2(
-                format!(
-                    "{}{}: bad substitution\n",
-                    self.diagnostic_prefix(),
-                    crate::executor::expand_word::bad_substitution_display(&diagnostic_word)
-                )
-                .as_bytes(),
-            );
+            // rubash#3499: one diagnostic per latch lifetime (see
+            // bad_substitution_report_first).
+            if self.bad_substitution_report_first() {
+                self.write_diagnostic_fd2(
+                    format!(
+                        "{}{}: bad substitution\n",
+                        self.diagnostic_prefix(),
+                        crate::executor::expand_word::bad_substitution_display(&diagnostic_word)
+                    )
+                    .as_bytes(),
+                );
+            }
             self.shell_state.parameter_bad_substitution.set(true);
             return String::new();
         }
@@ -1043,14 +1038,18 @@ impl Executor {
         // runs at its whole-word entry, for words that arrive here without
         // passing a walker `${` arm.
         if crate::executor::expand_word::braced_name_is_bad_substitution(name) {
-            self.write_diagnostic_fd2(
-                format!(
-                    "{}{}: bad substitution\n",
-                    self.diagnostic_prefix(),
-                    crate::executor::expand_word::bad_substitution_display(&diagnostic_word)
-                )
-                .as_bytes(),
-            );
+            // rubash#3499: one diagnostic per latch lifetime (see
+            // bad_substitution_report_first).
+            if self.bad_substitution_report_first() {
+                self.write_diagnostic_fd2(
+                    format!(
+                        "{}{}: bad substitution\n",
+                        self.diagnostic_prefix(),
+                        crate::executor::expand_word::bad_substitution_display(&diagnostic_word)
+                    )
+                    .as_bytes(),
+                );
+            }
             self.shell_state.parameter_bad_substitution.set(true);
             return String::new();
         }
@@ -1324,7 +1323,14 @@ impl Executor {
             }
         }
 
-        if let Some(value) = self.expand_braced_pattern_or_transform_parameter(name) {
+        // rubash#3581: the routed entry already records the quote context
+        // (DoubleQuoted | HereDocument) in EXTQUOTE_NAME_QUOTED_CONTEXT —
+        // the flag GNU `quoted` corresponds to for the `#`/`%` gate
+        // (heredoc bodies count: GNU diagnoses `"${a[*]#bad}"` there too).
+        if let Some(value) = self.expand_braced_pattern_or_transform_parameter(
+            name,
+            crate::executor::expand_word::extquote_name_quoted_context(),
+        ) {
             if apfae_trace_enabled() {
                 eprintln!("[EQPWM-tail-pattern] name={name:?}");
             }
@@ -1367,7 +1373,22 @@ impl Executor {
         super::expand_braced_replacement::ASSIGNMENT_RHS.with(|f| f.set(true));
         let result = self.expand_assignment_alternate_mut_inner(value, double_quoted);
         super::expand_braced_replacement::ASSIGNMENT_RHS.with(|f| f.set(old));
-        result
+        // The `=`/`:=` rhs never carries a quoted null. GNU emits CTLNUL
+        // only when (W_NOSPLIT|W_EXPANDRHS|W_ASSIGNRHS) == W_EXPANDRHS
+        // (subst.c:11843, subst.c:11905); the `=` word flags include
+        // W_ASSIGNRHS (subst.c:4495), so the gate fails and the empty
+        // ""'' span is discarded by the NOSPLIT2 branch (subst.c:11853,
+        // subst.c:11921). A quoted null spliced in from a nested
+        // `${x- ""}` dies in list_string's remove_quoted_nulls
+        // (subst.c:3181-3192), and dequote_string runs on the remainder
+        // (subst.c:8085). Net: the assigned and substituted value is
+        // CTLNUL-free, so `${v= "$x" }` field-splits to zero words where
+        // the `-`/`+` alternates anchor one empty field.
+        // E400-aware (rubash#2882): a typed `$''` is user data.
+        crate::executor::markers::restore_bare_sentinels(
+            &result,
+            &[(crate::executor::markers::QUOTED_NULL_MARKER, "")],
+        )
     }
 
     fn expand_assignment_alternate_mut_inner(
@@ -1419,7 +1440,10 @@ impl Executor {
         // (not quote delimiters), matching GNU's expand_string_for_rhs
         // behavior inside double quotes. Use unescape_parameter_operator_result
         // (not decode_parameter_word_quotes) so single quotes survive as data.
-        let expanded = self.expand_embedded_parameters_mut_with_context(
+        // rubash#3088: the walk defers its backslash restores so the
+        // unescape below cannot fold expansion data as source escapes;
+        // restore after the pass (see expand_operator_rhs_for_context).
+        let expanded = self.expand_embedded_parameters_mut_with_context_no_restore(
             &decoded,
             SubstitutionQuoteContext::DoubleQuoted,
         );
@@ -1428,7 +1452,7 @@ impl Executor {
             SubstitutionQuoteContext::DoubleQuoted,
             self.shell_state.env_vars.get("IFS").map(String::as_str),
         );
-        unescaped.replace(PROTECTED_LITERAL_BACKSLASH, "\\")
+        restore_deferred_operator_backslashes(&unescaped).replace(PROTECTED_LITERAL_BACKSLASH, "\\")
     }
 
     pub(in crate::executor) fn apply_parameter_assignment_expansions_in_word(
@@ -1776,7 +1800,7 @@ impl Executor {
             if !is_shell_name(name) {
                 return;
             }
-            if !self.apply_shell_assignment(name, bound) {
+            if !self.apply_shell_assignment(name, bound, None) {
                 self.latch_parameter_assignment_failure(prev_status);
             }
             return;
@@ -1824,7 +1848,7 @@ impl Executor {
             if !is_shell_name(name) {
                 return;
             }
-            if !self.apply_shell_assignment(name, bound) {
+            if !self.apply_shell_assignment(name, bound, None) {
                 self.latch_parameter_assignment_failure(prev_status);
             }
         }
@@ -1842,7 +1866,17 @@ impl Executor {
         if self.nameref_target_name(indirect_name).is_some() {
             return false;
         }
-        let Some(target_name) = self.shell_state.env_vars.get(indirect_name).cloned() else {
+        let Some(target_name) = (match self.shell_state.env_vars.get(indirect_name) {
+            Some(target_name) => Some(target_name.clone()),
+            // GNU parameter_brace_find_indir (subst.c:7839-7881): a
+            // positional/special source resolves to the parameter NAME
+            // its value holds, so `${!0:=d}` binds $0's target
+            // (rubash#3784).
+            None if !is_shell_name(indirect_name) => {
+                self.indirect_holder_target_name(indirect_name)
+            }
+            None => None,
+        }) else {
             return false;
         };
         if self.apply_array_element_parameter_assignment(&target_name, value.clone()) {
@@ -1857,7 +1891,7 @@ impl Executor {
             self.latch_parameter_assignment_failure(prev_status);
             return true;
         }
-        self.apply_shell_assignment(&target_name, value);
+        self.apply_shell_assignment(&target_name, value, None);
         true
     }
 }
@@ -2213,6 +2247,23 @@ pub(in crate::executor) fn decode_double_quotes_in_quoted_parameter_word(
             index = end;
             continue;
         }
+        // rubash#3086: `$"..."` locale string — GNU's extraction-time
+        // reader turns it into a genuine double-quoted span before the
+        // word is ever scanned (parse.y:5546-5610 read_token_word:
+        // locale_expand, then the sh_mkdoublequoted re-wrap at
+        // parse.y:5582-5595; the ${...} extraction scan rides the same
+        // reader, parse.y:4095-4126). Consume the `$` sigil and let the
+        // double-quote sentence decode below process the span exactly
+        // like a bare `"..."`. Without this the span's opening quote was
+        // consumed as a plain sentence opener and the orphaned `$`
+        // reached the expansion walker, which read the span's first
+        // word as a parameter name (`${q-$"a b"}` expanded `$a` and
+        // lost it). Heredoc words keep the raw text: GNU's
+        // here-document scan does not locale-decode inside ${...}
+        // words either (the `$'` arm above is gated the same way).
+        if chars[index] == '$' && chars.get(index + 1) == Some(&'"') && !heredoc {
+            index += 1;
+        }
         if chars[index] != '"' {
             output.push(chars[index]);
             index += 1;
@@ -2326,6 +2377,24 @@ fn unescape_double_quoted_backslashes(value: &str) -> String {
 // removal already ran on the raw alternate (decode_double_quotes...); the
 // expansion result itself is data and only needs its remaining escapes
 // resolved (GNU subst.c never quote-removes expansion results).
+
+/// Restore the backslash carriers a deferred-restore operator walk left
+/// in its result, after the post-expansion unescape pass has run over it
+/// (rubash#3088): expansion-result backslashes (U+E30D) and literal
+/// DATA_BACKSLASH carriers both become real `\` — the unescape pass has
+/// already skipped the former (they rode as the marker, not as `\`) and
+/// converted the latter itself in the double-quote case, so this is a
+/// no-op safety net there and the real restore in the heredoc case.
+pub(in crate::executor) fn restore_deferred_operator_backslashes(value: &str) -> String {
+    crate::executor::markers::restore_bare_sentinels(
+        value,
+        &[
+            (crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH, "\\"),
+            (crate::executor::markers::DATA_BACKSLASH, "\\"),
+        ],
+    )
+}
+
 pub(in crate::executor) fn unescape_parameter_operator_result(
     word: &str,
     context: SubstitutionQuoteContext,

@@ -176,9 +176,6 @@ pub(super) struct ConditionalArithParser<'a> {
     /// The first recorded evalerror — GNU longjmps on the first failure, so
     /// later diagnostics never overwrite it.
     pub(super) error: Option<ArithEvalError>,
-    /// Non-fatal diagnostics emitted during evaluation (bad subscript reads,
-    /// invalid-identifier binds).
-    pub(super) diags: Vec<ArithEvalDiag>,
     /// Start offset of the most recently consumed token — GNU `lasttp`
     /// (expr.c:1342). End-of-input diagnostics use the last token's start
     /// (`jv += ` reports `+= `).
@@ -201,6 +198,15 @@ pub(super) struct ConditionalArithParser<'a> {
 }
 
 impl ConditionalArithParser<'_> {
+    /// Record a non-fatal diagnostic at its production point, into
+    /// the shared evaluation-order event log (rubash#3078): nested
+    /// frames append at the moment they produce the diagnostic, so
+    /// the log IS the global evaluation order and no adoption step
+    /// is needed when frames unwind.
+    pub(super) fn record_diag(&mut self, diag: ArithEvalDiag) {
+        super::record_arith_eval_diag(diag);
+    }
+
     /// Record an evalerror and fail the parse. The first failure wins —
     /// GNU's sh_longjmp leaves the evaluator on the spot.
     pub(super) fn fail(&mut self, msg: &str, tok_start: usize) -> Option<i128> {
@@ -269,11 +275,6 @@ impl ConditionalArithParser<'_> {
         if self.error.is_none() {
             self.error = other;
         }
-    }
-
-    /// Merge non-fatal diagnostics produced by a nested evaluation.
-    pub(super) fn adopt_diags(&mut self, other: Vec<ArithEvalDiag>) {
-        self.diags.extend(other);
     }
 
     /// GNU expr.c:484-485 subexpr vs 528-529 expassign vs 1506-1509

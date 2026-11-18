@@ -71,9 +71,15 @@ impl Executor {
                 // $0 bottom entry, which a script parent's respawn
                 // child never has in its raw stack; the inherited view
                 // goes beneath.
+                // rubash#3125: pop the bottom entry only when it
+                // really is the recorded seed (same rule as the
+                // dynamic_stack_array_values view).
                 let inherited = self.shell_state.inherited_fork_frames.as_ref();
                 let inherited_main = inherited.is_some_and(|frames| frames.has_main_frame);
-                if !self.has_script_main_frame() && !inherited_main && !stack.is_empty() {
+                if !self.has_script_main_frame()
+                    && !inherited_main
+                    && self.bash_source_bottom_is_seed(&stack)
+                {
                     stack.pop();
                 }
                 if let Some(inherited) = inherited {
@@ -582,7 +588,10 @@ impl Executor {
                 // `$name` expansion — `${a[$((RANDOM%3))]}` advances the
                 // same RNG state as `$((RANDOM%3))` (rubash#299).
                 let dynamic_values = self.arith_dynamic_context();
-                let (result, writes, actual_category) =
+                // GNU arrayfunc.c:1373-1377 array_expand_index clears
+                // this_command_name around evalexp (rubash#3295).
+                let (result, writes, actual_category) = {
+                    let _arith_label = crate::executor::arithmetic::arith_eval_label_scope(None);
                     eval_conditional_arith_value_categorized_with_writes_and_state(
                         &expr,
                         &overlaid,
@@ -593,7 +602,8 @@ impl Executor {
                         } else {
                             None
                         },
-                    );
+                    )
+                };
                 if !writes.is_empty() {
                     crate::executor::expand_braced_indices::PENDING_SUBSCRIPT_WRITES.with(|w| {
                         w.borrow_mut().extend(writes);
@@ -658,6 +668,30 @@ impl Executor {
             // while `'x'` survives as literal text (sq is data in dq context)
             // and evalexp then rejects it as a string operand — `a[' ']`
             // fails "' ': operand expected" where `a[" "]` resolves to 0.
+            // rubash#3085: a `$'...'` span in the raw subscript is ANSI-C
+            // decoded to BARE content before the arith-context pass — GNU
+            // expand_subscript_string -> expand_word_internal's `$'` arm
+            // (ansicstr) — so `${a[$'1+2']}` evaluates `1+2` and
+            // `${a[$'x y']}` errors on the trailing `y`, exactly like the
+            // decoded text was written bare. Without this the span reached
+            // the pass raw and its `$` plus the lexer's \x17 carrier
+            // leaked into the error token. The decoded bytes ride the
+            // span-data carriers (transform_arith_ansi_c_spans, Decode)
+            // so the arith pass cannot re-read them as syntax; runs
+            // before the `$"` decode below, the same order
+            // expand_subscript_string_inner uses (a `$"` produced inside
+            // a `$'...'` span is single-quoted data, and the locale
+            // decoder's sq tracking leaves it alone).
+            let decoded_ansi;
+            let key = if key.contains("$'") {
+                decoded_ansi = crate::executor::subscript_expansion::transform_arith_ansi_c_spans(
+                    key,
+                    crate::executor::subscript_expansion::ArithAnsiSpanMode::Decode,
+                );
+                decoded_ansi.as_str()
+            } else {
+                key
+            };
             // rubash#3023: a `$"..."` span in the raw subscript is a
             // double-quoted span with quote-syntax markup (the lexer cooks
             // it that way, but raw subscript text bypasses the lexer).
@@ -671,11 +705,58 @@ impl Executor {
             } else {
                 key
             };
-            let expanded = self.expand_arithmetic_special_parameters(key);
-            if expanded.len() >= 2 && expanded.starts_with('"') && expanded.ends_with('"') {
-                expanded[1..expanded.len() - 1].to_string()
+            // rubash#2595: the error pre-scan already resolved this
+            // subscript (its evaluating fetch) — reuse the resolved text
+            // instead of re-executing it; the real expansion reads the
+            // element live. Out of scope (pre-scan) a resolution is
+            // PEEKED, not consumed: identical fragments share the
+            // scan's single evaluation, and the entry stays for the
+            // real expansion. In scope (real expansion) it is
+            // CONSUMED: each fragment's fetch takes exactly one entry,
+            // so a later identical fragment re-expands — GNU evaluates
+            // the substitution once per fragment.
+            let in_word_scope = crate::executor::expand_braced_indices::word_ctx_active();
+            let carried = if in_word_scope {
+                crate::executor::expand_braced_indices::scan_carry_take(key)
             } else {
-                expanded
+                crate::executor::expand_braced_indices::scan_carry_peek(key)
+            };
+            match carried {
+                Some(expanded) => expanded,
+                None => {
+                    let writes_before =
+                        crate::executor::expand_braced_indices::PENDING_SUBSCRIPT_WRITES
+                            .with(|w| w.borrow().len());
+                    let expanded = self.expand_arithmetic_special_parameters(key);
+                    let expanded = if expanded.len() >= 2
+                        && expanded.starts_with('"')
+                        && expanded.ends_with('"')
+                    {
+                        expanded[1..expanded.len() - 1].to_string()
+                    } else {
+                        expanded
+                    };
+                    // Only carry a pre-scan resolution the real expansion
+                    // may replay: no deferred writes were queued during
+                    // the resolution (a `$((i++))` inside the subscript
+                    // must be re-evaluated, not replayed from stale
+                    // text), and the raw text is carryable (no `$?`, no
+                    // reference to a simulated bind). A real-expansion
+                    // fetch never stores: its re-expansion belongs to
+                    // this fragment alone.
+                    if !in_word_scope
+                        && crate::executor::expand_braced_indices::PENDING_SUBSCRIPT_WRITES
+                            .with(|w| w.borrow().len())
+                            == writes_before
+                        && crate::executor::expand_braced_indices::scan_carry_may_store(key)
+                    {
+                        crate::executor::expand_braced_indices::scan_carry_store(
+                            key,
+                            expanded.clone(),
+                        );
+                    }
+                    expanded
+                }
             }
         };
         if key.trim() == "*" || key.trim() == "@" {
@@ -1094,28 +1175,34 @@ impl Executor {
             return Some(values);
         }
         if !quoted_array_word {
-            if let Some((name, offset, length)) =
+            if let Some(((name, offset, length), writes)) =
                 crate::executor::parameter_ops::whole_word_braced_parameter_body(word)
-                    .and_then(|name| self.parse_parameter_substring(name))
+                    .and_then(|name| self.parse_parameter_substring_with_writes(name))
             {
                 if let Some(array_name) = name
                     .strip_suffix("[@]")
                     .or_else(|| name.strip_suffix("[*]"))
                 {
+                    // rubash#3649: this parse's result is the expansion,
+                    // so commit its offset/length arithmetic writes.
+                    self.queue_pending_subscript_writes(writes);
                     return self.array_subscript_range_values(array_name, offset, length);
                 }
             }
         }
         if quoted_array_word {
-            if let Some((name, offset, length)) =
+            if let Some(((name, offset, length), writes)) =
                 crate::executor::parameter_ops::whole_word_braced_parameter_body(word)
-                    .and_then(|name| self.parse_parameter_substring(name))
+                    .and_then(|name| self.parse_parameter_substring_with_writes(name))
             {
                 if let Some(indirect_name) = name.strip_prefix('!') {
                     let target_expr = self.shell_state.env_vars.get(indirect_name)?;
                     let expands_as_array = target_expr.ends_with("[@]")
                         || (!quoted_array_word && target_expr.ends_with("[*]"));
                     if expands_as_array {
+                        // rubash#3649: this parse's result is the
+                        // expansion, so commit its offset/length writes.
+                        self.queue_pending_subscript_writes(writes);
                         return Some(slice_array_values(
                             self.indirect_target_values(target_expr),
                             offset,
@@ -1125,12 +1212,18 @@ impl Executor {
                 }
                 if let Some(array_name) = name.strip_suffix("[@]") {
                     if array_name == "GROUPS" {
+                        // rubash#3649: this parse's result is the
+                        // expansion, so commit its offset/length writes.
+                        self.queue_pending_subscript_writes(writes);
                         return Some(slice_array_values(
                             self.groups_words(),
                             offset,
                             length.and_then(|length| usize::try_from(length).ok()),
                         ));
                     }
+                    // rubash#3649: this parse's result is the expansion,
+                    // so commit its offset/length arithmetic writes.
+                    self.queue_pending_subscript_writes(writes);
                     return self.array_subscript_range_values(array_name, offset, length);
                 }
             }
@@ -1140,6 +1233,11 @@ impl Executor {
             if let Some(prefix) = word
                 .strip_prefix("${!")
                 .and_then(|word| word.strip_suffix("@}"))
+                // GNU subst.c:9974-9975 gates the `${!prefix@}` list form
+                // on `legal_variable_starter(name[1])`; the name scanner
+                // also stops at an operator byte, so `${!#%@}` is the `%`
+                // removal on `${!#}`, never a name list (rubash#3784).
+                .filter(|prefix| !prefix.is_empty() && is_shell_name(prefix))
             {
                 let mut names = self
                     .shell_state
@@ -1158,6 +1256,10 @@ impl Executor {
             if let Some(prefix) = word
                 .strip_prefix("${!")
                 .and_then(|word| word.strip_suffix("*}"))
+                // Same GNU gate as the @ form above: `${!#%*}` ends in `*`
+                // but its name head is the `%` operator, so the word is a
+                // suffix removal, not `${!prefix*}` (rubash#3784).
+                .filter(|prefix| !prefix.is_empty() && is_shell_name(prefix))
             {
                 let mut names = self
                     .shell_state
@@ -1432,6 +1534,17 @@ impl Executor {
             if !array_target(var_name) {
                 return None;
             }
+            // GNU subst.c:10320-10327 (`case '#': case '%':`): removal
+            // skips the pattern expansion entirely when the parameter
+            // word is absent or empty (rubash#3501). The gate reads the
+            // JOINED word, so a one-element list holding "" is silent
+            // only when the word is unquoted — a quoted one-"" list
+            // carries the QUOTED_NULL marker and GNU diagnoses
+            // (follow-up #3581). The scalar entry point already gates
+            // this way; the list entry point expanded unconditionally.
+            if self.pattern_word_is_silent(var_name, true, quoted_array_word) {
+                return Some(vec![]);
+            }
             let pattern = self.expand_parameter_pattern_word(pattern);
             return self.array_modified_word_values(var_name, quoted_array_word, |value| {
                 remove_parameter_pattern(value, &pattern, operation, self.extglob_enabled())
@@ -1441,6 +1554,12 @@ impl Executor {
         if let Some((var_name, pattern, replacement, global)) = parse_parameter_replacement(inner) {
             if !array_target(var_name) {
                 return None;
+            }
+            // GNU subst.c:9362-9367 parameter_brace_patsub returns NULL
+            // before getpattern when the value is absent (rubash#3501):
+            // an empty list is absent, but a one-"" list is present.
+            if self.pattern_word_is_silent(var_name, false, false) {
+                return Some(vec![]);
             }
             let pattern = self.expand_parameter_pattern_word(pattern);
             let replacement = self.expand_patsub_replacement_text(replacement);
@@ -1452,6 +1571,11 @@ impl Executor {
         if let Some((var_name, operation, pattern)) = parse_parameter_case_mod(inner) {
             if !array_target(var_name) {
                 return None;
+            }
+            // GNU subst.c:9604-9608 parameter_brace_casemod: same
+            // absent-value gate as patsub (rubash#3501).
+            if self.pattern_word_is_silent(var_name, false, false) {
+                return Some(vec![]);
             }
             let pattern = self.expand_embedded_parameters(pattern);
             return self.array_modified_word_values(var_name, quoted_array_word, |value| {

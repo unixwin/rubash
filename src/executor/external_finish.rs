@@ -39,7 +39,8 @@ impl Executor {
                     && !target.starts_with("<(")
                     && !target.starts_with(">(")
                 {
-                    let _ = self.create_redirect_output(&target, redirect.clobber);
+                    let _ =
+                        self.create_redirect_output_for(Some(redirect), &target, redirect.clobber);
                 }
             } else {
                 seen_last = true;
@@ -78,7 +79,8 @@ impl Executor {
             {
                 return result;
             }
-            let file = self.create_redirect_output(&target, redirect.clobber)?;
+            let file =
+                self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?;
             crate::fd::write_file_all(&file, output)?;
         } else if let Some(redirect) = &cmd.append {
             let target = self.expand_redirect_target(redirect);
@@ -152,7 +154,15 @@ impl Executor {
         stderr: &[u8],
         status: i32,
     ) -> Result<(), ExecuteError> {
-        self.write_buffered_builtin_output(cmd, &[], stderr)?;
+        // rubash#3222: the staged diagnostic accompanies an outcome the
+        // caller has already decided; it is never part of the result.
+        // GNU assigns the exit status before printing (execute_cmd.c:6145
+        // shell_execve) and internal_error never observes the fprintf
+        // outcome (error.c:207-218), so a failed diagnostic write (ENOSPC
+        // on /dev/full, a closed descriptor) must not displace `status`:
+        // attempt the write, drop its result, and always record the
+        // status the caller decided.
+        let _ = self.write_buffered_builtin_output(cmd, &[], stderr);
         self.exit_code = status;
         Ok(())
     }
@@ -192,10 +202,16 @@ impl Executor {
             return Ok(false);
         };
         // GNU execute_cmd.c:6139 shell_execve decides same-shell by path
-        // equivalence, not by the command text naming THIS_SH — after
-        // expansion `${THIS_SH}` resolves to the same path, while a literal
-        // `THIS_SHxx` word must not match.
-        let expanded_command_name = self.expand_word(command_name);
+        // equivalence, not by the command text naming THIS_SH — the word
+        // arrives here already expanded by command materialization, so
+        // `${THIS_SH}` has resolved to the same path, while a literal
+        // `THIS_SHxx` word must not match. The materialized text is used
+        // verbatim: GNU expands a command word exactly once, and running
+        // the expansion engine over the result a second time would walk
+        // expansion DATA that merely looks like syntax (e.g. a trailing
+        // literal `${` produced by $'...' or by plain quoting) as a live
+        // fragment and print a spurious `bad substitution` (rubash#3030).
+        let expanded_command_name = command_name.clone();
         let expanded_is_this_shell =
             self.shell_state
                 .env_vars
@@ -218,6 +234,22 @@ impl Executor {
                     let _ = writeln!(&mut stderr, "{diagnostic}");
                     self.finish_external_error(cmd, &stderr, status)?;
                     return Ok(true);
+                }
+                // rubash#3415: a `#!` line naming a resolvable NON-shell
+                // interpreter is not a shell script — decline so the
+                // ordinary disk-command path spawns the interpreter (the
+                // MSYS/Git Bash model; GNU execute_shell_script,
+                // execute_cmd.c:6001-6043, re-execs through the NAMED
+                // interpreter). Running it here would parse a node body
+                // as bash (syntax error, rc 2) and let a shebang-only
+                // file exit 0 in silence.
+                if crate::executor::path::foreign_shebang_interpreter(
+                    &script_path,
+                    &self.shell_state.env_vars,
+                )
+                .is_some()
+                {
+                    return Ok(false);
                 }
                 // Exec model, like GNU: a `#!` script is exec'd by the
                 // kernel as a NEW interpreter process, and a shebangless
@@ -271,7 +303,10 @@ impl Executor {
         let Some(script) = cmd.words.get(1) else {
             return Ok(false);
         };
-        let script = self.expand_word(script);
+        // Materialized like the command word above: already expanded
+        // once by the dispatch chain; a second expansion pass over the
+        // result is not GNU's model (rubash#3030).
+        let script = script.clone();
         let script_path = shell_path_to_windows(&script, &self.shell_state.env_vars);
         if !script_path.is_file() {
             return Ok(false);
@@ -341,7 +376,11 @@ impl Executor {
         // $0 keeps the invoked spelling (`./trap2.sub`), like
         // shell.c:720 dollar_vars[0] = shell_script_filename.
         let command_name = cmd.words.first()?;
-        let script = self.expand_word(command_name);
+        // The word arrives materialized (already expanded once by the
+        // dispatch chain); shell_execve's ENOEXEC tail classifies that
+        // exact text. Re-expanding it would treat expansion data as
+        // syntax and print a spurious `bad substitution` (rubash#3030).
+        let script = command_name.clone();
         // rubash#2302: for a slash-less word the invoked spelling is
         // NOT what GNU's reader sees. execute_disk_command resolves
         // the word through find_user_command (findcmd.c:247;
@@ -416,7 +455,45 @@ impl Executor {
         } else {
             String::new()
         };
-        let source = fs::read_to_string(script_path)?;
+        let script_bytes = fs::read(script_path)?;
+        // GNU general.c:739 check_binary_file is the only image gate:
+        // an 80-byte sample (shell.c:1659-1692 open_shell_script;
+        // execute_cmd.c:6237-6260 shell_execve's ENOEXEC tail) refuses
+        // ELF magic or a NUL in the first line (two under `#!`) with
+        // exit(EX_BINARY_FILE = 126). The diagnostic differs by entry
+        // face, verified against GNU 5.3.20:
+        //   - same-shell script child (`bash file` shape): $0 is
+        //     already bound to the filename, so internal_error's
+        //     "%s: %s" prints it twice —
+        //     `/bin/sh: /bin/sh: cannot execute binary file`.
+        //   - ENOEXEC fallback (`./x` a corrupt binary): $0 is still
+        //     the invoking shell —
+        //     `bash: line 1: ./x: cannot execute binary file: Exec
+        //     format error` (execute_cmd.c:6228 appends
+        //     strerror(ENOEXEC)).
+        // Refusing here keeps the parent's reader alive with status
+        // 126, where the raw UTF-8 read failure below would misreport
+        // the binary as a text decode error. Bytes that pass the gate
+        // decode as script text (raw-byte markers for invalid UTF-8
+        // sequences, rubash#132), never read_to_string's refusal.
+        if crate::script_driver::check_binary_file(&script_bytes[..script_bytes.len().min(80)]) {
+            let mut stderr = Vec::new();
+            if contain_child_signals {
+                let _ = writeln!(
+                    &mut stderr,
+                    "{script}: {script}: cannot execute binary file"
+                );
+            } else {
+                let _ = writeln!(
+                    &mut stderr,
+                    "{}{script}: cannot execute binary file: Exec format error",
+                    self.error_prefix_for_line(cmd.line.unwrap_or(1)),
+                );
+            }
+            self.finish_external_error(cmd, &stderr, 126)?;
+            return Ok(());
+        }
+        let source = crate::script_driver::bytes_to_script_text(&script_bytes);
         // bashhist.c pre_process_line: a fresh `bash script` child expands
         // history per input line, so an in-process THIS_SH child whose
         // script enables history must run the grouped history driver rather
@@ -475,7 +552,7 @@ impl Executor {
         // dup still resolves against the pre-command stdin; fd-0
         // heredocs stay with the command-input scope (include_stdin
         // false). A failed later bind unwinds the earlier ones.
-        let saved_numbered_heredocs = self.bind_numbered_heredoc_redirects(cmd, false);
+        let saved_numbered_heredocs = self.bind_numbered_heredoc_redirects(cmd, false)?;
         // rubash#2310: the numbered inputs bind in segments split
         // at the command's `{var}` entries, applying each such
         // entry's dup/close effect at its list position — the
@@ -565,7 +642,7 @@ impl Executor {
             // readonly, UID/EUID/PPID, SHELLOPTS/BASHOPTS replay, SHLVL+1,
             // IFS default). Without this the in-process child fell back to
             // indexed-array handling for ${!BASH_CMDS[@]} (assoc audit C1).
-            Self::initialize_fresh_shell_env_vars(
+            let child_logical_cwd = Self::initialize_fresh_shell_env_vars(
                 &mut child_env,
                 &self.shell_state.cwd.clone(),
                 // An exec'd shell image is a genuinely new shell:
@@ -582,6 +659,10 @@ impl Executor {
             // getppid() == the parent shell's getpid()).
             child_env.insert("PPID".to_string(), self.shell_pid.to_string());
             self.shell_state.env_vars = child_env;
+            // variables.c:907 set_pwd: the fresh child's logical cwd
+            // is the adoption the initializer just performed against
+            // its inherited $PWD (rubash#2799).
+            self.shell_state.logical_cwd = Some(child_logical_cwd);
             self.shell_state.variables =
                 crate::shell::VariableStore::from_environment(&self.shell_state.env_vars);
             // GNU variables.c:511-526 (initialize_shell_variables): a fresh
@@ -661,6 +742,7 @@ impl Executor {
         let saved_pipestatus = self.shell_state.pipestatus.clone();
         let saved_positional_params = self.shell_state.positional_window_cloned();
         let saved_bash_source_stack = self.shell_state.bash_source_stack.clone();
+        let saved_bash_source_seed = self.shell_state.bash_source_seed.clone();
         let saved_bash_lineno_stack = self.shell_state.bash_lineno_stack.clone();
         let saved_bash_argc_stack = self.shell_state.bash_argc_stack.clone();
         let saved_bash_argv_stack = self.shell_state.bash_argv_stack.clone();
@@ -737,6 +819,19 @@ impl Executor {
         // expanded shell path) must not leak into child diagnostics
         // (nameref8.sub warnings reported `rubash.exe:` prologs).
         let saved_assignment_command_name = self.assignment_command_name.take();
+        // The EXIT-trap latch and the exec-replacement latch are
+        // per-process too: trap.c:1128 run_exit_trap's once-only flag and
+        // the exec.def replacement unwind both die with the real child
+        // process (shell.c exit_shell). Without this bracket, a child
+        // script's `trap ... EXIT` fire latched the shared Executor — the
+        // next in-process child's `( trap T 0; ... )` subshell found the
+        // latch set and skipped its own EXIT trap (execscript's
+        // exec3.sub `trap 'echo EXIT' EXIT` silenced exec12.sub's
+        // `exit code: 1`), and a child's successful in-process `exec`
+        // leaked exec_replaced into the parent's trap adjudication.
+        // Both latches start clear in the fresh child.
+        let saved_exit_trap_ran = self.exit_trap_ran.replace(false);
+        let saved_exec_replaced = std::mem::replace(&mut self.exec_replaced, false);
 
         // The fd table is a process boundary too: a child's persistent
         // `exec 2>/dev/null` (redir.c do_redirection_internal without undo)
@@ -748,7 +843,7 @@ impl Executor {
         // the file_stdin install below: GNU applies `< file` in the CHILD
         // (do_redirections after fork), so the parent's fd 0 slot is the
         // pre-redirect state — restoring it also unwinds our emulation.
-        let saved_fd_table = self.fd_table.clone();
+        let saved_fd_table = self.fd_table.saved_table();
         // GNU execute_cmd.c redirects before the child runs: `< file` puts
         // the open file on the child's fd 0, so `exec 3<&0` inside the child
         // dups the file (shared offset). Install a real File endpoint on
@@ -807,7 +902,6 @@ impl Executor {
             FileFd::open_read(path).ok().map(|file| (file, None))
         });
         if let Some((file, write_end)) = file_stdin {
-            self.set_fd_input_file(0, file, false);
             if let Some((write_file, target)) = write_end {
                 // rubash#2261: the write half of the `<>` pair plus
                 // the fd-0 output env bookkeeping set_fd_readwrite_file
@@ -818,12 +912,27 @@ impl Executor {
                 // and are restored after the child runs — the same
                 // save/restore contract the function face spells out
                 // per binding (FunctionCallStdinBinding).
-                self.fd_table
-                    .open_output(0, FdWriteEndpoint::File(write_file), false);
+                // rubash#3655: one O_RDWR description — a single
+                // open_readwrite install, not an input bind followed
+                // by an output bind (the second would retire the
+                // first). The mirror lines are the set_fd_input_file
+                // lines the pair replaces, plus the output ledger.
+                self.fd_table.open_readwrite(
+                    0,
+                    FdReadEndpoint::File(file),
+                    FdWriteEndpoint::File(write_file),
+                    false,
+                );
+                self.shell_state.env_vars.remove(&fd_closed_key(0));
+                self.shell_state.env_vars.remove(&fd_stdin_key(0));
+                self.shell_state.env_vars.remove(&fd_stdin_offset_key(0));
+                self.shell_state.env_vars.remove(&fd_dynamic_input_key(0));
                 self.shell_state
                     .env_vars
                     .remove(&fd_output_process_substitution_key(0));
                 self.shell_state.env_vars.insert(fd_output_key(0), target);
+            } else {
+                self.set_fd_input_file(0, file, false);
             }
             self.shell_state.env_vars.remove(FUNCTION_STDIN);
             self.shell_state.env_vars.remove(FUNCTION_STDIN_OFFSET);
@@ -1056,6 +1165,22 @@ impl Executor {
         let saved_fd_var_external_undo = std::mem::take(&mut self.fd_var_external_undo);
         let saved_fd_var_pending_closes = std::mem::take(&mut self.fd_var_pending_closes);
         let saved_fd_var_close_restore = std::mem::take(&mut self.fd_var_close_restore);
+        // GNU trap.c:1045-1050 run_exit_trap keys on sigmodes[EXIT_TRAP]:
+        // a fresh `bash script` process starts with SIG_INPROGRESS clear
+        // and its run sets SIG_TRAPPED|SIG_INPROGRESS on its own trap
+        // table — the parent's sigmodes are untouched across the process
+        // boundary. The in-process emulation's exit_trap_ran is executor
+        // state shared across it: a fresh-shell child whose end-of-script
+        // run below fired the latch read back to the parent as "the exit
+        // trap already ran", and a trap the parent armed AFTER the child
+        // was then silently dropped (trap.tests: ${THIS_SH} ./trap6.sub
+        // then `trap 'echo exiting' 0; exit` printed nothing). Park the
+        // parent's latch, let the child start clear like a fresh process,
+        // and hand it back at the restore block below.
+        let saved_exit_trap_ran = self.exit_trap_ran.get();
+        if fresh_shell {
+            self.exit_trap_ran.set(false);
+        }
         // GNU shell.c:722 run_startup_files in the fresh process: a
         // fresh shell runs the startup chain before the script body —
         // for this non-interactive child that is the env-file step
@@ -1067,6 +1192,13 @@ impl Executor {
         // (rubash#2393). An `exit` in the env file ends the child
         // here, before the body; the EXIT-trap arm below still runs,
         // as exit_shell's would.
+        // rubash#3605: the whole child run — its env file, its body,
+        // and its EXIT trap — is one in-process GNU fork child; mark
+        // the depth so `ulimit` inside virtualizes instead of moving
+        // this process's real rlimits (a child's hard drop could not
+        // be restored below).
+        self.emulated_child_depth
+            .set(self.emulated_child_depth.get() + 1);
         let startup_exit = if fresh_shell {
             self.run_fresh_child_startup_env_file(cmd)
         } else {
@@ -1126,6 +1258,11 @@ impl Executor {
                 status = trap_status;
             }
         }
+        // trap.c:1045-1050: the child's own sigmodes[EXIT_TRAP] died with
+        // its run — hand the parent back the latch parked above so a
+        // trap the parent armed after this child still fires at the
+        // parent's real exit.
+        self.exit_trap_ran.set(saved_exit_trap_ran);
         // rubash#2236: collect this child's adjudicated signal death
         // (set when its trap table judged an untrapped delivery) and
         // end the shell_pid swap — the EXIT trap above still ran as
@@ -1165,11 +1302,31 @@ impl Executor {
             // this same process, and a `umask` inside it must die at
             // this process boundary like GNU's exec'd child.
             let fork_saved_process_umask = saved_shell_state.fork_saved_process_umask;
+            // rubash#2636: the same bypass applies to the rlimit
+            // half — a `ulimit` inside the child script re-limited
+            // this process and must die at this boundary too.
+            let fork_saved_process_rlimits = saved_shell_state.fork_saved_process_rlimits.clone();
+            // rubash#3387: the same bypass applies to the rusage
+            // half — this direct-assignment restore skips
+            // restore_flat_subshell, so pop the CloneBoundary
+            // baseline the entry clone_for_child_save pushed (same
+            // kind-and-depth condition) explicitly here.
+            crate::executor::read_helpers::pop_times_baseline_if(
+                crate::executor::read_helpers::TimesBaselineKind::CloneBoundary,
+                saved_shell_state.subshell_depth.get(),
+            );
             self.shell_state = saved_shell_state;
             if let Some(mask) = fork_saved_process_umask {
                 crate::builtins::umask::apply_process_umask(mask);
             }
+            if let Some(rlimits) = &fork_saved_process_rlimits {
+                crate::builtins::ulimit::apply_process_rlimits(rlimits);
+            }
         }
+        // rubash#3605: the in-process child's mark ends here — its
+        // env cells already died with the env restore above.
+        self.emulated_child_depth
+            .set(self.emulated_child_depth.get() - 1);
         self.shell_state.coproc_names = saved_coproc_names;
         self.shell_state.last_background_pid = saved_last_background_pid;
         self.shell_state.job_table = saved_job_table;
@@ -1232,6 +1389,7 @@ impl Executor {
         self.tempenv_promoted_names = saved_tempenv_promoted;
         self.tempenv_previous = saved_tempenv_previous;
         self.shell_state.bash_source_stack = saved_bash_source_stack;
+        self.shell_state.bash_source_seed = saved_bash_source_seed;
         self.shell_state.bash_lineno_stack = saved_bash_lineno_stack;
         self.shell_state.bash_argc_stack = saved_bash_argc_stack;
         self.shell_state.bash_argv_stack = saved_bash_argv_stack;
@@ -1257,6 +1415,12 @@ impl Executor {
             .set(saved_parameter_assignment_failure_prev_status);
         self.evalerror_exec_depth.set(saved_evalerror_exec_depth);
         self.assignment_command_name = saved_assignment_command_name;
+        // The child's EXIT-trap fire and exec-replacement unwind latched
+        // the shared Executor — hand the parent's own latches back so a
+        // later child or `( )` subshell adjudicates with the parent's
+        // state, not the dead child's (see the entry saves above).
+        self.exit_trap_ran.set(saved_exit_trap_ran);
+        self.exec_replaced = saved_exec_replaced;
         self.shell_state.cwd = saved_cwd;
         self.exit_code = status;
         // rubash#2236: the child died by an untrapped signal and the

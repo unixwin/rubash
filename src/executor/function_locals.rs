@@ -351,6 +351,12 @@ impl Executor {
         // behind). Silent: teardown paths own no stderr channel; the flags
         // (the behavior key) are exact.
         let touched_bashcompat = scope.contains_key("BASH_COMPAT");
+        // GNU variables.c:5820/6257-6266 sv_strict_posix: popping a
+        // frame that shadowed POSIXLY_CORRECT reinstalls the saved
+        // binding, so the mode re-derives from the restored
+        // isset-ness — a function-local bind flips POSIX inside the
+        // frame only (rubash#3661).
+        let touched_posixly_correct = scope.contains_key("POSIXLY_CORRECT");
         // GNU variables.c:5271-5275 (push_posix_tempvar_internal, reached via
         // pop_var_context -> hash_flush -> push_func_var): a local `-`
         // restores the saved `set -o` options when its frame pops.
@@ -440,6 +446,9 @@ impl Executor {
                 let line = format!("{}{diagnostic}\n", self.diagnostic_prefix());
                 self.emit_assignment_diag(line);
             }
+        }
+        if touched_posixly_correct {
+            self.sync_posix_mode_from_variable();
         }
         names
     }

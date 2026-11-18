@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::io::{self, Write};
 
 use super::attrs::DeclareOptions;
-use super::diagnostic::diagnostic_prefix;
+
 use super::marks::{exported_vars, marked_vars};
 use super::names::valid_identifier;
 use super::output::{
@@ -87,7 +87,7 @@ fn listing_filter_passes(requested: u16, held: u16) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn print_declare_names<W, E>(
+pub(super) fn print_declare_names<W>(
     command_name: &str,
     names: &[&str],
     variables: &crate::shell::var_table::VarTable,
@@ -98,11 +98,11 @@ pub(super) fn print_declare_names<W, E>(
     dynamic_views: &[DynamicDeclarationView],
     underlay: &crate::shell::var_table::TempenvListingUnderlay,
     stdout: &mut W,
-    stderr: &mut E,
+    diag: &mut crate::executor::builtin_diag::Diag<'_>,
+    prolog: &crate::executor::builtin_diag::PrologParts,
 ) -> io::Result<i32>
 where
     W: Write,
-    E: Write,
 {
     // rubash#1569: the underlay applies to LISTINGS only. An explicit
     // `declare -p name` lookup goes through find_variable, which sees
@@ -276,13 +276,10 @@ where
         listed.sort();
         listed
     } else {
-        names
-            .iter()
-            .copied()
-            .map(|name| name.split_once('=').map(|(name, _)| name).unwrap_or(name))
-            .map(|name| name.strip_suffix('+').unwrap_or(name))
-            .map(str::to_string)
-            .collect()
+        // GNU declare.def:389-406: the -p branch looks each operand up
+        // verbatim — a valued operand is a name (`declare -p dv=6`
+        // reports `dv=6: not found`), never a bind of its base.
+        names.iter().copied().map(str::to_string).collect()
     };
     // rubash#1569: for names the current command's own tempenv frame
     // bound, the per-name attributes come from the pre-frame snapshot,
@@ -301,6 +298,20 @@ where
             }
         };
     for name in names_to_print {
+        // rubash#3408: a `not found` diagnostic is only RECORDED by
+        // `diag.free` and rendered when the dispatcher flushes after
+        // the call, while listings go straight to stdout — so on a
+        // merged stream (`2>&1 | cat`) every listing overtook every
+        // diagnostic, against GNU's per-name sequential emission
+        // (builtins/setattr.def `set_or_show_attributes`: each
+        // operand is printed or reported as it is walked). Flush the
+        // pending diagnostics before this name's listing so the byte
+        // stream keeps operand order — the same
+        // flush-before-immediate-write rule `bare_diag_line`
+        // (setattr.rs) follows. The prolog is built only when
+        // something is pending (E4: a diagnostic-free call pays one
+        // `is_empty` check per name).
+        diag.flush_with(|| prolog.build(variables));
         let attrs = DeclarationAttrs {
             exported: underlay_attr(&name, EXPORTED_VARS, |a| a.exported),
             readonly: underlay_attr(&name, READONLY_VARS, |a| a.readonly),
@@ -373,12 +384,7 @@ where
             // lookups, where the user asked for the name explicitly.
             continue;
         } else {
-            writeln!(
-                stderr,
-                "{}{command_name}: {}: not found",
-                diagnostic_prefix(variables),
-                name
-            )?;
+            diag.free(format_args!("{name}: not found"));
             status = EXECUTION_FAILURE;
         }
     }

@@ -12,7 +12,6 @@
 //! scratch directory: the diagnostic appears exactly once, the failing
 //! element reports status 1 in PIPESTATUS, and the script continues.
 
-use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 

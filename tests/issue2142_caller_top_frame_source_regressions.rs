@@ -138,18 +138,20 @@ fn caller_nested_c_frame_source_control_issue2142() {
     // Control: nested `-c` calls — the caller frame is g's frame,
     // whose source element EXISTS (the -c frame's own name, i.e. the
     // name the shell was invoked as); it must keep printing. The
-    // binary is invoked through a `bash` symlink so the invocation
-    // name is exactly "bash" for both shells (GNU renders
-    // dollar_vars[0] verbatim here, so the spelling follows the
-    // invocation, not the binary's location).
+    // binary is invoked by bare name `bash` through a symlink in a
+    // directory placed first on PATH, so the invocation name is
+    // exactly "bash" (GNU renders dollar_vars[0] verbatim here, so
+    // the spelling follows the invocation: an absolute-path call
+    // makes even GNU print the absolute path).
     let dir = tempdir("nested");
     let bin_link = dir.join("bash");
     std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_rubash"), &bin_link).expect("symlink binary");
-    let output = Command::new(&bin_link)
+    let path = format!("{}:/usr/bin:/bin", dir.display());
+    let output = Command::new("bash")
         .current_dir(&dir)
         .args(["-c", "f(){ caller; }; g(){ f; }; g"])
         .env_clear()
-        .env("PATH", "/usr/bin:/bin")
+        .env("PATH", &path)
         .env("HOME", &dir)
         .output()
         .expect("run rubash");

@@ -43,10 +43,160 @@ pub(super) fn correct_first_word_end_for_redirect_target(cmd: &mut CommandNode, 
         && cmd.redirects.len() == 1
     {
         cmd.first_word_end_line = Some(target.end_position);
+        // rubash#3209: this redirection is the command's first
+        // element — the parse-order fact the function-definition
+        // restamp reads (element order is not stored on the node,
+        // and prefix tokens like BANG note the command line without
+        // recording an element, so target consumption — whose
+        // admission is exactly "no other element yet" — is the
+        // proof point).
+        cmd.first_element_redirect = true;
+        return;
+    }
+    // rubash#3053: when the node's words are exactly a foldable
+    // `time` prefix chain, this redirection is the timed command's
+    // first element — the correction above is blocked by the head
+    // word, so record the target's end line as the post-prefix
+    // candidate the fold applies when it strips the head.
+    if cmd.time_prefix_first_element_end_line == 0
+        && cmd.assignments.is_empty()
+        && cmd.compound_assignments.is_empty()
+        && cmd.array_element_assignments.is_empty()
+        && cmd.redirects.len() == 1
+        && !cmd.words.is_empty()
+        && time_prefix_chain_len(cmd) == Some(cmd.words.len())
+    {
+        cmd.time_prefix_first_element_end_line = target.end_position;
+        cmd.first_element_redirect = true;
     }
 }
 
+/// rubash#3053: the dense per-word metadata view the time-prefix
+/// operand scan reads. Entries are keyed by `word_index` and the
+/// vector is sparse (a process-substitution word may carry none);
+/// a word without an entry reads as its own value — the scan's
+/// unquoted legacy reading.
+fn dense_word_metadata(cmd: &CommandNode) -> Vec<WordMetadata> {
+    (0..cmd.words.len())
+        .map(|pos| {
+            cmd.word_metadata
+                .iter()
+                .find(|metadata| metadata.word_index == pos)
+                .cloned()
+                .unwrap_or_else(|| build_word_metadata(pos, &cmd.words[pos], &cmd.words[pos]))
+        })
+        .collect()
+}
+
+/// rubash#3053: how many leading words a sequence of time-prefix
+/// folds would strip from `cmd` — every `time` head plus its
+/// operand window — or None when the leading words form no foldable
+/// `time` head. Mirrors `time_prefix_from_command`'s admission
+/// exactly: the same head checks (value, the parse-time-frozen
+/// plain-word verdict, the keyword kind when kinds are aligned),
+/// then the shared operand scan per head.
+pub(super) fn time_prefix_chain_len(cmd: &CommandNode) -> Option<usize> {
+    // The head check comes first: this runs at word intakes, and a
+    // node not headed by a foldable `time` must cost O(1), not a
+    // metadata snapshot.
+    if cmd.words.first().map(String::as_str) != Some("time") || cmd.time_head_plain_word {
+        return None;
+    }
+    time_prefix_chain_len_of(
+        &cmd.words,
+        &cmd.word_kinds,
+        &dense_word_metadata(cmd),
+        cmd.time_head_plain_word,
+    )
+}
+
+fn time_prefix_chain_len_of(
+    words: &[String],
+    word_kinds: &[TokenKind],
+    dense_metadata: &[WordMetadata],
+    head_plain_word: bool,
+) -> Option<usize> {
+    if words.first().map(String::as_str) != Some("time") || head_plain_word {
+        return None;
+    }
+    let aligned_kinds = word_kinds.len() == words.len();
+    if aligned_kinds && word_kinds.first() != Some(&TokenKind::Keyword) {
+        return None;
+    }
+    let mut pos = 0;
+    loop {
+        if pos >= words.len() || words[pos] != "time" {
+            break;
+        }
+        if aligned_kinds && word_kinds[pos] != TokenKind::Keyword {
+            break;
+        }
+        let scan =
+            super::parse_loop::scan_time_prefix_words(&words[pos..], Some(&dense_metadata[pos..]));
+        pos += scan.next;
+    }
+    Some(pos)
+}
+
+/// rubash#3053: record the post-`time`-prefix first-element
+/// candidate at a word intake. While the node's recorded elements
+/// are exactly a foldable `time` prefix chain, the incoming word is
+/// either another chain word (a nested head, or an operand of the
+/// last head's window) or the timed command's first element. Which
+/// one is decided by re-running the chain scan with the word
+/// appended, so the admission is the fold's own, never a second
+/// spelling list. Element kinds that are not words settle the
+/// candidate through their own paths (assignments reclassify at
+/// the fold; redirection targets correct above), so this hook only
+/// ever acts while the node is words-only.
+pub(super) fn note_time_prefix_first_element(
+    cmd: &mut CommandNode,
+    value: &str,
+    raw: &str,
+    kind: &TokenKind,
+    end_line: usize,
+) {
+    if cmd.time_prefix_first_element_end_line != 0
+        || !cmd.assignments.is_empty()
+        || !cmd.compound_assignments.is_empty()
+        || !cmd.array_element_assignments.is_empty()
+        || !cmd.redirects.is_empty()
+        || !cmd.heredoc_redirects.is_empty()
+    {
+        return;
+    }
+    if time_prefix_chain_len(cmd) != Some(cmd.words.len()) {
+        return;
+    }
+    let mut words = cmd.words.clone();
+    words.push(value.to_string());
+    let mut word_kinds = cmd.word_kinds.clone();
+    word_kinds.push(kind.clone());
+    let mut dense_metadata = dense_word_metadata(cmd);
+    dense_metadata.push(build_word_metadata(cmd.words.len(), value, raw));
+    if time_prefix_chain_len_of(
+        &words,
+        &word_kinds,
+        &dense_metadata,
+        cmd.time_head_plain_word,
+    ) == Some(words.len())
+    {
+        return;
+    }
+    cmd.time_prefix_first_element_end_line = end_line;
+}
+
 pub(super) fn push_command_word(cmd: &mut CommandNode, token: &Token) {
+    // rubash#3053: while the node is exactly a `time` prefix chain,
+    // this word may be the timed command's first element — record
+    // its end line as the post-prefix candidate before it lands.
+    note_time_prefix_first_element(
+        cmd,
+        &token.value,
+        &token.raw,
+        &token.kind,
+        token.end_position,
+    );
     // rubash#3028: when no element has been recorded yet, this word IS
     // the first element, so (re)stamp the first-element end line from
     // its own end line — this also supersedes a provisional stamp left
@@ -86,6 +236,10 @@ pub(super) fn push_command_word(cmd: &mut CommandNode, token: &Token) {
     cmd.extglob_patterns
         .extend(extglob_patterns.iter().cloned().map(|mut p| {
             p.word_index = Some(word_index);
+            // rubash#3224: stamp the read-time gate of the pass that
+            // lexed this word (Token::extglob_gate; GNU parse.y:5466
+            // decides pattern legality at read time).
+            p.read_gate_on = token.extglob_gate;
             p
         }));
     cmd.pathname_patterns

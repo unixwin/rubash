@@ -1,0 +1,560 @@
+number	table	call_index	n_variants	first_string_escaped
+0000	fileTests	0	5	
+0001	fileTests	1	4	
+0002	fileTests	2	4	foo
+0003	fileTests	3	1	\\
+0004	fileTests	4	2	foo\\
+0005	fileTests	5	1	foo\\\\
+0006	fileTests	6	1	foo\\\\\\
+0007	fileTests	7	2	foo\\a
+0008	fileTests	8	5	foo\nbar
+0009	fileTests	9	4	foo a b
+0010	fileTests	10	3	foobar
+0011	fileTests	11	3	foo
+0012	fileTests	12	1	foo'bar'
+0013	fileTests	13	3	(foo)
+0014	fileTests	14	2	(\n\tfoo\n\tbar\n)
+0015	fileTests	15	2	{ foo; }
+0016	fileTests	16	2	{ if a; then b; fi; }
+0017	fileTests	17	5	if a; then b; fi
+0018	fileTests	18	2	if a; then b; else c; fi
+0019	fileTests	19	1	if a; then a; elif b; then b; else c; fi
+0020	fileTests	20	2	if a; then a; elif b; then b; elif c; then c; else d; fi
+0021	fileTests	21	2	if\n\ta1\n\ta2 foo\n\ta3 bar\nthen b; fi
+0022	fileTests	22	1	((a == 2))
+0023	fileTests	23	1	if (($# > 2)); then b; fi
+0024	fileTests	24	2	(($(date -u) > DATE))
+0025	fileTests	25	1	: $((0x$foo == 10))
+0026	fileTests	26	2	((# 1 + 2))
+0027	fileTests	27	2	$((# 1 + 2))
+0028	fileTests	28	1	((3#20))
+0029	fileTests	29	1	((1.2 > 0.3))
+0030	fileTests	30	5	while a; do b; done
+0031	fileTests	31	2	while { a; }; do b; done
+0032	fileTests	32	2	while (a); do b; done
+0033	fileTests	33	1	while ((1 > 2)); do b; done
+0034	fileTests	34	2	until a; do b; done
+0035	fileTests	35	5	for i; do foo; done
+0036	fileTests	36	4	for i in 1 2 3; do echo $i; done
+0037	fileTests	37	2	for i in \\\n\t1 2 3; do #foo\n\techo $i\ndone
+0038	fileTests	38	2	for i; do foo; done
+0039	fileTests	39	2	for i in 1 2 3; do echo $i; done
+0040	fileTests	40	4	for ((i = 0; i < 10; i++)); do echo $i; done
+0041	fileTests	41	2	for (( ; ; )); do foo; done
+0042	fileTests	42	2	for ((i = 0; ; )); do foo; done
+0043	fileTests	43	2	select i; do foo; done
+0044	fileTests	44	3	select i in 1 2 3; do echo $i; done
+0045	fileTests	45	1	select foo bar
+0046	fileTests	46	1	' ' "foo bar"
+0047	fileTests	47	1	"foo \\" bar"
+0048	fileTests	48	1	">foo" "\nbar"
+0049	fileTests	49	1	foo \\" bar
+0050	fileTests	50	1	'"'
+0051	fileTests	51	1	'`'
+0052	fileTests	52	1	"'"
+0053	fileTests	53	1	""
+0054	fileTests	54	1	=a s{s s=s
+0055	fileTests	55	3	foo && bar
+0056	fileTests	56	1	foo &&\n\tbar
+0057	fileTests	57	3	foo || bar
+0058	fileTests	58	1	if a; then b; fi || while a; do b; done
+0059	fileTests	59	1	foo && bar1 || bar2
+0060	fileTests	60	1	a || b || c || d
+0061	fileTests	61	3	foo | bar
+0062	fileTests	62	1	foo | bar | extra
+0063	fileTests	63	1	foo | a=b bar
+0064	fileTests	64	1	foo |&
+0065	fileTests	65	1	foo \\\n\t|&
+0066	fileTests	66	2	foo |& bar
+0067	fileTests	67	2	foo &|
+0068	fileTests	68	1	foo &|\nbar
+0069	fileTests	69	4	foo() {\n\ta\n\tb\n}
+0070	fileTests	70	2	foo() { a; }\nbar
+0071	fileTests	71	1	foO_123() { a; }
+0072	fileTests	72	1	-foo_.,+-bar() { a; }
+0073	fileTests	73	2	function foo() {\n\ta\n\tb\n}
+0074	fileTests	74	2	function foo {\n\ta\n\tb\n}
+0075	fileTests	75	1	function foo() (a)
+0076	fileTests	76	1	function f1 f2 f3() {\n\ta\n}
+0077	fileTests	77	1	function f1 f2 f3() {\n\ta\n}
+0078	fileTests	78	1	function {\n\ta\n}
+0079	fileTests	79	1	() {\n\ta\n}
+0080	fileTests	80	1	a=b foo=$bar foo=start$bar
+0081	fileTests	81	1	a="\nbar"
+0082	fileTests	82	1	A_3a= foo
+0083	fileTests	83	1	a=b=c
+0084	fileTests	84	1	\xe0=b foo
+0085	fileTests	85	3	foo >a >>b <c
+0086	fileTests	86	2	foo bar >a
+0087	fileTests	87	1	>a >\\b
+0088	fileTests	88	2	>a\n>b
+0089	fileTests	89	2	foo1\nfoo2 >r2
+0090	fileTests	90	2	foo >bar$(etc)
+0091	fileTests	91	5	a=b c=d foo >x <y
+0092	fileTests	92	4	foo <<EOF\nbar\nEOF
+0093	fileTests	93	1	foo <<EOF\n\nbar\nEOF
+0094	fileTests	94	1	foo <<EOF\nbar\n\nEOF
+0095	fileTests	95	1	foo <<EOF\n1\n2\n3\nEOF
+0096	fileTests	96	1	a <<EOF\nfoo$bar\nEOF
+0097	fileTests	97	1	a <<EOF\n"$bar"\nEOF
+0098	fileTests	98	1	a <<EOF\n$''$bar\nEOF
+0099	fileTests	99	2	a <<EOF\n$(b)\nc\nEOF
+0100	fileTests	100	2	a <<EOF\nfoo$(bar)baz\nEOF
+0101	fileTests	101	1	a <<EOF\n\\${\nEOF
+0102	fileTests	102	2	{\n\tfoo <<EOF\nbar\nEOF\n}
+0103	fileTests	103	4	$(\n\tfoo <<EOF\nbar\nEOF\n)
+0104	fileTests	104	2	foo <<EOF\nbar\nEOF$(oops)\nEOF
+0105	fileTests	105	2	foo <<EOF\nbar\nNOTEOF$(oops)\nEOF
+0106	fileTests	106	4	$(\n\tfoo <<'EOF'\nbar\nEOF\n)
+0107	fileTests	107	1	foo <<'EOF'\nbar\nEOF`oops`\nEOF
+0108	fileTests	108	1	foo <<'EOF'\nbar\nNOTEOF`oops`\nEOF
+0109	fileTests	109	2	$(<foo)
+0110	fileTests	110	1	foo <<EOF >f\nbar\nEOF
+0111	fileTests	111	1	foo <<EOF && {\nbar\nEOF\n\tetc\n}
+0112	fileTests	112	2	$(\n\tfoo\n) <<EOF\nbar\nEOF
+0113	fileTests	113	3	$(\n\tfoo\n) <<EOF\nbar\nEOF
+0114	fileTests	114	2	$((foo)) <<EOF\nbar\nEOF
+0115	fileTests	115	1	if true; then\n\tfoo <<-EOF\n\t\tbar\n\tEOF\nfi
+0116	fileTests	116	1	if true; then\n\tfoo <<-EOF\n\tEOF\nfi
+0117	fileTests	117	1	foo <<EOF\nEOF_body\nEOF\nfoo2
+0118	fileTests	118	1	foo <<FOOBAR\nbar\nFOOBAR
+0119	fileTests	119	1	foo <<"EOF"\nbar\nEOF
+0120	fileTests	120	1	foo <<'EOF'\nEOF_body\nEOF\nfoo2
+0121	fileTests	121	1	foo <<'EOF'\n${\nEOF
+0122	fileTests	122	1	foo <<'EOF'\nEOF
+0123	fileTests	123	1	foo <<"EOF"2\nbar\nEOF2
+0124	fileTests	124	1	foo <<\\EOF\nbar\nEOF
+0125	fileTests	125	1	foo <<EOF\nbar\\\nbaz\nEOF
+0126	fileTests	126	3	foo <<'EOF'\nbar\\\nEOF
+0127	fileTests	127	2	foo <<-EOF\n\tbar\nEOF
+0128	fileTests	128	1	foo <<EOF\nEOF
+0129	fileTests	129	1	foo <<-EOF\nEOF
+0130	fileTests	130	1	foo <<-EOF\n\tbar\nEOF
+0131	fileTests	131	1	foo <<-'EOF'\n\tbar\nEOF
+0132	fileTests	132	2	f1 <<EOF1\nh1\nEOF1\nf2 <<EOF2\nh2\nEOF2
+0133	fileTests	133	2	a <<EOF\nfoo\nEOF\nb\nb\nb\nb\nb\nb\nb\nb\nb
+0134	fileTests	134	2	foo "\narg" <<EOF\nbar\nEOF
+0135	fileTests	135	1	foo >&2 <&0 2>file 345>file <>f2
+0136	fileTests	136	2	foo bar >file
+0137	fileTests	137	1	true &>a
+0138	fileTests	138	1	true &>>b
+0139	fileTests	139	2	foo 2>file bar
+0140	fileTests	140	2	a >f1\nb >f2
+0141	fileTests	141	1	foo >|bar
+0142	fileTests	142	1	foo >>|a &>|b &>>|c
+0143	fileTests	143	2	foo >|a >>|b &>|c &>>|d
+0144	fileTests	144	4	foo &>|a &>>c &>>|d
+0145	fileTests	145	2	foo <<<input
+0146	fileTests	146	2	foo <<<"spaced input"
+0147	fileTests	147	1	foo >(foo)
+0148	fileTests	148	1	foo < <(foo)
+0149	fileTests	149	1	a<(b) c>(d)
+0150	fileTests	150	1	foo =(bar)
+0151	fileTests	151	1	foo {fd}<f
+0152	fileTests	152	1	foo {fds[3]}<f
+0153	fileTests	153	1	! foo
+0154	fileTests	154	3	foo &\nbar
+0155	fileTests	155	2	! if foo; then bar; fi >/dev/null &
+0156	fileTests	156	2	if foo; then bar; fi >/dev/null
+0157	fileTests	157	1	! foo && bar
+0158	fileTests	158	1	! foo | bar
+0159	fileTests	159	2	a && b &\nc
+0160	fileTests	160	1	a | b &
+0161	fileTests	161	1	foo#bar
+0162	fileTests	162	1	$foo#bar foo#$bar
+0163	fileTests	163	2	$(foo)#bar
+0164	fileTests	164	1	{ foo } }; }
+0165	fileTests	165	1	foo {
+0166	fileTests	166	1	foo }
+0167	fileTests	167	2	{ foo; }
+0168	fileTests	168	1	{ }
+0169	fileTests	170	1	( )
+0170	fileTests	171	1	if; then; fi
+0171	fileTests	172	1	if foo; then; fi
+0172	fileTests	173	2	while; do exit; done
+0173	fileTests	174	1	while false; do; done
+0174	fileTests	175	1	$({ foo; })
+0175	fileTests	176	3	$( (echo foo bar) )
+0176	fileTests	177	1	$()
+0177	fileTests	178	3	$(\n\t(a)\n\tb\n)
+0178	fileTests	179	4	$(echo \\')
+0179	fileTests	180	4	$(echo \\\\)
+0180	fileTests	181	4	$(echo '\\' 'a\\b' "\\\\" "a\\a")
+0181	fileTests	182	2	$(echo $(x))
+0182	fileTests	183	2	$($(foo bar))
+0183	fileTests	184	2	"$(echo "foobar")"
+0184	fileTests	185	2	"$(echo '"')"
+0185	fileTests	186	1	$( (a) | b)
+0186	fileTests	187	1	"$( (foo) )"
+0187	fileTests	188	1	"foo\\\nbar"
+0188	fileTests	189	2	'foo\\\nbar'
+0189	fileTests	190	2	$({ echo; })
+0190	fileTests	191	1	{foo}
+0191	fileTests	192	1	{"foo"
+0192	fileTests	193	3	foo"bar"
+0193	fileTests	194	1	!foo
+0194	fileTests	195	2	$(foo bar)
+0195	fileTests	196	2	$(foo | bar)
+0196	fileTests	197	2	$(foo | >f)
+0197	fileTests	198	1	$(foo $(b1 b2))
+0198	fileTests	199	1	"$(foo "bar")"
+0199	fileTests	200	2	$(foo)
+0200	fileTests	201	2	foo $(bar)
+0201	fileTests	202	2	$(foo 'bar')
+0202	fileTests	203	2	$(foo "bar")
+0203	fileTests	204	2	"$(foo "bar")"
+0204	fileTests	205	4	${ foo;}
+0205	fileTests	206	2	${\n\tfoo\n\tbar\n}
+0206	fileTests	207	2	${|foo;}
+0207	fileTests	208	2	${|\n\tfoo\n\tbar\n}
+0208	fileTests	209	2	"${ foo;}"
+0209	fileTests	210	2	"${|foo;}"
+0210	fileTests	211	1	${ foo;}bar
+0211	fileTests	212	1	"$foo"
+0212	fileTests	213	1	"#foo"
+0213	fileTests	214	1	$2foo $3[bar] "ba$4z"
+0214	fileTests	215	1	$@a $*a $#a $$a $?a $!a $-a $0a $30a $_a
+0215	fileTests	216	1	"$!"
+0216	fileTests	217	1	"$#" $#"$foo" $#
+0217	fileTests	218	1	"$+" $+"$foo" $+
+0218	fileTests	219	1	"$%" $%"$foo" $%foo
+0219	fileTests	220	1	$="$foo" $~"$foo" $^"$foo"
+0220	fileTests	221	2	$
+0221	fileTests	222	1	${@} ${*} ${#} ${$} ${?} ${!} ${0} ${29} ${-}
+0222	fileTests	223	1	${#$} ${#@} ${#*} ${##}
+0223	fileTests	224	1	${foo}
+0224	fileTests	225	1	${}
+0225	fileTests	226	1	${foo}"bar"
+0226	fileTests	227	1	$a/b $a-b $a:b $a}b $a]b $a.b $a,b $a*b $a_b $a2b
+0227	fileTests	228	1	$a\xe0b $\xe0b $,b
+0228	fileTests	229	3	$\xe0
+0229	fileTests	230	2	$foobar
+0230	fileTests	231	1	$foo\\bar
+0231	fileTests	232	1	echo -e "$foo\\nbar"
+0232	fileTests	233	1	${foo-bar}
+0233	fileTests	234	1	${foo+}"bar"
+0234	fileTests	235	1	${foo:=<"bar"}
+0235	fileTests	236	2	${foo:=b${c}$(d)}
+0236	fileTests	237	1	${foo?"${bar}"}
+0237	fileTests	238	1	${foo:?bar1 bar2}
+0238	fileTests	239	1	${a:+b}${a:-b}${a=b}
+0239	fileTests	240	1	${3:-'$x'}
+0240	fileTests	241	1	${@:-$x}
+0241	fileTests	242	1	${var#*'="'}
+0242	fileTests	243	1	${var/'a'/b'c'd}
+0243	fileTests	244	1	${foo%bar}${foo%%bar*}
+0244	fileTests	245	1	${3#bar}${-##bar*}
+0245	fileTests	246	1	${foo%?}
+0246	fileTests	247	1	foo=force_expansion\necho ${foo:#bar}
+0247	fileTests	248	1	foo=force_expansion\necho ${foo:|bar}
+0248	fileTests	249	1	foo=force_expansion\necho ${foo:*bar}
+0249	fileTests	250	2	${foo[1]}
+0250	fileTests	251	1	$foo[1]
+0251	fileTests	252	1	a$foo[1]b
+0252	fileTests	253	1	"a$foo[1]b"
+0253	fileTests	254	2	${foo[1,3]}
+0254	fileTests	255	1	${a:(1):(2)}
+0255	fileTests	256	1	${args[cmd,#]}
+0256	fileTests	257	1	${foo[1,-1]}
+0257	fileTests	258	1	${@[-1]}
+0258	fileTests	259	1	${*[-1]}
+0259	fileTests	260	1	$foo[1,3]
+0260	fileTests	261	1	${signals[(i)QUIT]}
+0261	fileTests	262	1	${ZSH_VERSION[(s:.:w)2]}
+0262	fileTests	263	1	$foo[(r)pattern]
+0263	fileTests	264	1	${array[(i)]}
+0264	fileTests	265	1	${array[(i)--]}
+0265	fileTests	266	1	${array[(R)/*]}
+0266	fileTests	267	1	${array[(i)&]}
+0267	fileTests	268	1	${foo[(r)ab,(r)cd]}
+0268	fileTests	269	1	${foo[-1]}
+0269	fileTests	270	1	${foo[@]}
+0270	fileTests	271	1	${foo[*]-etc}
+0271	fileTests	272	1	${foo[bar]}
+0272	fileTests	273	1	${foo[$bar]}
+0273	fileTests	274	1	${foo[${bar}]}
+0274	fileTests	275	2	${foo:1}
+0275	fileTests	276	2	${foo:1:2}
+0276	fileTests	277	1	${foo:a:b}
+0277	fileTests	278	1	${foo:1:-2}
+0278	fileTests	279	1	${foo::+3}
+0279	fileTests	280	1	${foo: -1}
+0280	fileTests	281	1	${foo: +2+3}
+0281	fileTests	282	1	${foo:a?1:2:3}
+0282	fileTests	283	1	${foo/a/b}
+0283	fileTests	284	1	${foo/ /\t}
+0284	fileTests	285	1	${foo/[/]-}
+0285	fileTests	286	1	${foo/bar/b/a/r}
+0286	fileTests	287	1	${foo/$a/$'\\''}
+0287	fileTests	288	1	${foo//b1/b2}
+0288	fileTests	289	2	${foo///}
+0289	fileTests	290	1	${foo/-//}
+0290	fileTests	291	2	${foo//#/}
+0291	fileTests	292	1	${foo//[42]/}
+0292	fileTests	293	1	${a^b} ${a^^b} ${a,b} ${a,,b}
+0293	fileTests	294	1	${a@E} ${b@a} ${@@Q} ${!ref@P}
+0294	fileTests	295	1	${a@K} ${b@k}
+0295	fileTests	296	1	${a@Q} ${b@#}
+0296	fileTests	297	1	${#foo}
+0297	fileTests	298	1	${%foo}
+0298	fileTests	299	1	${!foo} ${!bar[@]}
+0299	fileTests	300	1	${!foo*} ${!bar@}
+0300	fileTests	301	1	${#?}
+0301	fileTests	302	1	${#-foo} ${#?bar}
+0302	fileTests	303	1	"${foo}"
+0303	fileTests	304	1	"(foo)"
+0304	fileTests	305	1	"${foo}>"
+0305	fileTests	306	2	"$(foo)"
+0306	fileTests	307	4	"$(foo bar)"
+0307	fileTests	308	1	'${foo}'
+0308	fileTests	309	1	$((1))
+0309	fileTests	310	2	$((1 + 3))
+0310	fileTests	311	1	"$((foo))"
+0311	fileTests	312	1	$((a)) b
+0312	fileTests	313	1	$((arr[0]++))
+0313	fileTests	314	1	$((++arr[0]))
+0314	fileTests	315	1	$((${a:-1}))
+0315	fileTests	316	2	$((5 * 2 - 1))
+0316	fileTests	317	1	$((i | 13))
+0317	fileTests	318	2	$(((a) + ((b))))
+0318	fileTests	319	4	$((3 % 7))
+0319	fileTests	320	1	"$((1 / 3))"
+0320	fileTests	321	1	$((2 ** 10))
+0321	fileTests	322	1	$(((1) ^ 3))
+0322	fileTests	323	1	$((1 >> (3 << 2)))
+0323	fileTests	324	1	$((-(1)))
+0324	fileTests	325	1	$((i++))
+0325	fileTests	326	1	$((--i))
+0326	fileTests	327	2	$((! i))
+0327	fileTests	328	1	$((~i))
+0328	fileTests	329	2	$((-! +i))
+0329	fileTests	330	2	$((! ! i))
+0330	fileTests	331	1	$((~~i))
+0331	fileTests	332	1	$((1 < 3))
+0332	fileTests	333	2	$((i = 2))
+0333	fileTests	334	2	((a[i] = 4))
+0334	fileTests	335	1	$((a += 2, b -= 3))
+0335	fileTests	336	1	$((a >>= 2, b <<= 3))
+0336	fileTests	337	1	$((a ^^ 2))
+0337	fileTests	338	1	$((a ^^= 2, b **= 3))
+0338	fileTests	339	1	$((a &&= 2, b ||= 3))
+0339	fileTests	340	1	$((a == b && c > d))
+0340	fileTests	341	1	$((a != b))
+0341	fileTests	342	1	$((a &= b))
+0342	fileTests	343	1	$((a |= b))
+0343	fileTests	344	1	$((a %= b))
+0344	fileTests	345	2	$((a /= b))
+0345	fileTests	346	1	$((a ^= b))
+0346	fileTests	347	1	$((i *= 3))
+0347	fileTests	348	1	$((2 >= 10))
+0348	fileTests	349	1	$((foo ? b1 : b2))
+0349	fileTests	350	1	$((a <= (1 || 2)))
+0350	fileTests	351	2	foo$
+0351	fileTests	352	3	foo$
+0352	fileTests	353	1	$''
+0353	fileTests	354	1	$""
+0354	fileTests	355	1	$'foo'
+0355	fileTests	356	1	$'f+oo${'
+0356	fileTests	357	1	$'foo bar`'
+0357	fileTests	358	1	$'a ${b} c'
+0358	fileTests	359	1	$"a ${b} c"
+0359	fileTests	360	1	"a $b c"
+0360	fileTests	361	1	$"a $b c"
+0361	fileTests	362	1	$'f\\'oo\n'
+0362	fileTests	363	1	$"foo"
+0363	fileTests	364	1	$"foo$"
+0364	fileTests	365	1	$"foo bar"
+0365	fileTests	366	1	$'f\\'oo'
+0366	fileTests	367	1	$"f\\"oo"
+0367	fileTests	368	1	"foo$"
+0368	fileTests	369	1	"foo$$"
+0369	fileTests	370	1	"a $\\"b\\" c"
+0370	fileTests	371	2	$(foo$)
+0371	fileTests	372	1	foo$bar
+0372	fileTests	373	1	foo$(bar)
+0373	fileTests	374	1	foo${bar}
+0374	fileTests	375	1	'foo${bar'
+0375	fileTests	376	2	(foo)\nbar
+0376	fileTests	377	2	foo\n(bar)
+0377	fileTests	378	2	foo\n(bar)
+0378	fileTests	379	4	case $i in 1) foo ;; 2 | 3*) bar ;; esac
+0379	fileTests	380	1	case i in 1) a ;& 2) ;; esac
+0380	fileTests	381	3	case i in 1) a ;; esac
+0381	fileTests	382	1	case i in 1) a ;;& 2) b ;; esac
+0382	fileTests	383	1	case i in 1) a ;| 2) b ;; esac
+0383	fileTests	384	1	case $i in 1) cat <<EOF ;;\nfoo\nEOF\nesac
+0384	fileTests	385	1	foo | while read a; do b; done
+0385	fileTests	386	1	while read l; do foo || bar; done
+0386	fileTests	387	1	echo if while
+0387	fileTests	388	1	${foo}if
+0388	fileTests	389	1	$if'|'
+0389	fileTests	390	2	if a; then b=; fi
+0390	fileTests	391	2	if a; then >f; fi
+0391	fileTests	392	2	if a; then (a); fi
+0392	fileTests	393	2	a=b\nc=d
+0393	fileTests	394	1	foo && write | read
+0394	fileTests	395	1	write | read && bar
+0395	fileTests	396	1	foo >f | bar
+0396	fileTests	397	1	(foo) >f | bar
+0397	fileTests	398	1	foo | >f
+0398	fileTests	399	1	[[ a ]]
+0399	fileTests	400	1	[[ a ]]\nb
+0400	fileTests	401	1	[[ a > b ]]
+0401	fileTests	402	1	[[ 1 -nt 2 ]]
+0402	fileTests	403	1	[[ 1 -eq 2 ]]
+0403	fileTests	404	1	[[ -1 -eq -1 ]]
+0404	fileTests	405	1	[[ +3 -eq 1+2 ]]
+0405	fileTests	406	2	[[ -R a ]]
+0406	fileTests	407	1	[[ -n $foo#bar ]]
+0407	fileTests	408	2	[[ a =~ b ]]
+0408	fileTests	409	1	[[ a =~ " foo "$bar ]]
+0409	fileTests	410	1	[[ a =~ foo"bar" ]]
+0410	fileTests	411	1	[[ a =~ [ab](c |d) ]]
+0411	fileTests	412	1	[[ a =~ ( ]]<>;&) ]]
+0412	fileTests	413	1	[[ a =~ ($foo) ]]
+0413	fileTests	414	1	[[ a =~ b\\ c|d ]]
+0414	fileTests	415	1	[[ a == -n ]]
+0415	fileTests	416	1	[[ a == (b|c)* ]]
+0416	fileTests	417	1	[[ a == (#i)bar ]]
+0417	fileTests	418	1	echo (foo|bar).baz
+0418	fileTests	419	1	ls (#i)*.mod
+0419	fileTests	420	1	[[ a =~ -n ]]
+0420	fileTests	421	1	[[ a =~ b$ || c =~ d$ ]]
+0421	fileTests	422	1	[[ -n $a ]]
+0422	fileTests	423	1	[[ ! $a < 'b' ]]
+0423	fileTests	424	3	[[ ! -e $a ]]
+0424	fileTests	425	3	[[ a && b ]]
+0425	fileTests	426	1	[[ (a && b) ]]
+0426	fileTests	427	2	[[ a && (b) ]]
+0427	fileTests	428	1	[[ (a && b) || -f c ]]
+0428	fileTests	429	2	[[ -S a && -L b ]]
+0429	fileTests	430	1	[[ -k a && -N b ]]
+0430	fileTests	431	1	[[ -G a && -O b ]]
+0431	fileTests	432	1	[[ -d a && -c b ]]
+0432	fileTests	433	1	[[ -b a && -p b ]]
+0433	fileTests	434	1	[[ -g a && -u b ]]
+0434	fileTests	435	1	[[ -r a && -w b ]]
+0435	fileTests	436	1	[[ -x a && -s b ]]
+0436	fileTests	437	1	[[ -t a && -z b ]]
+0437	fileTests	438	1	[[ -o a && -v b ]]
+0438	fileTests	439	1	[[ a -ot b && c -ef d ]]
+0439	fileTests	440	1	[[ a = b && c != d ]]
+0440	fileTests	441	1	[[ a -ne b && c -le d ]]
+0441	fileTests	442	1	[[ c -ge d ]]
+0442	fileTests	443	1	[[ a -lt b && c -gt d ]]
+0443	fileTests	444	1	[[ 1.2 -gt 0.3 ]]
+0444	fileTests	445	1	declare -f func
+0445	fileTests	446	1	(local bar)
+0446	fileTests	447	1	local {a,b}_c=1
+0447	fileTests	448	1	typeset
+0448	fileTests	449	1	export bar
+0449	fileTests	450	1	readonly -n
+0450	fileTests	451	1	nameref bar=
+0451	fileTests	452	1	declare -a +n -b$o foo=bar
+0452	fileTests	453	2	declare -a foo=(b1 $(b2))
+0453	fileTests	454	1	local -a foo=(b1)
+0454	fileTests	455	1	declare -A foo=([a]=b)
+0455	fileTests	456	1	declare foo[a]=
+0456	fileTests	457	1	declare foo[*]
+0457	fileTests	458	1	declare foo["x y"]
+0458	fileTests	459	1	declare foo['x y']
+0459	fileTests	460	1	foo=([)
+0460	fileTests	461	2	a && b=(c)\nd
+0461	fileTests	462	1	declare -f $func >/dev/null
+0462	fileTests	463	1	declare a\n{ x; }
+0463	fileTests	464	1	eval a=b foo
+0464	fileTests	465	2	time
+0465	fileTests	466	1	time -p
+0466	fileTests	467	1	time -a
+0467	fileTests	468	1	time --
+0468	fileTests	469	1	time foo
+0469	fileTests	470	1	time { foo; }
+0470	fileTests	471	1	time\nfoo
+0471	fileTests	472	1	coproc foo bar
+0472	fileTests	473	1	coproc name { foo; }
+0473	fileTests	474	1	coproc $namevar { foo; }
+0474	fileTests	475	2	coproc foo
+0475	fileTests	476	1	coproc { foo; }
+0476	fileTests	477	1	coproc (foo)
+0477	fileTests	478	1	coproc name foo | bar
+0478	fileTests	479	2	coproc $()
+0479	fileTests	480	1	let i++
+0480	fileTests	481	1	let a++ b++ c +d
+0481	fileTests	482	1	let ++i >/dev/null
+0482	fileTests	483	2	let a=(1 + 2) b=3+4
+0483	fileTests	484	2	let a=$(echo 3)
+0484	fileTests	485	1	(foo-bar)
+0485	fileTests	486	3	let i++\nbar
+0486	fileTests	487	3	let i++\nfoo=(bar)
+0487	fileTests	488	2	case a in b) let i++ ;; esac
+0488	fileTests	489	1	a+=1
+0489	fileTests	490	1	b+=(2 3)
+0490	fileTests	491	1	a[1]=(b c)
+0491	fileTests	492	1	a[2]=b c[-3]= d[x]+=e
+0492	fileTests	493	1	*[i]=x
+0493	fileTests	494	1	arr[0,1]=x
+0494	fileTests	495	2	b[i]+=2
+0495	fileTests	496	1	$((a + "b + $c"))
+0496	fileTests	497	1	let 'i++'
+0497	fileTests	498	1	echo ${a["x y"]}
+0498	fileTests	499	2	a[$"x y"]=b
+0499	fileTests	500	2	((a["x y"] = b))
+0500	fileTests	501	2	a=(["x y"]=b)
+0501	fileTests	502	2	a=([x]= [y]=)
+0502	fileTests	503	1	a=(foo[0-9])
+0503	fileTests	504	1	a=("foo"[0-9])
+0504	fileTests	505	1	a]b
+0505	fileTests	506	1	echo a[b c[de]f
+0506	fileTests	507	1	<<EOF | b\nfoo\nEOF
+0507	fileTests	508	1	<<EOF1 <<EOF2 | c && d\nEOF1\nEOF2
+0508	fileTests	509	2	<<EOF && { bar; }\nhdoc\nEOF
+0509	fileTests	510	1	foo() {\n\t<<EOF && { bar; }\nhdoc\nEOF\n}
+0510	fileTests	511	2	"a$("")"
+0511	fileTests	512	1	echo ?(b)*(c)+(d)@(e)!(f)
+0512	fileTests	513	1	echo foo@(b*(c|d))bar
+0513	fileTests	514	1	echo $a@(b)$c?(d)$e*(f)$g+(h)$i!(j)$k
+0514	fileTests	515	1	"^$1[[:space:]]"
+0515	fileTests	516	1	echo *(.)
+0516	fileTests	517	1	echo **(/)
+0517	fileTests	518	1	echo *.txt(@)
+0518	fileTests	519	1	echo *(om[1,5])
+0519	fileTests	520	1	echo /bin/sh(:t)
+0520	fileTests	521	1	echo .(:a)
+0521	fileTests	522	1	echo ~(:t)
+0522	fileTests	523	1	echo {go.mod,shfmt}(N*)
+0523	fileTests	524	1	echo $var(Nms-3)
+0524	fileTests	525	1	echo a(A) b(B)
+0525	fileTests	526	1	echo <->
+0526	fileTests	527	1	echo <5-10>
+0527	fileTests	528	1	echo foo<->.txt
+0528	fileTests	529	1	echo <5->.*
+0529	fileTests	530	1	echo <2-3
+0530	fileTests	531	1	@test "desc" { body; }
+0531	fileTests	532	1	@test 'desc' {\n\tmultiple\n\tstatements\n}
+0532	fileTests	533	1	${+foo}
+0533	fileTests	534	1	$+foo $#bar
+0534	fileTests	535	1	${${foo#head}%tail}
+0535	fileTests	536	1	${#"${foo}"}
+0536	fileTests	537	1	${$(echo footail)%tail}
+0537	fileTests	538	1	${foo:u}
+0538	fileTests	539	1	${foo:t5:h2:l}
+0539	fileTests	540	1	$${foo}
+0540	fileTests	541	1	${=foo}
+0541	fileTests	542	1	${~foo}
+0542	fileTests	543	1	${^foo}
+0543	fileTests	544	1	${==foo}
+0544	fileTests	545	1	${~~foo}
+0545	fileTests	546	1	${^^foo}
+0546	fileTests	547	1	$=foo $^bar $~baz
+0547	fileTests	548	1	${(o)=items}
+0548	fileTests	549	1	${(aO)foo} ${(s/x/)foo}
+0549	fileTests	550	1	${:-word}
+0550	fileTests	551	1	${:+word}
+0551	fileTests	552	1	${(%):-%N}
+0552	fileTestsNoPrint	0	1	$[foo]
+0553	fileTestsNoPrint	1	1	"$[foo]"
+0554	fileTestsNoPrint	2	1	"$[1 + 3]"
+0555	fileTestsKeepComments	0	1	# foo\ncmd\n# bar
+0556	fileTestsKeepComments	1	1	foo # bar # baz
+0557	fileTestsKeepComments	2	3	$(\n\t# foo\n)
+0558	fileTestsKeepComments	3	2	`# foo`

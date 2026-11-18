@@ -31,13 +31,17 @@ rubash 对一个命令词按优先级做三层处理：
    Windows 上 describe 严格按 GNU `describe_command`
    （builtins/type.def:211）作答——可解析即报告 PATH 文件本身
    （`command -v` 给全路径、`type -t` 给 `file`），不可解析即未找到，
-   与执行面是否接管无关。
+   与执行面是否接管无关。**#2642（2026-11-12）**：`env` 这一唯一的
+   扩展 builtin 同样适用——非 Windows 上 `type env` / `command -v env`
+   报告 PATH 文件；执行面与 `enable` / `compgen -b` 仍走统一投影。
 3. **外部命令**：沿 PATH 查找，由 winuxcmd 提供。
 
 ## 二、真 builtin 清单（62 项）
 
 GNU Bash 5.3 的 61 个 builtin **全部覆盖，无缺失**；唯一加粗的扩展是 `env`
-（rubash#759 item 4 起不再携带 zsh 兼容别名）。另有 Windows 专属 `sudo`
+（rubash#759 item 4 起不再携带 zsh 兼容别名）。`env` 的 describe 面例外：
+非 Windows 上 `type env` / `command -v env` 按 GNU 报告 PATH 文件（#2642），
+仅 Windows 产品面报告为 builtin。另有 Windows 专属 `sudo`
 作为**隐藏 host builtin** 不计入 62（见第三节说明）。
 
 <!-- builtins-list
@@ -120,7 +124,8 @@ wait
 
 ## 三、Fast-Path（隐藏 builtin）清单
 
-以下命令在参数形态简单时进程内执行，否则回退外部 winuxcmd 命令。
+以下命令在参数形态简单时进程内执行，否则回退外部 winuxcmd 命令
+（sleep 自 #3488 起在 unix 上例外：可解析形态全面退让真 spawn，见表内备注）。
 **有意不进 `is_shell_builtin_name` 白名单**：它们不是 builtin，白名单外
 的身份保证 builtin 表类内省面（`compgen -b`、`enable`）与 GNU 一致；
 describe 面自 #2036 S2 起如实披露接管（`type` 报 emulation 形态），
@@ -137,15 +142,16 @@ stty
 
 | 命令 | fast-path 实现位置 | 回退行为 | 备注 |
 |---|---|---|---|
-| `sleep` | `builtins/sleep.rs`（`can_execute_fast_path`） | `execute_external` | 支持小数秒（f64） |
+| `sleep` | `builtins/sleep.rs`（`can_execute_fast_path`） | `execute_external` | 支持小数秒（f64）；stand_down=Yield 为已裁——用户 2026-11-14 裁定（#3488 (a)）：unix 上可解析形态全面退让真 spawn（进程内仿真无进程同一性、进程树 watchdog 杀不到，#2995），仿真仅余非 unix 面 |
 | `dirname` | `executor/printf_path_builtins.rs` | `execute_external`（winuxcmd `dirname`） | 非平凡路径回退 |
 | `basename` | `executor/printf_path_builtins.rs` | `execute_external`（winuxcmd `basename`） | 同上 |
 | `uname` | `builtins/uname.rs`（身份人设字段取自 `executor/identity.rs`） | 无（内置完整选项解析） | rubash#154：身份不外包给 PATH |
 | `arch` | `builtins/uname.rs`（`uname -m` 语义） | 无 | 同上 |
 | `stty` | `builtins/stty.rs`（`execute_console_mode_tool`） | `execute_external`（stand-down 时） | 控制台模式工具，与 uname/arch 同族（#154）；stand_down=Replace 为已裁保持——用户 2026-10-29 确认 stty 暂用内建、不翻 Yield，评估格就此关闭，有实测问题再重评 |
 
-`env` 是唯一的混合形态：它在白名单内（属第二节真 builtin，`type env` 报告为
-builtin），但实现是进程内执行 coreutils 语义、**没有外部回退路径**。它不进
+`env` 是唯一的混合形态：它在白名单内（属第二节真 builtin，Windows 上
+`type env` 报告为 builtin；非 Windows 上 describe 按 GNU 报告 PATH 文件，
+#2642），但实现是进程内执行 coreutils 语义、**没有外部回退路径**。它不进
 本清单，因为白名单归属与 fast-path 判定互斥，文档同步测试会拒绝两边都出现
 的名字。
 

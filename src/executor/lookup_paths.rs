@@ -1,8 +1,9 @@
+use super::path::drop_exe_probe_suffix;
 use super::*;
 
 impl Executor {
     pub(in crate::executor) fn command_path(&self, name: &str, force_path: bool) -> Option<String> {
-        self.command_path_with_bridge(name, force_path, true)
+        self.command_path_with_bridge(name, force_path, true, true)
     }
 
     /// Bridge-free command lookup, for execution decisions only.
@@ -20,7 +21,7 @@ impl Executor {
         name: &str,
         force_path: bool,
     ) -> Option<String> {
-        self.command_path_with_bridge(name, force_path, false)
+        self.command_path_with_bridge(name, force_path, false, false)
     }
 
     fn command_path_with_bridge(
@@ -28,39 +29,28 @@ impl Executor {
         name: &str,
         force_path: bool,
         allow_bridge: bool,
+        describe_spelling: bool,
     ) -> Option<String> {
         if !force_path {
-            if let Some(path) = crate::builtins::hash::hashed_path(&self.shell_state.env_vars, name)
+            if let Some(path) =
+                crate::builtins::hash::phash_search(&self.shell_state.env_vars, name)
             {
-                return Some(path);
+                return Some(drop_exe_probe_suffix(name, path));
             }
         }
-        if name.starts_with('/') {
-            return Some(name.to_string());
+        // rubash#2717: a slash-bearing name is never PATH-walked at
+        // the describe faces — GNU describe_command qualifies it by
+        // file_status alone (FS_EXECABLE) and reports it verbatim.
+        // The unconditional absolute-name shortcut and the lose-on
+        // find_user_command fallthrough below both reported
+        // non-executable files and missing paths as found.
+        if crate::executor::path::has_path_separator(name) {
+            return crate::executor::path::slash_name_is_describable(
+                name,
+                &self.shell_state.env_vars,
+            )
+            .then(|| name.to_string());
         }
-        // Windows suite bridge: GNU test replays expect mv/cat/ls to
-        // describe even on hosts whose PATH never holds them (type.tests:39
-        // `type -t mv`), so the /bin-namespace display paths stay. Unix
-        // must NOT fake them: GNU describe_command (type.def:379) prints
-        // the real find_user_command hit below (WSL: `mv is /usr/bin/mv`).
-        // rubash#588: like the winuxcmd dispatcher, this /bin namespace is
-        // the stand-in for GNU's startup default PATH (variables.c:550
-        // set_if_not) and answers only while PATH is still the imported
-        // value — after a shell-level assignment, describe_command reports
-        // what find_user_command_in_path (findcmd.c:623-697) actually
-        // found, so `PATH=/nonexistent; command -v ls` fails with rc 1 the
-        // way GNU 5.3.0 does (WSL probe 2026-10-13).
-        #[cfg(windows)]
-        if allow_bridge && !crate::executor::path::path_is_user_owned(&self.shell_state.env_vars) {
-            if matches!(name, "mv") {
-                return Some("/usr/bin/mv".to_string());
-            }
-            if matches!(name, "cat" | "ls") {
-                return Some(format!("/bin/{name}"));
-            }
-        }
-        #[cfg(not(windows))]
-        let _ = allow_bridge;
         // GNU findcmd.c:266 path_value + builtins/type.def:390 describe_command:
         // an unset PATH makes find_user_command return NAME unchanged, which
         // describe_command then reports as "./name" when NAME is executable in
@@ -69,8 +59,70 @@ impl Executor {
         if let Some(dot_path) = self.command_path_in_dot(name) {
             return Some(dot_path);
         }
-        find_user_command(name, &self.shell_state.env_vars)
-            .map(|path| shell_display_path(&path.to_string_lossy().replace('\\', "/")))
+        let found = match find_user_command(name, &self.shell_state.env_vars) {
+            Some(found) => found,
+            // Windows suite bridge: GNU test replays expect mv/cat/ls
+            // to describe even on hosts whose PATH never holds them
+            // (type.tests:39 `type -t mv`), so the /bin-namespace
+            // display paths stay — but strictly as the fallback when
+            // the real walk found nothing (niubash#993 §4: a real PATH
+            // hit must win, since `command -v`/`type -p` are required
+            // to print the actual resolved file). Unix must NOT fake
+            // them: GNU describe_command (type.def:379) prints the real
+            // find_user_command hit only (WSL: `mv is /usr/bin/mv`).
+            // rubash#588: like the winuxcmd dispatcher, this /bin
+            // namespace is the stand-in for GNU's startup default PATH
+            // (variables.c:550 set_if_not) and answers only while PATH
+            // is still the imported value — after a shell-level
+            // assignment, describe_command reports what
+            // find_user_command_in_path (findcmd.c:623-697) actually
+            // found, so `PATH=/nonexistent; command -v ls` fails with
+            // rc 1 the way GNU 5.3.0 does (WSL probe 2026-10-13).
+            None => {
+                #[cfg(windows)]
+                if allow_bridge
+                    && !crate::executor::path::path_is_user_owned(&self.shell_state.env_vars)
+                {
+                    if matches!(name, "mv") {
+                        return Some("/usr/bin/mv".to_string());
+                    }
+                    if matches!(name, "cat" | "ls") {
+                        return Some(format!("/bin/{name}"));
+                    }
+                }
+                #[cfg(not(windows))]
+                let _ = allow_bridge;
+                return None;
+            }
+        };
+        // rubash#3147: the describe faces (describe_spelling) print
+        // the walk's ONE constructed string — the as-written
+        // `<elem>/<name>` join (findcmd.c:553 sh_makepath) that
+        // describe_command takes from find_user_command and prints
+        // verbatim (builtins/type.def:379, :425/:427). The anchored
+        // resolution form (`/tmp/<fixture>/./rel1/foo`, `/./` residue
+        // included) is the execution answer, not the display:
+        // recorded_resolution_spelling applies the same
+        // anchor-equality determination as the hash recording
+        // (rubash#2696) — the join is the display exactly when
+        // anchoring it lands on the file the walk produced, and any
+        // other resolution keeps the anchored display form. The
+        // execution-decision face (command_path_without_bridge)
+        // always keeps the anchored form.
+        if describe_spelling {
+            Some(drop_exe_probe_suffix(
+                name,
+                crate::executor::path::recorded_resolution_spelling(
+                    name,
+                    &found,
+                    &self.shell_state.env_vars,
+                ),
+            ))
+        } else {
+            Some(shell_display_path(
+                &found.to_string_lossy().replace('\\', "/"),
+            ))
+        }
     }
 
     /// Whether an in-process emulation of the external command `name`
@@ -186,6 +238,23 @@ impl Executor {
     }
 
     pub(in crate::executor) fn is_enabled_shell_builtin_name(&self, name: &str) -> bool {
+        // #2642 (completing #2514): the only callers of this predicate
+        // are the two describe faces (codegraph: describe_name_with_io,
+        // describe_name_all_with_io), so gating it here gates exactly
+        // what the describe faces print and nothing else — dispatch,
+        // `enable`, `compgen -b` and `builtin env` keep the unified
+        // projection. `env` is rubash's one extension builtin
+        // (builtin_table::NON_GNU_BUILTIN_NAMES): GNU bash has no env
+        // builtin, so GNU `describe_command` (builtins/type.def:211)
+        // resolves it as a PATH file, and the row exists only because
+        // Windows has no /usr/bin/env. Off Windows the describe faces
+        // must therefore fall through to the PATH branch, exactly as
+        // #2514 ruled for the emulation-registered names; on Windows
+        // the builtin answer stands (pinned by
+        // issue2036_s2_introspection_windows).
+        if !cfg!(windows) && super::builtin_table::NON_GNU_BUILTIN_NAMES.contains(&name) {
+            return false;
+        }
         is_shell_builtin_name(name)
             && !crate::builtins::enable::is_disabled(&self.shell_state.env_vars, name)
     }
@@ -223,30 +292,22 @@ impl Executor {
         // is the -a (`CDESC_ALL`) enumeration, so the hashed entry is reported
         // only under -P (force_path); a plain `type -a` must NOT prepend it.
         if force_path {
-            if let Some(path) = crate::builtins::hash::hashed_path(&self.shell_state.env_vars, name)
+            if let Some(path) =
+                crate::builtins::hash::phash_search(&self.shell_state.env_vars, name)
             {
-                paths.push(path);
+                paths.push(drop_exe_probe_suffix(name, path));
             }
         }
 
-        if name.starts_with('/') {
-            paths.push(name.to_string());
+        // rubash#2717: same file_status qualification as
+        // command_path — a slash-bearing name is reported (verbatim,
+        // once) only when executable; the PATH enumeration below
+        // never applies to it (GNU absolute_program).
+        if crate::executor::path::has_path_separator(name) {
+            if crate::executor::path::slash_name_is_describable(name, &self.shell_state.env_vars) {
+                paths.push(name.to_string());
+            }
             return paths;
-        }
-        // Same Windows/unix split as command_path above: the /bin-namespace
-        // display paths are a Windows suite bridge; unix enumerates only the
-        // real PATH matches, per GNU user_command_matches (findcmd.c:437).
-        // rubash#588: gated on the startup-PATH state exactly like
-        // command_path — after a shell-level PATH assignment the
-        // enumeration reports real hits only.
-        #[cfg(windows)]
-        if !crate::executor::path::path_is_user_owned(&self.shell_state.env_vars) {
-            if matches!(name, "mv") {
-                paths.push("/usr/bin/mv".to_string());
-            }
-            if matches!(name, "cat" | "ls") {
-                paths.push(format!("/bin/{name}"));
-            }
         }
         // GNU findcmd.c:477-481 user_command_matches iterates
         // path_value("PATH"): an unset PATH yields no list and no match
@@ -262,18 +323,48 @@ impl Executor {
         // unset/empty PATH are exactly its arms.)
         if let Some(path_value) = self.shell_state.env_vars.get("PATH") {
             for dir in split_shell_path(path_value) {
+                // rubash#3826: GNU findcmd.c:544 — expand a `~`-leading
+                // PATH element at lookup time (unless POSIX mode), so
+                // `type -a` / `command -v -a` enumerate the expanded
+                // element.
+                let dir = crate::executor::path::expand_path_element_tilde(
+                    &dir,
+                    &self.shell_state.env_vars,
+                );
                 let candidate = shell_path_to_windows(&dir, &self.shell_state.env_vars).join(name);
-                if candidate.is_file() {
-                    paths.push(shell_display_path(
-                        &candidate.to_string_lossy().replace('\\', "/"),
+                // rubash#3147: the existence probe resolves against
+                // the SESSION cwd, exactly like the single-match walk
+                // (find_in_path_walk_unix anchors its candidate with
+                // anchor_at_session_cwd — GNU file_status resolves
+                // the constructed name against the shell's cwd, not
+                // the process cwd). The unanchored probe lost every
+                // relative-element match after a `cd`. The DISPLAYED
+                // string stays the as-written join itself (the
+                // candidate before anchoring), never the anchored
+                // form.
+                let anchored = crate::executor::path::anchor_at_session_cwd(
+                    candidate.clone(),
+                    &self.shell_state.env_vars,
+                );
+                // GNU type.def:381 describe_command: the -a enumeration
+                // uses user_command_matches (command, FS_EXEC_ONLY, ...)
+                // — only executable files are enumerated. The walk above
+                // is FS_EXEC_PREFERRED (correct for execution and the
+                // lenient faces), so the strict gate lives here, at the
+                // -a consumption point (rubash#3825).
+                if anchored.is_file() && crate::executor::path::is_executable_file(&anchored) {
+                    paths.push(drop_exe_probe_suffix(
+                        name,
+                        shell_display_path(&candidate.to_string_lossy().replace('\\', "/")),
                     ));
                 }
                 if cfg!(windows) {
                     for ext in executable_extensions() {
                         let candidate = candidate.with_extension(ext);
                         if candidate.is_file() {
-                            paths.push(shell_display_path(
-                                &candidate.to_string_lossy().replace('\\', "/"),
+                            paths.push(drop_exe_probe_suffix(
+                                name,
+                                shell_display_path(&candidate.to_string_lossy().replace('\\', "/")),
                             ));
                         }
                     }
@@ -281,6 +372,32 @@ impl Executor {
             }
         }
 
+        // Same Windows suite bridge as command_path above, now a
+        // strict fallback (niubash#993 §4): the /bin-namespace display
+        // paths enumerate only when the real PATH walk produced no
+        // hits — a real file answer always wins. rubash#588: gated on
+        // the startup-PATH state exactly like command_path — after a
+        // shell-level PATH assignment the enumeration reports real
+        // hits only. Unix keeps GNU user_command_matches
+        // (findcmd.c:437): real PATH matches only.
+        #[cfg(windows)]
+        if paths.is_empty()
+            && !crate::executor::path::path_is_user_owned(&self.shell_state.env_vars)
+        {
+            if matches!(name, "mv") {
+                paths.push("/usr/bin/mv".to_string());
+            }
+            if matches!(name, "cat" | "ls") {
+                paths.push(format!("/bin/{name}"));
+            }
+        }
+
+        // niubash#993 S7: a `name` + `name.exe` pair in one PATH
+        // element collapses to the single as-written join Git Bash
+        // prints — drop the consecutive duplicate the .exe strip just
+        // produced (the walk pushes the bare file first, then each
+        // PATHEXT hit).
+        paths.dedup();
         paths
     }
 }

@@ -1,14 +1,15 @@
-use std::io::{self, Write};
+use std::io;
 
 use super::marks::{
     mark_array, mark_assoc, mark_exported, mark_readonly, marked_vars, nameref_resolved_cell,
     unmark_exported,
 };
 use super::value::{
-    array_attribute_assignment_value, diagnostic_prefix, readonly_error_prefix,
-    readonly_error_subject, split_assignment, valid_identifier,
+    array_attribute_assignment_value, readonly_error_subject, split_assignment, valid_identifier,
 };
+use super::{bare_diag_line, readonly_error_prefix};
 use super::{ExportMode, EXECUTION_FAILURE, EXECUTION_SUCCESS, READONLY_VARS};
+use crate::executor::builtin_diag::{Diag, DiagKind};
 use crate::executor::local_helpers::sync_shell_assignment_process_env;
 
 /// The subject GNU's sh_invalidid names for a bad assignment operand
@@ -27,19 +28,16 @@ fn invalid_id_subject<'a>(arg: &'a str, name: &'a str) -> &'a str {
     arg
 }
 
-pub(super) fn apply_export_arg<W>(
+pub(super) fn apply_export_arg(
     arg: &str,
     mode: ExportMode,
     array: bool,
     assoc: bool,
     env_vars: &mut crate::shell::var_table::VarTable,
-    stderr: &mut W,
+    diag: &mut Diag,
     oob_word: &mut Option<String>,
     traced: Option<&mut Vec<(String, bool, String)>>,
-) -> io::Result<i32>
-where
-    W: Write,
-{
+) -> io::Result<i32> {
     let (name, append, value) = split_assignment(arg);
     // The operand as written: GNU's per-assignment xtrace line
     // (subst.c:3580 xtrace_print_assignment via setattr.def's
@@ -53,12 +51,9 @@ where
         // the name-with-subscript is reported (`a[0]=x' complains about
         // `a[0]'); anything else reports the whole operand word
         // (`9bad=v', `9x[0]=v', `a-b=v') — rubash#1348.
-        let diagnostic = format!(
-            "{}export: `{}': not a valid identifier\n",
-            diagnostic_prefix(),
-            invalid_id_subject(arg, name)
-        );
-        stderr.write_all(diagnostic.as_bytes())?;
+        diag.error(DiagKind::InvalidId(
+            invalid_id_subject(arg, name).to_string(),
+        ));
         return Ok(EXECUTION_FAILURE);
     }
     let resolved_name = nameref_resolved_cell(env_vars, name).unwrap_or_else(|| name.to_string());
@@ -69,12 +64,7 @@ where
     // `export: 'var[0]': not a valid identifier` (sh_invalidid on the
     // cell), not a silent mark on a literal "var[0]" key.
     if !valid_identifier(name) {
-        let diagnostic = format!(
-            "{}export: `{name}': not a valid identifier
-",
-            diagnostic_prefix()
-        );
-        stderr.write_all(diagnostic.as_bytes())?;
+        diag.error(DiagKind::InvalidId(name.to_string()));
         // set_var_attribute returns void here without bumping
         // any_failed, so set_or_show_attributes reports SUCCESS.
         return Ok(EXECUTION_SUCCESS);
@@ -83,12 +73,12 @@ where
     match mode {
         ExportMode::Set => {
             if value.is_some() && env_vars.is_marked(READONLY_VARS, name) {
-                writeln!(
-                    stderr,
-                    "{}{}: readonly variable",
-                    readonly_error_prefix(env_vars),
-                    name
-                )?;
+                // rubash#3533: GNU setattr.def binds the operand FIRST and
+                // applies att_exported through set_var_attribute whether or
+                // not the bind succeeded — `export s=2` on a readonly s
+                // reports err_readonly but still leaves `declare -rx s`.
+                mark_exported(env_vars, name);
+                diag.err_readonly(&readonly_error_prefix(env_vars), name);
                 return Ok(EXECUTION_FAILURE);
             }
 
@@ -158,7 +148,7 @@ where
             // so gate on has_assign like the sv_path flush below.
             if has_assign {
                 if let Some(warning) = crate::locale::locale_assignment_warning(name, env_vars) {
-                    writeln!(stderr, "{}warning: {}", diagnostic_prefix(), warning)?;
+                    bare_diag_line(diag, env_vars, &format!("warning: {warning}"));
                 }
             }
             // GNU variables.c:5819/5919 sv_path -> phash_flush
@@ -179,12 +169,15 @@ where
             // the operand entirely lost the value.
             if let Some(assigned) = value {
                 if env_vars.is_marked(READONLY_VARS, name) {
-                    writeln!(
-                        stderr,
-                        "{}{}: readonly variable",
-                        readonly_error_prefix(env_vars),
-                        name
-                    )?;
+                    // rubash#3533: same setattr.def order as the Set arm —
+                    // the failed bind does not stop the attribute change,
+                    // so `export -n x=2` on a readonly exported x still
+                    // removes att_exported (`declare -r x`). Same
+                    // existence-gated process-env removal as the normal
+                    // tail below (#916/#917).
+                    crate::executor::local_helpers::unset_process_env(name);
+                    unmark_exported(env_vars, name);
+                    diag.err_readonly(&readonly_error_prefix(env_vars), name);
                     return Ok(EXECUTION_FAILURE);
                 }
                 let converted = env_vars.contains_key(name);
@@ -219,19 +212,17 @@ where
     Ok(EXECUTION_SUCCESS)
 }
 
-pub(super) fn apply_readonly_arg<W>(
+pub(super) fn apply_readonly_arg(
     arg: &str,
     array: bool,
     assoc: bool,
+    undo: bool,
     env_vars: &mut crate::shell::var_table::VarTable,
-    stderr: &mut W,
+    diag: &mut Diag,
     context_name: Option<&str>,
     oob_word: &mut Option<String>,
     traced: Option<&mut Vec<(String, bool, String)>>,
-) -> io::Result<i32>
-where
-    W: Write,
-{
+) -> io::Result<i32> {
     let (name, append, value) = split_assignment(arg);
     // Written operand name + RHS for the xtrace record (rubash#1340, see
     // apply_export_arg).
@@ -241,12 +232,9 @@ where
         // Same sh_invalidid subject rule as apply_export_arg
         // (rubash#1348): name-with-subscript for a valid-base element
         // form, the whole operand word otherwise.
-        let diagnostic = format!(
-            "{}readonly: `{}': not a valid identifier\n",
-            diagnostic_prefix(),
-            invalid_id_subject(arg, name)
-        );
-        stderr.write_all(diagnostic.as_bytes())?;
+        diag.error(DiagKind::InvalidId(
+            invalid_id_subject(arg, name).to_string(),
+        ));
         return Ok(EXECUTION_FAILURE);
     }
     let resolved_name = nameref_resolved_cell(env_vars, name).unwrap_or_else(|| name.to_string());
@@ -256,12 +244,7 @@ where
     // ref -> 'var[0]' reports `readonly: 'var[0]': not a valid
     // identifier` and leaves the nameref untouched.
     if !valid_identifier(name) {
-        let diagnostic = format!(
-            "{}readonly: `{name}': not a valid identifier
-",
-            diagnostic_prefix()
-        );
-        stderr.write_all(diagnostic.as_bytes())?;
+        diag.error(DiagKind::InvalidId(name.to_string()));
         // set_var_attribute returns void here without bumping
         // any_failed, so set_or_show_attributes reports SUCCESS.
         return Ok(EXECUTION_SUCCESS);
@@ -272,20 +255,16 @@ where
         if let Some(subject) =
             readonly_error_subject(value.unwrap_or_default(), array || assoc, context_name)
         {
-            writeln!(
-                stderr,
-                "{}{}: {}: readonly variable",
-                diagnostic_prefix(),
-                subject,
-                name
-            )?;
+            // The subject form carries the unqualified prolog (no
+            // gnu_errfmt gate): `{prolog}{subject}: {name}: readonly
+            // variable` is the err_readonly skeleton with the compound
+            // name `{subject}: {name}`.
+            diag.err_readonly(
+                &super::diag_prolog(env_vars).render(),
+                &format!("{subject}: {name}"),
+            );
         } else {
-            writeln!(
-                stderr,
-                "{}{}: readonly variable",
-                readonly_error_prefix(env_vars),
-                name
-            )?;
+            diag.err_readonly(&readonly_error_prefix(env_vars), name);
         }
         return Ok(EXECUTION_FAILURE);
     }
@@ -299,7 +278,11 @@ where
         if crate::builtins::set::shell_option_enabled(env_vars, "allexport") {
             mark_exported(env_vars, name);
         }
-        mark_readonly(env_vars, name);
+        // Under -n the readonly attribute is dropped from the request
+        // (setattr.def:174-176): the variable is created, never marked.
+        if !undo {
+            mark_readonly(env_vars, name);
+        }
         return Ok(EXECUTION_SUCCESS);
     }
 
@@ -343,7 +326,7 @@ where
     // (same has_assign gate as the sv_path flush below).
     if has_assign {
         if let Some(warning) = crate::locale::locale_assignment_warning(name, env_vars) {
-            writeln!(stderr, "{}warning: {}", diagnostic_prefix(), warning)?;
+            bare_diag_line(diag, env_vars, &format!("warning: {warning}"));
         }
     }
     // GNU variables.c:5819/5919 sv_path -> phash_flush (rubash#1551):
@@ -367,6 +350,10 @@ where
     {
         mark_exported(env_vars, name);
     }
-    mark_readonly(env_vars, name);
+    // Under -n the assignment binds plainly and the readonly mark is
+    // never applied (setattr.def:174-176, oracle-verified).
+    if !undo {
+        mark_readonly(env_vars, name);
+    }
     Ok(EXECUTION_SUCCESS)
 }

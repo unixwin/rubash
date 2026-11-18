@@ -17,7 +17,6 @@
 //!   the seeded file twice (startup load + re-arm load).
 //! - the load itself is skipped when startup lines exist (shell.c:810-811).
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;

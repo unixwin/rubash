@@ -22,7 +22,7 @@ use super::bind::{BindKindView, BindView};
 use super::capabilities::ElevationHandler;
 use super::capabilities::{
     Candidate, CompletionOutcome, CompletionProvider, DiagnosticSink, ExternalCommandHandler,
-    RcPolicy, StartupClass, StartupContext,
+    RcPolicy, SpecialCompspecKind, StartupClass, StartupContext,
 };
 use super::completion_attempt::CompletionAttempt;
 use super::completion_view::{full_env_sorted, CompletionView};
@@ -218,6 +218,24 @@ pub struct RunClassification {
     /// Populated by `run`/`run_line`; the stdin routes leave
     /// the mark to their callers and report `false`.
     pub signal_discard: bool,
+    /// An expansion-error DISCARD was the run's terminal
+    /// class (rubash#2794): a FATAL-class word-expansion
+    /// error — `${var:?}` (subst.c:10416-10418), nounset
+    /// unbound (subst.c:11032-11034), arithmetic nounset
+    /// (expr.c:1208-1216), bad @-transform (subst.c:8949) —
+    /// that the executor adjudicated an interactive DISCARD
+    /// at its raise point (the error branch, not the fatal
+    /// FORCE_EOF branch): the unit was dropped with status
+    /// 1 and the session lives, a fate indistinguishable
+    /// from an ordinary status-1 completion without this
+    /// face. Noted by the executor where the adjudication
+    /// is made; the session layer reports it, it does not
+    /// recompute it. The fact can stand alongside
+    /// `errexit_break`: the discard dropped the line, the
+    /// verdict on its status ended the session. The lesser
+    /// expansion classes (bad substitution and kin) carry
+    /// no interactive/fatal branch in GNU and never set it.
+    pub expansion_error_discard: bool,
     /// A real `exit`/FatalFunctionError jump ended the run's
     /// terminal unit (Q6 arm B: corrected by the executor's
     /// errexit-unwind mark — an errexit break no longer reads
@@ -473,12 +491,31 @@ impl Session {
         let posix = self.posix_mode();
         let unclosed = crate::lexer::has_unclosed_input_syntax_posix(source, posix)
             || script_driver::heredoc_delimiter_unclosed_quote(source).is_some();
-        let alias_live =
-            self.executor.alias_expansion_enabled() && !self.executor.aliases_snapshot().is_empty();
+        // rubash#3605 class B (Session::run): the live flag is the
+        // whole admission — the same answer run_command_string_with_init
+        // computes as `alias_live_at_start` (main.rs). GNU's reader is
+        // incremental (evalstring.c parse_and_execute) and the alias
+        // gate is consulted on every token (parse.y:5759), so
+        // expand_aliases-on at reader start — a non-interactive posix
+        // shell (shell.c:1853 init_noninteractive: expand_aliases =
+        // posixly_correct) or `-O expand_aliases` — needs the grouped
+        // driver even with an EMPTY alias table: `alias for=echo` on
+        // line 1 must sit in the table when `al for` is read on line 2.
+        // Requiring a non-empty table sent that shape to the
+        // whole-source route, whose word-level alias fallback expands
+        // reserved words without parse.y:5751-5769's posix ordering —
+        // `niu -o posix -c 'alias for=echo\nal for f in v\ndo ...'`
+        // printed `f in v` + a syntax error where GNU runs the loop.
+        let alias_live = self.executor.alias_expansion_enabled();
         let (status, flow, mut classification, diagnostics) = if !unclosed
             && (options.interactive
                 || script_driver::script_uses_history(source)
-                || script_driver::script_uses_aliases(source, alias_live))
+                || script_driver::script_uses_aliases(source, alias_live)
+                // rubash#2773: a submission that may toggle `set -v`
+                // mid-read needs the grouped reader's per-line read
+                // point (flags.c:284; parse.y:2712) — the whole-source
+                // route below can only sample the entry state.
+                || script_driver::script_may_toggle_verbose(source))
         {
             let (status, _unwound, facts) =
                 script_driver::run_script_with_history_at_line_offset_classified(
@@ -503,6 +540,7 @@ impl Session {
             let classification = RunClassification {
                 parse_error: facts.parse_error,
                 signal_discard: facts.signal_discard,
+                expansion_error_discard: facts.expansion_error_discard,
                 exit_jump: facts.exit_jump,
                 exit_jump_raw: facts.exit_jump_raw,
                 errexit_break: facts.errexit_stop,
@@ -532,6 +570,15 @@ impl Session {
             // echoed verbatim. The name keeps its own jobs (the
             // diagnostic values' source_name, the event record);
             // the parse receives the input text explicitly.
+            //
+            // rubash#2773: this route likewise reads the whole
+            // submission as one unit before anything in it executes
+            // (the parse_and_execute model), so its lines are echoed
+            // at this read boundary when verbose is on (flags.c:284
+            // echo_input_at_read = verbose_flag; parse.y:2712 prints
+            // shell_input_line as read). The grouped route above gets
+            // the same answer from its per-line read point.
+            script_driver::echo_verbose_input_lines(&self.executor, source);
             let status = script_driver::run_source_with_line_offset(
                 &mut self.executor,
                 source,
@@ -769,6 +816,7 @@ impl Session {
         RunClassification {
             parse_error: self.executor.take_parse_error(),
             signal_discard: self.executor.take_signal_discard_pending(),
+            expansion_error_discard: self.executor.take_unit_expansion_error_discard(),
             exit_jump: exit_jump_raw && !errexit_unwind,
             exit_jump_raw,
             errexit_break: false,
@@ -831,6 +879,7 @@ impl Session {
                 crate::shell::bind_registry::BindKind::Function { name }
             }
             BindKindView::Macro { text } => crate::shell::bind_registry::BindKind::Macro { text },
+            BindKindView::Keymap { name } => crate::shell::bind_registry::BindKind::Keymap { name },
         };
         self.executor
             .register_bind_entry(crate::shell::bind_registry::BindEntry {
@@ -918,6 +967,19 @@ impl Session {
     /// asks the engine about the position itself.
     pub fn has_compspec(&self, command: &str) -> bool {
         self.executor.has_compspec(command)
+    }
+
+    /// Whether the special compspec of one class is registered —
+    /// the selective form of [`Session::has_compspec`]
+    /// (rubash#2738): the name form ORs the command's own
+    /// registration and all three special slots (`-D` / `-E` /
+    /// `-I`) together, so a host routing gate cannot open for
+    /// exactly the class that governs a position. This answers for
+    /// a single slot ([`SpecialCompspecKind`]), a pure registration
+    /// query like the name form; whether a spec governs a concrete
+    /// `(line, cursor)` is [`Session::has_compspec_at`]'s answer.
+    pub fn has_special_compspec(&self, kind: SpecialCompspecKind) -> bool {
+        self.executor.has_special_compspec(kind)
     }
 
     /// Whether a compspec governs completion at `(line, cursor)` —
@@ -1394,9 +1456,17 @@ impl Session {
         self.executor.positional_params()
     }
 
-    /// Replace the positional parameters (the `set --` path).
+    /// Replace the positional parameters. Hosts pass RAW data:
+    /// the engine entry-encodes each value into the storage domain
+    /// at this boundary (rubash#3105), so callers must not
+    /// pre-encode. (The shell's own `set --` path hands the shared
+    /// setter cooked words and does not pass through here.)
     pub fn set_positional(&mut self, args: Vec<String>) {
-        self.executor.set_positional_params(args);
+        self.executor.set_positional_params(
+            args.iter()
+                .map(|value| crate::executor::substitution_metadata::entry_encode_value_text(value))
+                .collect(),
+        );
     }
 
     /// Alias snapshot: (name, value) pairs, sorted by name.
@@ -1537,6 +1607,7 @@ impl Session {
                     classification: RunClassification {
                         parse_error: false,
                         signal_discard: false,
+                        expansion_error_discard: false,
                         exit_jump: false,
                         exit_jump_raw,
                         errexit_break: true,
@@ -1559,6 +1630,7 @@ impl Session {
                     classification: RunClassification {
                         parse_error: false,
                         signal_discard: false,
+                        expansion_error_discard: false,
                         exit_jump: true,
                         exit_jump_raw,
                         errexit_break: false,
@@ -1702,6 +1774,7 @@ impl Session {
         let errexit_unwind = self.executor.take_errexit_unwind_armed();
         let exit_jump = exit_jump_raw && !errexit_unwind;
         let discarded = self.executor.take_unit_signal_discard();
+        let expansion_discarded = self.executor.take_unit_expansion_error_discard();
         let errexit_break = script_driver::errexit_break_verdict(&self.executor, status);
         let unwind = if exit_jump && !parse_error {
             Some(RunUnwind::ExitJump)
@@ -1722,6 +1795,7 @@ impl Session {
             classification: RunClassification {
                 parse_error,
                 signal_discard: discarded,
+                expansion_error_discard: expansion_discarded,
                 exit_jump,
                 exit_jump_raw,
                 errexit_break,
@@ -2135,7 +2209,15 @@ impl SessionBuilder {
             executor.set_env("__RUBASH_SCRIPT_NAME", argv0);
         }
         for (name, value) in &self.environment {
-            executor.set_env(name, value);
+            // rubash#3207: host seeds are RAW data — entry-encode each
+            // value at this boundary (the #3105 contract), so carrier
+            // bytes ride the storage domain instead of being stripped
+            // as live protocol at finalization. `__RUBASH_SCRIPT_NAME`
+            // above stays verbatim (argv0 is internal transport, and
+            // the per-name rule passes `__RUBASH_*` through anyway).
+            let encoded =
+                crate::executor::env_helpers::entry_encode_imported_env_value(name, value);
+            executor.set_env(name, &encoded);
         }
         if let Some(root) = &self.shell_root {
             executor.set_shell_root(root);

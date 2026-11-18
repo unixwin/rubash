@@ -6,10 +6,10 @@
 //! contract carried none of it, so a host mirrored the registry
 //! through the tier-C executor seam and re-decoded the written
 //! key sequences with a second, handwritten translation beside
-//! the engine's own `keyseq_bytes`. This module is the tier-A
+//! the engine's own. This module is the tier-A
 //! read face: one owned snapshot, captured from the registry
-//! itself, whose canonical bytes come from the engine's one
-//! decoder and whose dump lines come from the `bind` builtin's
+//! itself, whose canonical bytes are the registry's own byte
+//! identity ([`keyseq_identity`]) and whose dump lines come from the `bind` builtin's
 //! own format helpers — the API and the shell can never disagree
 //! about what a binding is (the module rule in `super`).
 //!
@@ -20,9 +20,9 @@
 //! the variable table is rl_variable_dumper's (bind.c:3045).
 
 use crate::builtins::bind::{
-    format_function_readable, format_macro_readable, format_unix_command_readable, keyseq_bytes,
+    format_function_readable, format_macro_readable, format_unix_command_readable,
 };
-use crate::shell::bind_registry::{normalize_keymap_name, BindKind, BindRegistry};
+use crate::shell::bind_registry::{keyseq_identity, normalize_keymap_name, BindKind, BindRegistry};
 
 /// What a key sequence is bound to, as the contract reports it —
 /// the view form of the registry's
@@ -40,6 +40,14 @@ pub enum BindKindView {
     Function { name: String },
     /// `bind '"\C-t": "text"'` — a macro.
     Macro { text: String },
+    /// `bind 'Control-t: prefix-meta'` — the sequence is bound to a
+    /// whole keymap (rl_generic_bind's ISKMAP value); `name` is the
+    /// target map as registered (the alias form; the entry's
+    /// `keymap` field still names the map the binding lives in).
+    /// Entered the contract for rubash#3013 — hosts dispatch on
+    /// the kind instead of pattern-matching the `prefix-meta`
+    /// function name.
+    Keymap { name: String },
 }
 
 /// One registered binding, as the contract reports it.
@@ -48,9 +56,13 @@ pub struct BindEntryView {
     /// The written form, exactly as registered (`\C-g`,
     /// `\e[200~`, `\C-x\C-f`) — the form GNU's dumpers print.
     pub keyseq: String,
-    /// The canonical byte sequence: [`keyseq_bytes`] applied to
-    /// the written form — the engine's own rl_translate_keyseq
-    /// port, never a second decoder.
+    /// The canonical byte sequence: the registry's byte
+    /// identity ([`keyseq_identity`]) of the written form —
+    /// the engine's one rl_translate_keyseq port, run on the
+    /// decoded byte string, so a written form that carries a
+    /// raw byte as a raw-byte marker pair reports the folded
+    /// byte itself, never the pair's UTF-8 and never a second
+    /// decoder.
     pub bytes: Vec<u8>,
     /// What the sequence is bound to.
     pub kind: BindKindView,
@@ -85,8 +97,8 @@ pub struct BindEntryView {
 pub struct BindRemovalView {
     /// The written form, exactly as removed.
     pub keyseq: String,
-    /// The canonical byte sequence ([`keyseq_bytes`] applied to
-    /// the written form).
+    /// The canonical byte sequence: the registry's byte
+    /// identity ([`keyseq_identity`]) of the written form.
     pub bytes: Vec<u8>,
     /// The keymap the removal landed in — stored resolved at
     /// record time (an explicit `-m` map, or the map current
@@ -138,20 +150,11 @@ impl BindView {
                     },
                     BindKind::Function { name } => BindKindView::Function { name: name.clone() },
                     BindKind::Macro { text } => BindKindView::Macro { text: text.clone() },
-                    // The contract has no keymap-valued view kind:
-                    // GAP-13's Q-E ruling kept BindKind internal and
-                    // the view a 1:1 mirror, so a faithful rendering
-                    // needs a BindKindView::Keymap variant plus
-                    // ledger rows on both sides — a contract change
-                    // for the captain to schedule, NOT made here.
-                    // Rendering the entry as the `prefix-meta`
-                    // function name preserves exactly what hosts
-                    // saw for this binding before the registry grew
-                    // the kind (the old-style arm stored the name
-                    // verbatim, rubash#2923).
-                    BindKind::Keymap { .. } => BindKindView::Function {
-                        name: "prefix-meta".to_string(),
-                    },
+                    // rubash#3013: the contract now carries a
+                    // keymap-valued view kind — the entry reports
+                    // its real target map instead of the
+                    // `prefix-meta` function-name shim.
+                    BindKind::Keymap { name } => BindKindView::Keymap { name: name.clone() },
                 };
                 let dump = match &entry.kind {
                     BindKind::Execute { command } => {
@@ -164,7 +167,7 @@ impl BindView {
                     }
                 };
                 BindEntryView {
-                    bytes: keyseq_bytes(&entry.keyseq),
+                    bytes: keyseq_identity(&entry.keyseq),
                     keyseq: entry.keyseq.clone(),
                     kind,
                     keymap: match entry.keymap.as_deref() {
@@ -179,7 +182,7 @@ impl BindView {
             .removals
             .iter()
             .map(|(keyseq, keymap)| BindRemovalView {
-                bytes: keyseq_bytes(keyseq),
+                bytes: keyseq_identity(keyseq),
                 keyseq: keyseq.clone(),
                 // The registry's own reads resolve a keymap-less
                 // tombstone against "emacs-standard" (see

@@ -43,6 +43,29 @@ impl TextInput {
     pub(crate) fn append_bytes(&mut self, bytes: &[u8]) {
         self.data.extend_from_slice(bytes);
     }
+
+    /// A fresh in-memory stream over already-materialized bytes
+    /// (the mapfile record source's shared cursor, rubash#3660).
+    pub(crate) fn from_data(data: Vec<u8>) -> Self {
+        Self {
+            data,
+            offset: 0,
+            timing: None,
+            origin_path: None,
+        }
+    }
+
+    pub(crate) fn data(&self) -> &[u8] {
+        &self.data
+    }
+
+    pub(crate) fn offset(&self) -> usize {
+        self.offset
+    }
+
+    pub(crate) fn set_offset(&mut self, offset: usize) {
+        self.offset = offset;
+    }
 }
 
 /// rubash#2385: one complementary (write) end of an in-memory byte
@@ -76,12 +99,29 @@ impl Eq for PipeChannelEnd {}
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct FileFd {
     pub(crate) handle: crate::fd::HANDLE,
+    /// rubash#3213: set once the kernel descriptor behind `handle`
+    /// is retired at the logical close point (see close_now). GNU
+    /// closes the descriptor when the redirect performs it
+    /// (redir.c:1264 close_buffered_fd), not when the last
+    /// userspace reference happens to drop — a snapshot's stale
+    /// Rc<FileFd> (fd_var_apply_snapshot binds, pending-close
+    /// undo stacks) used to keep the materialized descriptor open
+    /// past `exec {v}>&-` and the varredir_close command-end drain,
+    /// leaking the number into /proc/$$/fd. The flag also keeps a
+    /// stale holder's later Drop from re-closing a recycled number.
+    pub(crate) closed: std::cell::Cell<bool>,
     pub(crate) path: PathBuf,
 }
 
 impl FileFd {
     pub(crate) fn open_read(path: PathBuf) -> std::io::Result<Rc<Self>> {
-        crate::fd::open_file_read(&path).map(|handle| Rc::new(Self { handle, path }))
+        crate::fd::open_file_read(&path).map(|handle| {
+            Rc::new(Self {
+                handle,
+                closed: std::cell::Cell::new(false),
+                path,
+            })
+        })
     }
 
     pub(crate) fn open_write(
@@ -96,11 +136,21 @@ impl FileFd {
         } else {
             crate::fd::open_file_write_trunc(&path)
         }?;
-        Ok(Rc::new(Self { handle, path }))
+        Ok(Rc::new(Self {
+            handle,
+            closed: std::cell::Cell::new(false),
+            path,
+        }))
     }
 
     pub(crate) fn open_readwrite(path: PathBuf) -> std::io::Result<Rc<Self>> {
-        crate::fd::open_file_readwrite(&path).map(|handle| Rc::new(Self { handle, path }))
+        crate::fd::open_file_readwrite(&path).map(|handle| {
+            Rc::new(Self {
+                handle,
+                closed: std::cell::Cell::new(false),
+                path,
+            })
+        })
     }
 
     /// `[N]<>file` endpoint pair — O_RDWR|O_CREAT on ONE open file
@@ -121,10 +171,12 @@ impl FileFd {
             return Ok((
                 Rc::new(Self {
                     handle: read,
+                    closed: std::cell::Cell::new(false),
                     path: path.clone(),
                 }),
                 Rc::new(Self {
                     handle: write,
+                    closed: std::cell::Cell::new(false),
                     path,
                 }),
             ));
@@ -165,13 +217,67 @@ impl FileFd {
             use std::os::windows::io::IntoRawHandle;
             file.into_raw_handle() as crate::fd::HANDLE
         };
-        Rc::new(Self { handle, path })
+        Rc::new(Self {
+            handle,
+            closed: std::cell::Cell::new(false),
+            path,
+        })
+    }
+
+    /// rubash#3213: retire the kernel descriptor NOW, at the
+    /// logical close point — GNU's performed redirect close runs
+    /// close(2) immediately (redir.c:1264 close_buffered_fd for
+    /// r_close_this; the same fds disappear from /proc/$$/fd at
+    /// once). Idempotent: every later reference — including this
+    /// object's own eventual Drop and stale Rc holders the close
+    /// outlived — observes the flag and skips the close(2), so a
+    /// descriptor number the kernel recycled is never clobbered.
+    pub(crate) fn close_now(&self) {
+        if !self.closed.replace(true) {
+            crate::fd::close_handle(self.handle);
+        }
+    }
+
+    /// Whether close_now already retired the descriptor.
+    pub(crate) fn is_retired(&self) -> bool {
+        self.closed.get()
+    }
+
+    /// rubash#3706: duplicate this descriptor's kernel handle into a
+    /// fresh FileFd naming the same open file description (shared
+    /// offset and status flags) — the undo-save dup. GNU's undoable
+    /// redirect saves the displaced descriptor BEFORE the redirect
+    /// binds, with `fcntl (fd, F_DUPFD, SHELL_FD_BASE)` (redir.c:965
+    /// for input, :1082 for duplicating, :1144 for move; SHELL_FD_BASE
+    /// is 10, redir.c:86), and records the save with
+    /// `add_undo_redirect` so `undo_redirections` can dup it back.
+    /// The duplicate carries the table's close-on-exec discipline
+    /// (unix: F_DUPFD_CLOEXEC, like `crate::fd::dup_adopted_fd`;
+    /// Windows: `duplicate_handle` is already non-inheritable), so
+    /// the spawn path still arranges child layouts explicitly and no
+    /// saved descriptor ever leaks raw into a child.
+    pub(crate) fn duplicate(&self) -> std::io::Result<Rc<Self>> {
+        #[cfg(unix)]
+        let handle = {
+            let n = unsafe { libc::fcntl(self.handle, libc::F_DUPFD_CLOEXEC, 0) };
+            if n < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            n
+        };
+        #[cfg(windows)]
+        let handle = crate::fd::duplicate_handle(self.handle)?;
+        Ok(Rc::new(Self {
+            handle,
+            closed: std::cell::Cell::new(false),
+            path: self.path.clone(),
+        }))
     }
 }
 
 impl Drop for FileFd {
     fn drop(&mut self) {
-        crate::fd::close_handle(self.handle);
+        self.close_now();
     }
 }
 
@@ -297,6 +403,65 @@ pub(crate) struct FdEntry {
     pub(crate) dynamic: bool,
 }
 
+impl FdEntry {
+    /// rubash#3706: clone this entry with every kernel-backed
+    /// endpoint replaced by a fresh duplicate of its descriptor
+    /// (same open file description, shared offset) — the undo-save
+    /// form. A plain Rc clone shares the descriptor the bind-time
+    /// retire (`retire_read_arm` / `retire_write_arm`, rubash#3213)
+    /// closes when the scope's redirect binds, so a scope that saved
+    /// the clone restores a dead entry; the duplicate keeps the saved
+    /// descriptor alive until the scope's restore replays it, exactly
+    /// like GNU's `fcntl (fd, F_DUPFD, SHELL_FD_BASE)` save
+    /// (redir.c:965/1082/1144). Only the File-backed endpoints carry
+    /// a kernel descriptor (File, CoprocStdout/CoprocStdin); text,
+    /// directory, marker and channel endpoints are in-memory or
+    /// symbolic and clone exactly. A `<>` pair's two arms share one
+    /// Rc (open_readwrite_pair); that sharing is preserved — the
+    /// write arm reuses the read arm's duplicate — so closing one
+    /// direction still retires the shared descriptor.
+    pub(crate) fn dup_file_endpoints(&self) -> std::io::Result<Self> {
+        let read = match &self.read {
+            Some(FdReadEndpoint::File(file)) => Some(FdReadEndpoint::File(file.duplicate()?)),
+            Some(FdReadEndpoint::CoprocStdout { pid, fd }) => Some(FdReadEndpoint::CoprocStdout {
+                pid: *pid,
+                fd: fd.duplicate()?,
+            }),
+            other => other.clone(),
+        };
+        let write = match &self.write {
+            Some(FdWriteEndpoint::File(file)) => {
+                // A `<>` pair shares ONE open file description
+                // between its arms (open_readwrite_pair mints a
+                // single Rc for both); reuse the read arm's
+                // duplicate so the saved entry preserves that
+                // sharing — closing one direction must retire the
+                // shared descriptor, as GNU's close(2) closes the
+                // whole descriptor.
+                match (&self.read, &read) {
+                    (Some(FdReadEndpoint::File(orig)), Some(FdReadEndpoint::File(dup)))
+                        if Rc::ptr_eq(orig, file) =>
+                    {
+                        Some(FdWriteEndpoint::File(dup.clone()))
+                    }
+                    _ => Some(FdWriteEndpoint::File(file.duplicate()?)),
+                }
+            }
+            Some(FdWriteEndpoint::CoprocStdin { pid, fd }) => Some(FdWriteEndpoint::CoprocStdin {
+                pid: *pid,
+                fd: fd.duplicate()?,
+            }),
+            other => other.clone(),
+        };
+        Ok(Self {
+            read,
+            write,
+            closed: self.closed,
+            dynamic: self.dynamic,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MaterializedFd {
     pub(crate) read: Option<MaterializedRead>,
@@ -409,63 +574,192 @@ pub(crate) fn delimiter_seq_ending_at(
     None
 }
 
-/// Escape state for non-raw `read` delimiter matching (GNU
-/// builtins/read.def: without -r, a backslash consumes the next
-/// character as an escaped literal — zread/read_mbchar — and an escaped
-/// character can never terminate the record; that includes the
-/// delimiter `\` itself, which only -r makes matchable). Byte-oriented
-/// readers feed each byte through `suppresses_match` before testing
-/// the delimiter: the backslash byte itself and every byte of the
-/// escaped character report "suppressed" (rubash#1300).
-pub(crate) struct ReadEscapeTracker {
-    enabled: bool,
-    escaped_char_bytes_left: usize,
-    escape_pending: bool,
+/// What one fed byte means for the record a byte-oriented reader is
+/// accumulating (the caller has already appended the byte to its
+/// accumulation buffer).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FdScanAction {
+    /// The byte is record data; keep scanning.
+    Data,
+    /// The byte is record data and completes the `-n`/`-N` budget:
+    /// stop here (the byte stays in the record).
+    DataLimit,
+    /// The byte terminates the record as the delimiter: stop here and
+    /// drop `drop` bytes from the tail of the accumulation (the
+    /// delimiter is consumed but never returned).
+    Delimiter { drop: usize },
 }
 
-impl ReadEscapeTracker {
-    pub(crate) fn new(enabled: bool) -> Self {
-        ReadEscapeTracker {
-            enabled,
-            escaped_char_bytes_left: 0,
-            escape_pending: false,
+/// Incremental replay of GNU's read loop (builtins/read.def) over a
+/// raw byte stream, shared by the fd_table byte readers (in-memory
+/// scan, byte-wise file reader, buffered file reader).
+///
+/// The loop's unit is one read_mbchar consumption: in a multibyte
+/// locale a whole valid character, or the bytes of an invalid
+/// sequence up to and including the byte that invalidated it (a
+/// truncated tail is one unit); in a byte locale every byte is a
+/// unit. The delimiter is tested ONLY at a unit start, before the
+/// unit is consumed (read.def:834 compares the stream byte against
+/// the FIRST byte of the `-d` word) — a multibyte character's inner
+/// bytes never terminate a record, but when an invalid sequence is
+/// invalidated BY the delimiter byte, read_mbchar's pushback
+/// (delim_ind) makes that byte a unit start of its own, so it
+/// terminates after all. The previous sequence match
+/// (`delimiter_seq_ending_at` over the whole UTF-8 encoding) consumed
+/// the continuation byte into the delimiter in a multibyte locale:
+/// for stream `a C3 A9 b C3 A9` with `-d é` the second record lost
+/// its leading 0xA9 (rubash#3291); it remains the rule in byte
+/// locales, where the sequence forms are how the delimiter word's
+/// bytes can appear (rubash#1062/#2662).
+///
+/// The `-n`/`-N` budget counts POST-ESCAPE units (rubash#1328) at
+/// unit COMPLETION (read.def:884-886 `nr++` after read_mbchar): an
+/// escape pair costs one unit, a backslash-newline continuation zero,
+/// and the budget never stops inside a character — the earlier
+/// lead-byte accounting stopped after a multibyte character's first
+/// byte (rubash#3294). Escape state follows the read.def order at a
+/// unit start: an escaped unit is data (never a terminator), a
+/// backslash is the escape introducer (never a terminator without
+/// -r; rubash#1300), only then does the delimiter compare run.
+pub(crate) struct FdRecordScan {
+    /// Multibyte mode: the delimiter's first stream byte
+    /// (read_helpers::delimiter_stream_byte). None selects the
+    /// byte-locale sequence forms.
+    first_byte: Option<u8>,
+    seqs: ReadDelimiterSeqs,
+    char_limit: Option<usize>,
+    exact: bool,
+    raw: bool,
+    /// Post-escape unit count (the -n/-N budget).
+    chars: usize,
+    /// The next unit is an escaped character (a backslash unit start
+    /// was just consumed).
+    escaped: bool,
+    /// Continuation bytes still expected for the in-progress unit;
+    /// zero means the next byte starts a unit.
+    unit_left: usize,
+    /// First byte of the in-progress unit (its identity for the
+    /// post-escape count: an escaped newline costs zero).
+    unit_first: u8,
+    /// The in-progress unit is an escaped character.
+    unit_escaped: bool,
+}
+
+impl FdRecordScan {
+    pub(crate) fn new(delimiter: char, char_limit: Option<usize>, exact: bool, raw: bool) -> Self {
+        let multi_byte = crate::locale::is_multi_byte();
+        FdRecordScan {
+            first_byte: multi_byte
+                .then(|| super::read_helpers::delimiter_stream_byte(delimiter, true)),
+            seqs: read_delimiter_seqs(delimiter),
+            char_limit,
+            exact,
+            raw,
+            chars: 0,
+            escaped: false,
+            unit_left: 0,
+            unit_first: 0,
+            unit_escaped: false,
         }
     }
 
-    /// True when a delimiter match ending at `byte` must be ignored
-    /// because the byte is an escape introducer or part of an escaped
-    /// character. The byte is consumed either way.
-    pub(crate) fn suppresses_match(&mut self, byte: u8) -> bool {
-        if !self.enabled {
-            return false;
+    /// Length of a delimiter sequence ending at `end` (exclusive) in
+    /// the caller's accumulation, in byte-locale sequence mode; the
+    /// caller computes it after appending the current byte. Always
+    /// None in multibyte first-byte mode.
+    pub(crate) fn sequence_ending_at(&self, bytes: &[u8], end: usize) -> Option<usize> {
+        if self.first_byte.is_some() {
+            return None;
         }
-        if self.escaped_char_bytes_left > 0 {
-            self.escaped_char_bytes_left -= 1;
-            return true;
-        }
-        if self.escape_pending {
-            self.escape_pending = false;
-            self.escaped_char_bytes_left = utf8_first_byte_len(byte).saturating_sub(1);
-            return true;
-        }
-        if byte == b'\\' {
-            self.escape_pending = true;
-            return true;
-        }
-        false
+        delimiter_seq_ending_at(&self.seqs, bytes, end)
     }
-}
 
-/// Byte length of the UTF-8 character a leading byte introduces
-/// (invalid leading bytes count as one byte, matching the
-/// non-continuation-byte character accounting the readers use).
-fn utf8_first_byte_len(byte: u8) -> usize {
-    match byte {
-        0x00..=0x7F => 1,
-        0xC0..=0xDF => 2,
-        0xE0..=0xEF => 3,
-        0xF0..=0xF7 => 4,
-        _ => 1,
+    /// Begin the unit whose first byte is `byte`; returns its action
+    /// when the unit completes on this same byte (width one).
+    fn begin_unit(&mut self, byte: u8, escaped: bool) -> Option<FdScanAction> {
+        self.unit_first = byte;
+        self.unit_escaped = escaped;
+        let width = if self.first_byte.is_some() {
+            super::read_helpers::utf8_lead_width(byte)
+        } else {
+            1
+        };
+        self.unit_left = width - 1;
+        if self.unit_left == 0 {
+            Some(self.complete_unit())
+        } else {
+            None
+        }
+    }
+
+    /// Count the just-completed unit (post-escape rules) and report
+    /// whether the budget stops the record at this byte.
+    fn complete_unit(&mut self) -> FdScanAction {
+        if self.unit_escaped {
+            if self.unit_first != b'\n' {
+                self.chars += 1;
+            }
+        } else {
+            self.chars += 1;
+        }
+        if self.char_limit.is_some_and(|limit| self.chars >= limit) {
+            FdScanAction::DataLimit
+        } else {
+            FdScanAction::Data
+        }
+    }
+
+    /// Feed one byte (already appended to the caller's accumulation).
+    /// `seq_end` is the caller's `sequence_ending_at` result for this
+    /// byte (byte-locale mode only).
+    pub(crate) fn on_byte(&mut self, byte: u8, seq_end: Option<usize>) -> FdScanAction {
+        if self.unit_left > 0 {
+            // Inside a unit: continuation bytes are data. A
+            // non-continuation byte invalidates the sequence —
+            // read_mbchar consumes it into the unit, EXCEPT the
+            // delimiter byte, which is pushed back and terminates
+            // the record as the next unit start (delim_ind).
+            if (byte & 0xC0) == 0x80 {
+                self.unit_left -= 1;
+                if self.unit_left == 0 {
+                    return self.complete_unit();
+                }
+                return FdScanAction::Data;
+            }
+            if !self.exact && self.first_byte == Some(byte) {
+                let _ = self.complete_unit();
+                return FdScanAction::Delimiter { drop: 1 };
+            }
+            self.unit_left = 0;
+            return self.complete_unit();
+        }
+        // Unit start. An escaped unit is data, never a terminator.
+        if self.escaped {
+            self.escaped = false;
+            if let Some(action) = self.begin_unit(byte, true) {
+                return action;
+            }
+            return FdScanAction::Data;
+        }
+        // A backslash introduces an escape (never a terminator).
+        if !self.raw && byte == b'\\' {
+            self.escaped = true;
+            return FdScanAction::Data;
+        }
+        // The delimiter compare (read.def:834), before consumption.
+        if !self.exact {
+            if let Some(delim) = self.first_byte {
+                if byte == delim {
+                    return FdScanAction::Delimiter { drop: 1 };
+                }
+            } else if let Some(len) = seq_end {
+                return FdScanAction::Delimiter { drop: len };
+            }
+        }
+        if let Some(action) = self.begin_unit(byte, false) {
+            return action;
+        }
+        FdScanAction::Data
     }
 }
 
@@ -594,9 +888,19 @@ impl FdTable {
                 if let Some(handle) = crate::fd::dup_adopted_fd(0) {
                     let file = Rc::new(FileFd {
                         handle,
+                        closed: std::cell::Cell::new(false),
                         path: crate::fd::inherited_fd_path(0),
                     });
-                    self.open_output(0, FdWriteEndpoint::File(file), false);
+                    // rubash#3655: the adopted write arm joins the
+                    // birth read arm on the SAME inherited
+                    // description — one open_readwrite install, or
+                    // the output bind would retire the read arm.
+                    self.open_readwrite(
+                        0,
+                        FdReadEndpoint::InheritedProcessStdin,
+                        FdWriteEndpoint::File(file),
+                        false,
+                    );
                 }
             }
         }
@@ -612,12 +916,22 @@ impl FdTable {
             };
             let file = Rc::new(FileFd {
                 handle,
+                closed: std::cell::Cell::new(false),
                 path: crate::fd::inherited_fd_path(fd),
             });
-            if readable {
+            if readable && writable {
+                // rubash#3655: one inherited description open in
+                // both directions — a single open_readwrite install,
+                // never two sequential binds.
+                self.open_readwrite(
+                    fd,
+                    FdReadEndpoint::File(file.clone()),
+                    FdWriteEndpoint::File(file),
+                    false,
+                );
+            } else if readable {
                 self.open_input(fd, FdReadEndpoint::File(file.clone()), false);
-            }
-            if writable {
+            } else if writable {
                 self.open_output(fd, FdWriteEndpoint::File(file), false);
             }
         }
@@ -738,17 +1052,328 @@ impl FdTable {
         Some(candidate as u32)
     }
 
-    pub(crate) fn open_input(&mut self, fd: u32, endpoint: FdReadEndpoint, dynamic: bool) {
-        let entry = self.entry_mut(fd, dynamic);
-        entry.read = Some(endpoint);
-        entry.closed = false;
+    /// rubash#3213: GNU's floor for varredir/save descriptors
+    /// (redir.c:86 SHELL_FD_BASE). Slots at or above it are
+    /// materialized as real process descriptors (see
+    /// materialize_read_endpoint); 0/1/2 are the shell's virtualized
+    /// stdio and low fixed fds (3-9) keep current behavior.
+    const SHELL_FD_BASE: u32 = 10;
+
+    /// rubash#3213: dup a handle-backed endpoint's descriptor onto
+    /// its logical number in this process (GNU redir.c:963-968:
+    /// open, then fcntl(fd, F_DUPFD, SHELL_FD_BASE), then
+    /// redir_varassign binds the number; the low original is
+    /// closed), so /proc/$$/fd shows the number and readlink
+    /// resolves the target. The table used to keep only a virtual
+    /// entry (the FileFd's raw handle sat at some other low number),
+    /// visible to children only through the spawn pin pass.
+    /// Returns the materialized descriptor, or None when the
+    /// endpoint must stay virtual: the number is already occupied
+    /// in this process (another entry's raw handle, an inherited
+    /// descriptor, a transient spawn pipe) or the dup fails — never
+    /// clobber a live descriptor.
+    #[cfg(unix)]
+    fn materialized_handle(fd: u32, raw: crate::fd::HANDLE) -> Option<crate::fd::HANDLE> {
+        let target = fd as crate::fd::HANDLE;
+        if raw == target {
+            return Some(raw);
+        }
+        if unsafe { libc::fcntl(target, libc::F_GETFD) } >= 0 {
+            return None;
+        }
+        if unsafe { libc::dup2(raw, target) } < 0 {
+            return None;
+        }
+        Some(target)
     }
 
+    /// rubash#3213: materialize a read endpoint at its logical
+    /// number (see materialized_handle). The replacement FileFd owns
+    /// the materialized descriptor, so every existing close path —
+    /// which drops the endpoint — closes it; no new bookkeeping.
+    /// Off Unix this is the identity: there is no /proc view to
+    /// serve and the virtual table is the whole model.
+    fn materialize_read_endpoint(fd: u32, endpoint: FdReadEndpoint) -> FdReadEndpoint {
+        #[cfg(unix)]
+        {
+            if fd < Self::SHELL_FD_BASE {
+                return endpoint;
+            }
+            return match endpoint {
+                FdReadEndpoint::File(file) => match Self::materialized_handle(fd, file.handle) {
+                    Some(handle) => FdReadEndpoint::File(Rc::new(FileFd {
+                        handle,
+                        closed: std::cell::Cell::new(false),
+                        path: file.path.clone(),
+                    })),
+                    None => FdReadEndpoint::File(file),
+                },
+                FdReadEndpoint::CoprocStdout { pid, fd: file } => {
+                    match Self::materialized_handle(fd, file.handle) {
+                        Some(handle) => FdReadEndpoint::CoprocStdout {
+                            pid,
+                            fd: Rc::new(FileFd {
+                                handle,
+                                closed: std::cell::Cell::new(false),
+                                path: file.path.clone(),
+                            }),
+                        },
+                        None => FdReadEndpoint::CoprocStdout { pid, fd: file },
+                    }
+                }
+                other => other,
+            };
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = fd;
+            endpoint
+        }
+    }
+
+    /// rubash#3213: the write-side twin of
+    /// materialize_read_endpoint.
+    fn materialize_write_endpoint(fd: u32, endpoint: FdWriteEndpoint) -> FdWriteEndpoint {
+        #[cfg(unix)]
+        {
+            if fd < Self::SHELL_FD_BASE {
+                return endpoint;
+            }
+            return match endpoint {
+                FdWriteEndpoint::File(file) => match Self::materialized_handle(fd, file.handle) {
+                    Some(handle) => FdWriteEndpoint::File(Rc::new(FileFd {
+                        handle,
+                        closed: std::cell::Cell::new(false),
+                        path: file.path.clone(),
+                    })),
+                    None => FdWriteEndpoint::File(file),
+                },
+                FdWriteEndpoint::CoprocStdin { pid, fd: file } => {
+                    match Self::materialized_handle(fd, file.handle) {
+                        Some(handle) => FdWriteEndpoint::CoprocStdin {
+                            pid,
+                            fd: Rc::new(FileFd {
+                                handle,
+                                closed: std::cell::Cell::new(false),
+                                path: file.path.clone(),
+                            }),
+                        },
+                        None => FdWriteEndpoint::CoprocStdin { pid, fd: file },
+                    }
+                }
+                other => other,
+            };
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = fd;
+            endpoint
+        }
+    }
+
+    /// rubash#3213: the kernel descriptor a departing arm carried
+    /// is retired the moment the table drops the arm — GNU closes
+    /// it when the redirect performs (redir.c:1264
+    /// close_buffered_fd for r_close_this; the RX_UNDOABLE twins
+    /// save a dup first but still close the ORIGINAL number), not
+    /// when the last Rust reference happens to drop. Snapshot and
+    /// undo stores (fd_var_apply_snapshot binds, pending-close
+    /// restore stacks) clone entries and keep an Rc<FileFd> alive
+    /// past the logical close; without an explicit retirement the
+    /// materialized descriptor stayed open until process teardown
+    /// — /proc/$$/fd listed a number GNU already reported closed —
+    /// and the delayed Drop then risked closing a recycled number.
+    /// Skipped while another table arm still shares the FileFd: a
+    /// dup kept virtual holds ONE Rc across slots, and retiring it
+    /// on one slot's close would kill the description the siblings
+    /// still name. On non-unix targets there is no /proc view to
+    /// keep honest, so the drop timing stays as it was.
+    fn retire_read_arm(&self, fd: u32, endpoint: Option<FdReadEndpoint>) {
+        #[cfg(unix)]
+        {
+            let file = endpoint.and_then(|endpoint| match endpoint {
+                FdReadEndpoint::File(file) | FdReadEndpoint::CoprocStdout { fd: file, .. } => {
+                    Some(file)
+                }
+                _ => None,
+            });
+            self.retire_file(fd, file);
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (fd, endpoint);
+        }
+    }
+
+    /// The write-side twin of retire_read_arm.
+    fn retire_write_arm(&self, fd: u32, endpoint: Option<FdWriteEndpoint>) {
+        #[cfg(unix)]
+        {
+            let file = endpoint.and_then(|endpoint| match endpoint {
+                FdWriteEndpoint::File(file) | FdWriteEndpoint::CoprocStdin { fd: file, .. } => {
+                    Some(file)
+                }
+                _ => None,
+            });
+            self.retire_file(fd, file);
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (fd, endpoint);
+        }
+    }
+
+    /// Close `file`'s descriptor at the logical close point (see
+    /// retire_read_arm), unless another arm anywhere in the table
+    /// still holds the same FileFd — a shared Rc is one open file
+    /// description and retiring it here would dead-end the sibling
+    /// bindings (their own close retires it later).
+    #[cfg(unix)]
+    fn retire_file(&self, fd: u32, file: Option<Rc<FileFd>>) {
+        let _ = fd;
+        let Some(file) = file else { return };
+        if file.is_retired() {
+            return;
+        }
+        let still_bound = self.entries.values().any(|entry| {
+            let read_shares = match &entry.read {
+                Some(FdReadEndpoint::File(other))
+                | Some(FdReadEndpoint::CoprocStdout { fd: other, .. }) => Rc::ptr_eq(other, &file),
+                _ => false,
+            };
+            let write_shares = match &entry.write {
+                Some(FdWriteEndpoint::File(other))
+                | Some(FdWriteEndpoint::CoprocStdin { fd: other, .. }) => Rc::ptr_eq(other, &file),
+                _ => false,
+            };
+            read_shares || write_shares
+        });
+        if !still_bound {
+            file.close_now();
+        }
+    }
+
+    /// rubash#3706: snapshot slot `fd` for a scope's undo record —
+    /// the entry with its kernel-backed endpoints duplicated
+    /// (`FdEntry::dup_file_endpoints`), so the descriptor the scope's
+    /// redirect is about to displace stays alive until the scope's
+    /// restore replays it. A plain clone would share the descriptor
+    /// the bind-time retire closes (retire_read_arm /
+    /// retire_write_arm, rubash#3213). Fails only when the process
+    /// cannot duplicate a descriptor (fd exhaustion) — GNU fails the
+    /// whole redirect the same way (redir.c REDIRECTION_ERROR on a
+    /// failed F_DUPFD save).
+    pub(crate) fn saved_entry(&self, fd: u32) -> std::io::Result<Option<FdEntry>> {
+        match self.entries.get(&fd) {
+            Some(entry) => Ok(Some(entry.dup_file_endpoints()?)),
+            None => Ok(None),
+        }
+    }
+
+    /// rubash#3814: whole-table fork-boundary snapshot — the
+    /// save/restore half of GNU's forked-child descriptor copies
+    /// (execute_cmd.c:1576 execute_in_subshell; subst.c:7143
+    /// command_substitute). A plain `clone()` shares every
+    /// `Rc<FileFd>`, so a close inside the region
+    /// (`( : ) 8<&-`) retires the kernel descriptor the parent's
+    /// restored entry still names — the parent then reads EBADF.
+    /// Duplicate each kernel-backed endpoint exactly like
+    /// `saved_entry` does per slot; the duplicate shares the open
+    /// file description (dup(2)), so offset and write visibility
+    /// behave as GNU's inherited descriptors do, while the closed
+    /// flag and descriptor number stay region-local. Symbolic
+    /// endpoints (Text / ProcessSubstitution / markers) carry no
+    /// kernel handle and clone as before. A descriptor that cannot
+    /// be duplicated (fd exhaustion) keeps its shared entry — the
+    /// pre-fix behaviour for that slot only.
+    pub(crate) fn saved_table(&self) -> Self {
+        let mut table = self.clone();
+        for entry in table.entries.values_mut() {
+            if let Ok(dup) = entry.dup_file_endpoints() {
+                *entry = dup;
+            }
+        }
+        table
+    }
+
+    /// Install a new read description on `fd` (rubash#3655): GNU
+    /// dup2 replaces the descriptor WHOLESALE — the previous
+    /// description dies in both directions (redir.c
+    /// do_redirection_internal applies each redirect with dup2 onto
+    /// its redirector). A later `14>file` must therefore retire an
+    /// earlier heredoc's read arm, or `read -u 14` would still see
+    /// the heredoc text on a write-only descriptor. The `<>`
+    /// read-write pair is the only dual-arm install and lands
+    /// through open_readwrite, never through these two.
+    pub(crate) fn open_input(&mut self, fd: u32, endpoint: FdReadEndpoint, dynamic: bool) {
+        let (outgoing_read, outgoing_write);
+        {
+            let entry = self.entry_mut(fd, dynamic);
+            // rubash#3213: drop the previous endpoints BEFORE
+            // materializing the new one — dup2 onto fd closes whatever
+            // descriptor held that number, and dropping the old FileFd
+            // afterwards would close the new descriptor a second time.
+            outgoing_read = std::mem::replace(&mut entry.read, None);
+            outgoing_write = std::mem::replace(&mut entry.write, None);
+            let endpoint = Self::materialize_read_endpoint(fd, endpoint);
+            entry.read = Some(endpoint);
+            entry.closed = false;
+        }
+        self.retire_read_arm(fd, outgoing_read);
+        self.retire_write_arm(fd, outgoing_write);
+    }
+
+    /// Install a new write description on `fd` (rubash#3655): the
+    /// read-side twin of open_input — a later `14<<A` retires an
+    /// earlier `14>file` write arm the same way, so the descriptor
+    /// never carries arms from two different descriptions.
     pub(crate) fn open_output(&mut self, fd: u32, endpoint: FdWriteEndpoint, dynamic: bool) {
-        let entry = self.entry_mut(fd, dynamic);
-        entry.write = Some(endpoint);
-        entry.closed = false;
-        self.stdout_alias_generation.remove(&fd);
+        let (outgoing_read, outgoing_write);
+        {
+            let entry = self.entry_mut(fd, dynamic);
+            // rubash#3213: drop the previous endpoints BEFORE
+            // materializing the new one (see open_input).
+            outgoing_read = std::mem::replace(&mut entry.read, None);
+            outgoing_write = std::mem::replace(&mut entry.write, None);
+            let endpoint = Self::materialize_write_endpoint(fd, endpoint);
+            entry.write = Some(endpoint);
+            entry.closed = false;
+            self.stdout_alias_generation.remove(&fd);
+        }
+        self.retire_read_arm(fd, outgoing_read);
+        self.retire_write_arm(fd, outgoing_write);
+    }
+
+    /// Install BOTH arms of one open file description on `fd` at
+    /// once (rubash#3655: the `<>` r_input_output form — GNU
+    /// redir.c:725 redir_open opens O_RDWR, ONE descriptor serving
+    /// both directions). This is the only dual-arm install:
+    /// open_input/open_output each retire the opposite arm (dup2
+    /// wholesale), so a `<>` pair installed as two sequential calls
+    /// would end single-direction.
+    pub(crate) fn open_readwrite(
+        &mut self,
+        fd: u32,
+        read: FdReadEndpoint,
+        write: FdWriteEndpoint,
+        dynamic: bool,
+    ) {
+        let (outgoing_read, outgoing_write);
+        {
+            let entry = self.entry_mut(fd, dynamic);
+            // rubash#3213: drop the previous endpoints BEFORE
+            // materializing the new ones (see open_input).
+            outgoing_read = std::mem::replace(&mut entry.read, None);
+            outgoing_write = std::mem::replace(&mut entry.write, None);
+            let read = Self::materialize_read_endpoint(fd, read);
+            let write = Self::materialize_write_endpoint(fd, write);
+            entry.read = Some(read);
+            entry.write = Some(write);
+            entry.closed = false;
+            self.stdout_alias_generation.remove(&fd);
+        }
+        self.retire_read_arm(fd, outgoing_read);
+        self.retire_write_arm(fd, outgoing_write);
     }
 
     /// `N<&M` / `N>&M` — POSIX dup2 semantics: the descriptor is copied
@@ -794,10 +1419,22 @@ impl FdTable {
             self.stdout_alias_generation.remove(&target);
         }
         let dynamic = self.is_dynamic(target);
-        let entry = self.entry_mut(target, dynamic);
-        entry.read = read;
-        entry.write = write;
-        entry.closed = false;
+        let (outgoing_read, outgoing_write);
+        {
+            let entry = self.entry_mut(target, dynamic);
+            // rubash#3213: drop the target's previous endpoints BEFORE
+            // materializing the copies (see open_input): dup2 onto the
+            // target closes whatever descriptor held that number, and
+            // dropping the old FileFd afterwards would close the new
+            // descriptor a second time.
+            outgoing_read = std::mem::replace(&mut entry.read, None);
+            outgoing_write = std::mem::replace(&mut entry.write, None);
+            entry.read = read.map(|endpoint| Self::materialize_read_endpoint(target, endpoint));
+            entry.write = write.map(|endpoint| Self::materialize_write_endpoint(target, endpoint));
+            entry.closed = false;
+        }
+        self.retire_read_arm(target, outgoing_read);
+        self.retire_write_arm(target, outgoing_write);
         Ok(())
     }
 
@@ -824,23 +1461,36 @@ impl FdTable {
     }
 
     pub(crate) fn close_input(&mut self, fd: u32) {
-        let entry = self.entry_mut(fd, false);
-        entry.read = None;
-        entry.closed = entry.write.is_none();
+        let outgoing;
+        {
+            let entry = self.entry_mut(fd, false);
+            outgoing = entry.read.take();
+            entry.closed = entry.write.is_none();
+        }
+        self.retire_read_arm(fd, outgoing);
     }
 
     pub(crate) fn close_output(&mut self, fd: u32) {
-        let entry = self.entry_mut(fd, false);
-        entry.write = None;
-        entry.closed = entry.read.is_none();
-        self.stdout_alias_generation.remove(&fd);
+        let outgoing;
+        {
+            let entry = self.entry_mut(fd, false);
+            outgoing = entry.write.take();
+            entry.closed = entry.read.is_none();
+            self.stdout_alias_generation.remove(&fd);
+        }
+        self.retire_write_arm(fd, outgoing);
     }
 
     pub(crate) fn close(&mut self, fd: u32) {
-        let entry = self.entry_mut(fd, false);
-        entry.read = None;
-        entry.write = None;
-        entry.closed = true;
+        let (outgoing_read, outgoing_write);
+        {
+            let entry = self.entry_mut(fd, false);
+            outgoing_read = entry.read.take();
+            outgoing_write = entry.write.take();
+            entry.closed = true;
+        }
+        self.retire_read_arm(fd, outgoing_read);
+        self.retire_write_arm(fd, outgoing_write);
     }
 
     pub(crate) fn is_open_for_read(&self, fd: u32) -> bool {
@@ -982,55 +1632,36 @@ impl FdTable {
         // One scan of a byte window, returning (consumed, delimiter
         // found, delimiter length, char limit reached, payload length).
         // Runs once on the full remaining slice and, on a timing timeout,
-        // once more on the in-time prefix.
+        // once more on the in-time prefix. The scan itself is the shared
+        // FdRecordScan replay of the GNU read loop (unit consumption,
+        // first-byte delimiter compare, post-escape budget).
         let scan = |slice: &[u8]| -> (usize, bool, usize, bool, usize) {
-            let seqs = read_delimiter_seqs(delimiter);
+            let mut scan = FdRecordScan::new(delimiter, char_limit, exact, raw);
             let mut consumed = 0;
-            let mut chars = 0;
             let mut delimiter_found = false;
             let mut delimiter_len = 0usize;
             let mut limit_reached = false;
-            let mut escapes = ReadEscapeTracker::new(escape_aware && !exact);
-            // Post-escape counting state (rubash#1328), shared with the
-            // other readers: an unquoted backslash itself is not a stored
-            // character; the character it quotes completes one unit (zero
-            // for a newline continuation), and a delimiter byte ending an
-            // escape pair is data, not a terminator.
-            let mut escaped = false;
+            let mut result_len = 0usize;
             for (index, byte) in slice.iter().copied().enumerate() {
-                let lead = byte & 0xc0 != 0x80;
-                let was_escaped = escaped;
-                if lead {
-                    if escaped {
-                        if byte != b'\n' {
-                            chars += 1;
-                        }
-                        escaped = false;
-                    } else if !raw && byte == b'\\' {
-                        escaped = true;
-                    } else {
-                        chars += 1;
-                    }
-                }
+                let seq_end = scan.sequence_ending_at(slice, index + 1);
                 consumed = index + 1;
-                let suppressed = escapes.suppresses_match(byte);
-                if !exact && !suppressed {
-                    if let Some(len) = delimiter_seq_ending_at(&seqs, slice, consumed) {
+                match scan.on_byte(byte, seq_end) {
+                    FdScanAction::Data => {
+                        result_len = index + 1;
+                    }
+                    FdScanAction::DataLimit => {
+                        result_len = index + 1;
+                        limit_reached = true;
+                        break;
+                    }
+                    FdScanAction::Delimiter { drop } => {
+                        result_len = index + 1 - drop;
                         delimiter_found = true;
-                        delimiter_len = len;
+                        delimiter_len = drop;
                         break;
                     }
                 }
-                if char_limit.is_some_and(|limit| chars >= limit) {
-                    limit_reached = true;
-                    break;
-                }
             }
-            let result_len = if delimiter_found {
-                consumed - delimiter_len
-            } else {
-                consumed
-            };
             (
                 consumed,
                 delimiter_found,
@@ -1158,14 +1789,13 @@ impl FdTable {
             );
         }
         let mut result = Vec::new();
-        let mut chars = 0usize;
         let mut consumed = false;
         let mut delimiter_found = false;
         let mut limit_reached = false;
-        // Post-escape counting state (rubash#1328), as in read_bytes.
-        let mut escaped = false;
-        let seqs = read_delimiter_seqs(delimiter);
-        let mut escapes = ReadEscapeTracker::new(escape_aware);
+        // The shared FdRecordScan replay of the GNU read loop (unit
+        // consumption, first-byte delimiter compare, post-escape
+        // budget), as in read_bytes.
+        let mut scan = FdRecordScan::new(delimiter, char_limit, exact, raw);
         loop {
             // read.def check_read_timeout + shtimer_select: each byte read
             // is bounded by the remaining deadline.
@@ -1197,35 +1827,20 @@ impl FdTable {
                 }
             };
             consumed = true;
-            let lead = byte & 0xc0 != 0x80;
-            let was_escaped = escaped;
-            if lead {
-                if escaped {
-                    if byte != b'\n' {
-                        chars += 1;
-                    }
-                    escaped = false;
-                } else if !raw && byte == b'\\' {
-                    escaped = true;
-                } else {
-                    chars += 1;
-                }
-            }
             result.push(byte);
-            let suppressed = escapes.suppresses_match(byte);
-            if !exact && !suppressed {
-                // The delimiter is consumed but not returned: when the
-                // accumulated bytes end with one of its sequences, drop
-                // the sequence back off the record (rubash#1062).
-                if let Some(len) = delimiter_seq_ending_at(&seqs, &result, result.len()) {
-                    result.truncate(result.len() - len);
+            let seq_end = scan.sequence_ending_at(&result, result.len());
+            match scan.on_byte(byte, seq_end) {
+                FdScanAction::Data => {}
+                FdScanAction::DataLimit => {
+                    limit_reached = true;
+                    break;
+                }
+                FdScanAction::Delimiter { drop } => {
+                    // The delimiter is consumed but not returned.
+                    result.truncate(result.len() - drop);
                     delimiter_found = true;
                     break;
                 }
-            }
-            if char_limit.is_some_and(|limit| chars >= limit) {
-                limit_reached = true;
-                break;
             }
         }
         // EOF with zero bytes read must surface as None — `read` at EOF
@@ -1248,8 +1863,9 @@ impl FdTable {
     /// read 8 KiB chunks, scan for the delimiter / char limit, then seek
     /// the shared handle back to the consumed boundary — zreadc + zsyncfd
     /// parity (read.def:737, :940). Byte accounting matches the byte-wise
-    /// loop exactly (delimiter consumed but not returned in non-exact
-    /// mode; chars counted on non-continuation bytes).
+    /// loop exactly (the shared FdRecordScan replay: delimiter consumed
+    /// but not returned in non-exact mode; the budget counts completed
+    /// read_mbchar units).
     fn read_file_bytes_buffered(
         &mut self,
         file: Rc<FileFd>,
@@ -1262,59 +1878,55 @@ impl FdTable {
         let Ok(origin) = crate::fd::file_position(file.handle) else {
             return None;
         };
-        let seqs = read_delimiter_seqs(delimiter);
-        let mut escapes = ReadEscapeTracker::new(escape_aware);
         let mut buffer: Vec<u8> = Vec::new();
         let mut result: Vec<u8> = Vec::new();
-        let mut chars = 0usize;
         let mut consumed = false;
         let mut delimiter_found = false;
         let mut limit_reached = false;
         let mut rewind: Option<u64> = None;
-        // Post-escape counting state (rubash#1328), as in read_bytes;
+        // The shared FdRecordScan replay of the GNU read loop;
         // persists across chunk boundaries.
-        let mut escaped = false;
+        let mut scan = FdRecordScan::new(delimiter, char_limit, exact, raw);
         'chunks: loop {
             let scanned_from = buffer.len();
             match crate::fd::read_some(file.handle, 8192) {
                 Ok(chunk) if chunk.is_empty() => break,
                 Ok(chunk) => buffer.extend_from_slice(&chunk),
-                Err(_) => break,
+                Err(error) => {
+                    // rubash#3777: the byte-wise loop records the first
+                    // hard read error on an otherwise empty record
+                    // (rubash#1495); the buffered loop swallowed it, so
+                    // a directory bound to the fd read as silent EOF
+                    // instead of `read: 0: read error: Is a directory`
+                    // (read.def:911). Bytes already consumed keep the
+                    // plain partial-record path, as in the byte-wise arm.
+                    if result.is_empty() && self.read_error.is_none() {
+                        self.read_error = Some(crate::posix_errors::message(&error));
+                    }
+                    break;
+                }
             }
             for (index, &byte) in buffer[scanned_from..].iter().enumerate() {
                 let absolute = scanned_from + index;
                 consumed = true;
-                let lead = byte & 0xc0 != 0x80;
-                let was_escaped = escaped;
-                if lead {
-                    if escaped {
-                        if byte != b'\n' {
-                            chars += 1;
-                        }
-                        escaped = false;
-                    } else if !raw && byte == b'\\' {
-                        escaped = true;
-                    } else {
-                        chars += 1;
-                    }
-                }
                 result.push(byte);
-                let suppressed = escapes.suppresses_match(byte);
-                if !exact && !suppressed {
-                    if let Some(len) = delimiter_seq_ending_at(&seqs, &result, result.len()) {
+                let seq_end = scan.sequence_ending_at(&result, result.len());
+                match scan.on_byte(byte, seq_end) {
+                    FdScanAction::Data => {}
+                    FdScanAction::DataLimit => {
+                        limit_reached = true;
+                        rewind = Some(origin + (absolute as u64) + 1);
+                        break 'chunks;
+                    }
+                    FdScanAction::Delimiter { drop } => {
                         // Delimiter consumed but not returned; everything
                         // after its end position is prefetched data to
                         // rewind over.
-                        result.truncate(result.len() - len);
+                        result.truncate(result.len() - drop);
                         delimiter_found = true;
                         rewind = Some(origin + (absolute as u64) + 1);
                         break 'chunks;
                     }
-                }
-                if char_limit.is_some_and(|limit| chars >= limit) {
-                    limit_reached = true;
-                    rewind = Some(origin + (absolute as u64) + 1);
-                    break 'chunks;
                 }
             }
         }
@@ -1841,5 +2453,52 @@ mod tests {
             table.input_snapshot_bytes(10).unwrap(),
             (vec![0xff, b'\n'], 0)
         );
+    }
+
+    #[test]
+    fn output_bind_retires_read_arm() {
+        // rubash#3655: dup2 wholesale — `exec 14<<A 14>file` leaves
+        // fd 14 write-only; the heredoc text must not survive as a
+        // read arm for a later `read -u 14`.
+        let mut table = FdTable::new();
+        table.open_input(14, FdReadEndpoint::text("first\n"), false);
+        assert!(table.is_open_for_read(14));
+        table.open_output(14, FdWriteEndpoint::Stdout, false);
+        assert!(!table.is_open_for_read(14));
+        assert!(table.is_open_for_write(14));
+        assert!(table.read_endpoint(14).is_none());
+    }
+
+    #[test]
+    fn input_bind_retires_write_arm() {
+        // rubash#3655: the mirror direction — `exec 14>file 14<<A`
+        // leaves fd 14 read-only on the heredoc.
+        let mut table = FdTable::new();
+        table.open_output(14, FdWriteEndpoint::Stdout, false);
+        assert!(table.is_open_for_write(14));
+        table.open_input(14, FdReadEndpoint::text("first\n"), false);
+        assert!(!table.is_open_for_write(14));
+        assert!(table.is_open_for_read(14));
+        assert!(table.output_endpoint(14).is_none());
+    }
+
+    #[test]
+    fn open_readwrite_keeps_both_arms() {
+        // rubash#3655: the `<>` pair is ONE description — the only
+        // dual-arm install — and survives as both arms.
+        let mut table = FdTable::new();
+        table.open_readwrite(
+            14,
+            FdReadEndpoint::text("first\n"),
+            FdWriteEndpoint::Stdout,
+            false,
+        );
+        assert!(table.is_open_for_read(14));
+        assert!(table.is_open_for_write(14));
+        // A later single-direction bind still retires the pair
+        // wholesale (`exec 14<>f 14>g` leaves fd 14 write-only).
+        table.open_output(14, FdWriteEndpoint::Stderr, false);
+        assert!(!table.is_open_for_read(14));
+        assert!(table.is_open_for_write(14));
     }
 }

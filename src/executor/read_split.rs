@@ -66,6 +66,64 @@ fn logical_chars(text: &str) -> Vec<char> {
         .collect()
 }
 
+/// Single-byte locale byte domain for read splitting (rubash#2819).
+///
+/// GNU read.def hands the line to list_string (subst.c:3119), whose
+/// separator membership — string_extract_verbatim, subst.c:1148 — is
+/// per byte when MB_CUR_MAX == 1: a multibyte IFS character separates
+/// on each of its bytes. The read machinery above works on logical
+/// units (chars, marker pairs decoded); in byte mode the line and IFS
+/// are first rewritten so every byte is exactly one logical unit
+/// (bytes >= 0x80 become raw-byte marker pairs, which logical_units
+/// decodes to the byte as a Latin-1 codepoint), so the existing unit
+/// walk IS the byte walk, and each produced value is normalized back
+/// to storage text (a field whose bytes again form valid UTF-8
+/// re-forms its characters; a byte split out of a multibyte character
+/// stays a raw-byte marker). Pure-ASCII input never needs the rewrite:
+/// char and byte domains coincide there. Returns None outside byte
+/// mode (multibyte locale, or nothing non-ASCII involved).
+fn read_byte_domain(line: &str, ifs: &str) -> Option<(String, String)> {
+    if crate::locale::is_multi_byte_active() {
+        return None;
+    }
+    let non_ascii = |text: &str| text.chars().any(|ch| !ch.is_ascii());
+    if !non_ascii(line) && !non_ascii(ifs) {
+        return None;
+    }
+    Some((byte_domain_text(line), byte_domain_text(ifs)))
+}
+
+fn byte_domain_text(text: &str) -> String {
+    use crate::executor::substitution_metadata::{encode_raw_byte_marker, shell_text_to_raw_bytes};
+    shell_text_to_raw_bytes(text)
+        .iter()
+        .map(|byte| {
+            if *byte < 0x80 {
+                (*byte as char).to_string()
+            } else {
+                encode_raw_byte_marker(*byte)
+            }
+        })
+        .collect()
+}
+
+/// Normalize a byte-domain field back to storage text. The field's
+/// bytes are exactly the record bytes GNU binds (read.def:838-845 escapes
+/// CTLESC/CTLNUL and read.def:1127 / :1061 dequote_string undoes it, so the
+/// bound value is byte-identical to the input). `bytes_to_shell_text` is
+/// the storage-domain inverse of `shell_text_to_raw_bytes`: valid UTF-8
+/// re-forms its characters, a stray >= 0x80 byte stays a raw-byte marker,
+/// and every ASCII carrier byte (0x1b, 0x0c, 0x11, 0x13, 0x14..=0x1f) is
+/// re-tagged as its marker pair, exactly as `tag_read_carrier_text` tagged
+/// it on the way in. Emitting those bytes as bare chars (the pre-#3489
+/// walk) let the lexer's carrier consumers claim them: 0x14 became `\`,
+/// 0x1f `$`, 0x11/0x13 vanished, and 0x1b stopped matching `$'\e'`
+/// patterns (rubash#3489, the bats junit formatter's ANSI strip).
+fn byte_domain_value(text: &str) -> String {
+    use crate::executor::substitution_metadata::{bytes_to_shell_text, shell_text_to_raw_bytes};
+    bytes_to_shell_text(&shell_text_to_raw_bytes(text))
+}
+
 /// Byte length of `text`'s first `unit_count` logical units.
 fn logical_prefix_len(text: &str, units: &[(usize, usize, char)], unit_count: usize) -> usize {
     units
@@ -250,9 +308,48 @@ fn field_value(
 /// `field_value` helper, which unescapes backslash pairs
 /// (`unescape_read_backslashes`) instead of slicing the raw line.
 pub(in crate::executor) fn read_array_field_values(line: &str, ifs: &str) -> Vec<String> {
+    // rubash#2819: single-byte locale — split in the byte domain (see
+    // read_byte_domain); the ranges the impl computes then index the
+    // rewritten line, never the caller's.
+    if let Some((domain_line, domain_ifs)) = read_byte_domain(line, ifs) {
+        return read_array_field_values_impl(&domain_line, &domain_ifs)
+            .into_iter()
+            .map(|value| byte_domain_value(&value))
+            .collect();
+    }
+    read_array_field_values_impl(line, ifs)
+}
+
+fn read_array_field_values_impl(line: &str, ifs: &str) -> Vec<String> {
     split_read_field_ranges(line, ifs, true)
         .into_iter()
         .map(|range| field_value(line, range, ifs, true))
+        .collect()
+}
+
+/// Field values for `read -r -a` (raw mode): the elements are the raw
+/// field slices — no unescaping — but they must be produced at VALUE
+/// level, not by slicing the caller's line with the ranges of
+/// `split_read_field_ranges`. In a single-byte locale the split runs
+/// in the byte domain (rubash#2819's `read_byte_domain`, as the scalar
+/// and non-raw array producers do): there a multibyte IFS character
+/// is one delimiter PER BYTE (GNU subst.c list_string separator
+/// membership is per byte when MB_CUR_MAX == 1), the byte ranges can
+/// fall inside a multibyte character of the original line, and
+/// slicing it cannot express the empty fields between the two
+/// delimiter bytes (rubash#3191: IFS 'é', line 'xéyéz' — GNU n=5
+/// <x><><y><><z>, the range-slicing producer gave n=3). Outside the
+/// byte domain this is exactly the historical range slicing.
+pub(in crate::executor) fn read_array_raw_values(line: &str, ifs: &str) -> Vec<String> {
+    if let Some((domain_line, domain_ifs)) = read_byte_domain(line, ifs) {
+        return split_read_field_ranges(&domain_line, &domain_ifs, false)
+            .into_iter()
+            .map(|(start, end)| byte_domain_value(&domain_line[start..end]))
+            .collect();
+    }
+    split_read_field_ranges(line, ifs, false)
+        .into_iter()
+        .map(|(start, end)| line[start..end].to_string())
         .collect()
 }
 
@@ -328,6 +425,30 @@ pub(in crate::executor) fn read_scalar_fields_with_backslashes(
 }
 
 fn read_scalar_fields_internal(
+    line: &str,
+    names_len: usize,
+    ifs: &str,
+    interpret_backslashes: bool,
+) -> Vec<String> {
+    // rubash#2819: single-byte locale — split in the byte domain (see
+    // read_byte_domain). Every range/slice inside the impl then refers
+    // to the rewritten line, and the returned values are normalized
+    // back to storage text.
+    if let Some((domain_line, domain_ifs)) = read_byte_domain(line, ifs) {
+        return read_scalar_fields_impl(
+            &domain_line,
+            names_len,
+            &domain_ifs,
+            interpret_backslashes,
+        )
+        .into_iter()
+        .map(|value| byte_domain_value(&value))
+        .collect();
+    }
+    read_scalar_fields_impl(line, names_len, ifs, interpret_backslashes)
+}
+
+fn read_scalar_fields_impl(
     line: &str,
     names_len: usize,
     ifs: &str,

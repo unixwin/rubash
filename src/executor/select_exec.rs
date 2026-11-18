@@ -24,6 +24,14 @@ impl Executor {
                 return Ok(());
             }
         }
+        // rubash#3454: same `set -u` unbound-target gate as `if` —
+        // GNU's do_redirections runs before execute_select_command
+        // (execute_cmd.c:854, before the 3001 check_identifier), so an
+        // unbound `select ... done > $nope` target aborts ahead of the
+        // identifier check and any expansion side effect.
+        if self.compound_redirect_nounset_fatal(cmd)? {
+            return Err(ExecuteError::ExitCode(1));
+        }
         if !is_shell_name(&select_command.variable) {
             // GNU execute_select_command (execute_cmd.c:3001-3010) runs
             // check_identifier BEFORE `line_number = select_command->line`
@@ -48,6 +56,18 @@ impl Executor {
             return Ok(());
         }
 
+        // rubash#2701 — GNU execute_select_command expands the word
+        // list through the same word pipeline (execute_cmd.c:3525+ ->
+        // expand_words -> subst.c:13219 expand_word_list_internal): a
+        // `:?` verdict is the same FORCE_EOF class as in a command word
+        // (subst.c:10347/10414/10418) and `:=` binds at evaluation.
+        // The simple-command pre-passes never see this list.
+        for word in &select_command.words {
+            self.apply_parameter_assignment_expansions_in_word(word);
+            if let Some(error) = self.parameter_expansion_error_in_word_isolated(word) {
+                return self.raise_word_expansion_error(error);
+            }
+        }
         // GNU execute_cmd.c:3525-3528: the select head is printed
         // (print_select_command_head, print_cmd.c:656 -> `select NAME in
         // WORDS`) and run_debug_trap fires once before the word list is
@@ -224,7 +244,7 @@ impl Executor {
             // empty string on clean EOF and the partial line on an
             // unterminated tail.
             let reply = unescape_read_backslashes(&input);
-            if !self.apply_shell_assignment("REPLY", reply.clone()) {
+            if !self.apply_shell_assignment("REPLY", reply.clone(), None) {
                 // GNU: the read_builtin bind failure fails the query —
                 // stdout newline, no body, status failure (rubash#1018
                 // probe: `readonly REPLY` prints `REPLY: readonly
@@ -273,7 +293,7 @@ impl Executor {
             // assignment semantics (empty-cell nameref stores the cell,
             // invalid values report `` `x': not a valid identifier `` —
             // nameref11.sub `select r in /` on `declare -n r`).
-            if !self.apply_shell_assignment(&select_command.variable, selected.clone()) {
+            if !self.apply_shell_assignment(&select_command.variable, selected.clone(), None) {
                 self.exit_code = 1;
                 // POSIX-mode notes item 37 covers select alongside for: a
                 // readonly select variable exits the non-interactive POSIX

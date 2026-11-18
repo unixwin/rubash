@@ -829,6 +829,25 @@ fn extglob_match_literal_with_case(
                 && chars_match(pattern[p + 1], word[w], nocase)
                 && extglob_matches_at_with_case(pattern, p + 2, word, w + 1, nocase)
         }
+        // rubash#3050: CTLESC escape arm, isomorphic to the one
+        // `case_pattern_atom_matches` already has. A quoted literal
+        // metacharacter inside an extglob group reaches the matcher
+        // CTLESC-protected (parse.y:5694-5706 got_escaped_character);
+        // without this arm it fell into the catch-all below and was
+        // compared as a literal CTLESC character, so `@("a*b")` never
+        // matched 'a*b'. GNU's model: the case pattern is passed
+        // through quote_string_for_globbing with QGLOB_CTLESC
+        // (execute_cmd.c:3695-3729) and the matcher treats the escape
+        // as removing special meaning (lib/glob/sm_loop.c:121-135,
+        // GMATCH `case L('\\')`); CTLESC is this port's spelling of
+        // that escape. A trailing CTLESC (no next char) falls through
+        // to the catch-all literal arm, exactly like the ordinary
+        // matcher.
+        crate::executor::markers::CTLESC if p + 1 < pattern.len() => {
+            w < word.len()
+                && chars_match(pattern[p + 1], word[w], nocase)
+                && extglob_matches_at_with_case(pattern, p + 2, word, w + 1, nocase)
+        }
         c => {
             w < word.len()
                 && chars_match(c, word[w], nocase)

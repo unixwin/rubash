@@ -45,6 +45,33 @@ fn split_leading_array_ref(name: &str) -> Option<(&str, &str)> {
     Some((base, subscript))
 }
 
+/// The subscript text of the leading `name[...]` reference of a
+/// `${...}` parameter body, if it has one; text after the closing
+/// `]` (an operator suffix) is ignored because GNU
+/// parameter_brace_expand evaluates the subscript before the
+/// operator. Unlike `split_leading_array_ref`, a subscript that
+/// itself contains `[` (a nested subscript) is kept — the closing
+/// `]` is skipsubscript's, which nests brackets and treats
+/// `${...}` units as indivisible. An optional `!` (indirect) or
+/// `#` (length) prefix is skipped: both forms still expand the
+/// subscript during the fetch.
+fn leading_reference_subscript(inner: &str) -> Option<&str> {
+    let body = inner.strip_prefix(['!', '#']).unwrap_or(inner);
+    let open = body.find('[')?;
+    let head = &body[..open];
+    // GNU arrayfunc.c:1297-1313 `tokenize_array_reference` requires
+    // the base before `[` to pass `valid_identifier` — a digit base
+    // (`${1[...]}`) or a special-parameter base (`${@[0]}`) is a bad
+    // substitution, not a reference whose subscript is expanded, so
+    // only an identifier base descends (the malformed arm owns the
+    // rest and the real expansion reports it).
+    if !is_shell_name(head) {
+        return None;
+    }
+    let close = skipsubscript_close(body.as_bytes(), open)?;
+    Some(&body[open + 1..close])
+}
+
 /// A subscript that is a clean decimal integer literal (`-3`, `0`, `42`,
 /// `+7`): evaluating it through evalexp reads no variable, draws no RNG
 /// and writes nothing, so its value is decidable without evaluation.
@@ -353,6 +380,33 @@ fn mask_nonlocal_expansion_spans(word: &str) -> String {
         }
     }
     out.into_iter().collect()
+}
+
+/// The error pre-scan's verdict for one parameter name (rubash#2595 /
+/// #2762): the simulated-binding table first, then the #2527 pure
+/// probe. `Undecidable` means the verdict needs an evaluating fetch —
+/// a subscript the pure probe cannot settle without executing it.
+enum ScanValue {
+    /// Unset (no value at all).
+    Unset,
+    /// Set to the given value (empty counts as null for `:?`).
+    Set(String),
+    /// Set, but the value is unknown (bound by a non-literal `:=` /
+    /// `=` word the scan must not evaluate). Decides set-ness only.
+    SetUnknown,
+    /// No verdict without evaluating.
+    Undecidable,
+}
+
+/// The outcome of adjudicating one `:?` / `?` span in the scan.
+enum QuestionOutcome {
+    /// The span does not error.
+    NoError,
+    /// The span errors (report it).
+    Error,
+    /// Pure (pipeline-admission) mode and the span is undecidable:
+    /// count it as pending without evaluating anything.
+    ProvisionalPending,
 }
 
 impl Executor {
@@ -706,13 +760,25 @@ impl Executor {
         // parameter either way. The previous code fell through to
         // parameter_error_value, which returned $1's raw value ("a") as the
         // operator result.
-        if let Ok(index) = indirect_name.parse::<usize>() {
-            return match self
-                .shell_state
-                .positional_window()
-                .get(index.saturating_sub(1))
-            {
-                Some(target_name) => Some(self.parameter_operator_value(target_name)),
+        //
+        // The same two-step holds for a SPECIAL-parameter source
+        // (`#`, `?`, `@`, `*`, `0`): parameter_brace_find_indir
+        // (subst.c:7839-7881) resolves every parameter kind to t —
+        // the positional window count for `#`, the status text for
+        // `?`, the joined positionals for `@`/`*`, the script name for
+        // `0` — and the operator then applies to the parameter t
+        // names (`${!#:-d}` with $#=2 expands $2; `${!#x}` stays a
+        // bad substitution because `#x` is no parameter). Routing
+        // through parameter_error_value also fixes `0` indexing into
+        // the positional window at element 0 ($1) instead of $0.
+        if matches!(indirect_name, "#" | "?" | "@" | "*") || indirect_name.parse::<usize>().is_ok()
+        {
+            // parameter_error_value reads an all-digit name through
+            // get_dollar_var_value (subst.c:3707): 0 names `$0`, 1.. the
+            // positional window, leading zeros included (`${!010}` is $10,
+            // rubash#3784).
+            return match self.parameter_error_value(indirect_name) {
+                Some(t) => Some(self.parameter_operator_value(&t)),
                 None => Some(None),
             };
         }
@@ -819,7 +885,7 @@ impl Executor {
     /// the special parameters, and valid array references. Anything else
     /// triggers GNU's "invalid variable name" when indirected through
     /// (probe: x=123bad).
-    fn is_valid_indirect_target(value: &str) -> bool {
+    pub(in crate::executor) fn is_valid_indirect_target(value: &str) -> bool {
         if value.is_empty() {
             return false;
         }
@@ -878,14 +944,41 @@ impl Executor {
         if base.is_empty() {
             return false;
         }
-        if let Some(prefix) = base.strip_suffix(['@', '*']) {
-            return !prefix.is_empty() && is_shell_name(prefix);
-        }
+        // The body may BE a special parameter (`${!*}`, `${!@}`,
+        // `${!#}`...): subst.c:122 VALID_INDIR_PARAM takes `*`/`@` as
+        // the indirect SOURCE itself. This check must run before the
+        // prefix-list arm below — a body of exactly `*` or `@` also
+        // "strips" to an empty prefix, which shadowed the special and
+        // misreported the form as a bad substitution (rubash#2649).
         if matches!(base, "@" | "*" | "#" | "?" | "$" | "-" | "!" | "0")
             || base.parse::<usize>().is_ok()
             || is_shell_name(base)
         {
             return true;
+        }
+        // A special-parameter SOURCE with an operator tail — `${!#:-d}`,
+        // `${!?-d}`, `${!@:-d}` — is a legal indirection too: GNU
+        // parameter_brace_expand_indir (subst.c:7907-7918) resolves the
+        // source through parameter_brace_find_indir for every parameter
+        // kind, then applies the operator to the word t names. `#`/`?`
+        // heads reach here only outside posix mode
+        // (indirect_parameter_body); `$`/`-`/`!` heads stay a bad
+        // substitution — VALID_INDIR_PARAM (subst.c:122) does not admit
+        // them as sources.
+        //
+        // The tail class is exactly the string_extract stop set at
+        // subst.c:9844-9860 (`#%:-=?+/@`): `^` and `,` are NOT scanned
+        // after a special indir source, so `${!#^}`/`${!#,}` stay bad
+        // substitutions (named and positional heads keep them — casemod
+        // binds post-expansion there, `${!x^}` -> Zzz).
+        if matches!(base.chars().next(), Some('@' | '*' | '#' | '?')) {
+            return matches!(
+                base[1..].chars().next(),
+                Some('#' | '%' | ':' | '-' | '=' | '?' | '+' | '/' | '@')
+            );
+        }
+        if let Some(prefix) = base.strip_suffix(['@', '*']) {
+            return !prefix.is_empty() && is_shell_name(prefix);
         }
         // GNU also accepts a valid leading name followed by an operator
         // expression applied to the indirect value (${!x//c/x}, ${!x:-y},
@@ -1064,10 +1157,23 @@ impl Executor {
             // the colon-less `${#=}`/`${#+}` which stay bad substitution.
             return !name[1..].is_empty();
         }
-        matches!(
-            first,
-            '-' | '+' | '=' | '?' | '@' | '^' | ',' | '/' | '%' | '#'
-        ) && name.len() > 1
+        if first == '@' {
+            // rubash#2711 — GNU subst.c:8898-8922
+            // valid_parameter_transform: the `@` xform operator admits
+            // EXACTLY one transform char from the fixed set, so `${#@Q}`
+            // is `$#` under the Q transform (probe: `set -- ab cd;
+            // echo ${#@Q}` -> `'2'`) while `${#@:}`, `${#@%b}` and
+            // `${#@:-2}` all hit bad_substitution — `${#@...}` is NOT
+            // the `${#@}` positional-count form followed by an operator,
+            // because the `#`-led name scan (subst.c:9931-9941) requires
+            // the name to consume the whole body up to `}`.
+            return name.len() == 2
+                && matches!(
+                    name.as_bytes()[1],
+                    b'a' | b'A' | b'K' | b'k' | b'E' | b'P' | b'Q' | b'U' | b'u' | b'L'
+                );
+        }
+        matches!(first, '-' | '+' | '=' | '?' | '^' | ',' | '/' | '%' | '#') && name.len() > 1
     }
 
     /// GNU subst.c:8949 parameter_brace_transform returns
@@ -1133,6 +1239,9 @@ impl Executor {
         &self,
         cmd: &CommandNode,
     ) -> Option<(String, String, i32)> {
+        // rubash#2595/#2762: one scan call, one simulated walk — fresh
+        // simulated bindings and an empty subscript carry.
+        crate::executor::expand_braced_indices::scan_ctx_begin();
         // rubash#2558: this pre-scan is a verdict-only pass layered over
         // the real expansion (GNU's single fetch is subst.c:9777
         // parameter_brace_expand). Isolate the deferred subscript writes
@@ -1205,6 +1314,13 @@ impl Executor {
                 }
             }
         }
+        // niubash#993 §1: the nounset pass just recorded every `:=`/`=`
+        // bind it passed so a later `$name` fragment adjudicated the
+        // evolved state; the per-word `${...}` walk below re-records
+        // each fragment as it reaches it, so the table must restart
+        // empty — otherwise a `:?` earlier in the list would see a
+        // later fragment's bind.
+        crate::executor::expand_braced_indices::scan_sim_clear();
         for word in &cmd.words {
             let masked =
                 Self::mask_recorded_process_substitutions(word, &cmd.process_substitutions);
@@ -1235,6 +1351,14 @@ impl Executor {
     /// a pipeline element's here-string skipped the nounset check on both
     /// the concurrent path and, for the heredoc family, the stage path).
     pub(in crate::executor) fn parameter_expansion_error_pending(&self, cmd: &CommandNode) -> bool {
+        // rubash#2595: the admission predicate is side-effect-free, so
+        // its scan runs in pure mode — an undecidable `:?` span counts
+        // as pending (decline the fast path) instead of being evaluated.
+        let _pure = crate::executor::expand_braced_indices::ScanPureGuard::new();
+        // niubash#993 §1: the nounset walks below now record `:=`/`=`
+        // binds as they pass them — start from a fresh table so a
+        // previous scan's records never adjudicate this command.
+        crate::executor::expand_braced_indices::scan_ctx_begin();
         if cmd.arithmetic_command.is_some() {
             return false;
         }
@@ -1293,11 +1417,15 @@ impl Executor {
         texts.extend(cmd.assignment_values().map(String::as_str));
         for text in texts {
             for body in speculative_arithmetic_bodies(text) {
-                let (value, _writes, _category) =
+                // Probe mirrors the arithsub evalexp window: NULL
+                // this_command_name (rubash#3295).
+                let (value, _writes, _category) = {
+                    let _arith_label = crate::executor::arithmetic::arith_eval_label_scope(None);
                     crate::executor::arithmetic::eval_conditional_arith_value_categorized_with_writes(
                         &body,
                         &self.shell_state.env_vars,
-                    );
+                    )
+                };
                 if value.is_none() {
                     return true;
                 }
@@ -1322,6 +1450,8 @@ impl Executor {
         &self,
         body: &str,
     ) -> Option<(String, String, i32)> {
+        // rubash#2595/#2762: one scan call, one simulated walk.
+        crate::executor::expand_braced_indices::scan_ctx_begin();
         // rubash#2558: same deferred-write isolation as
         // `parameter_expansion_error` — a no-error heredoc pre-scan must
         // not leave its subscript evaluations queued for a second
@@ -1383,6 +1513,8 @@ impl Executor {
         &self,
         word: &str,
     ) -> Option<(String, String, i32)> {
+        // rubash#2595/#2762: one scan call, one simulated walk.
+        crate::executor::expand_braced_indices::scan_ctx_begin();
         let mark = Self::scan_pending_writes_mark();
         let verdict = self.parameter_expansion_error_in_word(word);
         if verdict.is_none() {
@@ -1407,6 +1539,7 @@ impl Executor {
         self.write_diagnostic_fd2(line.as_bytes());
         if status == Self::FATAL_PARAMETER_EXPANSION_STATUS {
             if self.expansion_error_is_interactive_discard() {
+                self.note_unit_expansion_error_discard();
                 self.exit_code = 1;
                 // rubash#439: expansion error, not a failed command.
                 self.command_expansion_failed.set(true);
@@ -1726,8 +1859,10 @@ impl Executor {
             // and GNU fetches exactly once (subst.c:9777
             // parameter_brace_expand → one array_value_internal). A
             // subscript the probe cannot settle without evaluating is
-            // left to that single real fetch.
-            let Some(value) = self.pre_scan_operator_value(var_name) else {
+            // left to that single real fetch. rubash#2762: the probe is
+            // simulation-aware, so a `:=` fragment earlier in the same
+            // walk already counts for the word-selection test.
+            let Some(value) = self.scan_operator_value(var_name) else {
                 continue;
             };
             let word_evaluated = match op {
@@ -1740,6 +1875,147 @@ impl Executor {
                 return None;
             }
             return self.parameter_expansion_error_in_word(word);
+        }
+        // rubash#2701 — `${var/pat/repl}`: GNU expands the replacement
+        // word (parameter_brace_patsub -> expand_string on the repl text,
+        // subst.c:9408+ skip_to_delim split) whenever the variable is SET
+        // — even when the value is empty or the pattern never matches
+        // (WSL 5.3.20 probe: `v=""; ${v/b/${u:?m}}` still reports
+        // `u: m`). A nested `:?` inside it is fatal exactly like the
+        // `-`/`+`/`=` operator words above.
+        if let Some((var_name, tail)) = split_once_outside_subscript_str(inner, "/") {
+            if is_parameter_error_name(var_name) {
+                let tail = tail.strip_prefix('/').unwrap_or(tail);
+                let tail = tail.strip_prefix(['#', '%']).unwrap_or(tail);
+                if let Some((_, replacement)) = split_parameter_separator(tail) {
+                    if !replacement.is_empty()
+                        && self
+                            .scan_operator_value(var_name)
+                            .is_some_and(|value| value.is_some())
+                    {
+                        return self.parameter_expansion_error_in_word(replacement);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Adjudicate a nested `${...}` inside the leading reference's
+    /// subscript (rubash#2596). GNU `parameter_brace_expand`
+    /// (subst.c:9777) fetches the parameter before any operator,
+    /// transform, length or indirect adjudication, and the fetch
+    /// expands the subscript (expand_array_subscript → expand_string,
+    /// subst.c:11063 `expand_subscript_string`), which recurses into
+    /// a nested `${...}` under its own name — a `:?` there is fatal
+    /// for the inner parameter (`${a[${b:?e}]}` reports `b: e`).
+    /// The pre-scan never descended into subscripts: it consumed the
+    /// outer span whole, so the nested error was swallowed (and the
+    /// real expansion's subscript walk yields empty for it). Scan the
+    /// subscript text before the operator arms, so the subscript
+    /// error pre-empts them exactly like the fetch does.
+    fn nested_subscript_word_error(&self, inner: &str) -> Option<(String, String, i32)> {
+        let subscript = leading_reference_subscript(inner)?;
+        if !subscript.contains("${") {
+            return None;
+        }
+        self.scan_subscript_text_for_errors(subscript)
+    }
+
+    /// Walk subscript text for nested `${...}` errors (rubash#2596).
+    /// Quote-transparent — GNU expands a nested expansion inside a
+    /// subscript even in single quotes (`${a['${b:?e}']}` reports
+    /// `b: e`; the quotes survive into the arithmetic evaluation,
+    /// subst.c:11063 expand_subscript_string → expand_string) — but
+    /// `$(...)`/backtick spans are opaque: a `:?` inside one belongs
+    /// to the inner command, which reports it itself while the outer
+    /// command continues. `$((...))` arithmetic units stay opaque
+    /// like the top-level scan's P_ARITH rule (rubash#533).
+    fn scan_subscript_text_for_errors(&self, text: &str) -> Option<(String, String, i32)> {
+        let bytes = text.as_bytes();
+        let mut index = 0usize;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'\\' => {
+                    index += 2;
+                }
+                b'$' if bytes.get(index + 1) == Some(&b'\'') => {
+                    // ANSI-C string: backslash escapes carry through.
+                    index += 2;
+                    while index < bytes.len() {
+                        if bytes[index] == b'\\' {
+                            index += 2;
+                            continue;
+                        }
+                        if bytes[index] == b'\'' {
+                            index += 1;
+                            break;
+                        }
+                        index += 1;
+                    }
+                }
+                b'$' if bytes.get(index + 1) == Some(&b'(') => {
+                    // $(...) / $((...)) body: a separate expansion
+                    // source with its own scan; skip it whole.
+                    index += 2;
+                    let mut depth = 1usize;
+                    let mut single = false;
+                    let mut double = false;
+                    while index < bytes.len() {
+                        let current = bytes[index];
+                        if current == b'\\' && !single {
+                            index += 2;
+                            continue;
+                        }
+                        match current {
+                            b'\'' if !double => single = !single,
+                            b'"' if !single => double = !double,
+                            b'(' if !single && !double => depth += 1,
+                            b')' if !single && !double => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    index += 1;
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                        index += 1;
+                    }
+                }
+                b'`' => {
+                    index += 1;
+                    while index < bytes.len() {
+                        if bytes[index] == b'\\' {
+                            index += 2;
+                            continue;
+                        }
+                        if bytes[index] == b'`' {
+                            index += 1;
+                            break;
+                        }
+                        index += 1;
+                    }
+                }
+                b'$' if bytes.get(index + 1) == Some(&b'{') => {
+                    let after = &text[index + 2..];
+                    let Some(end) = matching_parameter_brace(after) else {
+                        return Some((
+                            "${".to_string() + after + "}",
+                            "unexpected EOF while looking for matching `}'`".to_string(),
+                            2,
+                        ));
+                    };
+                    let span = &text[index..index + 2 + end + 1];
+                    if let Some(error) = self.parameter_expansion_error_in_word(span) {
+                        return Some(error);
+                    }
+                    index += 2 + end + 1;
+                }
+                _ => {
+                    index += 1;
+                }
+            }
         }
         None
     }
@@ -1762,7 +2038,10 @@ impl Executor {
     /// (a clean integer literal; expansion-free assoc key text). Any
     /// other subscript returns `None` (undecidable): the caller skips
     /// the span and the real expansion's single fetch adjudicates it.
-    fn pre_scan_operator_value(&self, name: &str) -> Option<Option<String>> {
+    pub(in crate::executor) fn pre_scan_operator_value(
+        &self,
+        name: &str,
+    ) -> Option<Option<String>> {
         if !name.contains('[') {
             return Some(self.parameter_error_value(name));
         }
@@ -1847,6 +2126,347 @@ impl Executor {
         )
     }
 
+    /// The simulated-binding table's verdict for `name`, if it has one
+    /// (rubash#2762). Exact-name matches win; a bare name also reads
+    /// the simulated element 0 (GNU reads element 0 for a bare array
+    /// name, variables.c get_string_value); an element query reads a
+    /// simulated scalar base's element 0 — and only that, unless the
+    /// live base is an array, whose other elements the simulation did
+    /// not touch. `[@]` / `[*]` joins take no simulated verdict (the
+    /// pure probe answers them from the live elements).
+    fn scan_sim_value(&self, name: &str) -> Option<ScanValue> {
+        use crate::executor::expand_braced_indices::ScanSimValue;
+        let to_value = |sim: ScanSimValue| match sim {
+            ScanSimValue::Exact(value) => ScanValue::Set(value),
+            ScanSimValue::SetUnknown => ScanValue::SetUnknown,
+        };
+        if let Some(sim) = crate::executor::expand_braced_indices::scan_sim_lookup(name) {
+            return Some(to_value(sim));
+        }
+        if name.ends_with("[@]") || name.ends_with("[*]") {
+            return None;
+        }
+        if let Some((base, key)) = parse_array_subscript(name) {
+            if let Some(sim) = crate::executor::expand_braced_indices::scan_sim_lookup(base) {
+                return match clean_integer_literal_subscript(key) {
+                    Some(0) => Some(to_value(sim)),
+                    Some(_) => {
+                        if self.parameter_is_array_variable(base)
+                            || is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, base)
+                        {
+                            None
+                        } else {
+                            Some(ScanValue::Unset)
+                        }
+                    }
+                    None => None,
+                };
+            }
+            return None;
+        }
+        if is_shell_name(name) {
+            let element0 = format!("{name}[0]");
+            if let Some(sim) = crate::executor::expand_braced_indices::scan_sim_lookup(&element0) {
+                return Some(to_value(sim));
+            }
+        }
+        None
+    }
+
+    /// The scan's set/null verdict for `name`: simulated bindings
+    /// first (an earlier `:=` / `=` fragment of the same walk), then
+    /// the #2527 pure probe. Never evaluates a subscript.
+    fn scan_error_value(&self, name: &str) -> ScanValue {
+        if let Some(value) = self.scan_sim_value(name) {
+            return value;
+        }
+        match self.pre_scan_operator_value(name) {
+            Some(value) => match value {
+                Some(value) => ScanValue::Set(value),
+                None => ScanValue::Unset,
+            },
+            None => ScanValue::Undecidable,
+        }
+    }
+
+    /// The `Option<Option<String>>` shape the operator-word and
+    /// substring arms need: `None` means undecidable (skip the span,
+    /// as the pure probe does today).
+    fn scan_operator_value(&self, name: &str) -> Option<Option<String>> {
+        match self.scan_error_value(name) {
+            ScanValue::Unset => Some(None),
+            ScanValue::Set(value) => Some(Some(value)),
+            ScanValue::SetUnknown | ScanValue::Undecidable => None,
+        }
+    }
+
+    /// The simulation's verdict for `name` by its RESOLVED element
+    /// name, after an evaluating fetch populated the subscript carry.
+    /// `None` when the fetch resolved nothing the simulation knows.
+    fn scan_sim_value_for_resolved(&self, name: &str) -> Option<ScanValue> {
+        let (base, key) = parse_array_subscript(name)?;
+        let expanded = crate::executor::expand_braced_indices::scan_carry_peek(key)?;
+        let resolved = format!("{base}[{expanded}]");
+        self.scan_sim_value(&resolved)
+    }
+
+    /// Adjudicate one `:?` / `?` span (rubash#2595 / #2762). The
+    /// verdict comes from the simulated walk or the pure probe
+    /// wherever possible, so a command substitution inside the tested
+    /// subscript is not executed by the scan; only an undecidable span
+    /// falls through to the evaluating fetch — whose resolution the
+    /// real expansion reuses through the subscript carry, so the
+    /// substitution still executes exactly once (subst.c:9777 single
+    /// fetch). In pure (pipeline-admission) mode no span is ever
+    /// evaluated: an undecidable span is provisional.
+    fn scan_question_is_error(&self, name: &str, require_non_empty: bool) -> QuestionOutcome {
+        // GNU subst.c:10060-10076: a `!`-indirect source is resolved FIRST —
+        // parameter_brace_expand_indir -> parameter_brace_find_indir
+        // (subst.c:7839-7881) turns `!src` into the VALUE of src (t), and
+        // parameter_brace_expand_word(t) (subst.c:7907) then produces the
+        // value the operator tests. The `?`/`:?` verdict therefore keys on
+        // the resolved target, not on the raw `!src` name: with
+        // `u=x; x=hello`, `${!u?v}` is set and expands to `hello`, while an
+        // unset x leaves temp NULL and the SAME report still names the
+        // original expression (`!u: v`, subst.c:10412
+        // parameter_brace_expand_error). `indirect_parameter_operator_value`
+        // is that two-step resolution (it already answers the `-`/`+`/`=`
+        // family); an unresolvable source yields no temp, i.e. unset.
+        if let Some(body) = self.indirect_parameter_body(name) {
+            if !body.is_empty() {
+                return match self.indirect_parameter_operator_value(name) {
+                    Some(Some(value)) => {
+                        if require_non_empty && value.is_empty() {
+                            QuestionOutcome::Error
+                        } else {
+                            QuestionOutcome::NoError
+                        }
+                    }
+                    Some(None) | None => QuestionOutcome::Error,
+                };
+            }
+        }
+        // A negative-literal subscript can carry the fetch's own `bad
+        // array subscript` diagnostic (GNU arrayfunc.c:1582-1583
+        // INDEX_ERROR), which the pure probe cannot reproduce — let the
+        // evaluating fetch adjudicate (it executes nothing: the
+        // subscript is a literal). Pure mode stays evaluation-free.
+        let negative_literal = parse_array_subscript(name).is_some_and(|(_, key)| {
+            clean_integer_literal_subscript(key).is_some_and(|index| index < 0)
+        });
+        if negative_literal && crate::executor::expand_braced_indices::scan_pure_mode() {
+            return QuestionOutcome::ProvisionalPending;
+        }
+        if !negative_literal {
+            match self.scan_error_value(name) {
+                ScanValue::Unset => return QuestionOutcome::Error,
+                ScanValue::Set(value) => {
+                    return if require_non_empty && value.is_empty() {
+                        QuestionOutcome::Error
+                    } else {
+                        QuestionOutcome::NoError
+                    };
+                }
+                ScanValue::SetUnknown => {
+                    // Set-ness is known; only the colon form needs the
+                    // value. A bare `?` is decided; `:?` falls through
+                    // to the fetch, whose pre-command value is the
+                    // fallback today's scan used.
+                    if !require_non_empty {
+                        return QuestionOutcome::NoError;
+                    }
+                }
+                ScanValue::Undecidable => {}
+            }
+        }
+        if crate::executor::expand_braced_indices::scan_pure_mode() {
+            return QuestionOutcome::ProvisionalPending;
+        }
+        // rubash#3541: GNU's evalerror (arrayfunc.c:1356 array_expand_index
+        // -> evalexp -> expr.c error jump) abandons parameter_brace_expand
+        // BEFORE subst.c:8216 parameter_brace_expand_error can run, so an
+        // arithmetic failure inside the tested subscript is the whole
+        // verdict — the `:?` report must not follow it. The fetch below
+        // raises the fatal-expansion flags on that path; honor them and
+        // defer instead of layering the `:?` report on top.
+        let pre_fetch_arith_error = self.shell_state.arithmetic_expansion_error.get()
+            || self.shell_state.arithmetic_fatal_error.get();
+        let fetched = self.parameter_error_value(name);
+        if !pre_fetch_arith_error
+            && (self.shell_state.arithmetic_expansion_error.get()
+                || self.shell_state.arithmetic_fatal_error.get())
+        {
+            return QuestionOutcome::NoError;
+        }
+        // The fetch resolved the subscript (carry map): re-check the
+        // simulation by the RESOLVED name — an earlier `:=` may have
+        // bound exactly this element, and the fetched (pre-command)
+        // value would then be stale.
+        if let Some(sim) = self.scan_sim_value_for_resolved(name) {
+            return match sim {
+                ScanValue::Unset => QuestionOutcome::Error,
+                ScanValue::Set(value) => {
+                    if require_non_empty && value.is_empty() {
+                        QuestionOutcome::Error
+                    } else {
+                        QuestionOutcome::NoError
+                    }
+                }
+                ScanValue::SetUnknown => {
+                    if !require_non_empty {
+                        QuestionOutcome::NoError
+                    } else if fetched.as_deref().map(str::is_empty).unwrap_or(true) {
+                        QuestionOutcome::Error
+                    } else {
+                        QuestionOutcome::NoError
+                    }
+                }
+                // Unreachable: the simulation never reports Undecidable.
+                ScanValue::Undecidable => QuestionOutcome::NoError,
+            };
+        }
+        let is_error = if require_non_empty {
+            fetched.as_deref().map(str::is_empty).unwrap_or(true)
+        } else {
+            fetched.is_none()
+        };
+        if is_error {
+            QuestionOutcome::Error
+        } else {
+            QuestionOutcome::NoError
+        }
+    }
+
+    /// Record a `:=` / `=` bind the walk just passed (rubash#2762),
+    /// so later fragments are adjudicated against the evolved state
+    /// (subst.c:13219 left-to-right walk; subst.c:7966 binds as it
+    /// goes). The bind is recorded only when the trigger condition is
+    /// decidable without evaluating (pure probe / simulation) and the
+    /// target can bind (not positional, readonly, or noassign — the
+    /// same predicates as the assignment-error scan); a non-literal
+    /// operator word records set-ness only, never its unevaluated
+    /// text. Recorded AFTER the span's own arms, so a nested `:?`
+    /// inside the operator word still sees the pre-bind value — GNU
+    /// expands the right-hand side before binding it.
+    fn scan_record_assignment(&self, inner: &str) {
+        let Some((name, require_non_empty)) = parse_parameter_assignment_operator(inner) else {
+            return;
+        };
+        if name.parse::<usize>().is_ok_and(|index| index > 0) {
+            return;
+        }
+        // A negative-literal element target may fail to resolve at bind
+        // time (GNU arrayfunc.c:1582-1583 INDEX_ERROR on an empty array),
+        // so a simulated bind for it would be a promise the real bind
+        // may not keep — leave the later `:?` to the fetch, which
+        // reports the failure itself.
+        if parse_array_subscript(name).is_some_and(|(_, key)| {
+            clean_integer_literal_subscript(key).is_some_and(|index| index < 0)
+        }) {
+            return;
+        }
+        let target = parse_array_subscript(name)
+            .map(|(array_name, _)| array_name.to_string())
+            .unwrap_or_else(|| {
+                self.nameref_target_name(name)
+                    .unwrap_or_else(|| name.to_string())
+            });
+        if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, &target)
+            || is_noassign_bash_array(&target)
+        {
+            return;
+        }
+        // The trigger condition, judged without evaluating: the bind
+        // happens when the parameter is unset (`=` and `:=`) or null
+        // (`:=` only). Undecidable means the condition needs the
+        // subscript evaluated — do not record; later fragments keep
+        // today's pre-command verdict for this name.
+        let triggered = match self.scan_error_value(name) {
+            ScanValue::Unset => true,
+            ScanValue::Set(value) => require_non_empty && value.is_empty(),
+            ScanValue::SetUnknown | ScanValue::Undecidable => return,
+        };
+        if !triggered {
+            return;
+        }
+        let word = inner
+            .split_once(":=")
+            .and_then(|(n, w)| (n == name).then_some(w))
+            .or_else(|| {
+                inner
+                    .split_once('=')
+                    .and_then(|(n, w)| (n == name).then_some(w))
+            });
+        let Some(word) = word else {
+            return;
+        };
+        use crate::executor::expand_braced_indices::ScanSimValue;
+        let value = if word.contains('$') || word.contains('`') {
+            ScanSimValue::SetUnknown
+        } else {
+            ScanSimValue::Exact(self.expand_parameter_word(word))
+        };
+        crate::executor::expand_braced_indices::scan_sim_record(name.to_string(), value);
+    }
+
+    /// Whether the #3855 bad-substitution gate must defer to the real
+    /// expansion for this span instead of emitting the scan's verdict
+    /// (rubash#3864). GNU's `bad substitution` default
+    /// (subst.c:10276-10288) reports the WORD BEING EXPANDED with the
+    /// error class of the context; the scan's whole-word display and
+    /// status 1 coincide with that only when none of these hold:
+    ///
+    /// - the scanned word is (or contains) a compound assignment
+    ///   value: GNU expands elements individually (arrayfunc.c:557
+    ///   `expand_compound_array_assignment`) and the diagnostic names
+    ///   the element word (`\[0\]=${-x}`), which the scan's whole-word
+    ///   display cannot name (issue3500);
+    /// - the span's name head is a `$'...'` literal the real expansion
+    ///   decodes: subst.c:7583 `valid_brace_expansion_word` judges the
+    ///   extracted NAME, and the real expansion decodes `$'x1'` to
+    ///   `x1` in a quoted context — the gate on the raw literal
+    ///   misjudges it (issue2650);
+    /// - the verdict is POSIX-fatal: subst.c:10285-10286 makes a bad
+    ///   substitution FORCE_EOF when POSIX + non-interactive + compat
+    ///   > 43, which the scan's status 1 cannot express (audit
+    ///   B4-F08). The predicate mirrors the fatal arm in
+    ///   command_execute.rs.
+    ///
+    /// Every deferral restores the pre-#3855 behavior for that slice:
+    /// the scan returns nothing here and the real expansion reports
+    /// (or stays silent for an unevaluated word), exactly as it did
+    /// when the census was green.
+    fn scan_bad_substitution_defers_to_expansion(&self, word: &str, inner: &str) -> bool {
+        // Compound assignment value: the parser's compound marker at
+        // the value start, an unmarked parenthesised value, or a
+        // `name=<marker>(...)` declare operand (the marker sits after
+        // the `=` there). Prefix checks only — no textual `.contains`
+        // on the marker, per the #2885 E7 blind-consumer lint.
+        if word.starts_with(crate::executor::markers::COMPOUND_ASSIGNMENT_MARKER)
+            || word.starts_with('(')
+            || word.split_once('=').is_some_and(|(_, rhs)| {
+                rhs.starts_with(crate::executor::markers::COMPOUND_ASSIGNMENT_MARKER)
+                    || rhs.starts_with('(')
+            })
+        {
+            return true;
+        }
+        // A `$'name'` head the real expansion decodes to a valid name.
+        let head = crate::executor::expand_word::brace_name_head(inner.as_bytes());
+        if head.starts_with(b"$'")
+            && std::str::from_utf8(head).is_ok_and(|head_str| {
+                crate::executor::expand_word::resolve_dollar_quoted_parameter_name(head_str)
+                    .is_some()
+            })
+        {
+            return true;
+        }
+        // POSIX-fatal class the scan cannot express.
+        self.posix_mode_enabled()
+            && !self.invocation_interactive()
+            && crate::builtins::shopt::compatibility_level(&self.shell_state.env_vars) > 43
+    }
+
     fn parameter_expansion_error_in_word_context(
         &self,
         word: &str,
@@ -1878,7 +2498,16 @@ impl Executor {
             return Some((name, "bad array subscript".to_string(), 2));
         }
         if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset") {
-            if let Some(name) = self.nounset_unbound_parameter(word) {
+            // niubash#993 §1: the nounset walk records each `:=`/`=`
+            // bind it passes so a later `$name`/`${name}` fragment
+            // adjudicates the evolved state. Its records are private
+            // to this pass — the `${...}` walk below re-records every
+            // fragment in order — so restore the incoming table before
+            // that walk starts.
+            let sim_snapshot = crate::executor::expand_braced_indices::scan_sim_snapshot();
+            let unbound_hit = self.nounset_unbound_parameter(word);
+            crate::executor::expand_braced_indices::scan_sim_restore(sim_snapshot);
+            if let Some(name) = unbound_hit {
                 // expr.c expr_streval raises FORCE_EOF for unbound vars
                 // under set -u — fatal like `${x?}` (see command_execute).
                 let (name, message) = self.nounset_unbound_diagnostic(name);
@@ -1906,6 +2535,47 @@ impl Executor {
                 break;
             };
             let after_start = &rest[start + 2..];
+            // GNU subst.c:10775-10798 param_expand `case LBRACE`:
+            // `${` + FUNSUB_CHAR (parser.h:85 — blank/newline/`|`)
+            // routes to function_substitute (subst.c:6917) BEFORE
+            // parameter_brace_expand ever runs, so the
+            // valid_brace_expansion_word gate (subst.c:10053/7583)
+            // and every operator arm below see command text, never a
+            // parameter name — `${ cmd; }` bodies must not be judged
+            // by braced_name_is_bad_substitution (rubash#3502
+            // follow-up: the scan read ` case x in x) esac; ` as an
+            // illegal name). Mirror the real path's admission —
+            // expand_word.rs / embedded_parameters.rs run the same
+            // three steps: funsub_introducer, extract_funsub_body,
+            // funsub_body_is_terminated. An introducer-led span that
+            // fails them is not a funsub and falls through to the
+            // parameter checks unchanged.
+            let mut funsub_chars = after_start.chars().peekable();
+            if funsub_chars
+                .peek()
+                .copied()
+                .and_then(crate::executor::command_substitution::funsub_introducer)
+                .is_some()
+            {
+                if let Some((body, _)) =
+                    crate::executor::command_substitution::extract_funsub_body(&mut funsub_chars)
+                {
+                    if crate::executor::command_substitution::funsub_body_is_terminated(&body) {
+                        // The funsub extent is introducer + body + `}`;
+                        // the `}` sits body.chars().count() + 1 chars
+                        // into after_start (introducer at 0, body
+                        // 1..=N, `}` at N+1) — the offset arithmetic
+                        // current_shell_command_substitution_span
+                        // (parameter_core.rs) already uses.
+                        if let Some((close, _)) =
+                            after_start.char_indices().nth(body.chars().count() + 1)
+                        {
+                            rest = &after_start[close + 1..];
+                            continue;
+                        }
+                    }
+                }
+            }
             let Some(end) = matching_parameter_brace(after_start) else {
                 return Some((
                     "${".to_string() + after_start + "}",
@@ -1958,6 +2628,15 @@ impl Executor {
                     1,
                 ));
             }
+            // rubash#2596: the subscript is expanded while the
+            // parameter is fetched, before any operator, transform,
+            // length or indirect adjudication (subst.c:9777
+            // parameter_brace_expand; expand_subscript_string,
+            // subst.c:11063) — a nested error inside it pre-empts
+            // every arm below.
+            if let Some(nested) = self.nested_subscript_word_error(inner) {
+                return Some(nested);
+            }
             // GNU subst.c:8944-8951 parameter_brace_transform +
             // valid_parameter_transform (subst.c:8898): a `@xform` suffix on
             // a parameter name must be exactly one valid transform
@@ -1968,8 +2647,23 @@ impl Executor {
                 // character, so `${unset@C}`/`${unset@}` expand empty
                 // without error; only a set variable reaches the fatal
                 // valid_parameter_transform check at subst.c:8944.
-                let is_set = self.parameter_error_value(base).is_some()
-                    || self.shell_state.env_vars.contains_key(base);
+                // rubash#2762: the set test is simulation-aware, so a
+                // `:=` fragment earlier in the same walk already counts.
+                let is_set = self.shell_state.env_vars.contains_key(base)
+                    || match self.scan_error_value(base) {
+                        ScanValue::Unset => false,
+                        ScanValue::Set(_) | ScanValue::SetUnknown => true,
+                        // Pure (pipeline-admission) mode never evaluates:
+                        // an undecidable base counts as unset here, so the
+                        // span is skipped and the stage scan adjudicates
+                        // it for real.
+                        ScanValue::Undecidable
+                            if crate::executor::expand_braced_indices::scan_pure_mode() =>
+                        {
+                            false
+                        }
+                        ScanValue::Undecidable => self.parameter_error_value(base).is_some(),
+                    };
                 if is_set {
                     return Some((
                         crate::executor::expand_word::bad_substitution_display(word),
@@ -2066,6 +2760,25 @@ impl Executor {
                         }
                     }
                 }
+                // GNU subst.c:7907-7910 parameter_brace_expand_indir: a
+                // positional source skips the valid_identifier existence
+                // check entirely — find_indir resolves it and an invalid
+                // t (`${!0}` through $0's script name) reports
+                // `<t>: invalid variable name`. An unset positional
+                // yields no t and proceeds silently (`${!9}`).
+                else if !indirect.is_empty() && indirect.bytes().all(|b| b.is_ascii_digit()) {
+                    // GNU parameter_brace_find_indir resolves a positional
+                    // source through the parameter itself:
+                    // parameter_error_value reads it via get_dollar_var_value
+                    // (subst.c:3707), so `${!0}`/`${!00}` read $0 and an
+                    // invalid t (the script path) reports `<t>: invalid
+                    // variable name` (rubash#3784).
+                    if let Some(t) = self.parameter_error_value(indirect) {
+                        if !Self::is_valid_indirect_target(&t) {
+                            return Some((t, "invalid variable name".to_string(), 1));
+                        }
+                    }
+                }
                 // GNU subst.c:9978-10007 parameter_brace_expand:
                 // `${!NAME*}` / `${!NAME@}` with a valid-name prefix is the
                 // variable-name-prefix list form — handled before the indir
@@ -2082,9 +2795,20 @@ impl Executor {
                     // "invalid indirect expansion" error, aborting the command
                     // without evaluating the operator's rhs (nameref3.sub:29
                     // `recho "${!foo-unset}"` prints nothing).
-                    let head_end = indirect
-                        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-                        .unwrap_or(indirect.len());
+                    //
+                    // The source may also be a positional or special
+                    // parameter (subst.c:7907-7910): a leading `#`/`?`/`@`
+                    // `*` is a one-character head before the operator tail
+                    // (`${!@:-d}`), while digits keep the alnum run
+                    // (`${!1:-d}`).
+                    let head_end = if matches!(indirect.chars().next(), Some('#' | '?' | '@' | '*'))
+                    {
+                        1
+                    } else {
+                        indirect
+                            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                            .unwrap_or(indirect.len())
+                    };
                     let (head, tail) = indirect.split_at(head_end);
                     if head_end > 0
                         && is_shell_name(head)
@@ -2191,19 +2915,73 @@ impl Executor {
                     // scalar-form value proceeds silently; a nameref head
                     // names its target's value, adjudicated by the
                     // nameref arms.
+                    //
+                    // A positional or special source takes the same
+                    // validation (subst.c:7907-7910 "an indirect reference
+                    // to a positional parameter or a special parameter is
+                    // ok"): t comes from parameter_brace_find_indir —
+                    // `${!1:-${1}}` with $1=-3 reports
+                    // `-3: invalid variable name` (errors6.sub), `${!0-d}`
+                    // reports $0's text; an unset positional yields no t
+                    // and proceeds silently.
+                    let head_is_name = is_shell_name(head);
                     if head_end > 0
-                        && is_shell_name(head)
+                        && (head_is_name
+                            || head.bytes().all(|b| b.is_ascii_digit())
+                            || matches!(head, "#" | "?" | "@" | "*"))
                         && !tail.starts_with('[')
                         && matches!(
                             tail.chars().next(),
                             Some(':' | '-' | '+' | '=' | '?' | '#' | '%' | '/' | '^' | ',' | '@')
                         )
-                        && self.nameref_target_name(head).is_none()
+                        && (!head_is_name || self.nameref_target_name(head).is_none())
                     {
-                        if let Some(t) = self.indirect_source_scalar_value(head) {
+                        let t = if head_is_name {
+                            self.indirect_source_scalar_value(head)
+                        } else {
+                            self.parameter_error_value(head)
+                        };
+                        if let Some(t) = t {
                             if !Self::is_valid_indirect_target(&t) {
                                 return Some((t, "invalid variable name".to_string(), 1));
                             }
+                        }
+                    }
+                }
+                // GNU subst.c:7883-7952 parameter_brace_expand_indir on a
+                // SPECIAL source: `${!*}` / `${!@}` indirect through the
+                // positional parameters themselves. find_indir expands
+                // the source with PF_ASSIGNRHS + no-split dollar star
+                // (subst.c:7847-7861): `*` joins with IFS[0], `@` joins
+                // with a space. The joined text is then judged exactly
+                // like any other t (subst.c:7947): non-empty and not a
+                // valid brace-expansion word reports
+                // `<t>: invalid variable name`; an empty join (no
+                // positionals) proceeds silently (rubash#2649).
+                if indirect == "*" || indirect == "@" {
+                    let t = if indirect == "*" {
+                        self.positional_params_star_joined()
+                    } else {
+                        self.shell_state.positional_window().join(" ")
+                    };
+                    if !t.is_empty() && !Self::is_valid_indirect_target(&t) {
+                        return Some((t, "invalid variable name".to_string(), 1));
+                    }
+                }
+                // Same adjudication for a special source WITH an operator
+                // tail (subst.c:9844-9860 + parameter_brace_find_indir
+                // subst.c:7839-7881): `${!@/a/Q}` resolves t = "a b" and
+                // reports `a b: invalid variable name` before the operator
+                // ever runs.
+                if let Some(head) = indirect
+                    .chars()
+                    .next()
+                    .filter(|c| matches!(c, '#' | '?' | '@' | '*'))
+                    .filter(|_| indirect.len() > 1)
+                {
+                    if let Some(t) = self.parameter_error_value(&head.to_string()) {
+                        if !t.is_empty() && !Self::is_valid_indirect_target(&t) {
+                            return Some((t, "invalid variable name".to_string(), 1));
                         }
                     }
                 }
@@ -2316,45 +3094,102 @@ impl Executor {
                     1,
                 ));
             }
+            // GNU subst.c:10053 parameter_brace_expand ->
+            // valid_brace_expansion_word (subst.c:7583): the extracted
+            // parameter name must be all digits, a single special
+            // parameter, a valid array reference, or an identifier —
+            // anything else (`${-x}`, `${(M)y}`, `${1a}`) is the
+            // subst.c:10276-10288 `bad substitution` default reported
+            // with the whole word being expanded. The real expansion
+            // applies the same gate (expand_word.rs
+            // braced_name_is_bad_substitution); the scan needs it so a
+            // bad substitution inside an operator word part surfaces as
+            // the INNER error — GNU's expand_string longjmps out of
+            // parameter_brace_expand_error (subst.c:8224-8228) before the
+            // outer `name: word` report can run (rubash#3502:
+            // `${v:?${-x}}` prints only `${-x}: bad substitution`,
+            // never `v: `). The scan may only emit that verdict when it
+            // coincides with the real expansion's — same name judgment,
+            // same display word, same error class (rubash#3864); where
+            // it cannot, the check defers and the real expansion reports
+            // (see scan_bad_substitution_defers_to_expansion).
+            if !self.scan_bad_substitution_defers_to_expansion(word, inner)
+                && crate::executor::expand_word::braced_name_is_bad_substitution(inner)
+            {
+                return Some((
+                    crate::executor::expand_word::bad_substitution_display(word),
+                    "bad substitution".to_string(),
+                    1,
+                ));
+            }
             if let Some((name, message, require_non_empty)) =
                 parse_parameter_error_operator(inner, self.posix_mode_enabled())
             {
-                let value = self.parameter_error_value(name);
-                let is_error = if require_non_empty {
-                    value.as_deref().map(str::is_empty).unwrap_or(true)
-                } else {
-                    value.is_none()
-                };
-                if is_error {
-                    // GNU subst.c:8216-8230 parameter_brace_expand_error
-                    // expands the message word (expand_string) before it
-                    // reports; a `:?` failure inside that word is itself
-                    // fatal, pre-empts the outer report, and names the
-                    // INNER variable (rubash#2343: `${a:?${b:?inner}}`
-                    // reports `b: inner`, never `a: inner`).
-                    if !message.is_empty() {
-                        if let Some(nested) = self.parameter_expansion_error_in_word(message) {
-                            return Some(nested);
-                        }
-                    }
-                    let message = if message.is_empty() {
-                        if require_non_empty {
+                // rubash#2595/#2762: the verdict comes from the scan's
+                // in-order simulated walk (or the pure probe), not from
+                // an evaluating fetch — a command substitution inside
+                // the tested subscript must execute exactly once, in
+                // the real expansion (subst.c:9777 single fetch).
+                match self.scan_question_is_error(name, require_non_empty) {
+                    QuestionOutcome::NoError => {}
+                    QuestionOutcome::ProvisionalPending => {
+                        // Pure (pipeline-admission) mode: count the
+                        // span as pending without evaluating anything
+                        // — not even its message word.
+                        let message = if require_non_empty {
                             "parameter null or not set".to_string()
                         } else {
                             "parameter not set".to_string()
+                        };
+                        return Some((
+                            parameter_error_display_name(name, quote_aware),
+                            message,
+                            Self::FATAL_PARAMETER_EXPANSION_STATUS,
+                        ));
+                    }
+                    QuestionOutcome::Error => {
+                        // GNU subst.c:8216-8230 parameter_brace_expand_error
+                        // expands the message word (expand_string) before it
+                        // reports; a `:?` failure inside that word is itself
+                        // fatal, pre-empts the outer report, and names the
+                        // INNER variable (rubash#2343: `${a:?${b:?inner}}`
+                        // reports `b: inner`, never `a: inner`).
+                        if !message.is_empty() {
+                            if let Some(nested) = self.parameter_expansion_error_in_word(message) {
+                                return Some(nested);
+                            }
                         }
-                    } else {
-                        self.expand_parameter_word(message)
-                    };
-                    // GNU subst.c:8221 parameter_brace_expand_error →
-                    // expand_wdesc_fatal (FORCE_EOF): `${x?}`/`${x:?}` abort
-                    // the whole noninteractive script; subshell, pipeline,
-                    // and command-substitution boundaries contain it.
-                    return Some((
-                        name.to_string(),
-                        message,
-                        Self::FATAL_PARAMETER_EXPANSION_STATUS,
-                    ));
+                        let message = if message.is_empty() {
+                            if require_non_empty {
+                                "parameter null or not set".to_string()
+                            } else {
+                                "parameter not set".to_string()
+                            }
+                        } else {
+                            // rubash#3260: the `:?` message is display text,
+                            // not a value — GNU subst.c:8216
+                            // parameter_brace_expand_error expands the word
+                            // (expand_string, quote removal included) and
+                            // reports the plain text. `expand_parameter_word`
+                            // keeps quoted whitespace behind the IFS_GLUE
+                            // carrier for field splitting, so the message
+                            // must go through the sanctioned visible-text
+                            // decoder before it is reported, or the carrier
+                            // leaks into the diagnostic (`e\x1c f`).
+                            crate::locale::decode_to_visible_text(
+                                &self.expand_parameter_word(message),
+                            )
+                        };
+                        // GNU subst.c:8221 parameter_brace_expand_error →
+                        // expand_wdesc_fatal (FORCE_EOF): `${x?}`/`${x:?}` abort
+                        // the whole noninteractive script; subshell, pipeline,
+                        // and command-substitution boundaries contain it.
+                        return Some((
+                            parameter_error_display_name(name, quote_aware),
+                            message,
+                            Self::FATAL_PARAMETER_EXPANSION_STATUS,
+                        ));
+                    }
                 }
             }
             // GNU subst.c parameter_brace_expand: the word of a `-`/`+`/`=`
@@ -2367,7 +3202,15 @@ impl Executor {
             if let Some(nested) = self.nested_operator_word_error(inner) {
                 return Some(nested);
             }
-            if let Some((name, offset, Some(length))) = self.parse_parameter_substring(inner) {
+            // rubash#3225: the scan parse must not probe through the
+            // reporting element fetch (parse_parameter_substring's NULL
+            // probe printed `bad array subscript` twice here before the
+            // real expansion printed it once) — the scan twin derives
+            // NULL-ness from the non-evaluating pre-scan probe, exactly
+            // like the verdict arm below already does.
+            if let Some((name, offset, Some(length))) =
+                self.parse_parameter_substring_for_scan(inner)
+            {
                 if length < 0 {
                     // GNU subst.c:8395 verify_substring_values, reached from
                     // parameter_brace_substring (subst.c:9050) only when the
@@ -2407,8 +3250,9 @@ impl Executor {
                         // nested_operator_word_error — a subscripted
                         // element name is answered by the pure probe,
                         // never by an evaluating fetch the real
-                        // expansion would repeat.
-                        self.pre_scan_operator_value(name)
+                        // expansion would repeat. rubash#2762: the probe
+                        // is simulation-aware.
+                        self.scan_operator_value(name)
                             .and_then(|value| value)
                             .is_some_and(|value| {
                                 parameter_substring_has_negative_result(
@@ -2421,14 +3265,26 @@ impl Executor {
                             })
                     };
                     if is_invalid {
-                        return Some((
-                            length.to_string(),
-                            "substring expression < 0".to_string(),
-                            1,
-                        ));
+                        // GNU subst.c:8487/8502 reports the RAW length
+                        // slice (text after the separator colon, verbatim)
+                        // in this diagnostic, not the evaluated number:
+                        // `${arr[@]: 1: -1}` reads ` -1: substring
+                        // expression < 0` with the leading blank kept
+                        // (rubash#2713). The evaluated value remains the
+                        // fallback for any shape the raw split cannot see.
+                        let display = Self::parameter_substring_raw_length_text(inner)
+                            .map(str::to_string)
+                            .unwrap_or_else(|| length.to_string());
+                        return Some((display, "substring expression < 0".to_string(), 1));
                     }
                 }
             }
+            // rubash#2762: record a `:=` / `=` bind this fragment
+            // applied, after its own arms (a nested `:?` inside the
+            // operator word still sees the pre-bind value) — later
+            // fragments of the same walk are adjudicated against the
+            // evolved state.
+            self.scan_record_assignment(inner);
             rest = &after_start[end + 1..];
         }
         None
@@ -2602,11 +3458,75 @@ impl Executor {
                         if name_ch == '}' {
                             break;
                         }
+                        // rubash#3540: a comsub inside the braced text (an
+                        // array subscript, an operator word) is still
+                        // forked by expand_word_internal's walk before the
+                        // nounset fatal reports — collect its body in
+                        // order so the caller runs it for side effects.
+                        if name_ch == '`' {
+                            name.push(name_ch);
+                            let mut body = String::new();
+                            while index < chars.len() {
+                                let body_ch = chars[index];
+                                index += 1;
+                                name.push(body_ch);
+                                if body_ch == '\\' {
+                                    if index < chars.len() {
+                                        name.push(chars[index]);
+                                        index += 1;
+                                    }
+                                    continue;
+                                }
+                                if body_ch == '`' {
+                                    break;
+                                }
+                                body.push(body_ch);
+                            }
+                            comsubs.push(body);
+                            continue;
+                        }
+                        if name_ch == '$' && chars.get(index).copied() == Some('(') {
+                            name.push(name_ch);
+                            name.push('(');
+                            index += 1;
+                            let mut depth = 1usize;
+                            let mut body = String::new();
+                            while index < chars.len() {
+                                let body_ch = chars[index];
+                                index += 1;
+                                name.push(body_ch);
+                                if body_ch == '\\' {
+                                    if index < chars.len() {
+                                        name.push(chars[index]);
+                                        index += 1;
+                                    }
+                                    continue;
+                                }
+                                if body_ch == '(' {
+                                    depth += 1;
+                                } else if body_ch == ')' {
+                                    depth -= 1;
+                                    if depth == 0 {
+                                        break;
+                                    }
+                                }
+                                body.push(body_ch);
+                            }
+                            comsubs.push(body);
+                            continue;
+                        }
                         name.push(name_ch);
                     }
                     if let Some(reported) = self.nounset_braced_parameter_is_unbound(&name) {
                         return (Some(reported), comsubs);
                     }
+                    // niubash#993 §1: a `:=`/`=` fragment the walk just
+                    // passed binds before the walk reaches the next
+                    // fragment (subst.c:7966 parameter_brace_expand_rhs)
+                    // — record it like the `${...}` error walk does at
+                    // `scan_record_assignment`, so a later `$name` is
+                    // adjudicated against the evolved state.
+                    self.scan_record_assignment(&name);
                 }
                 Some(first) if first.is_ascii_digit() => {
                     index += 1;
@@ -2644,8 +3564,17 @@ impl Executor {
                     index += 1;
                     if chars.get(index).copied() == Some('(') {
                         // `$(( ... ))` arithmetic is evaluated in the PARENT
-                        // (no fork): keep scanning the text for `$name'
-                        // references (GNU expr.c expr_streval).
+                        // (no fork), at this walk position: its expansion
+                        // phase's `$` reads, then its evalexp reads
+                        // (rubash#3498, see nounset_arith_expansion_verdict).
+                        if let Some((body, end)) = arith_expansion_body_at(&chars, index - 1) {
+                            let (unbound, bodies) = self.nounset_arith_expansion_verdict(&body);
+                            comsubs.extend(bodies);
+                            if unbound.is_some() {
+                                return (unbound, comsubs);
+                            }
+                            index = end;
+                        }
                         continue;
                     }
                     // `$( ... )` command substitution: collect the balanced
@@ -2685,6 +3614,62 @@ impl Executor {
             }
         }
         (None, comsubs)
+    }
+
+    /// rubash#3498: the nounset verdict of one `$((body))` the word
+    /// pre-scan reaches. GNU expands the arithmetic text first
+    /// (subst.c:3981 expand_arith_string — its `$` reads trap at
+    /// param_expand's `unbound_variable:` label, with indexed subscripts
+    /// expanded in an unquoted context, subst.c:11147) and then
+    /// evaluates it (expr.c:1190-1216 expr_streval traps a bare unset
+    /// name), both before the walk moves on to the next word. Returns
+    /// the trapped name (if any) plus the comsub bodies met on the way.
+    fn nounset_arith_expansion_verdict(&self, body: &str) -> (Option<String>, Vec<String>) {
+        let reads = crate::executor::arithmetic::arith_body_expansion_reads(body);
+        let (unbound, bodies) = self.nounset_unbound_parameter_with_comsubs(&reads);
+        if unbound.is_some() {
+            return (unbound, bodies);
+        }
+        let overlaid =
+            crate::executor::expand_braced_indices::env_vars_with_pending_subscript_writes(
+                &self.shell_state.env_vars,
+            );
+        (
+            crate::executor::arithmetic::arith_body_nounset_trap(body, &overlaid),
+            bodies,
+        )
+    }
+
+    /// Boundness of the parameter an indirect source names (GNU
+    /// subst.c:10164 check_unbound_variable over the find_indir target).
+    /// A numeric target names a POSITIONAL parameter, whose boundness is
+    /// the positional window (index 0 is `$0`, which always exists), not
+    /// the variable table — `${!i}` with i holding a positional index
+    /// (bats' bats_all_in loop over "$@", lib/bats-core/common.bash) must
+    /// not report `!i` for an in-window index, and must still report it
+    /// past the window (rubash#2212).
+    fn indirect_target_parameter_is_bound(&self, target: &str) -> bool {
+        if let Some((tbase, tsub)) = parse_array_subscript(target) {
+            if tsub == "@" || tsub == "*" {
+                true
+            } else if self.is_assoc_parameter_array(&tbase) {
+                let key = self.assoc_subscript_key(&tsub);
+                self.parameter_array_storage(&tbase)
+                    .and_then(|storage| assoc_value_at(&storage, &key))
+                    .is_some()
+            } else {
+                !self.nounset_indexed_element_absent(&tbase, &tsub)
+            }
+        } else if let Ok(index) = target.parse::<usize>() {
+            index == 0
+                || self
+                    .shell_state
+                    .positional_window()
+                    .get(index - 1)
+                    .is_some()
+        } else {
+            self.nounset_variable_bound(target)
+        }
     }
 
     pub(in crate::executor) fn nounset_unbound_parameter(&self, word: &str) -> Option<String> {
@@ -2729,6 +3714,13 @@ impl Executor {
                     if let Some(reported) = self.nounset_braced_parameter_is_unbound(&name) {
                         return Some(reported);
                     }
+                    // niubash#993 §1: a `:=`/`=` fragment the walk just
+                    // passed binds before the walk reaches the next
+                    // fragment (subst.c:7966 parameter_brace_expand_rhs)
+                    // — record it like the `${...}` error walk does at
+                    // `scan_record_assignment`, so a later `$name` is
+                    // adjudicated against the evolved state.
+                    self.scan_record_assignment(&name);
                 }
                 Some(first) if first.is_ascii_digit() => {
                     chars.next();
@@ -2785,8 +3777,19 @@ impl Executor {
                         // the PARENT (no fork): an unbound name inside is a
                         // parent-side fatal error (GNU expr.c expr_streval;
                         // probe p3: `x=$(($U))' under set -u exits the
-                        // script with 1), so keep scanning the arithmetic
-                        // text for `$name' references.
+                        // script with 1), judged at this walk position
+                        // (rubash#3498, see nounset_arith_expansion_verdict).
+                        let mut span = vec!['('];
+                        span.extend(chars.clone());
+                        if let Some((body, end)) = arith_expansion_body_at(&span, 0) {
+                            let (unbound, _bodies) = self.nounset_arith_expansion_verdict(&body);
+                            if unbound.is_some() {
+                                return unbound;
+                            }
+                            for _ in 1..end {
+                                chars.next();
+                            }
+                        }
                         continue;
                     }
                     // `$( ... )` command substitution: GNU forks
@@ -2858,7 +3861,30 @@ impl Executor {
             return None;
         }
         let subject = &brace_core[..parameter_reference_len(brace_core)];
-        let value = self.parameter_operator_value(subject);
+        // niubash#993 §1: the subject's set/null verdict is judged
+        // against the simulated walk first — an earlier `:=`/`=`
+        // fragment already bound it by the time this fragment is
+        // reached (subst.c:7966 parameter_brace_expand_rhs). A
+        // set-unknown simulation settles the `:`-less tests outright
+        // (bound is bound); the colon forms need the null-ness the
+        // simulation cannot promise, so they scan nothing — a false
+        // skip heals at the real expansion while a false scan is a
+        // fatal GNU never raises. An undecidable probe keeps the
+        // pre-command fetch, the verdict today's scan used.
+        let value = match self.scan_error_value(subject) {
+            ScanValue::Set(value) => Some(value),
+            ScanValue::Unset => None,
+            ScanValue::SetUnknown => {
+                if colon {
+                    return None;
+                }
+                if op == b'+' {
+                    return self.nounset_unbound_parameter(word);
+                }
+                return None;
+            }
+            ScanValue::Undecidable => self.parameter_operator_value(subject),
+        };
         let word_expanded = match op {
             b'-' | b'=' => {
                 if colon {
@@ -3007,6 +4033,28 @@ impl Executor {
             let resolved = self
                 .resolved_variable_name(base)
                 .unwrap_or_else(|| base.to_string());
+            // A positional/special SOURCE (all digits, `#`, `?`, `@`, `*`)
+            // has no variable cell of its own: find_indir resolves t from
+            // $0 / $# / $? / the positional list (subst.c:7839-7881), and
+            // the caller's unbound check (subst.c:10164-10175) still tests
+            // the parameter t names and reports the whole `!base`
+            // (rubash#3784; GNU 5.3.20: `set -u; BASH_ARGV0=target;
+            // echo ${!0}` -> `!0: unbound variable`, status 127).
+            if !base.is_empty() && base.chars().all(|c| c.is_ascii_digit())
+                || base.len() == 1 && matches!(base, "#" | "?" | "@" | "*")
+            {
+                let Some(target) = self.indirect_holder_target_name(base) else {
+                    return None;
+                };
+                if target.ends_with("[@]") || target.ends_with("[*]") {
+                    return None;
+                }
+                if !Self::is_valid_indirect_target(&target) {
+                    return None;
+                }
+                let bound = self.indirect_target_parameter_is_bound(&target);
+                return (!bound).then(|| format!("!{base}"));
+            }
             // GNU subst.c:7883-7920 parameter_brace_expand_indir + the
             // caller's unbound check at subst.c:10164-10175 — three ordered
             // outcomes for the indirection SOURCE:
@@ -3047,37 +4095,7 @@ impl Executor {
                     if !Self::is_valid_indirect_target(&target) {
                         return None;
                     }
-                    let bound = if let Some((tbase, tsub)) = parse_array_subscript(&target) {
-                        if tsub == "@" || tsub == "*" {
-                            true
-                        } else if self.is_assoc_parameter_array(&tbase) {
-                            let key = self.assoc_subscript_key(&tsub);
-                            self.parameter_array_storage(&tbase)
-                                .and_then(|storage| assoc_value_at(&storage, &key))
-                                .is_some()
-                        } else {
-                            !self.nounset_indexed_element_absent(&tbase, &tsub)
-                        }
-                    } else if let Ok(index) = target.parse::<usize>() {
-                        // GNU subst.c parameter_brace_expand_indir +
-                        // variables.c find_variable: a purely numeric
-                        // target names a POSITIONAL parameter, whose
-                        // boundness is the positional window, not the
-                        // variable table — `${!i}` with i holding a
-                        // positional index (bats' bats_all_in loop over
-                        // "$@", lib/bats-core/common.bash) must not
-                        // report `!i` for an in-window index, and must
-                        // still report it past the window (rubash#2212).
-                        // Index 0 is $0, which always exists.
-                        index == 0
-                            || self
-                                .shell_state
-                                .positional_window()
-                                .get(index - 1)
-                                .is_some()
-                    } else {
-                        self.nounset_variable_bound(&target)
-                    };
+                    let bound = self.indirect_target_parameter_is_bound(&target);
                     return (!bound).then(|| format!("!{base}"));
                 }
             }
@@ -3206,7 +4224,8 @@ impl Executor {
                     if let Some((abase, sub)) = parse_array_subscript(reference) {
                         return self.nounset_array_element_unbound(abase, sub, reference);
                     }
-                    return (!self.dynamic_parameter_is_set(base)
+                    return (!self.scan_sim_says_bound(base)
+                        && !self.dynamic_parameter_is_set(base)
                         && !self.shell_state.env_vars.contains_key(base)
                         && std::env::var(base).is_err())
                     .then(|| reference.to_string());
@@ -3237,7 +4256,8 @@ impl Executor {
                     }
                     return self.nounset_length_reference_unbound(abase, core);
                 }
-                return (!self.dynamic_parameter_is_set(base)
+                return (!self.scan_sim_says_bound(base)
+                    && !self.dynamic_parameter_is_set(base)
                     && !self.shell_state.env_vars.contains_key(base)
                     && std::env::var(base).is_err())
                 .then(|| core.to_string());
@@ -3293,7 +4313,8 @@ impl Executor {
                     let target = self
                         .resolved_variable_name(&cell)
                         .unwrap_or_else(|| cell.clone());
-                    return (!self.dynamic_parameter_is_set(&target)
+                    return (!self.scan_sim_says_bound(&target)
+                        && !self.dynamic_parameter_is_set(&target)
                         && !self.shell_state.env_vars.contains_key(&target)
                         && std::env::var(&target).is_err())
                     .then(|| name.to_string());
@@ -3306,12 +4327,32 @@ impl Executor {
         None
     }
 
+    /// niubash#993 §1: does the in-order scan's simulated-binding table
+    /// already hold a `:=`/`=` bind for `name`? Exact set-ness and
+    /// set-unknown both count as bound — GNU's
+    /// parameter_brace_expand_rhs (subst.c:7966) bound them by the time
+    /// a later fragment is judged.
+    fn scan_sim_says_bound(&self, name: &str) -> bool {
+        matches!(
+            self.scan_sim_value(name),
+            Some(ScanValue::Set(_)) | Some(ScanValue::SetUnknown)
+        )
+    }
+
     /// GNU subst.c check_unbound_variable: a variable is unbound under
     /// nounset when it has no value — and an array/assoc cell with zero
     /// elements counts as unset for scalar-form expansions (new-exp15
     /// `-uc`: `${foo}` / `${foo@a}` on `declare -a foo=()` report
     /// `foo: unbound variable`, while `${foo[@]}` stays bound).
     fn nounset_variable_bound(&self, name: &str) -> bool {
+        // niubash#993 §1: a `:=`/`=` fragment earlier in the same
+        // left-to-right expansion walk already bound this name when the
+        // reference is judged — the simulated table holds that evolved
+        // state (subst.c:7966 parameter_brace_expand_rhs binds as it
+        // goes inside expand_word_internal's single walk).
+        if self.scan_sim_says_bound(name) {
+            return true;
+        }
         if self.dynamic_parameter_is_set(name) {
             return true;
         }
@@ -3505,6 +4546,13 @@ impl Executor {
         if sub == "@" || sub == "*" {
             return None;
         }
+        // niubash#993 §1: an `:=`/`=` fragment earlier in this walk may
+        // have bound exactly this element — `${a[0]:=el}` makes
+        // `${a[0]}` (and the bare `$a` scalar read of element 0)
+        // bound for everything the walk judges after it.
+        if self.scan_sim_says_bound(&format!("{base}[{sub}]")) {
+            return None;
+        }
         // Dynamic stack arrays: adjudicate the element against the live
         // composed view, as in nounset_variable_bound — the env mirror
         // below is not refreshed on every path the stack itself takes
@@ -3545,6 +4593,11 @@ impl Executor {
     /// element existence for an indexed-array `a[sub]` reference. `sub` has
     /// already been screened for unset names by the caller.
     fn nounset_indexed_element_absent(&self, base: &str, sub: &str) -> bool {
+        // niubash#993 §1: a simulated `:=`/`=` bind for this element
+        // counts as present.
+        if self.scan_sim_says_bound(&format!("{base}[{sub}]")) {
+            return false;
+        }
         let index = self.eval_integer_assignment_value(sub);
         self.shell_state
             .env_vars
@@ -3565,6 +4618,41 @@ impl Executor {
         }
         let mut chars = subscript.chars().peekable();
         while let Some(ch) = chars.next() {
+            if ch == '`' {
+                // A command substitution inside the subscript is evaluated
+                // by expand_arith_string (subst.c:3981) in a forked child
+                // (subst.c:7143) — its variables are the child's business
+                // and never leak to this scan (rubash#3540).
+                while let Some(body_ch) = chars.next() {
+                    if body_ch == '\\' {
+                        chars.next();
+                        continue;
+                    }
+                    if body_ch == '`' {
+                        break;
+                    }
+                }
+                continue;
+            }
+            if ch == '$' && chars.peek().copied() == Some('(') {
+                chars.next();
+                let mut depth = 1usize;
+                while let Some(body_ch) = chars.next() {
+                    if body_ch == '\\' {
+                        chars.next();
+                        continue;
+                    }
+                    if body_ch == '(' {
+                        depth += 1;
+                    } else if body_ch == ')' {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                }
+                continue;
+            }
             if !is_shell_name_start(ch) {
                 continue;
             }
@@ -3584,6 +4672,19 @@ impl Executor {
             }
         }
         None
+    }
+
+    /// GNU subst.c:3707 get_dollar_var_value: numeric parameter 0 is the
+    /// special `$0` cell (dollar_vars[0], the shell/script name), while
+    /// 1.. index the positional window. This is the lookup
+    /// parameter_brace_expand_word (subst.c:7684 valid_number) performs
+    /// for an all-digit NAME, so `${!0}`/`${!00}` indirect through $0's
+    /// VALUE, never through $1 (rubash#3784).
+    pub(in crate::executor) fn numeric_parameter_value(&self, index: usize) -> Option<String> {
+        if index == 0 {
+            return Some(self.script_name_value());
+        }
+        self.shell_state.positional_window().get(index - 1).cloned()
     }
 
     pub(in crate::executor) fn parameter_error_value(&self, name: &str) -> Option<String> {
@@ -3631,11 +4732,7 @@ impl Executor {
                     return Some(value);
                 }
                 if let Ok(index) = name.parse::<usize>() {
-                    return self
-                        .shell_state
-                        .positional_window()
-                        .get(index.saturating_sub(1))
-                        .cloned();
+                    return self.numeric_parameter_value(index);
                 }
                 if let Some(value) = self.array_element_parameter_value(name) {
                     return Some(value);
@@ -3656,5 +4753,55 @@ impl Executor {
                 }
             }
         }
+    }
+}
+
+/// The body of the `$((...))` whose first `(` sits at `chars[open]`
+/// (`chars[open + 1]` is the second), and the index just past its
+/// closing `))`. Parentheses balance across the whole span (nested
+/// groups and `$(...)` bodies included, `\x` escapes skipped); a span
+/// that does not close with `))` (or never closes) yields None and the
+/// caller keeps its plain text walk.
+fn arith_expansion_body_at(chars: &[char], open: usize) -> Option<(String, usize)> {
+    let mut depth = 0usize;
+    let mut index = open;
+    while index < chars.len() {
+        match chars[index] {
+            '\\' => {
+                index += 2;
+                continue;
+            }
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    if index < open + 3 || chars[index - 1] != ')' {
+                        return None;
+                    }
+                    return Some((chars[open + 2..index - 1].iter().collect(), index + 1));
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+/// The `:?`/`?` diagnostic names the parameter as the lexer stored it
+/// (subst.c:8216 parameter_brace_expand_error prints `name`, the text
+/// parameter_brace_expand cut from the word). A `$(...)` inside that text
+/// (a subscript) was replaced at read time by its print_comsub
+/// serialization (parse.y:4451 parse_comsub -> parse.y:4632
+/// print_comsub), so `${a[$(cmd >&2)]:?e}` reports `a[$(cmd 1>&2)]: e`
+/// (rubash#3404). `parser_word` is the scan's `quote_aware` context: a
+/// here-document body (the `false` context) is expanded at run time
+/// without ever passing parse_comsub (redir.c:348 heredoc_expand ->
+/// expand_string), so GNU reports its text raw (`q[$(cmd >&2)]: e`).
+fn parameter_error_display_name(name: &str, parser_word: bool) -> String {
+    if parser_word {
+        super::print_comsub::canonicalize_comsub_spans(name)
+    } else {
+        name.to_string()
     }
 }

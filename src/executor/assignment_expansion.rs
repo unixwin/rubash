@@ -401,6 +401,76 @@ pub(in crate::executor) fn dbg_aav_enabled() -> bool {
     *DBG.get_or_init(|| std::env::var_os("RUBASH_DBG_AAV").is_some())
 }
 
+/// The diagnostic word for one compound-assignment element, mirroring GNU
+/// quote_assign (arrayfunc.c:938-977) over quote_array_assignment_chars
+/// (:1108-1129): an indexed `[sub]=value` element is cited with its
+/// subscript span backslash-quoted, an associative element names its bare
+/// value (arrayfunc.c:594-599/:630 expand key/value separately), and a
+/// quoted value keeps the fragment's own word.
+enum CompoundElementDiag {
+    /// Indexed `[sub]=value`: `\[sub\]=value`.
+    Element(String),
+    /// Associative `[key]=value`: the bare value.
+    Value(String),
+    /// Quoted value: the fragment keeps its own word.
+    Fragment,
+}
+
+fn compound_element_diag_word(token_raw: &str, assoc: bool) -> CompoundElementDiag {
+    // Only a word opening with `[sub]=` takes the element/value form;
+    // anything else is a plain element whose walker default already names
+    // the whole token.
+    if !token_raw.starts_with('[') {
+        return CompoundElementDiag::Element(token_raw.to_string());
+    }
+    let Some((sub_end, tail)) =
+        crate::executor::subscript_expansion::scan_compound_subscript(token_raw, 0)
+    else {
+        return CompoundElementDiag::Element(token_raw.to_string());
+    };
+    if tail != crate::executor::subscript_expansion::CompoundSubscriptTail::Assignment {
+        return CompoundElementDiag::Element(token_raw.to_string());
+    }
+    let after = &token_raw[sub_end + 1..];
+    let Some((operator, rhs)) = after
+        .strip_prefix("+=")
+        .map(|rhs| ("+=", rhs))
+        .or_else(|| after.strip_prefix('=').map(|rhs| ("=", rhs)))
+    else {
+        return CompoundElementDiag::Element(token_raw.to_string());
+    };
+    // A quoted value is one quoted word: the bad fragment inside keeps its
+    // own diagnostic word. The double-quote-wrap test mirrors
+    // subscripted_parameter_element; the raw-quote / hoisted-squote /
+    // storage-prefix forms are the other deliveries of a quoted value.
+    let dq_wrapped = rhs.starts_with(ASSIGN_DATA_DQUOTE)
+        && crate::executor::markers::ends_with_bare_sentinel(
+            rhs,
+            crate::executor::markers::ASSIGN_DATA_DQUOTE,
+        );
+    if dq_wrapped
+        || rhs.starts_with('"')
+        || rhs.starts_with('\'')
+        || rhs.starts_with(ASSIGN_HOISTED_SQUOTE)
+        || rhs.starts_with(STORAGE_WORD_PREFIX)
+    {
+        return CompoundElementDiag::Fragment;
+    }
+    if assoc {
+        return CompoundElementDiag::Value(rhs.to_string());
+    }
+    // GNU quote_assign (arrayfunc.c:938-977): before `=`, the `[sub]` span
+    // is copied verbatim between two backslashes; glob/IFS characters
+    // before `=` would take one too, but before `=` there is only the
+    // subscript span itself.
+    CompoundElementDiag::Element(format!(
+        "\\[{}\\]{}{}",
+        &token_raw[1..sub_end],
+        operator,
+        rhs
+    ))
+}
+
 impl Executor {
     // #609 slice 1: `name=literal|$other|"$other"` fast expansion (GNU
     // subst.c:3524 do_assignment_internal; variables.c:3225 bind_variable).
@@ -607,6 +677,20 @@ impl Executor {
         self.last_command_substitution_status.set(None);
         let arithmetic_error = self.shell_state.arithmetic_expansion_error.replace(false);
         let arithmetic_nonfatal_error = self.shell_state.arithmetic_nonfatal_error.replace(false);
+        // rubash#3287: the three arithmetic error flags are ONE error
+        // record — the expansion-error latch, the fatal severity and the
+        // nonfatal severity — and this boundary is where the record is
+        // consumed (the caller adjudicates from `arithmetic_error`).
+        // The old code left `arithmetic_fatal_error` standing, so a
+        // fatal `$(( ))` on an assignment RHS leaked into the NEXT
+        // command: `eval_arithmetic_command_value_with_flags` bails
+        // out early on a set fatal flag, and the `(( ))` / `let` /
+        // `for (( ))` after a fatal fast assignment was silently
+        // skipped. GNU has no cross-command error state at all
+        // (expr.c:1525 evalerror longjmps out of the failing
+        // evaluation only), so a consumed record must not survive
+        // its own command.
+        self.shell_state.arithmetic_fatal_error.set(false);
         AssignmentExpansionResult {
             value: expanded,
             substitution_status,
@@ -626,6 +710,10 @@ impl Executor {
         self.last_command_substitution_status.set(None);
         let arithmetic_error = self.shell_state.arithmetic_expansion_error.replace(false);
         let arithmetic_nonfatal_error = self.shell_state.arithmetic_nonfatal_error.replace(false);
+        // rubash#3287: same one-record consumption as the _with_raw
+        // sibling above — the fatal flag must not outlive the
+        // expansion whose error it records.
+        self.shell_state.arithmetic_fatal_error.set(false);
         AssignmentExpansionResult {
             value: expanded,
             substitution_status,
@@ -904,13 +992,23 @@ impl Executor {
         // produced BY a parameter is likewise never re-expanded). Apply
         // the pass up front here and suppress the post-expansion pass at
         // the bottom of this function, which operated on expanded text.
+        //
+        // rubash#2651: GNU performs that pass INSIDE the one walk and
+        // joins the result as a quoted string (subst.c:11862
+        // add_quoted_string), so the resolved text is data for the rest
+        // of the walk. This port rewrites the string up front and walks
+        // the result, so the rewrite must carry the same protection:
+        // expand_assignment_tilde_protected carrier-encodes each
+        // resolved prefix, and only the raw tails stay live. Without it
+        // a `$x` inside $HOME was expanded a second time — in every
+        // mode, not only the POSIX/eval shape the report filed.
         let tilde_first = !quoted
             && !compound_assignment
             && !value.contains('=')
             && tilde_expand::assignment_value_needs_tilde_expansion(value, true);
         let tilde_resolved;
         let value = if tilde_first {
-            tilde_resolved = self.expand_assignment_tilde(value);
+            tilde_resolved = self.expand_assignment_tilde_protected(value);
             &tilde_resolved
         } else {
             value
@@ -1125,7 +1223,11 @@ impl Executor {
         // and the same shape through `y='('$x')'`, argument words
         // `echo "y=($x)"`, and prefix assignments).
         if compound_assignment {
-            if let Some(expanded) = self.expand_compound_positional_at_assignment(value, quoted) {
+            if let Some(expanded) = self.expand_compound_positional_at_assignment(
+                value,
+                quoted,
+                self.compound_assignment_is_assoc(name),
+            ) {
                 if dbg_aav_enabled() {
                     eprintln!("[ECPAT] value={value:?} expanded={expanded:?}");
                 }
@@ -1358,9 +1460,29 @@ impl Executor {
                     crate::executor::markers::IFS_GLUE_STR,
                     "",
                 );
-                crate::executor::markers::restore_bare_sentinels(
+                let unescaped = crate::executor::markers::restore_bare_sentinels(
                     &unescaped,
                     &[(crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH, "\\")],
+                );
+                // rubash#3663: restore the lexer's DATA_BACKSLASH carrier
+                // only AFTER the unescape pass above. The carrier is the
+                // decoded form of a source `\\`, i.e. data, not escape
+                // syntax — restoring it in the walker tail handed this pass
+                // a raw `\` it folded as a source escape, so `x=a\\*e`
+                // stored `a*e` (and `x=a\\?b` stored `a?b`) while `\\[`
+                // and `\\b` survived only because `[`/`b` are outside the
+                // pass's escape set. GNU's dequote_string (subst.c:4807)
+                // strips only CTLESC bytes, so a literal `\` in the
+                // expanded value is never re-read as an escape; this is
+                // the same defer-and-restore-later discipline rubash#3088
+                // established for the operator-word walker. The restore
+                // rides the pair-aware helper (not a blind cow_replace)
+                // because the marker lint requires it; a bare U+0014 here
+                // is the carrier by construction (ANSI-C bytes arrive as
+                // U+E000 pairs, never as a bare U+0014).
+                crate::executor::markers::restore_bare_sentinels(
+                    &unescaped,
+                    &[(crate::executor::markers::DATA_BACKSLASH, "\\")],
                 )
                 .into()
             };
@@ -1546,12 +1668,20 @@ impl Executor {
     }
 
     fn expand_fast_assignment_value(&mut self, value: &str) -> Option<String> {
-        if let Some(expression) = value
-            .strip_prefix("$((")
-            .and_then(|rest| rest.strip_suffix("))"))
-            .filter(|expression| !expression.contains("${"))
+        // rubash#2715: admission is the same whole-word verdict the
+        // sibling arms use (parameter_core / expand_word) — the naive
+        // prefix+suffix strip paired the first `$((` with the LAST
+        // `))`, and on eval failure the old code returned None, so
+        // the slower expanders re-processed the text and stored the
+        // spliced expression literally (`y=$(( ; echo 1))`). GNU's
+        // classification (subst.c:10842-10862 chk_arithsub) precedes
+        // expansion; once admitted as arithmetic, an evalexp failure
+        // is final (expand_wdesc_error), never a fall-through.
+        if let Some(expression) =
+            crate::executor::parameter_ops::whole_word_arithmetic_substitution_body(value)
+                .filter(|expression| !expression.contains("${"))
         {
-            let Some(value) = self.eval_arithmetic_command_value(expression) else {
+            let Some(value) = self.eval_arithmetic_command_value_unlabeled(expression) else {
                 // GNU expr.c raises evalerror from the actual evaluation, so
                 // the recorded real-environment category decides fatality.
                 // A fresh-environment re-evaluation would lose state-dependent
@@ -1578,7 +1708,36 @@ impl Executor {
                     // `b: command not found` (issue #67).
                     return Some(String::new());
                 }
-                return None;
+                if actual_fatal
+                    || crate::executor::arithmetic::arithmetic_expansion_is_fatal(expression)
+                {
+                    self.shell_state.arithmetic_fatal_error.set(true);
+                }
+                if !self.shell_state.arithmetic_expansion_error.replace(true) {
+                    // GNU evalexp reports against the post-expansion
+                    // string (expand_arith_string ran first); the
+                    // captured eval input is that spliced text.
+                    let eval_input = self.arithmetic_last_eval_input.borrow().clone();
+                    let display = if eval_input.is_empty() {
+                        expression
+                    } else {
+                        eval_input.as_str()
+                    };
+                    let message = crate::executor::arithmetic::arithmetic_error_message(
+                        display,
+                        true,
+                        &self.shell_state.env_vars,
+                    )
+                    .unwrap_or_else(|| {
+                        format!(
+                            "{display}: arithmetic syntax error in expression (error token is \"{display}\")"
+                        )
+                    });
+                    self.write_diagnostic_fd2(
+                        format!("{}{}\n", self.error_prefix(), message).as_bytes(),
+                    );
+                }
+                return Some(String::new());
             };
             return Some(self.expand_assignment_tilde_if_needed(value.to_string()));
         }
@@ -1744,12 +1903,27 @@ impl Executor {
         preserve_prompt_escapes(&output)
     }
 
+    /// Whether the compound-assignment target `name` is an associative
+    /// array: the live ASSOC_VARS marking, or the declare-assoc hint for a
+    /// name this command is about to declare with `declare -A` /
+    /// `typeset -A` / `local -A` (rubash#3500 — GNU declare.def creates the
+    /// variable before expanding the operand value, but rubash expands
+    /// command words before the builtin runs, so a fresh `declare -A`
+    /// operand would otherwise look indexed at expansion time).
+    pub(in crate::executor) fn compound_assignment_is_assoc(&self, name: &str) -> bool {
+        let base = name.strip_suffix('+').unwrap_or(name);
+        let base = base.split('[').next().unwrap_or(base);
+        is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, base)
+            || crate::executor::expand_word::declare_assoc_hint_contains(base)
+    }
+
     pub(in crate::executor) fn expand_compound_positional_at_assignment(
         &self,
         value: &str,
         quoted: bool,
+        assoc: bool,
     ) -> Option<String> {
-        self.expand_compound_positional_at_assignment_impl(value, quoted, false)
+        self.expand_compound_positional_at_assignment_impl(value, quoted, false, assoc)
     }
 
     /// GNU eval-argument flatten (xtrace evidence, gg7.sh E1): an
@@ -1761,8 +1935,9 @@ impl Executor {
     pub(in crate::executor) fn expand_compound_positional_at_assignment_bare(
         &self,
         value: &str,
+        assoc: bool,
     ) -> Option<String> {
-        self.expand_compound_positional_at_assignment_impl(value, false, true)
+        self.expand_compound_positional_at_assignment_impl(value, false, true, assoc)
     }
 
     fn expand_compound_positional_at_assignment_impl(
@@ -1770,6 +1945,7 @@ impl Executor {
         value: &str,
         quoted: bool,
         bare: bool,
+        assoc: bool,
     ) -> Option<String> {
         let inner = value.strip_prefix('(')?.strip_suffix(')')?;
         let mut changed = false;
@@ -1896,6 +2072,7 @@ impl Executor {
                                 .positional_window()
                                 .join(&self.ifs_first_char_separator()),
                             fields,
+                            &self.ifs_first_char_separator(),
                         ));
                     }
                 }
@@ -2056,7 +2233,11 @@ impl Executor {
                             } else {
                                 // Same glued transport as the storage arm
                                 // below (compound_field_split_transport).
-                                values.extend(compound_field_split_transport(&joined, fields));
+                                values.extend(compound_field_split_transport(
+                                    &joined,
+                                    fields,
+                                    &self.ifs_first_char_separator(),
+                                ));
                             }
                         }
                         continue;
@@ -2097,6 +2278,7 @@ impl Executor {
                                 members,
                                 self.shell_state.env_vars.get("IFS").map(String::as_str),
                             ),
+                            &self.ifs_first_char_separator(),
                         ));
                     }
                 } else {
@@ -2224,7 +2406,14 @@ impl Executor {
                         None => Vec::new(),
                     }
                 };
-                if element_values.is_empty() && var_name != "@" && var_name != "*" {
+                // GNU subst.c:9367 parameter_brace_patsub (`value == 0`
+                // returns NULL before getpattern): with no elements at all
+                // — an empty array, or an empty positional list — the
+                // pattern word is never expanded (rubash#3501). The raw
+                // token is kept for the generic re-expansion, which yields
+                // zero elements for an empty `@`/`*
+                // (arrayfunc.c:557 expand_words_no_vars).
+                if element_values.is_empty() {
                     values.push(store!(&token, token_raw));
                 } else {
                     let pattern = self.expand_parameter_pattern_word(
@@ -2364,10 +2553,17 @@ impl Executor {
                         None => Vec::new(),
                     }
                 };
-                if element_values.is_empty()
-                    && quoted_at_operator.var_name() != "@"
-                    && quoted_at_operator.var_name() != "*"
-                {
+                // Same gate as the patsub arm above (rubash#3501): an empty
+                // element list — empty array or empty positional list —
+                // never expands the pattern word; the raw token is kept for
+                // the generic re-expansion. The gate stays empty-only even
+                // for PatternRemoval: this arm handles QUOTED `[@]` words,
+                // and GNU diagnoses a quoted one-element "" list — the
+                // value word carries the QUOTED_NULL marker, so the
+                // removal gate's `*temp == '\0'` test (subst.c:10320)
+                // does not fire (the unquoted form IS silent; see the
+                // joined-word rule in pattern_word_is_silent).
+                if element_values.is_empty() {
                     values.push(store!(&token, token_raw));
                 } else {
                     changed = true;
@@ -2448,8 +2644,13 @@ impl Executor {
                     }
                 })
             {
-                if let Some((var_name, offset, length)) = self.parse_parameter_substring(name) {
+                if let Some(((var_name, offset, length), writes)) =
+                    self.parse_parameter_substring_with_writes(name)
+                {
                     if var_name == "@" {
+                        // rubash#3649: this parse's result is used as the
+                        // element values, so commit its offset/length writes.
+                        self.queue_pending_subscript_writes(writes);
                         changed = true;
                         values.extend(
                             positional_parameter_substring_with_zero(
@@ -2468,6 +2669,9 @@ impl Executor {
                         .strip_suffix("[@]")
                         .or_else(|| var_name.strip_suffix("[*]"))
                     {
+                        // rubash#3649: this parse's result is used as the
+                        // element values, so commit its offset/length writes.
+                        self.queue_pending_subscript_writes(writes);
                         if let Some(storage) = self.parameter_array_storage(array_name) {
                             changed = true;
                             // A scalar base under [@]/[*] is VT_VARIABLE:
@@ -2528,6 +2732,7 @@ impl Executor {
                         &token_raw,
                         bare,
                         &mut changed,
+                        assoc,
                     ));
                 }
             } else {
@@ -2580,16 +2785,12 @@ impl Executor {
                                 && raw_param.starts_with('"')
                                 && raw_param.ends_with('"')));
                     if name.chars().all(|c| c.is_ascii_digit()) && !name.is_empty() {
-                        let expanded = if name == "0" {
-                            Some(self.script_name_value())
-                        } else if let Ok(index) = name.parse::<usize>() {
-                            self.shell_state
-                                .positional_window()
-                                .get(index.saturating_sub(1))
-                                .cloned()
-                        } else {
-                            None
-                        };
+                        // GNU subst.c:3707 get_dollar_var_value: `${00}` is
+                        // $0, `${01}` is $1 (rubash#3784).
+                        let expanded = name
+                            .parse::<usize>()
+                            .ok()
+                            .and_then(|index| self.numeric_parameter_value(index));
                         if let Some(value) = expanded {
                             changed = true;
                             // Preserve [N]= subscript form without
@@ -2637,7 +2838,11 @@ impl Executor {
                                 // it unsplit, arrayfunc.c:630; indexed storage
                                 // re-splits per field, arrayfunc.c:610) — see
                                 // compound_field_split_transport.
-                                values.extend(compound_field_split_transport(&value, fields));
+                                values.extend(compound_field_split_transport(
+                                    &value,
+                                    fields,
+                                    &self.ifs_first_char_separator(),
+                                ));
                             }
                             continue;
                         }
@@ -2674,7 +2879,11 @@ impl Executor {
                                 } else {
                                     // Same glued transport as the $N arm above
                                     // (compound_field_split_transport).
-                                    values.extend(compound_field_split_transport(&value, fields));
+                                    values.extend(compound_field_split_transport(
+                                        &value,
+                                        fields,
+                                        &self.ifs_first_char_separator(),
+                                    ));
                                 }
                             }
                         }
@@ -2703,7 +2912,7 @@ impl Executor {
                     values.append(&mut fields);
                     continue;
                 }
-                if let Some(word) = self.subscripted_parameter_element(&token_raw) {
+                if let Some(word) = self.subscripted_parameter_element(&token_raw, assoc, bare) {
                     // Raw `[sub]=$param` word: W_ASSIGNMENT|W_NOSPLIT
                     // (parse.y:5786-5796) — the whole expanded value lands
                     // at the subscript, unsplit (see
@@ -2716,12 +2925,18 @@ impl Executor {
                 // stored field; only the bare-element form takes the GNU
                 // per-word quoted/split treatment above.
                 if core.starts_with('[') {
-                    values.push(self.compound_plain_element_value(&token_raw, bare, &mut changed));
+                    values.push(self.compound_plain_element_value(
+                        &token_raw,
+                        bare,
+                        &mut changed,
+                        assoc,
+                    ));
                 } else {
                     values.extend(self.compound_plain_element_value_fields(
                         &token_raw,
                         bare,
                         &mut changed,
+                        assoc,
                     ));
                 }
             }
@@ -3006,6 +3221,7 @@ impl Executor {
         token_raw: &str,
         bare: bool,
         changed: &mut bool,
+        assoc: bool,
     ) -> Vec<String> {
         if bare {
             // Bare (eval-argument) flatten keeps the raw token verbatim.
@@ -3014,7 +3230,19 @@ impl Executor {
         if let Some(fields) = self.glued_quoted_list_element_fields(token_raw, changed) {
             return fields;
         }
-        let expanded = self.expand_embedded_parameters_compound(token_raw);
+        // rubash#3500: install the element word (or the bare value for an
+        // assoc element) as the pending diagnostic word, so a bad
+        // substitution inside this element names the element, not the
+        // `${...}` fragment (GNU subst.c:10278). A quoted value keeps the
+        // fragment's own word.
+        let expanded = match compound_element_diag_word(token_raw, assoc) {
+            CompoundElementDiag::Element(word) | CompoundElementDiag::Value(word) => {
+                crate::executor::expand_word::with_pending_diagnostic_word(&word, || {
+                    self.expand_embedded_parameters_compound(token_raw)
+                })
+            }
+            CompoundElementDiag::Fragment => self.expand_embedded_parameters_compound(token_raw),
+        };
         if expanded == token_raw {
             // No expansion ran: a literal element word never undergoes word
             // splitting (subst.c:13219 — "for which no expansion is done").
@@ -3153,6 +3381,7 @@ impl Executor {
             // transport then falls back to synthetic separators.
             .map(|field| decode_compound_expansion_carriers(&field))
             .collect::<Vec<_>>(),
+            &self.ifs_first_char_separator(),
         )
     }
 
@@ -3161,11 +3390,21 @@ impl Executor {
         token_raw: &str,
         bare: bool,
         changed: &mut bool,
+        assoc: bool,
     ) -> String {
         if bare {
             return token_raw.to_string();
         }
-        let expanded = self.expand_embedded_parameters_compound(token_raw);
+        // rubash#3500: same element-word install as
+        // compound_plain_element_value_fields (see there).
+        let expanded = match compound_element_diag_word(token_raw, assoc) {
+            CompoundElementDiag::Element(word) | CompoundElementDiag::Value(word) => {
+                crate::executor::expand_word::with_pending_diagnostic_word(&word, || {
+                    self.expand_embedded_parameters_compound(token_raw)
+                })
+            }
+            CompoundElementDiag::Fragment => self.expand_embedded_parameters_compound(token_raw),
+        };
         if expanded != token_raw {
             *changed = true;
         }
@@ -3492,12 +3731,17 @@ impl Executor {
         };
         // Slice form `${name[@]:off[:len]}` fans out per element
         // (mirror of the direct-token slice arm above).
-        if let Some((var_name, offset, length)) = self.parse_parameter_substring(list_body) {
+        if let Some(((var_name, offset, length), writes)) =
+            self.parse_parameter_substring_with_writes(list_body)
+        {
             let starred = var_name.ends_with("[*]");
             if let Some(array_name) = var_name
                 .strip_suffix("[@]")
                 .or_else(|| var_name.strip_suffix("[*]"))
             {
+                // rubash#3649: this parse's result is used as the element
+                // values, so commit its offset/length arithmetic writes.
+                self.queue_pending_subscript_writes(writes);
                 let storage = self.parameter_array_storage(array_name)?;
                 // Scalar base under [@]/[*]: VT_VARIABLE string slice
                 // with the signed length (subst.c:9083; rubash#1600).
@@ -3665,6 +3909,7 @@ impl Executor {
                 &value,
                 self.shell_state.env_vars.get("IFS").map(String::as_str),
             ),
+            &self.ifs_first_char_separator(),
         ))
     }
 
@@ -3740,7 +3985,12 @@ impl Executor {
     /// `[..]=` text inside that value is never re-read as a subscript
     /// (issue #198 matrix: `M=([2]=$v)` with v='[9]=q [r]=w' stores
     /// M[2]='[9]=q [r]=w').
-    fn subscripted_parameter_element(&self, token_raw: &str) -> Option<String> {
+    fn subscripted_parameter_element(
+        &self,
+        token_raw: &str,
+        assoc: bool,
+        bare: bool,
+    ) -> Option<String> {
         let (sub_end, tail) =
             crate::executor::subscript_expansion::scan_compound_subscript(token_raw, 0)?;
         if tail != crate::executor::subscript_expansion::CompoundSubscriptTail::Assignment {
@@ -3766,7 +4016,21 @@ impl Executor {
         if !dq_wrapped && unquoted != core && core.starts_with('\'') {
             return None;
         }
-        let value = self.whole_word_parameter_single_value(unquoted)?;
+        // rubash#3500: install the element word (or the bare value for an
+        // assoc element) around the whole-word expansion, so a bad
+        // substitution inside the RHS names the element (GNU subst.c:10278).
+        // A quoted value keeps the fragment's own word. The bare
+        // (eval-argument) flatten re-serializes the word for eval's
+        // re-parse, where the assignment executes afresh with its own
+        // declare context, so no word is installed there.
+        let value = match compound_element_diag_word(token_raw, assoc) {
+            CompoundElementDiag::Element(word) | CompoundElementDiag::Value(word) if !bare => {
+                crate::executor::expand_word::with_pending_diagnostic_word(&word, || {
+                    self.whole_word_parameter_single_value(unquoted)
+                })
+            }
+            _ => self.whole_word_parameter_single_value(unquoted),
+        }?;
         Some(format!(
             "{}{}{}",
             &token_raw[..sub_end + 1],

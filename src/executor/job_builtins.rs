@@ -127,8 +127,11 @@ impl Executor {
         // GNU's jobs listing disposes dead coprocs before printing
         // (jobs.c list_all_jobs/list_one_job call cleanup_dead_jobs,
         // which reaps coprocs) — the same disposal point as the wait
-        // family (rubash#2053).
-        let _ = self.apply_pending_job_completions(true, false);
+        // family (rubash#2053). Only coproc completions are applied
+        // here (rubash#2769): the listing records no new background
+        // death, so a non-coproc completion stays stashed until a
+        // GNU observation point applies it.
+        let _ = self.apply_pending_coproc_completions();
         self.flush_pending_coproc_retirements();
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
@@ -374,17 +377,39 @@ impl Executor {
         // command's descriptors — `wait $p 2>/dev/null` silences the
         // "Killed" notice. Notices queued BEFORE this wait (reaped at
         // an earlier boundary) keep the boundary route: the raw-stderr
-        // flush in report_pending_signal_notices. So: snapshot the
-        // queue length, run the wait, then drain only the notices this
-        // wait produced and route them through the wait command's own
-        // fd-2 binding instead of leaving them for the raw flush
-        // (rubash#1303).
+        // flush in report_pending_signal_notices — EXCEPT for the jobs
+        // this wait resolved through the completed arm (rubash#3637):
+        // GNU jobs.c:3385 wait_for's notify_and_cleanup(job) prints
+        // the waited job's notice inside the wait, so a pre-queued
+        // notice for a waited pid has no later notify point in a
+        // single-list `-c` string and would otherwise be dropped at
+        // stream end. So: snapshot the queue length, run the wait,
+        // then drain the notices this wait produced PLUS the pre-queued
+        // notices for exactly the pids it resolved, and route them
+        // through the wait command's own fd-2 binding instead of
+        // leaving them for the raw flush (rubash#1303).
         let notice_mark = self.pending_signal_notices.borrow().len();
+        self.wait_notice_pids.clear();
         let result = self.execute_wait_inner(cmd);
         let drained: Vec<(u32, i32, String, bool)> = {
             let mut queue = self.pending_signal_notices.borrow_mut();
             let mark = notice_mark.min(queue.len());
-            queue.drain(mark..).collect()
+            let produced: Vec<(u32, i32, String, bool)> = queue.drain(mark..).collect();
+            // Pre-queued notices for the pids this wait resolved
+            // (completed arm): take them out of the pre-mark region,
+            // oldest first, leaving every other job's notice queued
+            // for the boundary route.
+            let mut prequeued = Vec::new();
+            let mut index = 0;
+            while index < queue.len() {
+                if self.wait_notice_pids.contains(&queue[index].0) {
+                    prequeued.push(queue.remove(index));
+                } else {
+                    index += 1;
+                }
+            }
+            prequeued.extend(produced);
+            prequeued
         };
         if !drained.is_empty() {
             let (text, printed_pids) = self.format_signal_notices(drained);
@@ -623,8 +648,12 @@ impl Executor {
                 self.shell_state.env_vars.remove_unset_marks(&unbind_name);
                 // GNU: an unbound dynamic variable stays unbound for the
                 // shell's lifetime (the unset builtin's UNSET_DYNAMIC_VARS
-                // record).
-                if self.dynamic_parameter_is_set(&unbind_name) {
+                // record). The two dynamic assoc variables are not served
+                // by dynamic_parameter_is_set (owner-table-backed, not
+                // scalar-registry) but unbind the same way (rubash#3573).
+                if self.dynamic_parameter_is_set(&unbind_name)
+                    || matches!(unbind_name.as_ref(), "BASH_ALIASES" | "BASH_CMDS")
+                {
                     mark_env_name(
                         &mut self.shell_state.env_vars,
                         UNSET_DYNAMIC_VARS,
@@ -778,6 +807,24 @@ impl Executor {
                 .collect::<Vec<_>>();
             let mut wait_stderr: Vec<u8> = Vec::new();
             for pid in pids {
+                // GNU's bare wait is a scan/wait loop (jobs.c:2796-2867
+                // wait_for_background_pids): waitchld, driven from
+                // wait_for's blocking loop, records EVERY exited child,
+                // so a job whose death landed while an earlier job was
+                // being waited is seen DEAD when the scan reaches it and
+                // is never passed to wait_for_single_pid — the notified
+                // mark at jobs.c:3434-3437 belongs only to jobs the
+                // wait actually blocked on. The poll model's recording
+                // point is the observed refresh, so run it at the head
+                // of every pass iteration: a death the sweep records
+                // takes the completed arm of wait_for_background_pid
+                // (no wait-mark), while without the sweep it falls into
+                // the live arm as an instant reap and is marked there,
+                // consuming the last-asynchronous-pid job that
+                // mark_dead_jobs_as_notified exempts from the bare
+                // wait's force-mark (jobs.c:5196) and that
+                // settle_bare_wait exists to keep (rubash#2340).
+                self.refresh_background_jobs_observed()?;
                 // wait.def:238-245 wait_for_any_job + :328-331: a trapped
                 // signal interrupts the no-operand wait too, returning
                 // 128+sig.
@@ -839,9 +886,18 @@ impl Executor {
         }
 
         if !bg_operands.is_empty()
-            && bg_operands
-                .iter()
-                .any(|operand| self.resolve_background_job(operand).is_some())
+            && bg_operands.iter().any(|operand| {
+                // rubash#2777: a retired `%N` (job already notified
+                // and cleaned up, status saved in `completed_statuses`)
+                // counts as resolvable for the operand-wait route —
+                // the live-table check alone would drop it to the
+                // single-word fallback below, which can only answer
+                // 127. The retired link is consulted only here and
+                // inside `wait_for_background_operands`, never by
+                // kill/fg/bg.
+                self.resolve_background_job(operand).is_some()
+                    || self.retired_job_pid_for_wait_operand(operand).is_some()
+            })
         {
             // GNU wait.def:338-339: -p binds the pid of the LAST operand
             // waited for (pstat.pid; NO_PID when the last operand
@@ -1041,7 +1097,7 @@ impl Executor {
     /// bind_array_element does (assoc for a non-numeric key).
     fn bind_wait_variable(&mut self, name: &str, value: String, arrayref: bool) {
         let Some((base, subscript)) = parse_array_subscript(name) else {
-            self.apply_shell_assignment_command("wait", name, value);
+            self.apply_shell_assignment_command("wait", name, value, None);
             return;
         };
         let base = base.to_string();
@@ -1107,7 +1163,7 @@ impl Executor {
                 if self.raise_nounset_subscript_abort() {
                     return;
                 }
-                self.apply_shell_assignment_command("wait", name, value);
+                self.apply_shell_assignment_command("wait", name, value, None);
             }
         }
     }
@@ -1168,15 +1224,45 @@ impl Executor {
                     continue;
                 }
                 JobOperandResolution::NoMatch => {
-                    status = write_wait_operand_error(
-                        &operand,
-                        false,
-                        &self.diagnostic_prefix(),
-                        &self.error_prefix(),
-                        &mut stderr,
-                    )?;
-                    last_pid = None;
-                    continue;
+                    // rubash#2777: a numeric `%N` whose job already
+                    // left the live table at notification cleanup
+                    // falls back to the retained link — see
+                    // `retired_job_pid_for_wait_operand`. A pid
+                    // recovered this way still flows through
+                    // `wait_for_background_pid`, so a wiped saved
+                    // status lands in its NotFound arm (127) exactly
+                    // where GNU has no record.
+                    match self.retired_job_pid_for_wait_operand(&operand) {
+                        Some(pid) => {
+                            // rubash#2777 R2: an operand wait that
+                            // reaches the saved status through the
+                            // retired link consumes it, matching GNU
+                            // wait_for_job (jobs.c:3434-3437 marks the
+                            // slot J_NOTIFIED after answering) — a
+                            // second `wait %N` must answer 127.
+                            if let Some(job_id) = operand
+                                .strip_prefix('%')
+                                .and_then(|body| body.parse::<u32>().ok())
+                            {
+                                self.shell_state
+                                    .job_table
+                                    .completed_job_pids
+                                    .remove(&job_id);
+                            }
+                            pid
+                        }
+                        None => {
+                            status = write_wait_operand_error(
+                                &operand,
+                                false,
+                                &self.diagnostic_prefix(),
+                                &self.error_prefix(),
+                                &mut stderr,
+                            )?;
+                            last_pid = None;
+                            continue;
+                        }
+                    }
                 }
             };
             match self.wait_for_background_pid(pid, true, force)? {
@@ -1437,6 +1523,49 @@ impl Executor {
             .push((pid, signal, command, foreground));
     }
 
+    /// Print a foreground child's signal-death notice synchronously
+    /// at its wait (rubash#2769): GNU's wait_for calls
+    /// notify_and_cleanup for the dead foreground job before returning
+    /// (jobs.c:3385), so the notice is stamped with the line the reader
+    /// is on at the wait — the dying command's own line, or its
+    /// enclosing compound's end line (the ambient line) — and prints
+    /// before the next command's output. Queueing it for the reader
+    /// boundary instead stamped it with the next command's line and
+    /// printed it after that command ran. The notice goes through the
+    /// shared emit core (format + mark notified + cleanup + fd-2
+    /// write), so a later boundary flush never re-prints it.
+    pub(crate) fn print_fg_signal_notice_now(
+        &mut self,
+        pid: u32,
+        signal: i32,
+        command: String,
+    ) -> Result<(), ExecuteError> {
+        if signal <= 0 {
+            return Ok(());
+        }
+        let Some(line) = self.ambient_line.get() else {
+            return self.emit_signal_notices(vec![(pid, signal, command, true)]);
+        };
+        let previous = self
+            .shell_state
+            .env_vars
+            .get("__RUBASH_CURRENT_LINE")
+            .cloned();
+        self.set_current_line_value(line);
+        let result = self.emit_signal_notices(vec![(pid, signal, command, true)]);
+        match previous {
+            Some(value) => {
+                self.shell_state
+                    .env_vars
+                    .insert("__RUBASH_CURRENT_LINE".to_string(), value);
+            }
+            None => {
+                self.shell_state.env_vars.remove("__RUBASH_CURRENT_LINE");
+            }
+        }
+        result
+    }
+
     /// Command text for a foreground child's signal-death notice
     /// (rubash#229). GNU prints the job's `command` string — the pipeline
     /// text as typed (jobs.c make_job stores the_printed_command), not a
@@ -1499,6 +1628,28 @@ impl Executor {
         &mut self,
         notices: Vec<(u32, i32, String, bool)>,
     ) -> Result<(), ExecuteError> {
+        // rubash#3637: GNU jobs.c:4570 notify_of_job_status prints only
+        // when IS_NOTIFIED (job) == 0 — a job `jobs` (or an earlier
+        // notify point) already reported is never announced again. Drop
+        // such notices here, on the boundary / stream-end / `jobs`
+        // flush path. The wait drain routes through
+        // format_signal_notices directly and deliberately bypasses
+        // this filter: wait IS the notify point (jobs.c:3385), and its
+        // own bookkeeping marks the waited job notified before the
+        // drain runs. A pid with no job entry still prints (foreground
+        // notices carry the shell's own pid, not a job-table pid).
+        let notices: Vec<(u32, i32, String, bool)> = notices
+            .into_iter()
+            .filter(|(pid, _, _, _)| {
+                !self
+                    .shell_state
+                    .job_table
+                    .pid_to_job
+                    .get(pid)
+                    .and_then(|job_id| self.shell_state.job_table.jobs.get(job_id))
+                    .is_some_and(|job| job.notified)
+            })
+            .collect();
         let (out, printed_pids) = self.format_signal_notices(notices);
         // rubash#2698: record the notification on the job table —
         // notify_of_job_status marks J_NOTIFIED as it prints, and
@@ -1746,9 +1897,15 @@ impl Executor {
             let padding = 27usize.saturating_sub(description.chars().count());
             if !trapped && signal != SIGTERM {
                 // Branch 1 (jobs.c:4625-4641): the "name: line N: PID desc
-                // cmd" shape. The line at notify time is the command that
-                // just finished (the boundary runs before the next command
-                // sets its own line), matching GNU's line_number.
+                // cmd" shape. The stamp is GNU's line_number at the
+                // moment the notice prints: the ambient line for a
+                // foreground death (wait_for's notify, jobs.c:3385 —
+                // the dying command's own line, or its enclosing
+                // compound's end line), the next command's line for a
+                // background death (the boundary pull, parse.y:2533).
+                // The two faces are stamped by their own callers
+                // (print_fg_signal_notice_now / the at_line reports);
+                // this formatter only renders the swapped-in line.
                 out.push_str(&self.diagnostic_prefix());
                 out.push_str(&format!("{pid:>5} {description}"));
                 out.push_str(&" ".repeat(padding));
@@ -1849,42 +2006,49 @@ impl Executor {
     ) -> Result<(), ExecuteError> {
         // part_036 (jobs.c waitchld lag): a reap becomes VISIBLE in the
         // job table only at a GNU observation point — the shell blocked
-        // in wait() for a foreground process, the reader advanced to a
-        // new line, or a fresh execute_ast run began. Between
-        // observation points (a stretch of builtins inside one read)
-        // `jobs` keeps showing the pre-death state: GNU 5.3.20 lists a
-        // jobspec-killed job as Running until the reap boundary even
-        // though the process is already dead, and the pre-fix eager
-        // application here printed `Terminated` for it.
+        // in wait() for a foreground process (wait_for's waitchld,
+        // jobs.c:3064), an explicit wait/fg, or job control live on a
+        // terminal. A bare reader advance is NOT one: GNU 5.3.20 lists
+        // a jobspec-killed job as Running after `kill` + `echo` + `jobs`
+        // with no foreground wait in between, and prints no death
+        // notice for it either (rubash#2769 oracle probes) — the death
+        // is recorded only when waitchld runs or the SIGCHLD handler
+        // happens to fire, which in a script is a race, not a boundary.
+        // Between observation points (a stretch of builtins inside one
+        // read) `jobs` keeps showing the pre-death state, and a death
+        // reaped there is stashed, not applied — it becomes visible at
+        // the next observation point, or once the SIGCHLD-delivery
+        // aging below has elapsed (see apply_pending_job_completions).
         let mark = (
             self.execute_generation.get(),
             self.reader_command_line.get(),
             self.foreground_wait_count.get(),
         );
         let prev_mark = self.reap_prev_mark.get();
-        let observation_happened = mark != prev_mark;
         // rubash#2529: the reader-boundary cleanup below keys on the
         // run/line components only — GNU's read_command boundary is
         // per freshly read list, never between one list's elements.
         let line_advanced = mark.0 != prev_mark.0 || mark.1 != prev_mark.1;
-        // rubash#1607/#1612: publication of the shell's own kill
-        // state marks uses a NARROWER event set than reap visibility.
-        // A mere reader-line advance must not publish (kill -STOP,
-        // one intervening builtin, then `jobs` still shows Running —
-        // #1607); the events that publish are an explicit wait/fg
-        // (force_observe), the shell having blocked on a foreground
-        // process since the last refresh (foreground_wait_count
-        // moved), or job control live on a terminal (under a pty
-        // GNU publishes on the very next command — #1612). One
-        // predicate, computed here at the notification point, feeds
-        // both the state marks and (via `observe`) the reap side.
+        // rubash#1607/#1612/#2769: publication of the shell's own kill
+        // state marks and visibility of reaped completions use ONE
+        // event set — a mere reader-line advance publishes neither
+        // (kill -STOP, one intervening builtin, then `jobs` still shows
+        // Running — #1607; kill -KILL, `echo`, then `jobs` still shows
+        // Running and prints no notice — #2769). The events that
+        // publish are an explicit wait/fg (force_observe), the shell
+        // having blocked on a foreground process since the last refresh
+        // (foreground_wait_count moved), or job control live on a
+        // terminal (under a pty GNU publishes on the very next command
+        // — #1612). One predicate, computed here at the notification
+        // point, feeds both the state marks and (via `observe`) the
+        // reap side.
         let foreground_blocked = mark.2 != self.reap_prev_mark.get().2;
         self.reap_prev_mark.set(mark);
-        let observe = force_observe || observation_happened;
         let state_observe = force_observe
             || foreground_blocked
             || (crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "monitor")
                 && self.stdin_source_is_terminal());
+        let observe = state_observe;
         // rubash#1494: apply the ripe kill state marks at the same
         // per-command boundary that reaps finished children.
         self.shell_state
@@ -2000,7 +2164,15 @@ impl Executor {
             // it instead; a wait/fg observed refresh (force_observe)
             // still applies it inside the wait, where the notice
             // drains through the wait's own fd 2.
+            // rubash#2769: the same holds for a refresh that observed
+            // a foreground wait (foreground_blocked): wait_for's
+            // waitchld recorded the death during that wait, so the
+            // notice cannot escape past a later `wait` — and at stream
+            // end this refresh is the last chance to print it at all
+            // (a completion stashed here is never applied again, so
+            // the EOF notice was lost outright).
             let fresh_fatal = !force_observe
+                && !foreground_blocked
                 && term_signal.is_some()
                 && !self.shell_state.coproc_names.contains_key(&pid)
                 && self.shell_state.job_table.take_fresh_fatal(pid);
@@ -2015,8 +2187,15 @@ impl Executor {
             if !fresh_fatal && observe && !stopped_recorded {
                 self.apply_job_completion(pid, status, term_signal)?;
             } else {
-                self.pending_job_completions
-                    .push((pid, status, term_signal));
+                // rubash#2769: record when the sweep first reaped the
+                // child — the aging arm of apply_pending_job_completions
+                // measures from here.
+                self.pending_job_completions.push((
+                    pid,
+                    status,
+                    term_signal,
+                    std::time::Instant::now(),
+                ));
             }
         }
         // rubash#2053/#2057: a refresh that observed a foreground
@@ -2053,22 +2232,62 @@ impl Executor {
     /// stashed: wait_for (jobs.c:3064) answers that wait from the
     /// recorded stop state, not from a death waitchld has not
     /// recorded for it.
+    /// rubash#2769: a stashed completion also applies once the
+    /// SIGCHLD-delivery aging has elapsed — GNU's handler records a
+    /// death opportunistically during builtin stretches, so a death
+    /// first reaped several milliseconds ago is recorded by the time
+    /// the next boundary runs (oracle: a kill followed by a ~15 ms
+    /// builtin loop prints the notice 8/10, by ~50 ms 10/10, while a
+    /// microsecond gap prints it ~1/5). The threshold mirrors the
+    /// deferred-state-mark publication rule (apply_deferred_state_marks,
+    /// 5 ms): the same delivery latency, the same constant.
     fn apply_pending_job_completions(
         &mut self,
         observe: bool,
         wait_gate: bool,
     ) -> Result<(), ExecuteError> {
-        if !observe || self.pending_job_completions.is_empty() {
+        if self.pending_job_completions.is_empty() {
+            return Ok(());
+        }
+        const AGED: std::time::Duration = std::time::Duration::from_millis(5);
+        let pending = std::mem::take(&mut self.pending_job_completions);
+        for (pid, status, term_signal, stashed_at) in pending {
+            if wait_gate && self.shell_state.job_table.job_recorded_stopped(pid) {
+                self.pending_job_completions
+                    .push((pid, status, term_signal, stashed_at));
+                continue;
+            }
+            if observe || stashed_at.elapsed() >= AGED {
+                self.apply_job_completion(pid, status, term_signal)?;
+            } else {
+                self.pending_job_completions
+                    .push((pid, status, term_signal, stashed_at));
+            }
+        }
+        Ok(())
+    }
+
+    /// Apply only the stashed completions for coprocesses (rubash#2769):
+    /// GNU's `jobs` listing disposes dead coprocs (jobs.c
+    /// cleanup_dead_jobs -> coproc_reap) but records no new background
+    /// deaths — the listing shows the job table as waitchld/the handler
+    /// recorded it, and the `jobs` builtin itself calls only
+    /// notify_and_cleanup (builtins/jobs.def:172), never waitchld.
+    /// Force-applying every stashed completion here made `jobs` list a
+    /// job as Killed (and queue its notice) that GNU still shows
+    /// Running when no foreground wait has recorded the death.
+    fn apply_pending_coproc_completions(&mut self) -> Result<(), ExecuteError> {
+        if self.pending_job_completions.is_empty() {
             return Ok(());
         }
         let pending = std::mem::take(&mut self.pending_job_completions);
-        for (pid, status, term_signal) in pending {
-            if wait_gate && self.shell_state.job_table.job_recorded_stopped(pid) {
+        for (pid, status, term_signal, stashed_at) in pending {
+            if self.shell_state.coproc_names.contains_key(&pid) {
+                self.apply_job_completion(pid, status, term_signal)?;
+            } else {
                 self.pending_job_completions
-                    .push((pid, status, term_signal));
-                continue;
+                    .push((pid, status, term_signal, stashed_at));
             }
-            self.apply_job_completion(pid, status, term_signal)?;
         }
         Ok(())
     }
@@ -2100,6 +2319,36 @@ impl Executor {
     /// Make one reaped child's completion visible in the job table:
     /// the term-signal record, the jobs.c:4625 death notice, the
     /// completion mark, the CHLD trap, coproc retirement.
+    /// rubash#3802: the signal to attribute at a completion from the
+    /// shell's own `kill` delivery record.
+    ///
+    /// The owner of "did this process die by that signal?" is the wait
+    /// status — GNU's `WIFSIGNALED`/`WTERMSIG`, the only arm of
+    /// `printable_job_status (jobs.c:1969-2015)` that prints
+    /// `j_strsignal`. Unix wait statuses carry it (`exit_status_signal`),
+    /// so the record is merely consumed there and can never override a
+    /// `WIFEXITED` status: a trapped/ignored SIGTERM that ends in
+    /// `exit 143` is indistinguishable from a SIGTERM death by code
+    /// alone, and GNU renders `Exit 143`. Windows `ExitStatus` has no
+    /// signal bit — rubash's own `kill` encodes the delivery as
+    /// `TerminateProcess(128+signal)` (builtins/kill.rs
+    /// signal_process) — so the record supplies the signal, but only
+    /// when the reaped code is exactly that signal's `128+signal`.
+    fn delivered_term_signal(&mut self, pid: u32, status: i32) -> Option<i32> {
+        #[cfg(unix)]
+        {
+            let _ = status;
+            self.shell_state.job_table.discard_delivered_signal(pid);
+            None
+        }
+        #[cfg(not(unix))]
+        {
+            self.shell_state
+                .job_table
+                .take_delivered_signal(pid, status)
+        }
+    }
+
     fn apply_job_completion(
         &mut self,
         pid: u32,
@@ -2109,6 +2358,24 @@ impl Executor {
         // The raw wait status knows whether the child died by a
         // signal; the flattened status does not. Record it so the
         // jobs listing prints the signal description (rubash#1256).
+        //
+        // rubash#3802: Windows wait statuses never carry WIFSIGNALED —
+        // this shell's own `kill` encodes the death as
+        // `TerminateProcess (128 + signal)` (builtins/kill.rs
+        // signal_process), so 137/143 alone cannot be told from a
+        // plain `exit 137`. The delivery record fills the gap so
+        // printable_job_status (jobs.c:1969-1985, `j_strsignal
+        // (WTERMSIG (p->status))`) renders `Killed` / `Terminated`;
+        // a job that simply exited keeps `Exit 137`.
+        //
+        // The delivery record only supplies the signal when the reaped
+        // status IS that signal's 128+signal death: GNU's WIFSIGNALED
+        // arm is decided by the wait status, so a process that
+        // ignored/trapped the delivered signal and exited on its own
+        // keeps `Exit <code>` (rubash#3802). The record is consumed
+        // unconditionally so a recycled pid cannot borrow it.
+        let delivered = self.delivered_term_signal(pid, status);
+        let term_signal = term_signal.or(delivered);
         if let Some(signal) = term_signal {
             self.shell_state.job_table.note_term_signal(pid, signal);
         }
@@ -2433,8 +2700,14 @@ impl Executor {
             // (settle_bare_wait) owns the marking there.
             self.shell_state.job_table.cleanup_dead_jobs();
             if retain_for_explicit_wait {
-                self.shell_state.job_table.mark_job_notified_by_pid(pid);
+                self.shell_state.job_table.mark_job_waited_by_pid(pid);
             }
+            // rubash#3637: this wait resolved an already-completed job,
+            // so its death notice — queued when an earlier boundary
+            // reaped it — is not produced by this wait. Record the pid
+            // so execute_wait drains that pre-queued notice for it
+            // (GNU jobs.c:3385 wait_for's notify_and_cleanup(job)).
+            self.wait_notice_pids.push(pid);
             self.forget_background_runtime(pid);
             return Ok(WaitPidOutcome::Status(status));
         }
@@ -2473,7 +2746,15 @@ impl Executor {
                 super::read_helpers::note_reaped_child_cpu(&child);
                 // rubash#229: queue the signal-death notice (the job entry
                 // still exists here, so its command text is available).
-                if let Some(signal) = crate::executor::wait_status::exit_status_signal(&done) {
+                // rubash#3803: on Windows `exit_status_signal` is always
+                // None (no WTERMSIG), so fall back to the 128+signal
+                // exit-code decode — the same convention the boundary
+                // reap already uses. Without it the wait's own reap
+                // never queues the notice and the immediate-wait face
+                // (`kill -9 %1; wait %1`) prints nothing.
+                if let Some(signal) = crate::executor::wait_status::exit_status_signal(&done)
+                    .or_else(|| crate::executor::wait_status::exit_code_signal(&done))
+                {
                     let command = self
                         .shell_state
                         .job_table
@@ -2501,7 +2782,7 @@ impl Executor {
         // next cleanup point. The exit status stays in
         // completed_statuses for repeated explicit PID waits.
         self.shell_state.job_table.cleanup_dead_jobs();
-        self.shell_state.job_table.mark_job_notified_by_pid(pid);
+        self.shell_state.job_table.mark_job_waited_by_pid(pid);
         self.forget_background_runtime(pid);
         Ok(WaitPidOutcome::Status(status))
     }
@@ -3449,6 +3730,33 @@ impl Executor {
         } else {
             JobOperandResolution::NoMatch
         }
+    }
+
+    /// rubash#2777: the last pid of a job retired by
+    /// `cleanup_dead_jobs` (notification cleanup), for an explicit
+    /// operand `wait %N` only. GNU `wait_for_job` (jobs.c:3401) reads
+    /// the job's slot, which survives until the wait consumes it; a
+    /// rubash job whose death notice already printed lost its slot,
+    /// so a numeric `%N` with no live match falls back to the
+    /// retained link and `wait_for_background_pid` answers from
+    /// `completed_statuses` (the bgpids equivalent) — 137 for the
+    /// killed job — instead of 127. A spec that is not a plain
+    /// `%<digits>` has no retained link (GNU's current/previous
+    /// markers reset on deletion, jobs.c:1535-1543), and a link whose
+    /// saved status was wiped (bare-`wait` bgp_clear, jobs.c:2866)
+    /// still lands in `wait_for_background_pid`'s NotFound arm, so
+    /// 127 survives exactly where GNU has no record.
+    fn retired_job_pid_for_wait_operand(&self, operand: &str) -> Option<u32> {
+        let body = operand.strip_prefix('%')?;
+        if body.is_empty() || !body.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let job_id: u32 = body.parse().ok()?;
+        self.shell_state
+            .job_table
+            .completed_job_pids
+            .get(&job_id)
+            .copied()
     }
 
     pub(in crate::executor) fn resolve_background_job(&self, job: &str) -> Option<u32> {
@@ -4700,12 +5008,25 @@ impl Executor {
                     let ignore = self.get_env("HISTIGNORE").unwrap_or_default();
                     let histsize =
                         crate::history::SessionHistory::size_limit(self.get_env("HISTSIZE"));
+                    // readline/history.c hist_inittime: the stamp an
+                    // entry takes is armed by the first HISTTIMEFORMAT
+                    // bind (rubash#3392).
+                    let comment_char_armed = self.shell_state.history_comment_char_armed
+                        || self.get_env("HISTTIMEFORMAT").is_some();
                     let mut shell = session.borrow_mut();
                     // The fc-line entry was already deleted above
                     // (fc.def:403-421); the executed text is remembered
                     // in its place (fc_execute_file with
                     // remember_on_history forced on, fc.def:530).
-                    let was_recorded = shell.record(&edited, &control, &ignore, histsize);
+                    // fc.def:770-780 fc_replhist returns early on an
+                    // empty command (`*command == '\0'`) — the empty
+                    // guard lives at the fc caller, not in the shared
+                    // record gate (rubash#3329).
+                    let was_recorded = if edited.is_empty() {
+                        false
+                    } else {
+                        shell.record(&edited, &control, &ignore, histsize, comment_char_armed)
+                    };
                     shell.last_line_added = was_recorded;
                 }
                 let tokens = crate::lexer::tokenize(&edited);
@@ -4738,19 +5059,44 @@ impl Executor {
                     let ignore = self.get_env("HISTIGNORE").unwrap_or_default();
                     let histsize =
                         crate::history::SessionHistory::size_limit(self.get_env("HISTSIZE"));
+                    // readline/history.c hist_inittime: the stamp an
+                    // entry takes is armed by the first HISTTIMEFORMAT
+                    // bind (rubash#3392).
+                    let comment_char_armed = self.shell_state.history_comment_char_armed
+                        || self.get_env("HISTTIMEFORMAT").is_some();
                     let mut shell = session.borrow_mut();
-                    // fc.def fc_replhist: the executed command REPLACES
-                    // the last entry (bash_delete_last_history +
-                    // maybe_add_history), so the fc command itself never
-                    // appears in the history. Rubash pops when the last
-                    // entry is the current line's (hist_last_line_added),
-                    // which covers both the interactive fc line and the
-                    // entry an `fc -s`/`fc -e -` re-execution resolved.
-                    if shell.last_line_added && !shell.entries.is_empty() {
-                        shell.entries.pop();
-                        shell.timestamps.pop();
-                    }
-                    let was_recorded = shell.record(&command, &control, &ignore, histsize);
+                    // fc.def fc_replhist (766-780): for a non-empty
+                    // command the executed command REPLACES the last
+                    // entry — `bash_delete_last_history` runs
+                    // UNCONDITIONALLY, then `maybe_add_history` adds
+                    // the new command. The delete is NOT gated on
+                    // `hist_last_line_added`: whenever the `fc -s`
+                    // line itself was never recorded — e.g.
+                    // interactively when HISTIGNORE filters it, or
+                    // when the script driver takes the history-off
+                    // branch (script_driver.rs:2301) — the gate left
+                    // the previous entry in place and the new command
+                    // was APPENDED (rubash#3391 face 2). The same
+                    // unconditional delete is what GNU does interactively
+                    // when HISTIGNORE filters the `fc` line itself: the
+                    // previous real command is deleted and the new one
+                    // takes its place (PTY probe vs GNU 5.3.20, clean
+                    // HISTFILE, HISTIGNORE="fc *").
+                    // `bash_delete_last_history` (bashhist.c:392) is a
+                    // no-op on an empty list, hence the emptiness guard
+                    // below. fc_replhist returns early on an empty command
+                    // (fc.def:770-780 `*command == '\0'`) BEFORE the
+                    // delete, so an empty command pops nothing and
+                    // records nothing (rubash#3329).
+                    let was_recorded = if command.is_empty() {
+                        false
+                    } else {
+                        if !shell.entries.is_empty() {
+                            shell.entries.pop();
+                            shell.timestamps.pop();
+                        }
+                        shell.record(&command, &control, &ignore, histsize, comment_char_armed)
+                    };
                     shell.last_line_added = was_recorded;
                 }
                 let tokens = crate::lexer::tokenize(&command);
@@ -4916,17 +5262,19 @@ impl Executor {
                 self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
                 return Ok(2); // EX_USAGE
             }
-            // Register the compspec for every name (complete.def:480-485).
+            // Register the compspec (complete.def:480-485): the loop
+            // runs over `wl ? wl : list` — with -D/-E/-I present the
+            // single pseudo word REPLACES the operand list, so the
+            // operands never land in the regular table (rubash#2719).
             let spec = crate::builtins::complete::Compspec::from_parsed(&parsed);
             if let Some(pseudo) = pseudo {
-                self.shell_state
-                    .completion_specs
-                    .insert(pseudo, spec.clone());
-            }
-            for target in &parsed.operands {
-                self.shell_state
-                    .completion_specs
-                    .insert(target, spec.clone());
+                self.shell_state.completion_specs.insert(pseudo, spec);
+            } else {
+                for target in &parsed.operands {
+                    self.shell_state
+                        .completion_specs
+                        .insert(target, spec.clone());
+                }
             }
             self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
             return Ok(0);
@@ -4973,7 +5321,7 @@ impl Executor {
             // rest of this attempt. Outside it always errors.
             if parsed.operands.is_empty() && pseudo.is_none() {
                 if self.shell_state.line_completion_depth == 0
-                    || self.shell_state.pcomp_curcs.is_none()
+                    || self.shell_state.pcomp_curcs.borrow().is_none()
                 {
                     writeln!(
                         stderr,
@@ -4982,11 +5330,16 @@ impl Executor {
                     self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
                     return Ok(1); // EXECUTION_FAILURE
                 }
-                let curcmd = self.shell_state.pcomp_curcmd.clone().unwrap_or_default();
+                let curcmd = self
+                    .shell_state
+                    .pcomp_curcmd
+                    .borrow()
+                    .clone()
+                    .unwrap_or_default();
                 if parsed.on_options == 0 && parsed.off_options == 0 {
                     // complete.def:870-874 print_compopts (pcomp_curcmd,
                     // cs, 1) → stdout.
-                    if let Some(cs) = self.shell_state.pcomp_curcs.as_ref() {
+                    if let Some(cs) = self.shell_state.pcomp_curcs.borrow().as_ref() {
                         crate::builtins::complete::print_compopts_line(&curcmd, cs, &mut stdout)?;
                     }
                 } else {
@@ -4998,7 +5351,7 @@ impl Executor {
                     // after generation, pcomplete.c gen_progcomp_
                     // completions), so the fallback decisions and the
                     // insert policy see the mutated bits (rubash#2572).
-                    if let Some(cs) = self.shell_state.pcomp_curcs.as_mut() {
+                    if let Some(cs) = self.shell_state.pcomp_curcs.borrow_mut().as_mut() {
                         cs.options |= parsed.on_options;
                         cs.options &= !parsed.off_options;
                     }
@@ -5021,7 +5374,14 @@ impl Executor {
                 .into_iter()
                 .map(|(magic, flag)| (flag, magic, flag))
                 .collect();
-            for (report_name, diag_name, key) in pseudo_ref.into_iter().chain(operand_refs) {
+            // `wl ? wl : list` (complete.def:893): with a pseudo flag
+            // present the operands are NOT visited at all (rubash#2719).
+            let targets: Vec<(&str, &str, &str)> = if pseudo_ref.is_empty() {
+                operand_refs
+            } else {
+                pseudo_ref
+            };
+            for (report_name, diag_name, key) in targets {
                 match self.shell_state.completion_specs.get_mut(key) {
                     None => {
                         // complete.def:896-898 progcomp_search miss.
@@ -5153,7 +5513,7 @@ impl Executor {
                             // (the #1090/#1041 hazard — it was already
                             // erasing this very warning on the will_run
                             // path).
-                            framed_fd_table = Some(self.fd_table.clone());
+                            framed_fd_table = Some(self.fd_table.saved_table());
                             if let Err(error) = self.bind_conditional_stdio_redirects(cmd) {
                                 self.fd_table = framed_fd_table.take().unwrap();
                                 return Err(error);
@@ -5431,33 +5791,75 @@ impl Executor {
         );
         let (words, cur_idx, cur_word) =
             (split.words.clone(), split.cur_idx, split.cur_word.clone());
-        let spec = crate::builtins::complete::resolve_compspec(
+        let wordbreaks = crate::builtins::complete::comp_wordbreaks(&self.shell_state.env_vars);
+        let (spec, rebuilt) = crate::builtins::complete::resolve_compspec_with_rebuild(
             &self.shell_state.completion_specs,
             &words,
             cur_idx,
             &self.shell_state.aliases,
             crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "progcomp_alias"),
-        )
-        .cloned()?;
+            &split.segment_line,
+            split.segment_point,
+            &wordbreaks,
+        )?;
+        let spec = spec.clone();
         if spec.funcname.is_none() && spec.command.is_none() && spec.words.is_none() {
             return None;
         }
-        let (cmd_name, prev_word, bind_words, cword): (String, String, Vec<String>, i64) =
-            if words.is_empty() {
-                ("_EmptycmD_".to_string(), String::new(), Vec::new(), -1)
+        // rubash#2610: when an alias hop governed, GNU restarts the
+        // lookup on the rebuilt line, so the generators bind the
+        // REBUILT word list (build_arg_list's $1/$3 come from it) and
+        // the rebuilt line text/point (bind_compfunc_variables).
+        let (cmd_name, prev_word, bind_words, cword, bind_line, bind_point): (
+            String,
+            String,
+            Vec<String>,
+            i64,
+            String,
+            usize,
+        ) = if words.is_empty() {
+            (
+                "_EmptycmD_".to_string(),
+                String::new(),
+                Vec::new(),
+                -1,
+                split.segment_line.clone(),
+                split.segment_point,
+            )
+        } else if let Some(rebuilt) = rebuilt {
+            let new_cword = cur_idx + (rebuilt.words.len() - words.len());
+            let prev = if new_cword >= 1 {
+                rebuilt
+                    .words
+                    .get(new_cword - 1)
+                    .cloned()
+                    .unwrap_or_default()
             } else {
-                let prev = if cur_idx >= 1 {
-                    words.get(cur_idx - 1).cloned().unwrap_or_default()
-                } else {
-                    String::new()
-                };
-                (
-                    words.first().cloned().unwrap_or_default(),
-                    prev,
-                    words.clone(),
-                    cur_idx as i64,
-                )
+                String::new()
             };
+            (
+                rebuilt.words.first().cloned().unwrap_or_default(),
+                prev,
+                rebuilt.words,
+                new_cword as i64,
+                rebuilt.line,
+                rebuilt.point,
+            )
+        } else {
+            let prev = if cur_idx >= 1 {
+                words.get(cur_idx - 1).cloned().unwrap_or_default()
+            } else {
+                String::new()
+            };
+            (
+                words.first().cloned().unwrap_or_default(),
+                prev,
+                words.clone(),
+                cur_idx as i64,
+                split.segment_line.clone(),
+                split.segment_point,
+            )
+        };
         let mut dynamic = crate::builtins::complete::CompgenDynamic::default();
         // pcomplete.c:1520-1531 gen_progcomp_completions: the governing
         // compspec's COPY becomes `pcomp_curcs` (with `pcomp_curcmd` =
@@ -5467,17 +5869,17 @@ impl Executor {
         // restored afterwards (nesting-safe). A `compopt` executed by the
         // completion function reads and mutates this copy
         // (complete.def:866-886).
-        let saved_curcs = self.shell_state.pcomp_curcs.take();
-        let saved_curcmd = self.shell_state.pcomp_curcmd.take();
-        self.shell_state.pcomp_curcs = Some(spec.clone());
-        self.shell_state.pcomp_curcmd = Some(cmd_name.clone());
+        let saved_curcs = self.shell_state.pcomp_curcs.borrow_mut().take();
+        let saved_curcmd = self.shell_state.pcomp_curcmd.borrow_mut().take();
+        *self.shell_state.pcomp_curcs.borrow_mut() = Some(spec.clone());
+        *self.shell_state.pcomp_curcmd.borrow_mut() = Some(cmd_name.clone());
         // rubash#1799: same PIPESTATUS cell rule as the compgen arm.
         dynamic.pipestatus = self.pipestatus_listing();
         if let Some(funcname) = spec.funcname.as_deref() {
             dynamic.function_candidates = self.run_completion_function_live(
                 funcname,
-                &split.segment_line,
-                split.segment_point,
+                &bind_line,
+                bind_point,
                 &bind_words,
                 cword,
                 &cmd_name,
@@ -5488,8 +5890,8 @@ impl Executor {
         if let Some(command) = spec.command.as_deref() {
             dynamic.command_candidates = self.run_completion_command_live(
                 command,
-                &split.segment_line,
-                split.segment_point,
+                &bind_line,
+                bind_point,
                 &bind_words,
                 cword,
                 &cmd_name,
@@ -5521,12 +5923,12 @@ impl Executor {
         // restore discards it — GNU's `*foundp |= cs->options` fold.
         // The registry spec itself is never mutated by a live
         // completion (the mutation lives on the per-attempt copy).
-        if let Some(current) = &self.shell_state.pcomp_curcs {
+        if let Some(current) = self.shell_state.pcomp_curcs.borrow().as_ref() {
             dynamic.options_override = Some(current.options);
         }
         // pcomplete.c:1530-1531: restore the enclosing completion context.
-        self.shell_state.pcomp_curcs = saved_curcs;
-        self.shell_state.pcomp_curcmd = saved_curcmd;
+        *self.shell_state.pcomp_curcs.borrow_mut() = saved_curcs;
+        *self.shell_state.pcomp_curcmd.borrow_mut() = saved_curcmd;
         Some(dynamic)
     }
 

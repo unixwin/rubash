@@ -171,6 +171,20 @@ impl ComsubPrinter {
     /// `case ';'`/`case '\n'` arms of make_command_string_internal,
     /// print_cmd.c:288-319). The first command's connector belongs to the
     /// caller (the construct that opened the list printed its header).
+    ///
+    /// rubash#3662: a previous `command &` is NOT followed by a `;`
+    /// connector — in GNU's tree `a & b` is a single connection whose
+    /// connector IS `&` (print_cmd.c:257-272: prints ` &`, plus a space
+    /// only when a second command follows), so no `;` connector node
+    /// exists after it, and the list grammar admits only a newline_list
+    /// after `&` (parse.y:1275/1290). The background arm below already
+    /// printed the ` &`; the connector only adds the separating space
+    /// (the ast_print.rs print_command_list branch does the same — that
+    /// is why `declare -f` was already correct while this printer
+    /// emitted `& ;`, a syntax error that killed every respawned
+    /// background child whose prelude carried such a function).
+    /// The boundary is still consumed (consume-once discipline) even
+    /// though nothing is printed for it.
     fn print_command_list(&mut self, commands: &[CommandNode]) {
         for (index, command) in commands.iter().enumerate() {
             if index > 0 {
@@ -181,7 +195,17 @@ impl ComsubPrinter {
                 let newline_connector = command
                     .line
                     .is_some_and(|line| self.boundaries.remove(&line));
-                self.print_connector(newline_connector);
+                if commands[index - 1].background_command.is_some() {
+                    // The " &" suffix was already printed by the command
+                    // itself; the connector only adds the separating
+                    // space (print_cmd.c:257-272 `&` case). No `;` and
+                    // no newline: `& ;` is a parse error, and GNU's `&`
+                    // case prints no inside_function_def newline either.
+                    self.cprintf(" ");
+                    self.skip_this_indent += 1;
+                } else {
+                    self.print_connector(newline_connector);
+                }
             }
             let start = command.line;
             let end = command.end_line;
@@ -243,10 +267,22 @@ impl ComsubPrinter {
             return;
         }
         if let Some(background) = &command.background_command {
+            // print_command already indented for this command; the
+            // wrapped child prints at the SAME level (GNU print_cmd.c
+            // indents once per command, print_cmd.c:1495/1507) — skip
+            // its indent like the time/!/pipeline arms do, or `&`
+            // bodies print one level too deep.
+            self.skip_this_indent += 1;
             self.print_command(&background.command);
-            // print_cmd.c `&` connector: ` &` then one space before the next
-            // command (`cprintf(" ")` under `c != '&' || second`).
-            self.cprintf(" & ");
+            // print_cmd.c:257-272 `&` connector case: prints ` &`, plus
+            // one space only when a second command follows — the space
+            // belongs to the enclosing list logic (print_command_list's
+            // background branch above), never to this arm. The old ` & `
+            // trailing space both fed `& ;` through print_connector and
+            // defeated semicolon()'s `ends_with(" &")` guard, so a body
+            // ending in a background command (loop/if/function closer)
+            // printed `& ;` too (rubash#3662 family).
+            self.cprintf(" &");
             self.print_redirects_of(command);
             return;
         }
@@ -721,42 +757,13 @@ impl ComsubPrinter {
         }
     }
 
+    /// print_cmd.c:1150 print_redirection through the one shared owner
+    /// (`ast_print::print_redirection_text`, the same renderer
+    /// `declare -f` uses): parse_comsub stores exactly this text in the
+    /// word (parse.y:4632), so `>&2` reads back as `1>&2`, `<&-` as
+    /// `0>&-`, `&>f` as `&> f` (rubash#3404).
     fn redirect_text(&mut self, redirect: &Redirect) -> String {
-        // The ordered `redirects` list carries the fd INSIDE the operator
-        // (`2>`, `2>&`, `<`), exactly as print_cmd.c prints it; only a
-        // `{var}` dynamic redirector lives in its own field
-        // (print_cmd.c:1150-1260 `{%s}` prefixes).
-        let mut prefix = String::new();
-        if let Some(fd_var) = &redirect.fd_var {
-            if !redirect.operator.contains('{') {
-                prefix.push_str(&format!("{{{fd_var}}}"));
-            }
-        }
-        let target = Self::word_source_text(&redirect.target, Some(&redirect.target_metadata));
-        // Word-taking redirections print `op target`; fd duplications print
-        // the operand glued to the operator (print_cmd.c:1150-1260). The
-        // stored operator carries the fd (`2>&`) and the target carries the
-        // leading `&` (`&1`); print exactly one of each.
-        let glued_target = target.strip_prefix('&').unwrap_or(&target).to_string();
-        let fd_digit = if redirect.operator.starts_with(|c: char| c.is_ascii_digit()) {
-            String::new()
-        } else {
-            redirect.fd.map(|fd| fd.to_string()).unwrap_or_default()
-        };
-        match redirect.kind {
-            crate::parser::RedirectKind::DuplicateInput
-            | crate::parser::RedirectKind::DuplicateOutput => {
-                format!("{prefix}{fd_digit}{}{glued_target}", redirect.operator)
-            }
-            crate::parser::RedirectKind::CloseInput | crate::parser::RedirectKind::CloseOutput => {
-                format!("{prefix}{}", redirect.operator)
-            }
-            crate::parser::RedirectKind::CombinedOutput
-            | crate::parser::RedirectKind::CombinedAppend => {
-                format!("{prefix}{}", redirect.operator)
-            }
-            _ => format!("{prefix}{} {target}", redirect.operator),
-        }
+        crate::parser::ast_print::print_redirection_text(redirect)
     }
 }
 
@@ -765,4 +772,50 @@ impl ComsubPrinter {
 struct ElifChainRest<'a> {
     elifs: &'a [ElifBranch],
     else_body: Option<&'a [CommandNode]>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::print_comsub_text;
+
+    /// rubash#3662: a background job inside `$(...)` must re-serialize as
+    /// `: & put ...`, never `: & ; put ...` — `&` followed by `;` is a
+    /// syntax error (parse.y:1275/1290: only newline_list may follow `&`),
+    /// and the old `& ;` spelling killed every respawned background child
+    /// whose function prelude carried such a comsub.
+    #[test]
+    fn issue_3662_comsub_background_job_keeps_ampersand_connector() {
+        assert_eq!(
+            print_comsub_text(": & put \"$!\"", false, 1),
+            ": & put \"$!\""
+        );
+    }
+
+    /// Same shape with a `;`-joined follower after the backgrounded
+    /// command: the `;` between the follower and the next command stays.
+    #[test]
+    fn issue_3662_comsub_background_then_semicolon_follower() {
+        assert_eq!(print_comsub_text("a & b; c", false, 1), "a & b; c");
+    }
+
+    /// Control: a plain `;` list is untouched by the background branch.
+    #[test]
+    fn issue_3662_comsub_plain_semicolon_list_unchanged() {
+        assert_eq!(
+            print_comsub_text("echo a; echo b", false, 1),
+            "echo a; echo b"
+        );
+    }
+
+    /// rubash#3662 family: a construct body ending in a background command
+    /// must not gain a `;` from its closer either — the background arm now
+    /// prints ` &` with no trailing space, so semicolon() (print_cmd.c:1520)
+    /// suppresses after it, exactly as GNU does.
+    #[test]
+    fn issue_3662_comsub_loop_body_ending_in_background() {
+        assert_eq!(
+            print_comsub_text("while false; do\n: &\ndone; echo ok", false, 1),
+            "while false; do\n    : &\ndone; echo ok"
+        );
+    }
 }

@@ -1,4 +1,7 @@
 use super::*;
+use crate::executor::builtin_diag::{Diag, DiagKind};
+use crate::executor::builtin_opt::{BuiltinOpt, OptEvent};
+use crate::executor::builtin_table::{builtin_table_row, BuiltinRow, OptSpec};
 use crate::executor::markers::STORAGE_WORD_PREFIX;
 
 /// Scan a declare/typeset command line the way GNU's internal getopt
@@ -31,20 +34,22 @@ fn declare_written_operand_hints(
     hints
 }
 
-/// The ONE declare-family option-letter table: GNU declare.def:145
-/// `#define DECLARE_OPTS "+acfgilnprtuxAFGI"` (the ARRAY_VARS branch —
-/// rubash always has arrays). Every scanner in the family
-/// (`scan_declare_options`, `validate_local_options`, and the routing
-/// in `execute_local`/`execute_declare_command`) derives its letter
-/// set from this constant; rubash#2582 was the three hand-copied
-/// tables disagreeing in both directions (`local -c` rejected by the
-/// local validator, `local -f` accepted there then rejected by the
-/// declare scanner).
-pub(crate) const DECLARE_OPTION_LETTERS: &str = "acfgilnprtuxAFGI";
+/// The declare-family option letters, derived from the table
+/// row (D1 — the spec IS the table, declare.def:145
+/// `DECLARE_OPTS "+acfgilnprtuxAFGI"`), never a hand-copied
+/// constant: rubash#2582 was three hand-copied tables disagreeing
+/// in both directions. The row's spec string carries its leading
+/// `+` (plus mode); the letters are everything after it.
+pub(in crate::executor) fn declare_option_letters() -> &'static str {
+    match builtin_table_row("declare").expect("declare row").opt_spec {
+        OptSpec::Getopt(spec) => spec.trim_start_matches(['+', '-']),
+        _ => "",
+    }
+}
 
 /// Whether a declare-family invocation carries NAME operands (as
 /// opposed to only option clusters): the walk mirrors
-/// scan_declare_options' stop rules — `--` ends the option run and
+/// declare_option_scan's stop rules — `--` ends the option run and
 /// every later word is an operand, a lone `-`/`+` is an operand, and
 /// any word that does not open an option cluster is an operand.
 fn declare_invocation_has_operands(args: &[String]) -> bool {
@@ -62,55 +67,128 @@ fn declare_invocation_has_operands(args: &[String]) -> bool {
     false
 }
 
-fn scan_declare_options(args: &[String]) -> (Vec<char>, Option<char>) {
-    const VALID: &str = DECLARE_OPTION_LETTERS;
-    let mut letters = Vec::new();
-    for arg in args {
-        if arg == "--" {
-            break;
-        }
-        if !(arg.starts_with('-') || arg.starts_with('+')) || arg.len() <= 1 {
-            continue;
-        }
-        for ch in arg[1..].chars() {
-            if VALID.contains(ch) {
-                letters.push(ch);
-            } else {
-                return (letters, Some(ch));
-            }
+/// Scan the option region of a declare-family invocation with the
+/// row's own machine: BuiltinOpt stops at the first non-option word
+/// exactly like GNU internal_getopt, so `-f` after an operand is an
+/// operand, never a diversion (the old `scan_declare_options`
+/// skipped operands and kept scanning). Returns the (letter, set?)
+/// pairs seen in the option region, in order, plus the first
+/// invalid letter, if any. The invalid letter is rendered lossy
+/// (U+FFFD for a non-ASCII byte, the codebase's standard rendering
+/// — cf. `builtin_opt::diagnostic_byte`): it comes from user argv
+/// and must never be widened with `as char`. Diagnostics go to a
+/// discard sink: the callers that REPORT an invalid letter (the
+/// function face, the local validator) do so themselves from the
+/// returned value.
+fn declare_option_scan(
+    row: &'static BuiltinRow,
+    args: &[String],
+) -> (Vec<(char, bool)>, Option<String>) {
+    // Fast path: when the row's spec takes no option arguments
+    // (no `:`/`;`/`#` kinds), the machine is a pure byte scan —
+    // every event is a flag letter, `OptArg` cannot occur, and the
+    // scan below reproduces the machine's stop rules exactly
+    // (option-word gate, `--help`, `--`, first invalid byte ends
+    // the scan with that byte as `optopt`). This predicate runs
+    // several times per declare-family call (the function-face
+    // gate, the allexport post-pass, `local`), and constructing
+    // the full machine + a discard Diag for it was a measurable
+    // per-call tax (E4, PR #2968). Specs with argument kinds keep
+    // the machine path.
+    if let OptSpec::Getopt(spec) = row.opt_spec {
+        if let Some(scanned) = scan_flag_only_spec(spec, args) {
+            return scanned;
         }
     }
-    (letters, None)
+    let mut sink = Vec::new();
+    let mut diag = Diag::new(row, &mut sink);
+    let mut opt = BuiltinOpt::new(row, args, &mut diag, false);
+    let mut letters = Vec::new();
+    loop {
+        match opt.next() {
+            OptEvent::Opt(c) => letters.push((c as char, opt.opttype() == b'-')),
+            OptEvent::OptArg(_, _) => {}
+            OptEvent::Help | OptEvent::End => break,
+        }
+    }
+    (
+        letters,
+        opt.optopt()
+            .map(|c| String::from_utf8_lossy(&[c]).into_owned()),
+    )
+}
+
+/// The byte-scan form of `declare_option_scan` for a flag-only
+/// spec (see the fast path there): returns the (letter, set?)
+/// pairs in scan order and the first invalid byte rendered lossy,
+/// or `None` when the spec is not flag-only (an argument-kind
+/// marker is present) and the caller must use the machine.
+fn scan_flag_only_spec(
+    spec: &'static str,
+    args: &[String],
+) -> Option<(Vec<(char, bool)>, Option<String>)> {
+    let bytes = spec.as_bytes();
+    let plus = bytes.first() == Some(&b'+');
+    let letter_bytes: &[u8] = if plus { &bytes[1..] } else { bytes };
+    // A `:` in letter position is inert to the parser (fc's
+    // leading one), but any argument-kind marker anywhere means
+    // some letter takes an argument — not flag-only.
+    if letter_bytes.iter().any(|b| matches!(b, b':' | b';' | b'#')) {
+        return None;
+    }
+    let mut letters = Vec::new();
+    let mut optopt = None;
+    'words: for word in args {
+        let word_bytes = word.as_bytes();
+        if !super::builtin_opt::is_option_word(word_bytes, plus) {
+            break;
+        }
+        if word == "--help" || word == "--" {
+            break;
+        }
+        let sign = word_bytes[0];
+        for &c in &word_bytes[1..] {
+            // An option character of ':' is always invalid,
+            // whatever the spec says (bashgetopt.c:99) — the
+            // guard above already excludes it from the set.
+            if c == b':' || !letter_bytes.contains(&c) {
+                optopt = Some(c);
+                break 'words;
+            }
+            letters.push((c as char, sign == b'-'));
+        }
+    }
+    Some((
+        letters,
+        optopt.map(|c| String::from_utf8_lossy(&[c]).into_owned()),
+    ))
+}
+
+/// Whether a declare/typeset/local invocation diverts to the
+/// function face: a MINUS-signed `f`/`F` in the option region.
+/// `+f`/`+F` clear att_function and stay on the variable path
+/// (declare.def: the function branch keys on `flags_on &
+/// att_function`).
+fn declare_has_function_option(args: &[String]) -> bool {
+    let row = builtin_table_row("declare").expect("declare row");
+    let (letters, _) = declare_option_scan(row, args);
+    letters
+        .iter()
+        .any(|(letter, set)| *set && (*letter == 'f' || *letter == 'F'))
 }
 
 /// Whether a declare/typeset/local invocation's -a/-A attribute ends up
 /// SET. The last occurrence wins and `+a`/`+A` unset, so `declare +a s=1`
 /// binds a scalar (and marks under set -a) while `declare -a s=1` binds
-/// an array element (and does not). Walks the arguments with the same
-/// stop rules as scan_declare_options.
+/// an array element (and does not). The scan stops at the first
+/// operand — an `-a` after an operand is a name, not an option.
 fn declare_invocation_sets_array_attribute(args: &[String]) -> bool {
+    let row = builtin_table_row("declare").expect("declare row");
+    let (letters, _) = declare_option_scan(row, args);
     let mut sets = false;
-    for arg in args {
-        if arg == "--" {
-            break;
-        }
-        let (setting, rest) = if let Some(rest) = arg.strip_prefix('-') {
-            (true, rest)
-        } else if let Some(rest) = arg.strip_prefix('+') {
-            (false, rest)
-        } else {
-            continue;
-        };
-        if rest.is_empty() {
-            continue;
-        }
-        for ch in rest.chars() {
-            if !DECLARE_OPTION_LETTERS.contains(ch) {
-                return sets;
-            }
-            if ch == 'a' || ch == 'A' {
-                sets = setting;
-            }
+    for (letter, set) in letters {
+        if letter == 'a' || letter == 'A' {
+            sets = set;
         }
     }
     sets
@@ -119,6 +197,7 @@ fn declare_invocation_sets_array_attribute(args: &[String]) -> bool {
 impl Executor {
     pub(in crate::executor) fn execute_declare_functions(
         &mut self,
+        command_name: &str,
         args: &[String],
         stdout: &mut impl Write,
         stderr: &mut impl Write,
@@ -128,23 +207,24 @@ impl Executor {
         // bodies, so render the simple function form used by builtins6.sub.
         // GNU declare.def declare_invalid_opts: att_function combined with
         // att_array/att_assoc/att_integer/att_nameref is a usage error.
-        let (option_letters, invalid_letter) = scan_declare_options(args);
-        let function_flag_on = option_letters.contains(&'f');
+        // The face speaks through the row of the INVOKED name, so
+        // `local -fZ x` reports `local: -Z: invalid option` (Stage-2
+        // ④ Phase 4 — the old code hardcoded `declare:` here).
+        let row = builtin_table_row(command_name).expect("declare-family row");
+        let mut diag = Diag::new(row, stderr);
+        let (option_letters, invalid_letter) = declare_option_scan(row, args);
+        let function_flag_on = option_letters
+            .iter()
+            .any(|(letter, set)| *set && (*letter == 'f' || *letter == 'F'));
         if function_flag_on {
             // A getopt-level invalid letter is reported (with usage,
             // EX_USAGE) before the attribute-combination check below:
             // `declare -fZ x` names `-Z`, never a combination
             // (rubash#1259).
             if let Some(invalid) = invalid_letter {
-                writeln!(
-                    stderr,
-                    "{}declare: -{invalid}: invalid option",
-                    self.diagnostic_prefix()
-                )?;
-                writeln!(
-                    stderr,
-                    "declare: usage: declare [-aAfFgiIlnrtux] [name[=value] ...] or declare -p [-aAfFilnrtux] [name ...]"
-                )?;
+                diag.error(DiagKind::InvalidOpt(format!("-{invalid}")));
+                diag.usage();
+                diag.flush_with(|| self.diagnostic_prolog());
                 return Ok(2);
             }
             // GNU declare.def declare_invalid_opts checks the conflicting
@@ -152,15 +232,11 @@ impl Executor {
             // order the letters appear in the command line.
             let bad_opt: Option<String> = ['n', 'i', 'A', 'a']
                 .iter()
-                .find(|letter| option_letters.contains(letter))
+                .find(|letter| option_letters.iter().any(|(seen, _)| seen == *letter))
                 .map(|letter| format!("-{letter}"));
             if let Some(opt) = bad_opt {
-                writeln!(
-                    stderr,
-                    "{}declare: {}: invalid option",
-                    self.diagnostic_prefix(),
-                    opt
-                )?;
+                diag.error(DiagKind::InvalidOpt(opt));
+                diag.flush_with(|| self.diagnostic_prolog());
                 return Ok(1);
             }
         }
@@ -171,47 +247,55 @@ impl Executor {
         if function_flag_on {
             for arg in args {
                 if !arg.starts_with('-') && !arg.starts_with('+') && arg.contains('=') {
-                    writeln!(
-                        stderr,
-                        "{}declare: cannot use `-f' to make functions",
-                        self.diagnostic_prefix()
-                    )?;
+                    diag.free(format_args!("cannot use `-f' to make functions"));
+                    diag.flush_with(|| self.diagnostic_prolog());
                     return Ok(1);
                 }
             }
         }
-        let names: Vec<&str> = args
-            .iter()
-            .filter(|arg| !arg.starts_with('-') && !arg.starts_with('+'))
-            .map(String::as_str)
-            .collect();
+        // rubash#3338: every letter scan in this face reads the
+        // OPTION REGION only, and the names are the operand tail
+        // behind it (skipping the `--` delimiter when the region
+        // ended there). GNU's scan stops at the first non-option
+        // word (builtins/bashgetopt.c:77-84), so a `-p` behind an
+        // operand is a function NAME to look up — the old whole-list
+        // scans read it as the print flag and `declare -f x -p`
+        // silently succeeded where GNU fails the missing name.
+        let region_end = super::builtin_opt::option_region_end(args, true);
+        let region = &args[..region_end];
+        let operands_start = if args.get(region_end).map(String::as_str) == Some("--") {
+            region_end + 1
+        } else {
+            region_end
+        };
+        let names: Vec<&str> = args[operands_start..].iter().map(String::as_str).collect();
         // GNU declare.def: the -p flag may arrive inside a cluster
         // (`declare -pf NAME`), so test for a `p` in any `-` option word,
         // exactly like the `print` scan below — an exact "-p" match left
         // `declare -pf NOPE` silent (rubash#1327). Bare `-f`/`-F` without
         // -p stays silent on both shells.
-        let print_not_found = args
+        let print_not_found = region
             .iter()
             .any(|arg| arg.starts_with('-') && arg.contains('p'));
-        let function_names_only = args
+        let function_names_only = region
             .iter()
             .any(|arg| arg.starts_with('-') && arg.contains('F'));
-        let function_definition_mode = args
+        let function_definition_mode = region
             .iter()
             .any(|arg| (arg.starts_with('-') || arg.starts_with('+')) && arg.contains('f'));
-        let set_export = args
+        let set_export = region
             .iter()
             .any(|arg| arg.starts_with('-') && arg.contains('x'));
-        let clear_export = args
+        let clear_export = region
             .iter()
             .any(|arg| arg.starts_with('+') && arg.contains('x'));
         let set_export_attribute = set_export && function_definition_mode;
         let clear_export_attribute = clear_export && function_definition_mode;
         let exported_only = set_export;
-        let readonly = args
+        let readonly = region
             .iter()
             .any(|arg| arg.starts_with('-') && arg.contains('r'));
-        let clear_readonly = args
+        let clear_readonly = region
             .iter()
             .any(|arg| arg.starts_with('+') && arg.contains('r'));
         // GNU declare.def declares -t on functions: set/clear the trace
@@ -224,13 +308,13 @@ impl Executor {
         // in its own cluster (`declare -f -t NAME', rubash#217) — requiring
         // `f' and `t' in the same cluster made the separated form fall
         // through to the display branch and print the body.
-        let set_trace = args
+        let set_trace = region
             .iter()
             .any(|arg| arg.starts_with('-') && arg.contains('t'));
-        let clear_trace = args
+        let clear_trace = region
             .iter()
             .any(|arg| arg.starts_with('+') && arg.contains('t'));
-        let print = args
+        let print = region
             .iter()
             .any(|arg| arg.starts_with('-') && arg.contains('p'));
         let exported_functions = marked_env_names(&self.shell_state.env_vars, EXPORTED_FUNCTIONS);
@@ -457,24 +541,21 @@ impl Executor {
         if plain {
             return Ok(args.to_vec());
         }
-        // Whether the operand list carries `-A` (set form); an unmarked
-        // variable declared with -A takes the assoc element rules.
-        let mut parse_options = true;
-        let assoc_hint = args.iter().any(|arg| {
-            if parse_options && arg == "--" {
-                parse_options = false;
-                return false;
-            }
-            parse_options && arg.starts_with('-') && arg != "-" && arg[1..].contains('A')
-        });
-        let mut parse_array_options = true;
-        let array_hint = args.iter().any(|arg| {
-            if parse_array_options && arg == "--" {
-                parse_array_options = false;
-                return false;
-            }
-            parse_array_options && arg.starts_with('-') && arg != "-" && arg[1..].contains('a')
-        });
+        // Whether the invocation carries `-A`/`-a` (set form) in its
+        // OPTION REGION; an unmarked variable declared with -A takes
+        // the assoc element rules. rubash#3338: the hints read the
+        // region only — behind the first operand (or `--`) the word
+        // is a name in GNU (internal_getopt stops there,
+        // builtins/bashgetopt.c:77-84), and the old whole-list scan
+        // let `declare y='(1 2)' -A` convert the quoted scalar into
+        // an associative bind where GNU keeps the literal string.
+        let region_end = super::builtin_opt::option_region_end(args, true);
+        let assoc_hint = args[..region_end]
+            .iter()
+            .any(|arg| arg.starts_with('-') && arg[1..].contains('A'));
+        let array_hint = args[..region_end]
+            .iter()
+            .any(|arg| arg.starts_with('-') && arg[1..].contains('a'));
         // GNU declare.def:660+ processes operands SEQUENTIALLY — an earlier
         // `a=$x` operand is bound before `d='($a)'` expands, so the deferred
         // compound expansion below must see the assignments of operands
@@ -528,11 +609,23 @@ impl Executor {
                 let array_exists = is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, lhs)
                     || is_marked_var(&self.shell_state.env_vars, ARRAY_VARS, lhs);
                 let declare_family = !matches!(command_name, "export" | "readonly");
-                let is_compound = paren_value
-                    && (w_compassign
-                        || assoc_hint
-                        || array_hint
-                        || (declare_family && array_exists));
+                // GNU parse.y:5648-5657 token_is_assignment + subst.c:12949
+                // expand_declaration_argument: a `(...)` operand binds as a
+                // compound assignment only when the LHS is a valid identifier
+                // — an invalid name (rubash#3186) takes the plain word path,
+                // so the builtin's InvalidId diagnostic quotes the plain
+                // expanded word instead of the marker/quoted compound
+                // expansion. The `w_compassign` arm needs no extra gate:
+                // the parser only sets the marker for a
+                // valid_compound_assignment_lhs LHS (token_actions.rs), which
+                // after its own tightening is a strict identifier (modulo a
+                // `[sub]` head).
+                let lhs_base = lhs.split('[').next().unwrap_or(lhs);
+                let lhs_base_valid = is_shell_name(lhs_base);
+                let hint_compound =
+                    assoc_hint || array_hint || (declare_family && array_exists);
+                let is_compound =
+                    paren_value && (w_compassign || (lhs_base_valid && hint_compound));
                 // GNU subst.c:12949-13036 expand_declaration_argument: a
                 // W_COMPASSIGN operand of an assignment builtin is bound by
                 // a nested declare_builtin during word expansion, with the
@@ -554,8 +647,12 @@ impl Executor {
                     // (declare.def / shopt) makes the local inherit the
                     // global's indexed attribute (varenv14.sub), or the
                     // local scope already carries the mark.
-                    let local_context =
-                        self.shell_state.function_depth > 0 && !declare_args_force_global(args);
+                    // The nested bind localizes only for the declare
+                    // family — export/readonly always bind the
+                    // inherited (global) variable (setattr.def:240-268).
+                    let local_context = declare_family
+                        && self.shell_state.function_depth > 0
+                        && !declare_args_force_global(args);
                     let locally_scoped = local_context
                         && !self
                             .shell_state.local_var_scopes
@@ -573,8 +670,19 @@ impl Executor {
                         assoc_hint && target_indexed && !target_assoc;
                     let nested_indexed_convert =
                         array_hint && target_assoc && !target_indexed;
-                    let nested_readonly =
-                        is_marked_var(&self.shell_state.env_vars, READONLY_VARS, lhs);
+                    // GNU make_local_variable (declare.def:929+,
+                    // variables.c:5524+): a `local`/`declare` operand
+                    // that creates a FRESH local binds the new mutable
+                    // instance — the readonly mark of an OUTER-scope
+                    // variable with the same name never fires on it
+                    // (varenv19.sub ccc(): `local x=(7 8 9)` inside a
+                    // caller whose own `local -r x` is live reports
+                    // nothing). The refusal stands only when the bound
+                    // instance itself is readonly — the global/outer
+                    // target for non-localizing operands, or the
+                    // same-scope local already marked.
+                    let nested_readonly = !locally_scoped
+                        && is_marked_var(&self.shell_state.env_vars, READONLY_VARS, lhs);
                     if nested_assoc_convert || nested_indexed_convert {
                         let kind = if nested_assoc_convert {
                             "indexed to associative"
@@ -609,16 +717,55 @@ impl Executor {
                             return Err(());
                         }
                     } else if nested_readonly {
-                        // GNU declare.def make_local_variable path surfaces
-                        // through sh_readonly (builtin_error family): the
-                        // line segment never gates, so this keeps the
-                        // ungated prefix (verified: `local l=(...)` in a
-                        // function reports `line N:` under gnu_errfmt).
-                        eprintln!(
-                            "{}{lhs}: readonly variable",
-                            self.diagnostic_prefix()
-                        );
-                        if self.shell_state.function_depth == 0 {
+                        // rubash#2658: two prolog classes split by which
+                        // layer refuses the readonly bind. When the operand
+                        // replays attribute letters through a nested
+                        // declare (subst.c:12949 expand_declaration_argument
+                        // -> subst.c:12792 make_internal_declare) the
+                        // refusal is declare's own sh_readonly
+                        // (declare.def:876) -> builtin_error, whose
+                        // this_command_name is the enclosing FUNCTION name
+                        // at expansion time (builtins/common.c:83-105 —
+                        // execute_cmd.c:4800 installs the builtin name only
+                        // after expand_words) — `f() { local r=(4); }` on
+                        // readonly r prints `f: r: readonly variable`. That
+                        // class covers declare/typeset/local always (a
+                        // local-scope declare of a readonly global fails)
+                        // and export/readonly ONLY when -a/-A replay:
+                        // setattr.def:231-251 turns `readonly -a r=(6)` into
+                        // `declare -gra r`, whose attr-set refusal prints
+                        // `f: r:`, while flagless `readonly r=(4)` reduces
+                        // to `declare -g r` — a scope-only no-op that
+                        // succeeds — so its refusal arrives later from the
+                        // bind layer's err_readonly (error.c:453
+                        // report_error), which prints the bare variable
+                        // name with no this_command_name segment. The
+                        // operand's expansion-time bind failure is a real
+                        // DISCARD for the special builtins
+                        // (subst.c:13033 exp_jump_to_top_level): inside a
+                        // function the body is abandoned after the single
+                        // line, before the builtin runs
+                        // (probe: `f() { readonly r=(4); declare -p r; }`
+                        // prints `r: readonly variable` once, f's tail
+                        // never runs, the caller continues at top level).
+                        if declare_family || array_hint || assoc_hint {
+                            match self.shell_state.function_name_stack.first() {
+                                Some(func) => eprintln!(
+                                    "{}{func}: {lhs}: readonly variable",
+                                    self.diagnostic_prefix()
+                                ),
+                                None => eprintln!(
+                                    "{}{lhs}: readonly variable",
+                                    self.diagnostic_prefix()
+                                ),
+                            }
+                        } else {
+                            eprintln!(
+                                "{}{lhs}: readonly variable",
+                                self.diagnostic_prefix()
+                            );
+                        }
+                        if self.shell_state.function_depth == 0 || !declare_family {
                             // Same subst.c:13033 DISCARD for the nested
                             // readonly bind (GNU probe run401/nro.sh:
                             // `declare ro=() 2> E1; echo same-line` skips the
@@ -893,7 +1040,25 @@ impl Executor {
                     // hard failure; execute_declare's Err(()) arm returns 1
                     // with the reader-level discard already armed.
                     Err(partial) => {
-                        if self.evalerror_failglob_pending.get() {
+                        // rubash#3613: an evalerror from a subscript's
+                        // nested expansion (expr.c evalerror -> DISCARD)
+                        // abandons the whole declaration before the bind —
+                        // the name keeps the flags' attribute mark but
+                        // stays unset (`declare -a b=([${x}]=v)` with
+                        // x='$y', y='`echo 1`' reports `declare -a b`),
+                        // unlike the err_badarraysub break which still
+                        // materializes the array. Same arm as the failglob
+                        // gate above.
+                        if self.evalerror_failglob_pending.get()
+                            || self.evalerror_pending.get()
+                        {
+                            let attr = if assoc { ASSOC_VARS } else { ARRAY_VARS };
+                            mark_env_name(&mut self.shell_state.env_vars, attr, lhs);
+                            mark_env_name(
+                                &mut self.shell_state.env_vars,
+                                DECLARED_UNSET_VARS,
+                                lhs,
+                            );
                             return Err(());
                         }
                         partial
@@ -1210,9 +1375,12 @@ impl Executor {
                     }
                     new_value = self.eval_integer_assignment_value(&new_value).to_string();
                 } else if opt_upper {
-                    new_value = new_value.to_uppercase();
+                    // GNU sh_modcase simple mapping (rubash#3790): the
+                    // DIRSTACK bind runs through the same
+                    // make_variable_value conversion as any other bind.
+                    new_value = crate::locale::simple_uppercase(&new_value);
                 } else if opt_lower {
-                    new_value = new_value.to_lowercase();
+                    new_value = crate::locale::simple_lowercase(&new_value);
                 }
                 crate::builtins::pushd::set_stack_value(
                     &mut self.shell_state.env_vars,
@@ -1433,8 +1601,23 @@ impl Executor {
         let skip_builtin = dirstack_routed && local_names(&args).is_empty();
 
         let result = (|| -> Result<i32, ExecuteError> {
-            let mut stdout = Vec::new();
-            let mut stderr = Vec::new();
+            // rubash#3408: a print request (`declare -p NAME...`)
+            // interleaves per-name listings (stdout) with `not found`
+            // diagnostics (stderr) in operand order — GNU's per-name
+            // sequential emission (builtins/setattr.def
+            // `set_or_show_attributes`). The pair route
+            // (`write_buffered_builtin_output`: whole stdout block,
+            // then whole stderr block) cannot express that order, so
+            // the builtin runs against one OrderedOutputLog and the
+            // chunks flush in log order — the same route `type`,
+            // `command -v` and `printf` already take (rubash#2699 /
+            // #3324). Every other declare shape has at most one
+            // stream non-empty, so the chunk route renders it exactly
+            // like the pair route (and falls back to the pair blocks
+            // when the walk declines).
+            let log = super::trap_stack_builtins::OrderedOutputLog::new();
+            let mut stdout = log.stdout_writer();
+            let mut stderr = log.stderr_writer();
             // rubash#2424: the DIRSTACK router's builtin-phase
             // diagnostics (readonly refusals, a standalone bad
             // subscript) — written here so the command's redirections
@@ -1491,7 +1674,18 @@ impl Executor {
                 // named print lookup, then restore — bare list mode stays
                 // untouched (GNU excludes the invisible array there) and
                 // assignments stay blocked (is_noassign_bash_array).
+                // rubash#2770: the named form now renders from the
+                // dynamic view; the seed stays for the subscript
+                // operands (`FUNCNAME[0]` has no view) — but never for
+                // a lifetime-unset cell (variables.c:3839 unbind):
+                // seeding one would fabricate a `declare -a FUNCNAME`
+                // GNU reports as not found.
                 let funcname_print_operand = declare_args_request_print(&args)
+                    && !is_marked_var(
+                        &self.shell_state.env_vars,
+                        crate::executor::UNSET_DYNAMIC_VARS,
+                        "FUNCNAME",
+                    )
                     && args
                         .iter()
                         .any(|arg| arg == "FUNCNAME" || arg.starts_with("FUNCNAME["));
@@ -1612,7 +1806,12 @@ impl Executor {
                         // contents; the env cells for these two only
                         // refresh at source-frame push/pop and would
                         // list a returned function's frozen frame.
-                        for name in ["GROUPS", "BASH_SOURCE", "BASH_LINENO"] {
+                        // rubash#2770: FUNCNAME joins the same VISIBLE
+                        // class — its env mirror is a birth snapshot
+                        // ("", init.rs) that function entry never
+                        // refreshes, so listings rendered the stale
+                        // valueless cell instead of the live stack.
+                        for name in ["GROUPS", "BASH_SOURCE", "BASH_LINENO", "FUNCNAME"] {
                             push_registry(name);
                         }
                         // rubash#1363 + rubash#2973: GNU enumerates a
@@ -1634,10 +1833,13 @@ impl Executor {
                                 "BASH_MONOSECONDS",
                                 "LINENO",
                                 "BASH_SUBSHELL",
-                                // BASH_ARGV0 is a table cell (an
-                                // att_invisible one, rendered by the
-                                // builtin's invisible rule); it has no
-                                // dynamic view (rubash#2973).
+                                // BASH_ARGV0's table cell is only
+                                // valueless — never att_invisible in
+                                // GNU — so it joins the registry once
+                                // a by-name read stores into it; the
+                                // cell view answers None before that
+                                // (rubash#3026).
+                                "BASH_ARGV0",
                                 "BASH_COMMAND",
                             ] {
                                 push_registry(name);
@@ -1656,12 +1858,20 @@ impl Executor {
                     self.fire_dynamic_operand_lookups(&args);
                 }
                 let dynamic_set_views = self.dynamic_set_views();
+                // The Diag's sink is this command's own stderr buffer,
+                // so a readonly diagnostic lands in the command's
+                // redirection, not the shell's (A3-R1, rubash#2707).
+                let row = crate::executor::builtin_table::builtin_table_row(command_name)
+                    .expect("declare-family row");
+                let mut diag = crate::executor::builtin_diag::Diag::new(row, &mut stderr);
+                let prolog = self.diagnostic_prolog_parts();
                 let status = crate::builtins::declare::execute_with_io_named_in_context(
                     command_name,
                     &args,
                     &mut self.shell_state.env_vars,
                     &mut stdout,
-                    &mut stderr,
+                    &mut diag,
+                    &prolog,
                     self.shell_state.function_depth > 0,
                     &frame_locals,
                     &dynamic_views,
@@ -1670,6 +1880,7 @@ impl Executor {
                     &mut oob_word,
                     &mut written_hints,
                 )?;
+                diag.flush_with(|| prolog.build(&self.shell_state.env_vars));
                 // GNU err_badarraysub + any_failed (arrayfunc.c:804-809,
                 // rubash#635): report_error carries no `command:` segment
                 // (unlike `declare: x: readonly variable`); abort the list
@@ -1721,7 +1932,7 @@ impl Executor {
                     // Flush here: this early return skips the normal
                     // buffered-output flush below, which would swallow the
                     // diagnostic (rubash#635).
-                    self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+                    self.write_buffered_builtin_output_chunks(cmd, &log)?;
                     return Ok(1);
                 }
                 if local_blocked.is_empty() && noassign_blocked.is_empty() {
@@ -1739,7 +1950,7 @@ impl Executor {
             // earlier guard dropped the buffered stderr whenever
             // stdout_capture was active (bashdb hardening, no GNU anchor),
             // which swallowed the diagnostic entirely (rubash#189).
-            self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+            self.write_buffered_builtin_output_chunks(cmd, &log)?;
             Ok(status)
         })();
         // PIPESTATUS cell-shape transitions for this declare's operands
@@ -1908,16 +2119,40 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<(), ExecuteError> {
-        let (option_letters, _) = scan_declare_options(&cmd.words[1..]);
-        if option_letters.contains(&'f') || option_letters.contains(&'F') {
+        // rubash#3344: the -f diversion must not pre-empt the shared
+        // --help gate (builtins/common.h:29-41 CHECK_HELPOPT /
+        // CASE_HELPOPT; declare.def:362 CASE_HELPOPT in the getopt
+        // loop, before any function/variable branch — `-f` only sets
+        // att_function in the flags). The plain path reaches the gate
+        // in execute_prepared_command first, but the `command`
+        // re-dispatch path carries no gate, so `command declare -f
+        // --help` fell into the function face, which treats `--help`
+        // as a function name to look up (rc 1, no help). Consult the
+        // same shared predicate here and fall through to the core,
+        // whose BuiltinOpt scan owns the help emission (EX_USAGE).
+        // This is the gate/diversion ordering, not a `-f` special
+        // case: the decision is the shared gate's, and the core
+        // still renders the help under the invoked name.
+        let command_name = cmd.words.first().map(String::as_str).unwrap_or("declare");
+        let help_requested = builtin_table_row(command_name)
+            .is_some_and(|row| super::builtin_opt::help_opt_requested(row, &cmd.words[1..]));
+        if declare_has_function_option(&cmd.words[1..]) && !help_requested {
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
-            self.exit_code =
-                self.execute_declare_functions(&cmd.words[1..], &mut stdout, &mut stderr)?;
+            self.exit_code = self.execute_declare_functions(
+                command_name,
+                &cmd.words[1..],
+                &mut stdout,
+                &mut stderr,
+            )?;
             self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
             return Ok(());
         }
         self.exit_code = self.execute_declare(cmd)?;
+        // GNU variables.c:5820/6257-6266 sv_strict_posix: a declare/
+        // typeset bind of POSIXLY_CORRECT re-derives the mode
+        // (rubash#3661).
+        self.sync_posix_mode_if_assignment_operands(&cmd.words[1..]);
         Ok(())
     }
 
@@ -1931,9 +2166,64 @@ impl Executor {
         // locals with nodefs set (declare.def's local branch passes
         // nodefs to show_local_var_attributes); the values are
         // stripped from the rendered listing at the flush below.
-        let nodefs_listing = scan_declare_options(&cmd.words[1..]).0.contains(&'F')
+        // The scan is the row's own machine now (declare_option_scan);
+        // GNU declare.def's `case 'F'` raises nodefs for either sign
+        // (`nodefs++` runs unconditionally, before att_function is
+        // split into flags_on/flags_off), so the letter alone
+        // decides here.
+        let nodefs_listing = declare_option_scan(
+            builtin_table_row("declare").expect("declare row"),
+            &cmd.words[1..],
+        )
+        .0
+        .iter()
+        .any(|(letter, _)| *letter == 'F')
             && !declare_invocation_has_operands(&cmd.words[1..]);
-        let (status, final_args) = if self.shell_state.function_depth == 0 {
+        // GNU declare.def local_builtin catches a STRAIGHT `local
+        // --help' (first word) before checking function context, while
+        // `--help` after other options (`local -a --help`) reaches the
+        // context check first — outside a function that reports "can
+        // only be used in a function", inside one the getopt scan
+        // reports Help before any operand processing. The pre-core
+        // local logic below (frame save, -p missing-name reports,
+        // substring option detectors) must not run for either Help
+        // shape, so both route straight to the core, whose BuiltinOpt
+        // emits the Help (and reports an earlier invalid letter, e.g.
+        // `local -97 --help`, in scan order).
+        let straight_help = cmd.words.get(1).is_some_and(|word| word == "--help");
+        let region_help = local_args_request_help(&cmd.words[1..]);
+        let (status, final_args) = if straight_help
+            || (region_help && self.shell_state.function_depth != 0)
+        {
+            // Route straight to the core, whose BuiltinOpt emits the
+            // Help (and reports an earlier invalid letter, e.g.
+            // `local -97 --help` inside a function, in scan order).
+            let row =
+                crate::executor::builtin_table::builtin_table_row("local").expect("local row");
+            let mut diag = crate::executor::builtin_diag::Diag::new(row, &mut stderr);
+            let prolog = self.diagnostic_prolog_parts();
+            let dynamic_set_views = self.dynamic_set_views();
+            let underlay = crate::shell::var_table::TempenvListingUnderlay::new();
+            let mut oob_word = None;
+            let mut written_hints = crate::builtins::declare::WrittenOperandHints::default();
+            let status = crate::builtins::declare::execute_with_io_named_in_context(
+                "local",
+                &cmd.words[1..],
+                &mut self.shell_state.env_vars,
+                &mut stdout,
+                &mut diag,
+                &prolog,
+                true,
+                &[],
+                &[],
+                &dynamic_set_views,
+                &underlay,
+                &mut oob_word,
+                &mut written_hints,
+            )?;
+            diag.flush_with(|| prolog.build(&self.shell_state.env_vars));
+            (status, Vec::new())
+        } else if self.shell_state.function_depth == 0 {
             writeln!(
                 stderr,
                 "{}local: can only be used in a function",
@@ -1948,10 +2238,7 @@ impl Executor {
             )?;
             writeln!(stderr, "local: usage: local [option] name[=value] ...")?;
             (2, Vec::new())
-        } else if scan_declare_options(&cmd.words[1..])
-            .0
-            .iter()
-            .any(|letter| *letter == 'f' || *letter == 'F')
+        } else if declare_has_function_option(&cmd.words[1..])
             && declare_invocation_has_operands(&cmd.words[1..])
         {
             // rubash#2582: GNU's local is declare_internal in a local
@@ -1968,8 +2255,32 @@ impl Executor {
             // branch (show_local_var_attributes, nodefs for -F) and
             // prints the frame's locals, never function definitions.
             let status =
-                self.execute_declare_functions(&cmd.words[1..], &mut stdout, &mut stderr)?;
+                self.execute_declare_functions("local", &cmd.words[1..], &mut stdout, &mut stderr)?;
             (status, Vec::new())
+        } else if declare_args_request_print(&cmd.words[1..])
+            && !local_operands(&cmd.words[1..]).is_empty()
+        {
+            // rubash#3529: `local -p NAME...` is one in-order walk over
+            // the operands (declare.def:389-406 ->
+            // setattr.def:555 show_localname_attributes); see
+            // execute_local_print_operands.
+            let written_args = self.expand_declare_assignment_args(&cmd.words[1..]);
+            let args = match self.rewrite_declare_operand_subscripts(
+                &written_args,
+                &cmd.word_metadata,
+                "local",
+            ) {
+                Ok(args) => args,
+                Err(()) => return Ok(1),
+            };
+            let mut written_hints = declare_written_operand_hints(&written_args, &args);
+            let status = self.execute_local_print_operands(
+                &args,
+                &mut written_hints,
+                &mut stdout,
+                &mut stderr,
+            )?;
+            (status, args)
         } else {
             let written_args = self.expand_declare_assignment_args(&cmd.words[1..]);
             let mut args = match self.rewrite_declare_operand_subscripts(
@@ -2070,48 +2381,6 @@ impl Executor {
                 } else {
                     args.clear();
                 }
-            }
-            // GNU setattr.def:555-570 show_localname_attributes:
-            // `local -p name` reports the operand only when it is a local at
-            // the CURRENT variable context (local_p && var->context ==
-            // variable_context) — an outer frame's local is "not found", so
-            // `local -p s` inside a function that declared no s reports an
-            // error even when the caller's local s is dynamically visible
-            // (varenv25.sub init_vars).
-            let mut print_missing: Vec<String> = Vec::new();
-            if declare_args_request_print(&args) && !local_names(&args).is_empty() {
-                let innermost = self.shell_state.local_var_scopes.last();
-                args.retain(|arg| {
-                    // GNU setattr.def:564-568: a `-` operand to `local -p`
-                    // prints `local -` when the frame holds the option-snapshot
-                    // local (created by `local -` above).
-                    if arg == "-" {
-                        let found = innermost.is_some_and(|scope| scope.contains_key("-"));
-                        if found {
-                            writeln!(stdout, "local -").ok();
-                            dash_printed = true;
-                        } else {
-                            print_missing.push("-".to_string());
-                        }
-                        return false;
-                    }
-                    if arg.starts_with('-') || arg.starts_with('+') {
-                        return true;
-                    }
-                    let (base, _) = assignment_name_and_append(arg);
-                    let found = innermost.is_some_and(|scope| scope.contains_key(base));
-                    if !found {
-                        print_missing.push(base.to_string());
-                    }
-                    found
-                });
-            }
-            for name in &print_missing {
-                writeln!(
-                    stderr,
-                    "{}local: {name}: not found",
-                    self.diagnostic_prefix()
-                )?;
             }
             // GNU variables.c:2651-2665 (make_local_variable): readonly
             // global bindings reject local creation — drop those operands
@@ -2219,14 +2488,10 @@ impl Executor {
                 && (had_dash_operand
                     || dash_printed
                     || !local_blocked.is_empty()
-                    || !noassign_blocked.is_empty()
-                    || !print_missing.is_empty())
+                    || !noassign_blocked.is_empty())
             {
                 (
-                    if local_blocked.is_empty()
-                        && noassign_blocked.is_empty()
-                        && print_missing.is_empty()
-                    {
+                    if local_blocked.is_empty() && noassign_blocked.is_empty() {
                         0
                     } else {
                         1
@@ -2263,12 +2528,18 @@ impl Executor {
                 // rubash#1569: same listing underlay as declare.
                 let underlay = self.tempenv_listing_underlay();
                 let dynamic_set_views = self.dynamic_set_views();
+                // Same A3-R1 sink binding as the declare route above.
+                let row =
+                    crate::executor::builtin_table::builtin_table_row("local").expect("local row");
+                let mut diag = crate::executor::builtin_diag::Diag::new(row, &mut stderr);
+                let prolog = self.diagnostic_prolog_parts();
                 let builtin_status = crate::builtins::declare::execute_with_io_named_in_context(
                     "local",
                     &args,
                     &mut self.shell_state.env_vars,
                     &mut stdout,
-                    &mut stderr,
+                    &mut diag,
+                    &prolog,
                     true,
                     &frame_locals,
                     &dynamic_views,
@@ -2277,10 +2548,8 @@ impl Executor {
                     &mut oob_word,
                     &mut written_hints,
                 )?;
-                let status = if local_blocked.is_empty()
-                    && noassign_blocked.is_empty()
-                    && print_missing.is_empty()
-                {
+                diag.flush_with(|| prolog.build(&self.shell_state.env_vars));
+                let status = if local_blocked.is_empty() && noassign_blocked.is_empty() {
                     builtin_status
                 } else {
                     builtin_status.max(1)
@@ -2469,8 +2738,130 @@ impl Executor {
             }
             stdout = stripped.into_bytes();
         }
+        // GNU variables.c:5820/6257-6266 sv_strict_posix: a local bind
+        // of POSIXLY_CORRECT re-derives the mode for the frame (the
+        // frame pop re-derives it back in restore_function_locals,
+        // rubash#3661).
+        self.sync_posix_mode_if_assignment_operands(&final_args);
         let stderr = local_stderr_from_declare(stderr);
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+        Ok(status)
+    }
+
+    /// `local -p NAME...` (rubash#3529): GNU builtins/declare.def:389-406
+    /// walks the operands ONCE, in order, calling setattr.def:555
+    /// show_localname_attributes on each word verbatim. A word naming a
+    /// local of the CURRENT variable context (`local_p (var) &&
+    /// var->context == variable_context`) is printed — `local -` for the
+    /// option-snapshot local — and every other word (a missing or outer
+    /// name, an option-shaped word after the first operand, a valued or
+    /// subscripted word) is reported `not found` and fails the command.
+    /// `-g` does not enter the lookup. Consecutive found names render
+    /// through one declare-printer call, so each stream keeps operand
+    /// order.
+    fn execute_local_print_operands(
+        &mut self,
+        args: &[String],
+        written_hints: &mut crate::builtins::declare::WrittenOperandHints,
+        stdout: &mut Vec<u8>,
+        stderr: &mut Vec<u8>,
+    ) -> Result<i32, ExecuteError> {
+        let operands: Vec<String> = local_operands(args)
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        // The operands are the suffix after the option region; a `--`
+        // terminator is dropped (the printer only receives names, which
+        // never start with '-').
+        let option_words: Vec<String> = args[..args.len() - operands.len()]
+            .iter()
+            .filter(|word| *word != "--")
+            .cloned()
+            .collect();
+        let found: Vec<bool> = {
+            let innermost = self.shell_state.local_var_scopes.last();
+            operands
+                .iter()
+                .map(|word| innermost.is_some_and(|scope| scope.contains_key(word.as_str())))
+                .collect()
+        };
+        let mut status = 0;
+        let mut run: Vec<String> = Vec::new();
+        for (word, found) in operands.iter().zip(found) {
+            if found && word != "-" {
+                run.push(word.clone());
+                continue;
+            }
+            status = status.max(self.local_print_run(
+                &option_words,
+                &mut run,
+                written_hints,
+                stdout,
+                stderr,
+            )?);
+            if found {
+                writeln!(stdout, "local -")?;
+            } else {
+                writeln!(
+                    stderr,
+                    "{}local: {word}: not found",
+                    self.diagnostic_prefix()
+                )?;
+                status = 1;
+            }
+        }
+        status = status.max(self.local_print_run(
+            &option_words,
+            &mut run,
+            written_hints,
+            stdout,
+            stderr,
+        )?);
+        Ok(status)
+    }
+
+    /// Render one run of frame-local names through the declare printer
+    /// (the same core call the non-print route makes), then clear it.
+    fn local_print_run(
+        &mut self,
+        option_words: &[String],
+        run: &mut Vec<String>,
+        written_hints: &mut crate::builtins::declare::WrittenOperandHints,
+        stdout: &mut Vec<u8>,
+        stderr: &mut Vec<u8>,
+    ) -> Result<i32, ExecuteError> {
+        if run.is_empty() {
+            return Ok(0);
+        }
+        let mut core_args = option_words.to_vec();
+        core_args.append(run);
+        let dynamic_views: Vec<crate::builtins::declare::DynamicDeclarationView> = core_args
+            [option_words.len()..]
+            .iter()
+            .filter_map(|name| self.dynamic_view(name))
+            .collect();
+        let underlay = self.tempenv_listing_underlay();
+        let dynamic_set_views = self.dynamic_set_views();
+        let row = crate::executor::builtin_table::builtin_table_row("local").expect("local row");
+        let mut diag = crate::executor::builtin_diag::Diag::new(row, stderr);
+        let prolog = self.diagnostic_prolog_parts();
+        let mut oob_word = None;
+        let status = crate::builtins::declare::execute_with_io_named_in_context(
+            "local",
+            &core_args,
+            &mut self.shell_state.env_vars,
+            stdout,
+            &mut diag,
+            &prolog,
+            true,
+            &[],
+            &dynamic_views,
+            &dynamic_set_views,
+            &underlay,
+            &mut oob_word,
+            written_hints,
+        )?;
+        diag.flush_with(|| prolog.build(&self.shell_state.env_vars));
         Ok(status)
     }
 
@@ -2715,4 +3106,80 @@ pub(in crate::executor) fn declare_words_name_dirstack(words: &[String]) -> bool
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The machine-driven scan, spelled out the way
+    /// `declare_option_scan`'s slow path performs it — the
+    /// reference the flag-only fast path must agree with.
+    fn machine_scan(
+        row: &'static BuiltinRow,
+        args: &[String],
+    ) -> (Vec<(char, bool)>, Option<String>) {
+        let mut sink = Vec::new();
+        let mut diag = Diag::new(row, &mut sink);
+        let mut opt = BuiltinOpt::new(row, args, &mut diag, false);
+        let mut letters = Vec::new();
+        loop {
+            match opt.next() {
+                OptEvent::Opt(c) => letters.push((c as char, opt.opttype() == b'-')),
+                OptEvent::OptArg(_, _) => {}
+                OptEvent::Help | OptEvent::End => break,
+            }
+        }
+        (
+            letters,
+            opt.optopt()
+                .map(|c| String::from_utf8_lossy(&[c]).into_owned()),
+        )
+    }
+
+    #[test]
+    fn flag_only_fast_scan_agrees_with_machine() {
+        let row = builtin_table_row("declare").expect("declare row");
+        let OptSpec::Getopt(spec) = row.opt_spec else {
+            panic!("declare row must carry a getopt spec");
+        };
+        let shapes: &[&[&str]] = &[
+            &[],
+            &["x=1"],
+            &["-a", "x"],
+            &["-aA", "x=1"],
+            &["+a", "x"],
+            &["-p"],
+            &["--", "-a"],
+            &["--help"],
+            &["-a", "--help", "x"],
+            &["-Z"],
+            &["-aZ", "x"],
+            &["-"],
+            &["+"],
+            &["++"],
+            &["-p", "--", "-f"],
+            &["x", "-a"],
+            &["-ai", "x=1", "-r"],
+            &["-\u{c3}\u{a9}"],
+            &["-fF", "g"],
+            &["-g", "-n", "r=v"],
+        ];
+        for shape in shapes {
+            let args: Vec<String> = shape.iter().map(|s| s.to_string()).collect();
+            let fast = scan_flag_only_spec(spec, &args)
+                .expect("declare spec is flag-only and must take the fast path");
+            assert_eq!(fast, machine_scan(row, &args), "shape {shape:?}");
+            assert_eq!(declare_option_scan(row, &args), fast, "shape {shape:?}");
+        }
+    }
+
+    #[test]
+    fn flag_only_fast_scan_declines_argument_specs() {
+        let args: Vec<String> = vec!["-e".to_string(), "vi".to_string()];
+        assert!(scan_flag_only_spec("e:lnrs", &args).is_none());
+        assert!(scan_flag_only_spec("o;v", &args).is_none());
+        assert!(scan_flag_only_spec("n#", &args).is_none());
+        assert!(scan_flag_only_spec(":e:lnrs", &args).is_none());
+    }
 }

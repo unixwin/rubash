@@ -118,6 +118,57 @@ pub fn is_disk_file(h: HANDLE) -> bool {
     }
 }
 
+/// rubash#3432: the (device, inode, mtime seconds, mtime
+/// nanoseconds) of the open file description behind `h`, from
+/// fstat(2) — the identity/mtime the `__RUBASH_FD_STAT_<fd>` mark
+/// carries. GNU's sh_stat (lib/sh/eaccess.c:80) stats the descriptor
+/// the process holds; in GNU the shell's OS fd N IS user fd N, so a
+/// plain stat() of /proc/self/fd/N lands on the bound file, while
+/// here the OS fd namespace is shifted (the cwd anchor holds OS fd
+/// 3) and only the fstat of the fd-table entry's handle names the
+/// same file. None when the descriptor is closed or fstat fails.
+/// The nanosecond arm follows the cp_stat_mtime_nsec idiom in
+/// src/executor/external_file_builtins.rs: the libc crate flattens
+/// the timespec's nanoseconds into their own field on every unix
+/// target the suite builds for, and the remaining targets answer 0.
+pub fn fd_stat_parts(h: HANDLE) -> Option<(u64, u64, i64, i64)> {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(h, &mut st) } != 0 {
+        return None;
+    }
+    Some((
+        st.st_dev as u64,
+        st.st_ino as u64,
+        i64::from(st.st_mtime),
+        stat_mtime_nsec(&st),
+    ))
+}
+
+#[cfg(any(
+    target_os = "android",
+    all(target_os = "linux", target_env = "gnu"),
+    all(target_os = "linux", not(target_env = "gnu")),
+    target_os = "macos",
+    target_os = "ios",
+))]
+fn stat_mtime_nsec(st: &libc::stat) -> i64 {
+    // glibc, musl and bionic flatten the nanoseconds into their own
+    // field; its width follows the target's c_long (i32 on armv7).
+    // Darwin's C header keeps the st_mtimespec pair, but the libc
+    // crate flattens it the same way.
+    i64::from(st.st_mtime_nsec)
+}
+
+#[cfg(not(any(
+    target_os = "android",
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "ios",
+)))]
+fn stat_mtime_nsec(_st: &libc::stat) -> i64 {
+    0
+}
+
 /// S_ISFIFO — the handle refers to a pipe/FIFO. GNU test.c's `-p`
 /// file test on an fd path resolves through the descriptor itself, so
 /// fd slots backed by a real OS pipe (e.g. `exec N< <(...)`, which
@@ -355,6 +406,122 @@ fn set_inheritable(fd: HANDLE, on: bool) -> std::io::Result<()> {
         return Err(std::io::Error::last_os_error());
     }
     Ok(())
+}
+
+/// rubash#3300: decode a 32-hex-char respawn proof nonce into its 16
+/// raw bytes. Shared by the spawner (`mint_respawn_proof`, below) and
+/// the child's entry check (`respawn_proof_validated`, init.rs) so the
+/// two sides can never disagree on the encoding.
+pub(crate) fn respawn_proof_nonce_bytes(hex: &str) -> Option<[u8; 16]> {
+    // Byte arithmetic only — no byte->char widening (the utf8
+    // boundary hygiene script forbids widening a byte that could be
+    // a UTF-8 continuation byte; a nonce is hex ASCII, but the
+    // decode must not assume that before validating).
+    fn hex_val(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        }
+    }
+    let bytes = hex.as_bytes();
+    if bytes.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 16];
+    for i in 0..16 {
+        let hi = hex_val(bytes[2 * i])?;
+        let lo = hex_val(bytes[2 * i + 1])?;
+        out[i] = (hi << 4) | lo;
+    }
+    Some(out)
+}
+
+/// rubash#3300: mint a per-spawn provenance proof for a fork-shaped
+/// respawn child — a fresh anonymous pipe holding a fresh 16-byte
+/// nonce, with the write end already closed (so the child reads nonce
+/// + EOF whenever it runs), and the read end placed at the lowest free
+/// descriptor >= 100 with CLOEXEC cleared so it survives exec.
+///
+/// The nonce is NOT a secret (it rides the environment in the clear
+/// next to the fd number); its job is binding — it ties this pipe to
+/// this spawn, so a coincidental pipe at the same number cannot
+/// validate (2^-128). The unforgeability comes from pipe possession,
+/// not nonce secrecy: env text can be copied, an inherited fd cannot.
+///
+/// Mint failure is fail-open: any failure returns None and the caller
+/// spawns without proof keys, i.e. today's behavior — a spawn must
+/// never fail because the proof could not be minted. The caller closes
+/// the returned fd after the spawn lands (like every other
+/// parent-side dup); the child closes its own copy on successful
+/// validation.
+pub(crate) fn mint_respawn_proof(nonce_hex: &str) -> Option<(RawFd, String)> {
+    let nonce = respawn_proof_nonce_bytes(nonce_hex)?;
+    let mut pipe_fds = [0 as RawFd; 2];
+    if unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    let (read_end, write_end) = (pipe_fds[0], pipe_fds[1]);
+    // Write the nonce, EINTR-tolerant; the 16 bytes always fit the
+    // pipe buffer, so this completes before the write end closes.
+    let mut written = 0;
+    while written < nonce.len() {
+        let n = unsafe {
+            libc::write(
+                write_end,
+                nonce[written..].as_ptr() as *const libc::c_void,
+                nonce.len() - written,
+            )
+        };
+        if n < 0 {
+            if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            unsafe {
+                libc::close(read_end);
+                libc::close(write_end);
+            }
+            return None;
+        }
+        if n == 0 {
+            unsafe {
+                libc::close(read_end);
+                libc::close(write_end);
+            }
+            return None;
+        }
+        written += n as usize;
+    }
+    // Close the write end BEFORE spawn: the pipe now holds nonce +
+    // EOF, so the proof is valid from spawn until consumed regardless
+    // of when the spawner dies — the time-independence the orphan
+    // race needs.
+    unsafe {
+        libc::close(write_end);
+    }
+    // Lowest free descriptor >= 100 (above stdio and the coproc
+    // save-slot scan 10..64; F_DUPFD_CLOEXEC skips open fds, so the
+    // number can never collide with a carrier). CLOEXEC first so a
+    // racing spawn cannot observe it half-staged; cleared below so it
+    // survives exec.
+    let chosen = unsafe { libc::fcntl(read_end, libc::F_DUPFD_CLOEXEC, 100) };
+    if chosen < 0 {
+        unsafe {
+            libc::close(read_end);
+        }
+        return None;
+    }
+    unsafe {
+        libc::close(read_end);
+    }
+    if set_inheritable(chosen, true).is_err() {
+        unsafe {
+            libc::close(chosen);
+        }
+        return None;
+    }
+    Some((chosen, nonce_hex.to_string()))
 }
 
 pub fn handle_to_file(h: HANDLE) -> std::fs::File {
@@ -684,6 +851,14 @@ pub struct WhitelistedSpawn {
     /// G-02: the child's working directory (the spawning session's cwd).
     /// None keeps the process cwd (host-level spawns with no session).
     pub cwd: Option<std::path::PathBuf>,
+    /// rubash#3268 (e): raw fd of the spawning session's cwd anchor,
+    /// spent only when `cwd` no longer resolves (the directory was
+    /// deleted): the child is fchdir'd into the anchor inode between
+    /// fork and exec — the same landing stamp_spawn_cwd gives
+    /// Command-based spawns. The fd is borrowed: it must stay open in
+    /// this process for the duration of the spawn call. None (or a
+    /// resolvable `cwd`) leaves the spawn exactly as before.
+    pub cwd_anchor_fd: Option<HANDLE>,
     /// rubash#2241: job-control grouping for async respawns — the child
     /// takes its own process group between fork and exec (GNU jobs.c:2390
     /// make_child) and the parent repeats the call after spawn
@@ -807,7 +982,39 @@ pub fn spawn_whitelisted(spec: &WhitelistedSpawn) -> std::io::Result<SpawnedChil
     let mut cmd = Command::new(&spec.program);
     cmd.args(&spec.args);
     if let Some(cwd) = &spec.cwd {
-        cmd.current_dir(cwd);
+        // rubash#3198: a session cwd whose directory has been unlinked
+        // must not refuse the respawn — `current_dir` re-resolves the
+        // path in the child and fails ENOENT for a deleted directory.
+        //
+        // rubash#3268 (e): "unstamped" used to be the whole story —
+        // the child silently inherited THIS process's cwd, a live but
+        // foreign directory, and was born there believing it was the
+        // session's directory. When the caller supplies the session's
+        // anchor fd, land the child in the anchor inode instead
+        // (fchdir between fork and exec — the stamp_spawn_cwd
+        // mechanism the executor's own spawn faces use for foreign
+        // children): the respawned child is then born inside the
+        // deleted directory itself, its birth getcwd fails, and its
+        // own birth machinery (birth anchor on "." plus the
+        // transported-PWD adoption in Executor::new) reconstructs the
+        // session there. GNU's forked child never leaves the inode.
+        if cwd.is_dir() {
+            cmd.current_dir(cwd);
+        } else if let Some(anchor_fd) = spec.cwd_anchor_fd {
+            // SAFETY: pre_exec runs in the forked child before exec;
+            // fchdir is async-signal-safe, and the fd is the caller's
+            // live anchor handle (open in this process, inherited
+            // across the fork).
+            unsafe {
+                use std::os::unix::process::CommandExt as _;
+                cmd.pre_exec(move || {
+                    if libc::fchdir(anchor_fd) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        }
     }
     // The spec's env IS the child environment (the caller composes it from
     // the ingested process environment plus the shell's exported state,
@@ -950,6 +1157,7 @@ mod tests {
             std_handles: [0, 1, 2],
             extra_handles: vec![extra],
             cwd: None,
+            cwd_anchor_fd: None,
             new_process_group: false,
         })
         .unwrap();

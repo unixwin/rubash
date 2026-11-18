@@ -3,8 +3,9 @@
 //! GNU Bash source ownership:
 //! - builtins/exec.def (`exec_builtin`)
 
-use super::diagnostic::diagnostic_prefix;
-use std::io::{self, Write};
+use super::diagnostic::{diagnostic_prefix, sys_error_prefix};
+use crate::executor::{ExecuteError, Executor};
+use std::io::{self, Read, Write};
 use std::process::{Command, Stdio};
 
 const EXECUTION_SUCCESS: i32 = 0;
@@ -58,9 +59,13 @@ pub fn execute(args: &[String], env_vars: &crate::shell::var_table::VarTable) ->
     // past a downstream pipe element.
     let mut stdout = crate::executor::GlobalStdout;
     let mut stderr = io::stderr().lock();
-    // Standalone entry (no session): the process cwd is the only cwd.
+    // Standalone entry (no session): the process cwd is the only cwd,
+    // and there is no executor — so the wait runs bare (`None`): with
+    // no mailbox to defer it, a termsig is SIG_DFL and kills the
+    // process at delivery, exactly as GNU does for an untrapped termsig.
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
     execute_with_child_stdio(
+        None,
         args,
         env_vars,
         &cwd,
@@ -69,7 +74,16 @@ pub fn execute(args: &[String], env_vars: &crate::shell::var_table::VarTable) ->
         Stdio::inherit(),
         Stdio::inherit(),
         Stdio::inherit(),
+        &crate::executor::ChildFdSetup::default(),
     )
+    .map_err(|error| match error {
+        ExecuteError::IoError(error) => error,
+        // The standalone entry has no session, so the chain can only
+        // fail with an I/O error here (spawn/write/wait); any other
+        // variant would come from a session wait, which `None` never
+        // takes. Map it to a generic I/O error rather than panicking.
+        other => io::Error::new(io::ErrorKind::Other, other.to_string()),
+    })
 }
 
 pub(crate) fn replaces_shell(args: &[String]) -> bool {
@@ -147,6 +161,7 @@ pub(crate) fn replace_process_image(
     env_vars: &crate::shell::var_table::VarTable,
     cwd: &std::path::Path,
     stdio: Option<(Stdio, Stdio, Stdio)>,
+    setup: &crate::executor::ChildFdSetup,
 ) -> Option<io::Result<i32>> {
     let mut clean_env = false;
     let mut login = false;
@@ -155,7 +170,7 @@ pub(crate) fn replace_process_image(
     let index = parse_options(
         args,
         &mut io::sink(),
-        "rubash: ",
+        &diagnostic_prefix(env_vars),
         &mut clean_env,
         &mut login,
         &mut argv0,
@@ -186,6 +201,10 @@ pub(crate) fn replace_process_image(
         effective_argv0.as_deref(),
         cwd,
     );
+    // rubash#3311: the image inherits the shell's descriptor table as
+    // do_redirections left it (exec.def:231 shell_execve) — the fd >= 3
+    // pins and transport keys the executor collected.
+    setup.apply(&mut process);
     // rubash#1175 (redirected forms): the dispatcher resolved the fd
     // table's live bindings (ambient `exec >log`, group redirects) to
     // real OS descriptors; Command::exec dup2's them onto 0/1/2 in the
@@ -217,38 +236,63 @@ pub(crate) fn replace_process_image(
     if error.raw_os_error() == Some(libc::ENOEXEC) {
         return None;
     }
-    let status = if error.raw_os_error() == Some(libc::ENOENT) {
-        EX_NOTFOUND
-    } else {
-        EX_NOEXEC
-    };
     let mut stderr = io::stderr().lock();
-    let _ = writeln!(
-        stderr,
-        "{}exec: {}: {}",
-        diagnostic_prefix(env_vars),
-        program.display(),
-        error
-    );
+    // The failed execve is reported exactly as the simulation reports
+    // it (rubash#3148): the shared shell_execve classification, not
+    // the bare `(errno == ENOENT) ? 127 : 126` switch with the raw
+    // error text — the doc contract above (the caller's
+    // finish_exec_replacement applies the returned status unchanged)
+    // already promises GNU's failed_exec statuses. A failed stderr
+    // write cannot change the status (GNU ignores the fprintf result).
+    let status = report_exec_spawn_failure(&program, command, env_vars, cwd, &error, &mut stderr)
+        .unwrap_or(EX_NOEXEC);
     Some(Ok(status))
 }
 
+/// rubash#3401 (face 3): the simulated exec wait runs through the
+/// executor's draining wait, so a termsig delivered while the
+/// replacement child runs aborts the wait in GNU order
+/// (execute_cmd.c:6126 exec_builtin -> shell_execve has no
+/// simulated-wait layer; the wait is where GNU's wait_for observes
+/// CHECK_TERMSIG, jobs.c:3064). The executor is threaded through as
+/// the first parameter, as `Option<&mut Executor>`: `Some` on the
+/// engine path, `None` on the standalone entry (`execute`), which has
+/// no session — there the bare wait is correct, because no mailbox
+/// defers the signal and the disposition is SIG_DFL. The return type
+/// widens from `io::Result` so the termsig unwind
+/// (`ExecuteError::ExitCode(128+sig)`) propagates to the dispatcher
+/// instead of collapsing into a status.
 pub(crate) fn execute_with_io<W, E>(
+    executor: Option<&mut Executor>,
     args: &[String],
     env_vars: &crate::shell::var_table::VarTable,
     cwd: &std::path::Path,
     stdout: &mut W,
     stderr: &mut E,
     child_stdin: Stdio,
-) -> io::Result<i32>
+    setup: &crate::executor::ChildFdSetup,
+) -> Result<i32, ExecuteError>
 where
     W: Write,
     E: Write,
 {
-    execute_impl(args, env_vars, cwd, stdout, stderr, None, child_stdin)
+    execute_impl(
+        executor,
+        args,
+        env_vars,
+        cwd,
+        stdout,
+        stderr,
+        None,
+        child_stdin,
+        &[],
+        setup,
+    )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_with_child_stdio<W, E>(
+    executor: Option<&mut Executor>,
     args: &[String],
     env_vars: &crate::shell::var_table::VarTable,
     cwd: &std::path::Path,
@@ -257,12 +301,14 @@ pub(crate) fn execute_with_child_stdio<W, E>(
     child_stdout: Stdio,
     child_stderr: Stdio,
     child_stdin: Stdio,
-) -> io::Result<i32>
+    setup: &crate::executor::ChildFdSetup,
+) -> Result<i32, ExecuteError>
 where
     W: Write,
     E: Write,
 {
     execute_impl(
+        executor,
         args,
         env_vars,
         cwd,
@@ -270,10 +316,54 @@ where
         stderr,
         Some((child_stdout, child_stderr)),
         child_stdin,
+        &[],
+        setup,
     )
 }
 
+/// execute_with_child_stdio plus genuinely closed child std fds
+/// (rubash#2803): a `>&-` binding is a CLOSED descriptor in GNU —
+/// the child's writes fail EBADF and the child reports them itself
+/// (redir.c r_close_this). Stdio::null() would let the writes
+/// silently succeed, so the spawner inherits the descriptor and
+/// closes it in the child before execve, the same realization the
+/// external-command spawn uses for closed slots
+/// (external_redirects.rs register_pre_exec_close).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_with_child_stdio_closing<W, E>(
+    executor: Option<&mut Executor>,
+    args: &[String],
+    env_vars: &crate::shell::var_table::VarTable,
+    cwd: &std::path::Path,
+    stdout: &mut W,
+    stderr: &mut E,
+    child_stdout: Stdio,
+    child_stderr: Stdio,
+    child_stdin: Stdio,
+    close_fds: &[u32],
+    setup: &crate::executor::ChildFdSetup,
+) -> Result<i32, ExecuteError>
+where
+    W: Write,
+    E: Write,
+{
+    execute_impl(
+        executor,
+        args,
+        env_vars,
+        cwd,
+        stdout,
+        stderr,
+        Some((child_stdout, child_stderr)),
+        child_stdin,
+        close_fds,
+        setup,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn execute_impl<W, E>(
+    executor: Option<&mut Executor>,
     args: &[String],
     env_vars: &crate::shell::var_table::VarTable,
     cwd: &std::path::Path,
@@ -281,7 +371,9 @@ fn execute_impl<W, E>(
     stderr: &mut E,
     child_stdio: Option<(Stdio, Stdio)>,
     child_stdin: Stdio,
-) -> io::Result<i32>
+    close_fds: &[u32],
+    setup: &crate::executor::ChildFdSetup,
+) -> Result<i32, ExecuteError>
 where
     W: Write,
     E: Write,
@@ -340,7 +432,8 @@ where
     };
 
     if command == Some("printenv") {
-        return run_printenv_fallback(operands, env_vars, clean_env, stdout);
+        return run_printenv_fallback(operands, env_vars, clean_env, stdout)
+            .map_err(ExecuteError::from);
     }
 
     if let Some(command) = command {
@@ -352,6 +445,32 @@ where
             let folded_command =
                 crate::executor::substitution_metadata::fold_literal_char_escapes(command);
             let command = folded_command.as_str();
+            // GNU builtins/exec.def:163-166: whatever the spelling, an
+            // operand that IS a directory as written is classified before
+            // the generic not-found report — file_isdir(args[0]) probes
+            // the operand itself, so `exec .` and `exec somedir` (no
+            // slash; the PATH walk discarded the directory per findcmd.c
+            // FS_NODIRS) report "cannot execute: Is a directory"
+            // (EX_NOEXEC), not "not found" (rubash#2661). The probe
+            // anchors at the session cwd (G-02), like the slash branch
+            // below.
+            let as_written = crate::executor::path::shell_path_to_windows(command, env_vars);
+            let as_written = if as_written.is_absolute() {
+                as_written
+            } else {
+                cwd.join(&as_written)
+            };
+            if std::fs::metadata(&as_written)
+                .map(|metadata| metadata.is_dir())
+                .unwrap_or(false)
+            {
+                writeln!(
+                    stderr,
+                    "{}exec: {command}: cannot execute: Is a directory",
+                    diagnostic_prefix(env_vars)
+                )?;
+                return Ok(EX_NOEXEC);
+            }
             // GNU builtins/exec.def:151: a slash-containing operand bypasses
             // search_for_command and is handed to shell_execve directly, so
             // the diagnostic is the execve errno text (exec.def:231 ->
@@ -366,9 +485,13 @@ where
                 } else {
                     cwd.join(&candidate)
                 };
-                let metadata = std::fs::metadata(&candidate)
-                    .or_else(|_| std::fs::metadata(cwd.join(command)))
-                    .ok();
+                let (metadata, probe_error) = match std::fs::metadata(&candidate) {
+                    Ok(metadata) => (Some(metadata), None),
+                    Err(_) => match std::fs::metadata(cwd.join(command)) {
+                        Ok(metadata) => (Some(metadata), None),
+                        Err(error) => (None, Some(error)),
+                    },
+                };
                 match metadata {
                     None => {
                         // exec.def:166-168 full_pathname: the failing path is
@@ -383,6 +506,26 @@ where
                             format!("{}/{}", cwd.to_string_lossy().replace('\\', "/"), command)
                                 .replace("/./", "/")
                         };
+                        // A regular file as a path component fails the
+                        // probe ENOTDIR; GNU's file_error classification
+                        // (execute_cmd.c:6126-6159) reports that errno
+                        // with EX_NOEXEC, not the ENOENT wording
+                        // (rubash#3182). The kind comparison is the
+                        // portable form of the errno test: std maps
+                        // ENOTDIR to NotADirectory on unix, and the
+                        // shared code must not name the unix-only libc
+                        // crate (Windows E0433).
+                        if probe_error
+                            .is_some_and(|error| error.kind() == io::ErrorKind::NotADirectory)
+                        {
+                            writeln!(
+                                stderr,
+                                "{}{}: Not a directory",
+                                diagnostic_prefix(env_vars),
+                                full
+                            )?;
+                            return Ok(EX_NOEXEC);
+                        }
                         writeln!(
                             stderr,
                             "{}{}: No such file or directory",
@@ -419,6 +562,7 @@ where
         };
         return match child_stdio {
             Some((child_stdout, child_stderr)) => run_external_exec_with_stdio(
+                executor,
                 &program,
                 command,
                 operands,
@@ -430,8 +574,11 @@ where
                 child_stderr,
                 child_stdin,
                 stderr,
+                close_fds,
+                setup,
             ),
             None => run_external_exec(
+                executor,
                 &program,
                 command,
                 operands,
@@ -442,11 +589,25 @@ where
                 child_stdin,
                 stdout,
                 stderr,
+                setup,
             ),
         };
     }
 
     Ok(EXECUTION_SUCCESS)
+}
+
+/// The option-parse prolog for this file's two shape-only probes
+/// ([`status_is_option_parse_failure`] and [`command_operand_index`]):
+/// their diagnostics are written to `io::sink`, so the string is
+/// never observable — but it still derives from the single argv[0]
+/// carrier chain (`builtins::prefix`, rubash#3256) instead of
+/// restating a local literal, so this file carries no second voice
+/// if a probe's sink ever becomes a real stream. The getter reads
+/// the process environment, where the executor mirrors the current
+/// file/line carriers — the same getter the `kill` stdio face uses.
+fn sink_option_prefix() -> String {
+    crate::builtins::prefix::diagnostic_prefix(&|key: &str| std::env::var(key).ok())
 }
 
 /// Whether `status` — the return of an execute_with_io /
@@ -470,7 +631,7 @@ pub(crate) fn status_is_option_parse_failure(args: &[String], status: i32) -> bo
         parse_options(
             args,
             &mut io::sink(),
-            "rubash: ",
+            &sink_option_prefix(),
             &mut clean_env,
             &mut login,
             &mut argv0,
@@ -488,7 +649,7 @@ pub(crate) fn command_operand_index(args: &[String]) -> Option<usize> {
     parse_options(
         args,
         &mut io::sink(),
-        "rubash: ",
+        &sink_option_prefix(),
         &mut clean_env,
         &mut login,
         &mut argv0,
@@ -564,7 +725,86 @@ where
     Ok(Some(index))
 }
 
+/// The reported name for a failed spawn on the exec face: GNU
+/// builtins/exec.def:172 hands shell_execve `full_pathname (command)`
+/// (general.c:931-943) — the typed word for a slash-bearing name
+/// (findcmd.c:385-387 savestring), the PATH walk's as-written join
+/// otherwise — made absolute against the cwd with dot components
+/// removed (sh_makepath, MP_DOCWD|MP_RMDOT). The resolved `program`
+/// cannot be re-rendered into this form: the session-cwd anchor that
+/// produced it keeps the join's `/./` residue (rubash#3148).
+fn exec_report_name(
+    command_name: &str,
+    program: &std::path::Path,
+    env_vars: &crate::shell::var_table::VarTable,
+    cwd: &std::path::Path,
+) -> String {
+    // Folded like every other probe and diagnostic in this file
+    // (rubash#3076): the recorded join names the raw file.
+    let folded = crate::executor::substitution_metadata::fold_literal_char_escapes(command_name);
+    let construction = if crate::executor::path::has_path_separator(&folded) {
+        folded
+    } else {
+        crate::executor::path::find_user_command_as_written(&folded, env_vars)
+            .unwrap_or_else(|| program.display().to_string())
+    };
+    let construction = construction.replace('\\', "/");
+    // full_pathname: an absolute construction is returned verbatim
+    // (general.c:937-938).
+    if construction.starts_with('/') || construction.as_bytes().get(1) == Some(&b':') {
+        return construction;
+    }
+    let cwd = cwd.to_string_lossy().replace('\\', "/");
+    let joined = format!("{cwd}/{construction}");
+    // sh_makepath MP_RMDOT canonicalizes the joined form textually:
+    // "." components drop, ".." consumes the preceding component,
+    // empty components collapse.
+    let root_prefix = if joined.starts_with('/') { "/" } else { "" };
+    let mut parts: Vec<&str> = Vec::new();
+    for part in joined.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            _ => parts.push(part),
+        }
+    }
+    format!("{root_prefix}{}", parts.join("/"))
+}
+
+/// GNU shell_execve (execute_cmd.c:6126-6198) reporting for a failed
+/// spawn on the exec builtin face, shared by every spawn site in this
+/// file (the process-replacement attempt and both simulation arms):
+/// the classification is the executor's `spawn_error_diagnostic`
+/// (rubash#2755) — the bad-interpreter refusal takes the sys_error
+/// prolog (error.c:275: no line segment, and no `exec:` infix; this
+/// is not a builtin_error report), the sibling classifications keep
+/// the line segment, and the reported name is the exec.def:172
+/// full_pathname form. Returns the exit status.
+fn report_exec_spawn_failure<E: Write>(
+    program: &std::path::Path,
+    command_name: &str,
+    env_vars: &crate::shell::var_table::VarTable,
+    cwd: &std::path::Path,
+    error: &io::Error,
+    stderr: &mut E,
+) -> io::Result<i32> {
+    let (message, status, sys_error) =
+        crate::executor::spawn_error_diagnostic(&program.to_path_buf(), cwd, error);
+    let prefix = if sys_error {
+        sys_error_prefix(env_vars)
+    } else {
+        diagnostic_prefix(env_vars)
+    };
+    let name = exec_report_name(command_name, program, env_vars, cwd);
+    writeln!(stderr, "{prefix}{name}: {message}")?;
+    Ok(status)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_external_exec<W, E>(
+    executor: Option<&mut Executor>,
     program: &std::path::Path,
     command_name: &str,
     operands: &[String],
@@ -575,7 +815,8 @@ fn run_external_exec<W, E>(
     child_stdin: Stdio,
     stdout: &mut W,
     stderr: &mut E,
-) -> io::Result<i32>
+    setup: &crate::executor::ChildFdSetup,
+) -> Result<i32, ExecuteError>
 where
     W: Write,
     E: Write,
@@ -589,6 +830,7 @@ where
         argv0,
         cwd,
     );
+    setup.apply(&mut process);
     process.stdout(Stdio::piped()).stderr(Stdio::piped());
     // std's Command::output() defaults stdin to Stdio::null() when .stdin()
     // is never called — a capture-path `$(exec cat)` then reads EOF on a
@@ -598,36 +840,64 @@ where
     // endpoint 0.
     process.stdin(child_stdin);
 
-    let mut spawned_pid = 0;
-    match process
+    let mut child = match process
         .spawn()
         .inspect(|child| crate::executor::path::adopt_orphan_console(child.id()))
-        .and_then(|child| {
-            spawned_pid = child.id();
-            child.wait_with_output()
-        }) {
-        Ok(output) => {
-            record_exec_signal_death(spawned_pid, &output.status);
-            stdout.write_all(&output.stdout)?;
-            stderr.write_all(&output.stderr)?;
-            Ok(crate::executor::wait_status::process_exit_status(
-                &output.status,
-            ))
-        }
+    {
+        Ok(child) => child,
         Err(error) => {
-            writeln!(
-                stderr,
-                "{}exec: {}: {}",
-                diagnostic_prefix(env_vars),
-                program.display(),
-                error
-            )?;
-            Ok(126)
+            return report_exec_spawn_failure(program, command_name, env_vars, cwd, &error, stderr)
+                .map_err(ExecuteError::from);
         }
-    }
+    };
+    let spawned_pid = child.id();
+    // rubash#3401 (face 3): `wait_with_output()` blocks in the OS wait
+    // with no observe point, and a piped child that fills its capture
+    // buffers blocks forever unless the pipes are drained — so drain
+    // both pipes on reader threads (std's `wait_with_output` shape) and
+    // wait through the draining wait. On a termsig the drain kills and
+    // reaps the child first and the unwind propagates with the output
+    // discarded (the shell is dying); the reader handles are dropped
+    // rather than joined there, so a grandchild holding a pipe open
+    // cannot stall the death — the threads finish on EOF in the
+    // background of the exiting process.
+    let stdout_reader = child.stdout.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = pipe.read_to_end(&mut buf);
+            buf
+        })
+    });
+    let stderr_reader = child.stderr.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = pipe.read_to_end(&mut buf);
+            buf
+        })
+    });
+    // With a session executor, wait through the draining wait; without
+    // one (the standalone entry) the bare wait is correct — no mailbox
+    // defers the signal and the disposition is SIG_DFL, so the process
+    // dies at delivery exactly as GNU does for an untrapped termsig.
+    let status = match executor {
+        Some(executor) => crate::executor::wait_fg_child_draining(executor, &mut child)?,
+        None => child.wait().map_err(ExecuteError::from)?,
+    };
+    let stdout_bytes = stdout_reader
+        .map(|handle| handle.join().unwrap_or_default())
+        .unwrap_or_default();
+    let stderr_bytes = stderr_reader
+        .map(|handle| handle.join().unwrap_or_default())
+        .unwrap_or_default();
+    record_exec_signal_death(spawned_pid, &status);
+    stdout.write_all(&stdout_bytes)?;
+    stderr.write_all(&stderr_bytes)?;
+    Ok(crate::executor::wait_status::process_exit_status(&status))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_external_exec_with_stdio<E>(
+    executor: Option<&mut Executor>,
     program: &std::path::Path,
     command_name: &str,
     operands: &[String],
@@ -639,7 +909,9 @@ fn run_external_exec_with_stdio<E>(
     child_stderr: Stdio,
     child_stdin: Stdio,
     stderr: &mut E,
-) -> io::Result<i32>
+    close_fds: &[u32],
+    setup: &crate::executor::ChildFdSetup,
+) -> Result<i32, ExecuteError>
 where
     E: Write,
 {
@@ -652,36 +924,57 @@ where
         argv0,
         cwd,
     );
+    setup.apply(&mut process);
     process.stdout(child_stdout).stderr(child_stderr);
+    // rubash#2803: genuinely closed std fds (see
+    // execute_with_child_stdio_closing): std arranges the inherited
+    // descriptors first, then the pre_exec closures run, so the
+    // close lands on the arranged slot before execve.
+    #[cfg(unix)]
+    if !close_fds.is_empty() {
+        let close_fds = close_fds.to_vec();
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            process.pre_exec(move || {
+                for fd in &close_fds {
+                    libc::close(*fd as std::os::unix::io::RawFd);
+                }
+                Ok(())
+            });
+        }
+    }
+    let _ = close_fds;
     // Explicit for symmetry with run_external_exec: `.status()` would
     // inherit by default, but every spawn site of the exec builtin must
     // state its child-stdin source (fd-table endpoint 0 resolution),
     // never the std default (rubash#575).
     process.stdin(child_stdin);
 
-    let mut spawned_pid = 0;
-    match process
+    let mut child = match process
         .spawn()
         .inspect(|child| crate::executor::path::adopt_orphan_console(child.id()))
-        .and_then(|mut child| {
-            spawned_pid = child.id();
-            child.wait()
-        }) {
-        Ok(status) => {
-            record_exec_signal_death(spawned_pid, &status);
-            Ok(crate::executor::wait_status::process_exit_status(&status))
-        }
+    {
+        Ok(child) => child,
         Err(error) => {
-            writeln!(
-                stderr,
-                "{}exec: {}: {}",
-                diagnostic_prefix(env_vars),
-                program.display(),
-                error
-            )?;
-            Ok(126)
+            return report_exec_spawn_failure(program, command_name, env_vars, cwd, &error, stderr)
+                .map_err(ExecuteError::from);
         }
-    }
+    };
+    let spawned_pid = child.id();
+    // rubash#3401 (face 3): the bare `child.wait()` here had no observe
+    // point — a termsig rode out the whole child. Route the wait through
+    // the draining wait (10ms try_wait slices + the mailbox drain); on a
+    // termsig it kills and reaps the child first, then unwinds.
+    // With a session executor, wait through the draining wait; without
+    // one (the standalone entry) the bare wait is correct — no mailbox
+    // defers the signal and the disposition is SIG_DFL, so the process
+    // dies at delivery exactly as GNU does for an untrapped termsig.
+    let status = match executor {
+        Some(executor) => crate::executor::wait_fg_child_draining(executor, &mut child)?,
+        None => child.wait().map_err(ExecuteError::from)?,
+    };
+    record_exec_signal_death(spawned_pid, &status);
+    Ok(crate::executor::wait_status::process_exit_status(&status))
 }
 
 fn external_exec_process(
@@ -698,12 +991,17 @@ fn external_exec_process(
     // a script run through `exec` reports the absolute path as its $0 (the
     // ENOEXEC re-entry at execute_cmd.c:6252 passes `command` as the new
     // script name). Non-script targets keep the dispatcher word form.
-    let mut process = if let Some((command, _)) = crate::executor::path::shell_wrapped_command(
-        program,
-        &full_pathname_word(program, cwd),
-        operands,
-        env_vars,
-    ) {
+    // rubash#3415: a resolvable non-shell `#!` interpreter is spawned
+    // directly (GNU execute_shell_script, execute_cmd.c:6001-6043) before
+    // the shell wrap below can run the script as bash.
+    let zero_word = full_pathname_word(program, cwd);
+    let mut process = if let Some((command, _)) =
+        crate::executor::path::shebang_interpreter_command(program, &zero_word, operands, env_vars)
+    {
+        command
+    } else if let Some((command, _)) =
+        crate::executor::path::shell_wrapped_command(program, &zero_word, operands, env_vars)
+    {
         command
     } else {
         // Non-script targets get the command word as typed for argv[0]

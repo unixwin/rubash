@@ -108,6 +108,27 @@ pub enum CandidateKind {
     File,
 }
 
+/// One of GNU's three special compspec slots, named by a
+/// [`Session::has_special_compspec`](crate::api::Session::has_special_compspec)
+/// query (rubash#2738). GNU keeps the three in separate slots —
+/// pcomplete.c resolves DEFAULTCMD, EMPTYCMD and INITIALWORD
+/// independently — so the selective query names exactly one class;
+/// the command-name form `has_compspec` ORs all three together and
+/// cannot answer for a single one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpecialCompspecKind {
+    /// The `complete -D` default compspec: governs a command word's
+    /// arguments when the command has no registration of its own,
+    /// and serves the empty line as `-E`'s fallback.
+    Default,
+    /// The `complete -E` empty-line compspec: governs completion
+    /// attempted on an empty line.
+    Empty,
+    /// The `complete -I` initial-word compspec: governs completion
+    /// of the command word itself.
+    Initial,
+}
+
 impl Candidate {
     /// A candidate without a description (and unmarked).
     pub fn new(text: impl Into<String>) -> Candidate {

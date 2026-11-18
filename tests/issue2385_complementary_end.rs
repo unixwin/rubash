@@ -54,7 +54,7 @@ fn run_script_stdin(
             .arg(&case)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = if let Some(bytes) = &stdin_bytes {
+        let child = if let Some(bytes) = &stdin_bytes {
             command.stdin(Stdio::piped());
             let mut child = command.spawn().expect("spawn rubash");
             child

@@ -239,12 +239,32 @@ impl Executor {
             .strip_suffix("[@]")
             .or_else(|| ref_expr.strip_suffix("[*]"))
             .unwrap_or(ref_expr);
-        if !is_shell_name(ref_name) {
-            return None;
+        // GNU parameter_brace_expand_indir (subst.c:7883-7952) resolves the
+        // `!`-source to t through parameter_brace_find_indir
+        // (subst.c:7839-7881) BEFORE the removal runs, so the holder need
+        // not be a plain variable: `${!#%*}` with no positionals strips
+        // from the resolved t (`0` — the script name, or `${N}` with
+        // positionals), `${!0#h}` from $0's value, `${!?%*}` from the
+        // status text. A named source contributes its value; a
+        // positional/special/array source goes through the holder
+        // (subst.c:8529 get_var_and_type).
+        let target_expr = match self.shell_state.env_vars.get(ref_name) {
+            Some(target_expr) => target_expr.clone(),
+            None if !is_shell_name(ref_name) => self.indirect_holder_target_name(ref_expr)?,
+            None => return None,
+        };
+        let target_expr = &target_expr;
+        // GNU subst.c:10320-10327 (`case '#': case '%':`): removal skips
+        // the pattern expansion entirely when the indirect target's value
+        // word is absent or empty (rubash#3501) — the same gate the scalar
+        // removal entry point applies, keyed on the `!`-holder. The gate
+        // reads the joined word, so one "" element is silent while two ""
+        // elements join to " " and diagnose; the empty-list arm below is
+        // subsumed but kept as the direct statement of that case.
+        if self.pattern_word_is_silent(&format!("!{ref_expr}"), true, false) {
+            return Some(String::new());
         }
-
-        let target_expr = self.shell_state.env_vars.get(ref_name)?;
-        let values = self.indirect_target_values(target_expr);
+        let values = self.indirect_target_values(&target_expr);
         if values.is_empty() {
             return Some(String::new());
         }
@@ -279,7 +299,7 @@ impl Executor {
                 ),
             })
             .collect::<Vec<_>>();
-        Some(self.join_expanded_array_values(values, target_expr))
+        Some(self.join_expanded_array_values(values, &target_expr))
     }
 
     pub(in crate::executor) fn indirect_target_values(&self, target_expr: &str) -> Vec<String> {
@@ -289,21 +309,10 @@ impl Executor {
         // outside the $1.. positional window. Without this arm a
         // PIPESTATUS indirection's operator adjudication saw its
         // target — element 0, most often "0" — as an unset variable
-        // (rubash#1566). The leading-zero guard matches the plain
-        // leg's: "007" is not a positional designator here.
+        // (rubash#1566). GNU's valid_number (general.c:248) accepts
+        // leading zeros, so "007" designates $7 (rubash#3784).
         if let Ok(index) = target_expr.parse::<usize>() {
-            if !target_expr.starts_with('0') || target_expr == "0" {
-                if index == 0 {
-                    return vec![self.script_name_value()];
-                }
-                return self
-                    .shell_state
-                    .positional_window()
-                    .get(index - 1)
-                    .cloned()
-                    .into_iter()
-                    .collect();
-            }
+            return self.numeric_parameter_value(index).into_iter().collect();
         }
         if let Some(array_name) = target_expr
             .strip_suffix("[@]")
@@ -650,6 +659,17 @@ impl Executor {
         tilde_expand::expand_assignment_value(value, &self.shell_state.env_vars)
     }
 
+    /// rubash#2651: like [`Self::expand_assignment_tilde`], but the
+    /// resolved tilde prefixes are carrier-encoded as data so the
+    /// caller's second expansion walk cannot rescan them (GNU joins
+    /// the tilde result as a quoted string, subst.c:11862).
+    pub(in crate::executor) fn expand_assignment_tilde_protected(&self, value: &str) -> String {
+        if value.contains('=') {
+            return value.to_string();
+        }
+        tilde_expand::expand_assignment_value_protected(value, &self.shell_state.env_vars)
+    }
+
     pub(in crate::executor) fn home_value(&self) -> String {
         tilde_expand::home_value(&self.shell_state.env_vars)
     }
@@ -767,6 +787,14 @@ impl Executor {
         self.suppress_errexit += 1;
         let result = body(self);
         self.suppress_errexit -= 1;
+        // rubash#2652: record whether this suppressed execution is
+        // what produced the terminal status — a nonzero status left
+        // by a CMD_IGNORE_RETURN position (execute_cmd.c's
+        // ignore_return arms) is errexit-exempt, and the
+        // driver-level verdict must not re-fire on it. A success
+        // clears the record: the terminal status is no longer the
+        // suppressed failure's.
+        self.errexit_suppressed_terminal.set(self.exit_code != 0);
         result
     }
 
@@ -892,7 +920,13 @@ impl Executor {
         // through xtrace_enabled/shell_option_flags, so both routes agree.
         let suspended = self.shell_state.xtrace_suspended.get();
         self.shell_state.xtrace_suspended.set(suspended + 1);
-        let expanded = self.expand_embedded_parameters(&decoded);
+        // rubash#3542: PS4 expands through the same containment channel
+        // as PS1/`${var@P}` — GNU expand_prompt_string (subst.c:4392-4418)
+        // runs the pass under no_longjmp_on_fatal_error and falls back to
+        // the DECODED string on any verdict, so `${q:?err}` reports
+        // `q: err` and the prefix stays `+${q:?err}` instead of
+        // substituting the message (`+err`).
+        let expanded = self.expand_embedded_parameters_double_quoted(&decoded);
         self.shell_state.xtrace_suspended.set(suspended);
         let expanded = strip_prompt_ignore_markers(&expanded);
         // Decode the transport pairs before the indirection repeat so the

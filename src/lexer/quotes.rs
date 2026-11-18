@@ -354,11 +354,18 @@ fn q22_name_start_byte(b: u8) -> bool {
 /// parse.y:5305+): `rest` walks the raw word byte-by-byte and runs of
 /// non-trigger bytes are pushed as one `&str` span.
 fn remove_shell_quotes_inner_cursor(raw: &str, posix: bool) -> String {
-    if !raw
-        .as_bytes()
-        .iter()
-        .any(|&b| matches!(b, b'\'' | b'"' | b'\\' | b'$' | b'`' | b'[' | b']'))
-    {
+    // rubash#3816: the fast path's admission ("no trigger byte") is not
+    // "provably trivial": a trigger-free word can still hold a literal
+    // control byte that collides with a transport carrier (`V=<0x11>`),
+    // which must be tagged as a raw-byte marker pair, not returned bare.
+    // A carrier byte therefore disqualifies the fast path exactly like a
+    // trigger byte does; the walk below tags it in its bulk span.
+    // (ESC is excluded from the carrier set here: niubash#200 owns it —
+    // word-initial tagged by tag_word_initial_raw_esc, mid-word verbatim.)
+    if !raw.as_bytes().iter().any(|&b| {
+        matches!(b, b'\'' | b'"' | b'\\' | b'$' | b'`' | b'[' | b']')
+            || super::ansi::is_literal_source_carrier_byte(b as u32)
+    }) {
         return raw.to_string();
     }
     let mut out = String::with_capacity(raw.len());
@@ -460,7 +467,11 @@ fn remove_shell_quotes_inner_cursor(raw: &str, posix: bool) -> String {
                     while idx < bytes.len() && !matches!(bytes[idx], b'\'' | b'$' | b'`' | b'"') {
                         idx += 1;
                     }
-                    out.push_str(&rest[..idx]);
+                    // rubash#3816: tag literal carrier bytes in the span
+                    // as raw-byte marker pairs (see
+                    // ansi::push_tagged_source_span) so a literal C0 byte
+                    // can never ride bare into transport text.
+                    super::ansi::push_tagged_source_span(&mut out, &rest[..idx]);
                     rest = &rest[idx..];
                     match rest.as_bytes().first() {
                         Some(&b'\'') => {
@@ -563,7 +574,10 @@ fn remove_shell_quotes_inner_cursor(raw: &str, posix: bool) -> String {
                         rest = &rest[2..];
                     }
                     b if b < 0x80 => {
-                        out.push(char::from(b));
+                        // rubash#3816: a backslash-escaped control byte
+                        // is literal data — tag it so it cannot be read
+                        // as the carrier it collides with.
+                        super::ansi::push_tagged_source_char(&mut out, char::from(b));
                         rest = &rest[2..];
                     }
                     _ => {
@@ -599,7 +613,9 @@ fn remove_shell_quotes_inner_cursor(raw: &str, posix: bool) -> String {
                         pending_name = false;
                     }
                 }
-                out.push_str(&rest[..idx]);
+                // rubash#3816: tag literal carrier bytes in the span as
+                // raw-byte marker pairs (see ansi::push_tagged_source_span).
+                super::ansi::push_tagged_source_span(&mut out, &rest[..idx]);
                 rest = &rest[idx..];
             }
         }
@@ -614,6 +630,14 @@ fn copy_dollar_paren_substitution_cursor<'a>(out: &mut String, rest: &'a str) ->
     let rest = &rest[1..]; // past '$'
     if !rest.starts_with('(') {
         return rest; // unreachable from the dispatcher; keeps parity
+    }
+    if rest.as_bytes().get(1) == Some(&b'(') && super::skip::dollar_double_paren_is_arithmetic(rest)
+    {
+        // `$((` arithmetic expansion — see copy_dollar_paren_substitution.
+        out.push('(');
+        out.push('(');
+        let consumed = copy_arith_paren_body_cursor(out, &rest[2..]);
+        return &rest[2 + consumed..];
     }
     out.push('(');
     copy_dollar_paren_body_raw_cursor(out, &rest[1..])
@@ -1137,6 +1161,94 @@ fn copy_dollar_bracket_body_raw_cursor<'a>(
     }
 }
 
+/// `<<`/`<<-` here-document skip inside a `$(...)' body being copied
+/// verbatim — the same consumption `skip.rs`
+/// `skip_heredoc_in_command_substitution` performs for the span
+/// extractor, so the cooked span and the extracted span always agree on
+/// where the substitution closes (GNU parse.y:4451 parse_comsub gathers
+/// pending here-documents; make_cmd.c:602-627 reads the delimiter line).
+/// `rest` begins at the SECOND `<` of the operator. Returns the byte
+/// count consumed from `rest` — the caller copies that region verbatim —
+/// and whether a `)` on the header line closed the substitution, in
+/// which case the substitution span ends after the gathered body.
+fn comsub_heredoc_skip(rest: &str) -> (usize, bool) {
+    let mut lexer = super::scanner::Lexer::new(rest, false);
+    let closes = lexer.skip_heredoc_in_command_substitution();
+    (lexer.position, closes)
+}
+
+/// Cursor form of skip.rs `skip_arith_paren`: copy a `$((...))'
+/// arithmetic body through its closing `))' verbatim. `rest` begins just
+/// past the second `(' of the opener. Returns the bytes consumed.
+fn copy_arith_paren_body_cursor(out: &mut String, rest: &str) -> usize {
+    let mut depth = 0usize;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    let mut idx = 0usize;
+    while idx < rest.len() {
+        let ch = rest[idx..].chars().next().unwrap();
+        out.push(ch);
+        idx += ch.len_utf8();
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        match ch {
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '(' if !single && !double => depth += 1,
+            ')' if !single && !double && depth > 0 => depth -= 1,
+            ')' if !single && !double && rest[idx..].starts_with(')') => {
+                out.push(')');
+                idx += 1;
+                break;
+            }
+            _ => {}
+        }
+    }
+    idx
+}
+
+/// Char form of `copy_arith_paren_body_cursor` (chars just past the
+/// second `(' of a `$((` opener).
+fn copy_arith_paren_body_raw(
+    out: &mut String,
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+) {
+    let mut depth = 0usize;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    while let Some(ch) = chars.next() {
+        out.push(ch);
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        match ch {
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '(' if !single && !double => depth += 1,
+            ')' if !single && !double && depth > 0 => depth -= 1,
+            ')' if !single && !double && chars.peek() == Some(&')') => {
+                chars.next();
+                out.push(')');
+                break;
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Cursor form of `copy_dollar_paren_body_raw` (rest just past the `$(`).
 /// Every consumed byte is pushed verbatim; the case-depth tracker and the
 /// `rest` lookahead are transcribed unchanged (the lookahead now passes the
@@ -1156,6 +1268,12 @@ fn copy_dollar_paren_body_raw_cursor<'a>(out: &mut String, rest: &'a str) -> &'a
     // issue #513): a boundary `#` comment runs to end of line and its `)`
     // never closes the body; the copy still carries the bytes.
     let mut token_boundary = true;
+    // rubash#3605: paren depth of a `$(` nested inside the case context
+    // (`$(case $(w) in e) ...`) — arm-for-arm with the parser
+    // extractor (parser/command_substitution.rs nested_case_subst).
+    // Counted in `depth` unconditionally below; this counter only
+    // marks how many `)`s the nested substitution owns.
+    let mut nested_case_subst = 0usize;
     let mut idx = 0usize;
     while idx < rest.len() {
         let ch = rest[idx..].chars().next().unwrap();
@@ -1217,9 +1335,47 @@ fn copy_dollar_paren_body_raw_cursor<'a>(out: &mut String, rest: &'a str) -> &'a
                 token_boundary = false;
             }
             '$' if rest.as_bytes().get(idx) == Some(&b'(') => {
-                idx += 1;
-                out.push('(');
-                depth += 1;
+                if rest.as_bytes().get(idx + 1) == Some(&b'(')
+                    && super::skip::dollar_double_paren_is_arithmetic(&rest[idx..])
+                {
+                    // `$((` arithmetic expansion: copy through the closing
+                    // `))' verbatim (skip.rs skip_arith_paren's contract)
+                    // so a shift `<<` inside is never read as a
+                    // here-document operator (rubash#2930's guard).
+                    idx += 1;
+                    out.push('(');
+                    idx += 1;
+                    out.push('(');
+                    idx += copy_arith_paren_body_cursor(out, &rest[idx..]);
+                } else {
+                    idx += 1;
+                    out.push('(');
+                    depth += 1;
+                    if case_depth > 0 {
+                        nested_case_subst += 1;
+                    }
+                    // rubash#3605: feed the skipped `(` to the case word
+                    // machine — `(` ends a token, so `case` right after `$(`
+                    // is a command-position keyword; otherwise `$(case` never
+                    // armed the tracker and the pattern `)` closed the body
+                    // one `)` early.
+                    super::skip::update_command_substitution_case_depth(
+                        '(',
+                        false,
+                        false,
+                        &mut word,
+                        &mut case_depth,
+                        &mut word_boundary,
+                        &mut current_word_boundary,
+                        rest[idx..].chars().next(),
+                        &mut case_in_stage,
+                        &mut case_pattern_region,
+                        prev_sig,
+                    );
+                    if crate::lexer::skip::esac_prev_token_char('(') {
+                        prev_sig = Some('(');
+                    }
+                }
                 token_boundary = false;
             }
             '\'' => {
@@ -1241,15 +1397,36 @@ fn copy_dollar_paren_body_raw_cursor<'a>(out: &mut String, rest: &'a str) -> &'a
                 word_boundary = false;
                 token_boundary = false;
             }
-            '(' if case_depth == 0 => {
+            '<' if rest.as_bytes().get(idx) == Some(&b'<')
+                && rest.as_bytes().get(idx + 1) != Some(&b'<') =>
+            {
+                // `<<`/`<<-` here-document inside the substitution body:
+                // consume the gathered body with the same skip the span
+                // extractor uses so a `)` on a delimiter-prefixed line
+                // cannot close the copy early and drop the IFS_GLUE
+                // bookkeeping byte into quote removal (rubash#3817).
+                let (consumed, closes) = comsub_heredoc_skip(&rest[idx..]);
+                out.push_str(&rest[idx..idx + consumed]);
+                idx += consumed;
+                if closes {
+                    return &rest[idx..];
+                }
+            }
+            '(' if case_depth == 0 || nested_case_subst > 0 => {
                 depth += 1;
+                if nested_case_subst > 0 {
+                    nested_case_subst += 1;
+                }
                 token_boundary = true;
             }
-            ')' if case_depth == 0 => {
+            ')' if case_depth == 0 || nested_case_subst > 0 => {
                 // Plain subtraction like the original: an unbalanced `)`
                 // underflows/wraps identically (never observed on real
                 // scripts; the case_depth tracker owns pattern parens).
                 depth -= 1;
+                if nested_case_subst > 0 {
+                    nested_case_subst -= 1;
+                }
                 if depth == 0 {
                     return &rest[idx..];
                 }
@@ -1473,6 +1650,472 @@ pub(crate) fn copy_braced_parameter_after_dollar_cursor<'a>(
     copy_braced_parameter_inner_cursor(out, rest, true, posix)
 }
 
+thread_local! {
+    /// Read-time extquote pin for word re-derivation (rubash#2772).
+    ///
+    /// GNU evaluates the `$'...'` translation verdict when a line is READ
+    /// (parse.y:4053 parse_matched_pair consults `extended_quote` at that
+    /// moment): inside a `${...}` body in a double-quoted word, a span in
+    /// a WORD region (default / alternate / assignment / error word) is
+    /// translated only when extquote held at read time; with extquote
+    /// off the span text stays literal. Rubash lexes upfront, so the
+    /// executor records the per-line read-time extquote state and
+    /// re-derives affected words under this pin (the same shape as the
+    /// rubash#353 read-time locale pin); the braced-copy functions below
+    /// consult it when copying a double-quoted `${...}` body. Outside a
+    /// re-derivation there is no pin and copying is exactly as before.
+    static LEX_EXTQUOTE_PIN: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Run `f` with the lex-time extquote pin set to `enabled`
+/// (see [`LEX_EXTQUOTE_PIN`]); the previous pin is restored on return.
+pub(crate) fn with_lex_extquote_pin<T>(enabled: bool, f: impl FnOnce() -> T) -> T {
+    let previous = LEX_EXTQUOTE_PIN.with(|slot| slot.replace(Some(enabled)));
+    let result = f();
+    LEX_EXTQUOTE_PIN.with(|slot| slot.set(previous));
+    result
+}
+
+/// The lex-time extquote verdict for the word being cooked: the pin when
+/// one is active, otherwise the standing default (extquote on — the
+/// state the upfront lex has always assumed).
+fn lex_extquote_enabled() -> bool {
+    LEX_EXTQUOTE_PIN.with(|slot| slot.get()).unwrap_or(true)
+}
+
+/// Carrier-encode one raw `$'...'` span (the full span text, quotes
+/// included) so the expansion stage emits it byte-for-byte as data:
+/// every byte that could act as syntax in a `${...}` body or in the
+/// operator-word expansion travels as its data carrier (the CTLESC
+/// port), the rest verbatim.
+fn encode_literal_ansi_c_span(span: &[char], out: &mut String) {
+    for &ch in span {
+        match ch {
+            '$' => out.push(DATA_DOLLAR),
+            '\'' => out.push(DATA_SQUOTE),
+            '"' => out.push(DATA_DQUOTE),
+            '`' => out.push(DATA_BACKTICK),
+            '\\' => out.push(crate::executor::markers::DATA_BACKSLASH),
+            '{' | '}' => {
+                out.push(CTLESC);
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+    }
+}
+
+/// Consume a `$'...'` span starting at `chars[start] == '$'`, honoring
+/// backslash escapes; returns the index just past the closing quote.
+fn ansi_c_span_end(chars: &[char], start: usize) -> Option<usize> {
+    let mut i = start + 2;
+    let mut escaped = false;
+    while i < chars.len() {
+        let ch = chars[i];
+        i += 1;
+        if escaped {
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '\'' {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Consume a `'...'` span starting at `chars[start] == '\''`.
+fn single_quote_span_end(chars: &[char], start: usize) -> Option<usize> {
+    let mut i = start + 1;
+    while i < chars.len() {
+        if chars[i] == '\'' {
+            return Some(i + 1);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Consume a `$(...)` / `$((...))` unit starting at `chars[start] == '$'`
+/// (its body is a separate read unit at execution; never rewritten).
+fn paren_unit_end(chars: &[char], start: usize) -> Option<usize> {
+    crate::lexer::skip_parenthesized_unit_corrected(chars, start + 1)
+}
+
+/// Consume a `` `...` `` unit starting at `chars[start] == '`'`.
+fn backtick_unit_end(chars: &[char], start: usize) -> Option<usize> {
+    let mut i = start + 1;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => i += 2,
+            '`' => return Some(i + 1),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Consume a `[...]` subscript starting at `chars[start] == '['`.
+fn subscript_unit_end(chars: &[char], start: usize) -> Option<usize> {
+    let mut i = start + 1;
+    let mut depth = 1usize;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => i += 2,
+            '\'' => i = single_quote_span_end(chars, i)?,
+            '"' => i = double_quote_span_end(chars, i)?,
+            '[' => {
+                depth += 1;
+                i += 1;
+            }
+            ']' => {
+                depth -= 1;
+                i += 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Consume a `"..."` span starting at `chars[start] == '"'` (units inside
+/// are skipped whole so a quote inside one cannot close the span early).
+fn double_quote_span_end(chars: &[char], start: usize) -> Option<usize> {
+    let mut i = start + 1;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => i += 2,
+            '"' => return Some(i + 1),
+            '$' if chars.get(i + 1) == Some(&'(') => i = paren_unit_end(chars, i)?,
+            '$' if chars.get(i + 1) == Some(&'{') => {
+                i = braced_unit_end(chars, i)?;
+            }
+            '`' => i = backtick_unit_end(chars, i)?,
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// The index just past the `}` matching the `${` at `chars[start]`,
+/// skipping quoted spans and nested units as indivisible.
+fn braced_unit_end(chars: &[char], start: usize) -> Option<usize> {
+    let mut i = start + 2;
+    let mut depth = 1usize;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => i += 2,
+            '\'' => i = single_quote_span_end(chars, i)?,
+            '"' => i = double_quote_span_end(chars, i)?,
+            '$' if chars.get(i + 1) == Some(&'\'') => i = ansi_c_span_end(chars, i)?,
+            '$' if chars.get(i + 1) == Some(&'(') => i = paren_unit_end(chars, i)?,
+            '$' if chars.get(i + 1) == Some(&'{') => {
+                depth += 1;
+                i += 2;
+            }
+            '`' => i = backtick_unit_end(chars, i)?,
+            '}' => {
+                depth -= 1;
+                i += 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BracedRegion {
+    /// Default / alternate / assignment / error word (DOLBRACE_WORD):
+    /// `$'...'` spans stay literal when extquote was off at read time.
+    Word,
+    /// Pattern / replacement / case-modification regions
+    /// (DOLBRACE_QUOTE / QUOTE2) and arithmetic regions: spans are
+    /// copied verbatim (translated regardless of extquote).
+    Verbatim,
+}
+
+/// Rewrite one `${...}` unit (starting at `chars[start] == '$'`) for a
+/// double-quoted word read while extquote was OFF: `$'...'` spans in
+/// WORD regions are carrier-encoded so expansion reproduces them
+/// literally; everything else — the name region, pattern and
+/// replacement regions, nested units' own regions — is classified and
+/// copied by the same walk, recursing into nested `${...}` units.
+/// Returns the rewritten text and the index just past the unit, or
+/// `None` when the unit is unbalanced or nothing needed rewriting.
+fn rewrite_braced_for_extquote_off(chars: &[char], start: usize) -> Option<(String, usize)> {
+    let mut out = String::new();
+    out.push_str("${");
+    let mut changed = false;
+    let end = rewrite_braced_body(chars, start + 2, &mut out, &mut changed)?;
+    if !changed {
+        return None;
+    }
+    out.push('}');
+    Some((out, end))
+}
+
+/// Walk one `${...}` body from `start` (just past `${`) to its matching
+/// `}` (consumed, not emitted); returns the index just past it.
+fn rewrite_braced_body(
+    chars: &[char],
+    start: usize,
+    out: &mut String,
+    changed: &mut bool,
+) -> Option<usize> {
+    let mut i = start;
+    // Param region: prefixes (`!`, `#` length), the name (which may
+    // itself be a `$'...'` span or a nested expansion), and a subscript
+    // — copied verbatim up to the operator.
+    while i < chars.len() {
+        let ch = chars[i];
+        match ch {
+            '}' => return Some(i + 1),
+            '\\' => {
+                out.push(ch);
+                if let Some(&next) = chars.get(i + 1) {
+                    out.push(next);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            '$' if chars.get(i + 1) == Some(&'\'') => {
+                let end = ansi_c_span_end(chars, i)?;
+                out.extend(&chars[i..end]);
+                i = end;
+            }
+            '$' if chars.get(i + 1) == Some(&'{') => {
+                let (text, end) = rewrite_braced_for_extquote_off(chars, i).unwrap_or_else(|| {
+                    let end = braced_unit_end(chars, i).unwrap_or(chars.len());
+                    (chars[i..end].iter().collect(), end)
+                });
+                out.push_str(&text);
+                i = end;
+            }
+            '$' if chars.get(i + 1) == Some(&'(') => {
+                let end = paren_unit_end(chars, i)?;
+                out.extend(&chars[i..end]);
+                i = end;
+            }
+            '`' => {
+                let end = backtick_unit_end(chars, i)?;
+                out.extend(&chars[i..end]);
+                i = end;
+            }
+            '\'' => {
+                let end = single_quote_span_end(chars, i)?;
+                out.extend(&chars[i..end]);
+                i = end;
+            }
+            '"' => {
+                let end = double_quote_span_end(chars, i)?;
+                out.extend(&chars[i..end]);
+                i = end;
+            }
+            '[' => {
+                let end = subscript_unit_end(chars, i)?;
+                out.extend(&chars[i..end]);
+                i = end;
+            }
+            ':' if matches!(chars.get(i + 1), Some('-' | '=' | '+' | '?')) => {
+                out.push(':');
+                out.push(chars[i + 1]);
+                return rewrite_braced_region(chars, i + 2, out, changed, BracedRegion::Word);
+            }
+            '-' | '=' | '+' | '?' => {
+                out.push(ch);
+                return rewrite_braced_region(chars, i + 1, out, changed, BracedRegion::Word);
+            }
+            '#' | '%' | '/' | '^' | ',' => {
+                // Pattern-bearing operators (removal, patsub, case
+                // modification): the region decodes regardless.
+                out.push(ch);
+                if chars.get(i + 1) == Some(&ch) && ch != '/' {
+                    out.push(ch);
+                    i += 1;
+                }
+                return rewrite_braced_region(chars, i + 1, out, changed, BracedRegion::Verbatim);
+            }
+            ':' | '@' => {
+                // Substring offsets / transforms: no word region.
+                out.push(ch);
+                return rewrite_braced_region(chars, i + 1, out, changed, BracedRegion::Verbatim);
+            }
+            _ => {
+                out.push(ch);
+                i += 1;
+            }
+        }
+    }
+    None
+}
+
+/// Walk a post-operator region of one `${...}` body to its matching `}`
+/// (consumed, not emitted); returns the index just past it.
+fn rewrite_braced_region(
+    chars: &[char],
+    start: usize,
+    out: &mut String,
+    changed: &mut bool,
+    region: BracedRegion,
+) -> Option<usize> {
+    let mut i = start;
+    while i < chars.len() {
+        let ch = chars[i];
+        match ch {
+            '}' => return Some(i + 1),
+            '\\' => {
+                out.push(ch);
+                if let Some(&next) = chars.get(i + 1) {
+                    out.push(next);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            '$' if chars.get(i + 1) == Some(&'\'') => {
+                let end = ansi_c_span_end(chars, i)?;
+                if region == BracedRegion::Word {
+                    encode_literal_ansi_c_span(&chars[i..end], out);
+                    *changed = true;
+                } else {
+                    out.extend(&chars[i..end]);
+                }
+                i = end;
+            }
+            '$' if chars.get(i + 1) == Some(&'{') => {
+                match rewrite_braced_for_extquote_off(chars, i) {
+                    Some((text, end)) => {
+                        out.push_str(&text);
+                        *changed = true;
+                        i = end;
+                    }
+                    None => {
+                        let end = braced_unit_end(chars, i)?;
+                        out.extend(&chars[i..end]);
+                        i = end;
+                    }
+                }
+            }
+            '$' if chars.get(i + 1) == Some(&'(') => {
+                let end = paren_unit_end(chars, i)?;
+                out.extend(&chars[i..end]);
+                i = end;
+            }
+            '`' => {
+                let end = backtick_unit_end(chars, i)?;
+                out.extend(&chars[i..end]);
+                i = end;
+            }
+            '\'' => {
+                let end = single_quote_span_end(chars, i)?;
+                out.extend(&chars[i..end]);
+                i = end;
+            }
+            '"' => {
+                // A quoted span inside the region: in a WORD region the
+                // span's own `$'...'` spans share the region's verdict
+                // (the enclosing word's quoting already decided it);
+                // walk it instead of copying blind.
+                if region == BracedRegion::Word {
+                    out.push(ch);
+                    i += 1;
+                    let mut closed = false;
+                    while i < chars.len() {
+                        let inner = chars[i];
+                        match inner {
+                            '"' => {
+                                out.push(inner);
+                                i += 1;
+                                closed = true;
+                                break;
+                            }
+                            '\\' => {
+                                out.push(inner);
+                                if let Some(&next) = chars.get(i + 1) {
+                                    out.push(next);
+                                    i += 2;
+                                } else {
+                                    i += 1;
+                                }
+                            }
+                            '$' if chars.get(i + 1) == Some(&'\'') => {
+                                let end = ansi_c_span_end(chars, i)?;
+                                encode_literal_ansi_c_span(&chars[i..end], out);
+                                *changed = true;
+                                i = end;
+                            }
+                            '$' if chars.get(i + 1) == Some(&'{') => {
+                                match rewrite_braced_for_extquote_off(chars, i) {
+                                    Some((text, end)) => {
+                                        out.push_str(&text);
+                                        *changed = true;
+                                        i = end;
+                                    }
+                                    None => {
+                                        let end = braced_unit_end(chars, i)?;
+                                        out.extend(&chars[i..end]);
+                                        i = end;
+                                    }
+                                }
+                            }
+                            '$' if chars.get(i + 1) == Some(&'(') => {
+                                let end = paren_unit_end(chars, i)?;
+                                out.extend(&chars[i..end]);
+                                i = end;
+                            }
+                            '`' => {
+                                let end = backtick_unit_end(chars, i)?;
+                                out.extend(&chars[i..end]);
+                                i = end;
+                            }
+                            _ => {
+                                out.push(inner);
+                                i += 1;
+                            }
+                        }
+                    }
+                    if !closed {
+                        return None;
+                    }
+                } else {
+                    let end = double_quote_span_end(chars, i)?;
+                    out.extend(&chars[i..end]);
+                    i = end;
+                }
+            }
+            _ => {
+                out.push(ch);
+                i += 1;
+            }
+        }
+    }
+    None
+}
+
+/// The extquote-off braced rewrite for the copy functions: when the
+/// `${...}` unit at the head of `text` sits in a double-quoted word and
+/// the lex pin says extquote was OFF at read time, return the rewritten
+/// unit text and its byte length in `text`; otherwise `None` and the
+/// caller copies verbatim exactly as before (rubash#2772).
+fn extquote_off_braced_rewrite(text: &str, outer_double_quote: bool) -> Option<(String, usize)> {
+    if !outer_double_quote || lex_extquote_enabled() || !text.starts_with("${") {
+        return None;
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let (rewritten, end) = rewrite_braced_for_extquote_off(&chars, 0)?;
+    let byte_len: usize = chars[..end].iter().map(|ch| ch.len_utf8()).sum();
+    Some((rewritten, byte_len))
+}
+
 /// Cursor form of `copy_braced_parameter_inner` (rest at the `$`). The
 /// `${...}` unit is copied verbatim; only the consumption accounting changes
 /// (bytes consumed instead of chars counted).
@@ -1482,6 +2125,14 @@ fn copy_braced_parameter_inner_cursor<'a>(
     outer_double_quote: bool,
     posix: bool,
 ) -> &'a str {
+    // rubash#2772: a double-quoted unit re-derived under a read-time
+    // extquote-off pin gets its WORD-region `$'...'` spans rewritten to
+    // literal carriers before the verbatim copy below can freeze the
+    // translated form in.
+    if let Some((rewritten, byte_len)) = extquote_off_braced_rewrite(rest, outer_double_quote) {
+        out.push_str(&rewritten);
+        return &rest[byte_len..];
+    }
     out.push('$');
     let rest = &rest[1..]; // past '$'
     if !rest.starts_with('{') {
@@ -1606,7 +2257,7 @@ fn copy_braced_parameter_with_ansi_c_cursor<'a>(out: &mut String, rest: &'a str)
 /// an empty slice). Trigger bytes inside double quotes: `"`, `$`, `\`, `'`,
 /// the glob set `* ? [ @ + !`, and `` ` `` when backtick bodies must be
 /// preserved.
-fn remove_double_quoted_into_cursor<'a>(
+pub(crate) fn remove_double_quoted_into_cursor<'a>(
     out: &mut String,
     rest: &'a str,
     preserve_backticks: bool,
@@ -1738,7 +2389,9 @@ fn remove_double_quoted_into_cursor<'a>(
                         pending_name = false;
                     }
                 }
-                out.push_str(&rest[..idx]);
+                // rubash#3816: tag literal carrier bytes in the span as
+                // raw-byte marker pairs (see ansi::push_tagged_source_span).
+                super::ansi::push_tagged_source_span(&mut *out, &rest[..idx]);
                 rest = &rest[idx..];
             }
         }
@@ -1811,6 +2464,20 @@ pub(super) fn remove_shell_quotes_outside_backticks(raw: &str) -> String {
                         '$' => out.push(DATA_DOLLAR),
                         '`' => out.push(crate::executor::markers::DATA_BACKTICK),
                         '"' => out.push(crate::executor::markers::DATA_DQUOTE),
+                        // rubash#3816: a literal control byte inside the
+                        // quotes is user data — tag it as a raw-byte
+                        // marker pair so no downstream decoder can claim
+                        // it as the carrier it collides with. ESC (0x1b)
+                        // is excluded: niubash#200 owns it (word-initial
+                        // tagged by tag_word_initial_raw_esc, mid-word
+                        // verbatim).
+                        quoted
+                            if crate::lexer::ansi::is_literal_source_carrier_byte(
+                                quoted as u32,
+                            ) =>
+                        {
+                            crate::lexer::ansi::push_tagged_source_char(&mut out, quoted);
+                        }
                         _ => out.push(quoted),
                     }
                 }
@@ -1836,7 +2503,9 @@ pub(super) fn remove_shell_quotes_outside_backticks(raw: &str) -> String {
                 } else if escaped == '`' {
                     out.push(crate::executor::markers::DATA_BACKTICK);
                 } else {
-                    out.push(escaped);
+                    // rubash#3816: a backslash-escaped control byte is
+                    // literal data — tag it as a raw-byte marker pair.
+                    super::ansi::push_tagged_source_char(&mut out, escaped);
                 }
             }
             _ => {
@@ -1847,7 +2516,9 @@ pub(super) fn remove_shell_quotes_outside_backticks(raw: &str) -> String {
                 } else if !(pending_name && is_lexer_shell_name_char(ch)) {
                     pending_name = false;
                 }
-                out.push(ch);
+                // rubash#3816: a literal control byte in the unquoted word
+                // is user data — tag it as a raw-byte marker pair.
+                super::ansi::push_tagged_source_char(&mut out, ch);
             }
         }
     }
@@ -1986,7 +2657,11 @@ fn remove_double_quoted_into(
                 } else if !(pending_name && is_lexer_shell_name_char(quoted)) {
                     pending_name = false;
                 }
-                out.push(quoted);
+                // rubash#3816: a literal control byte inside double
+                // quotes is user data — tag it as a raw-byte marker pair
+                // so no downstream decoder can claim it as the carrier
+                // it collides with.
+                super::ansi::push_tagged_source_char(&mut *out, quoted);
             }
         }
     }
@@ -1998,9 +2673,26 @@ fn copy_dollar_paren_substitution(
     chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
 ) {
     out.push('$');
-    if chars.next() != Some('(') {
+    if chars.peek() != Some(&'(') {
+        chars.next();
         return;
     }
+    // `$((` arithmetic expansion (skip.rs skip_arith_paren's contract):
+    // copy through the closing `))' verbatim so a shift `<<` inside is
+    // never read as a here-document operator (rubash#2930's guard).
+    let mut probe = chars.clone();
+    probe.next();
+    if probe.next() == Some('(')
+        && super::skip::dollar_double_paren_is_arithmetic(&chars.clone().collect::<String>())
+    {
+        chars.next();
+        out.push('(');
+        chars.next();
+        out.push('(');
+        copy_arith_paren_body_raw(out, chars);
+        return;
+    }
+    chars.next();
     out.push('(');
     copy_dollar_paren_body_raw(out, chars);
 }
@@ -2171,6 +2863,24 @@ pub(super) fn decode_ansi_c_span(chars: &mut std::iter::Peekable<std::str::Chars
 /// has_unclosed_command_substitution) cannot mistake it for a live
 /// command-substitution opener (rubash#215: `x=$'a`b$(echo z)'`).
 pub(crate) fn escape_decoded_ansi_c_quotes(decoded: &str) -> String {
+    escape_decoded_ansi_c_quotes_impl(decoded, true)
+}
+
+/// [`escape_decoded_ansi_c_quotes`] without the CTLESC glob protection for
+/// `*`/`?`/`[` (and extglob introducers). The protection is only needed
+/// when the decoded bytes are emitted into an UNQUOTED region, where the
+/// glob engine would read them as pattern syntax. The preserve-quotes
+/// caller wraps the result in the synthetic single-quoted span GNU's
+/// `sh_single_quote` produces (parse.y:5564-5571), so the bytes are
+/// already quoted data — prefixing them with CTLESC there leaves the
+/// carrier inside the quoted span, where the escape pair is data, and it
+/// leaked as a literal `\x11` into the stored element
+/// (`A=([0]=$'\[a\]')`).
+pub(crate) fn escape_decoded_ansi_c_quotes_unprotected(decoded: &str) -> String {
+    escape_decoded_ansi_c_quotes_impl(decoded, false)
+}
+
+fn escape_decoded_ansi_c_quotes_impl(decoded: &str, protect_glob: bool) -> String {
     let chars: Vec<char> = decoded.chars().collect();
     let mut out = String::with_capacity(decoded.len());
     let mut index = 0usize;
@@ -2204,12 +2914,12 @@ pub(crate) fn escape_decoded_ansi_c_quotes(decoded: &str) -> String {
             // skip-pair carrier (glob.rs contains_glob_or_extglob), the
             // assignment boundary's dequote_ctlesc_pairs removes the pair
             // before storage, and materialize strips it at argv.
-            '*' | '?' | '[' => {
+            '*' | '?' | '[' if protect_glob => {
                 out.push_str(crate::executor::markers::CTLESC_STR);
                 out.push(ch);
             }
             // Extglob introducers as decoded data must not open a group.
-            '@' | '+' | '!' if chars.get(index + 1) == Some(&'(') => {
+            '@' | '+' | '!' if protect_glob && chars.get(index + 1) == Some(&'(') => {
                 out.push_str(crate::executor::markers::CTLESC_STR);
                 out.push(ch);
             }
@@ -2281,6 +2991,10 @@ fn copy_dollar_paren_body_raw(
     // token recognition, so a `)` inside it does not close the body
     // (issue #513). The verbatim copy still carries the comment bytes.
     let mut token_boundary = true;
+    // rubash#3605: paren depth of a `$(` nested inside the case context
+    // — arm-for-arm with copy_dollar_paren_body_raw_cursor and the
+    // parser extractor (nested_case_subst).
+    let mut nested_case_subst = 0usize;
     while let Some(ch) = chars.next() {
         out.push(ch);
         if ch == '\\' {
@@ -2337,9 +3051,48 @@ fn copy_dollar_paren_body_raw(
                 token_boundary = false;
             }
             '$' if chars.peek() == Some(&'(') => {
-                chars.next();
-                out.push('(');
-                depth += 1;
+                // `$((` arithmetic expansion — see the cursor form's arm.
+                let mut probe = chars.clone();
+                probe.next();
+                if probe.next() == Some('(')
+                    && super::skip::dollar_double_paren_is_arithmetic(
+                        &chars.clone().collect::<String>(),
+                    )
+                {
+                    chars.next();
+                    out.push('(');
+                    chars.next();
+                    out.push('(');
+                    copy_arith_paren_body_raw(out, chars);
+                } else {
+                    chars.next();
+                    out.push('(');
+                    depth += 1;
+                    if case_depth > 0 {
+                        nested_case_subst += 1;
+                    }
+                    // rubash#3605: feed the skipped `(` to the case word
+                    // machine — `(` ends a token, so `case` right after `$(`
+                    // is a command-position keyword; otherwise `$(case` never
+                    // armed the tracker and the pattern `)` closed the body
+                    // one `)` early.
+                    super::skip::update_command_substitution_case_depth(
+                        '(',
+                        false,
+                        false,
+                        &mut word,
+                        &mut case_depth,
+                        &mut word_boundary,
+                        &mut current_word_boundary,
+                        chars.peek().copied(),
+                        &mut case_in_stage,
+                        &mut case_pattern_region,
+                        prev_sig,
+                    );
+                    if crate::lexer::skip::esac_prev_token_char('(') {
+                        prev_sig = Some('(');
+                    }
+                }
                 token_boundary = false;
             }
             '\'' => {
@@ -2360,12 +3113,34 @@ fn copy_dollar_paren_body_raw(
                 word_boundary = false;
                 token_boundary = false;
             }
-            '(' if case_depth == 0 => {
+            '<' if chars.peek() == Some(&'<') => {
+                // `<<`/`<<-` here-document — see the cursor form's arm.
+                let mut probe = chars.clone();
+                probe.next();
+                if probe.next() != Some('<') {
+                    let remaining: String = chars.clone().collect();
+                    let (consumed, closes) = comsub_heredoc_skip(&remaining);
+                    out.push_str(&remaining[..consumed]);
+                    for _ in remaining[..consumed].chars() {
+                        chars.next();
+                    }
+                    if closes {
+                        break;
+                    }
+                }
+            }
+            '(' if case_depth == 0 || nested_case_subst > 0 => {
                 depth += 1;
+                if nested_case_subst > 0 {
+                    nested_case_subst += 1;
+                }
                 token_boundary = true;
             }
-            ')' if case_depth == 0 => {
+            ')' if case_depth == 0 || nested_case_subst > 0 => {
                 depth = depth.saturating_sub(1);
+                if nested_case_subst > 0 {
+                    nested_case_subst -= 1;
+                }
                 if depth == 0 {
                     break;
                 }
@@ -2495,6 +3270,20 @@ fn copy_braced_parameter_inner(
     outer_double_quote: bool,
     posix: bool,
 ) {
+    // rubash#2772: same extquote-off rewrite as the cursor form (this
+    // entry sits just past the `$`; rebuild the unit text to consult it).
+    if outer_double_quote && !lex_extquote_enabled() && chars.peek() == Some(&'{') {
+        let remaining: String = chars.clone().collect();
+        let text = format!("${remaining}");
+        if let Some((rewritten, byte_len)) = extquote_off_braced_rewrite(&text, true) {
+            out.push_str(&rewritten);
+            let consume = text[..byte_len].chars().count().saturating_sub(1);
+            for _ in 0..consume {
+                chars.next();
+            }
+            return;
+        }
+    }
     out.push('$');
     if chars.peek() != Some(&'{') {
         return;

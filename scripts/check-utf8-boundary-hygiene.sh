@@ -88,13 +88,59 @@ src/executor/command_substitution_pipelines.rs::as_bytes\(\)\[[0-9]+\] as char
 src/executor/conditional.rs::is_shell_name_char\(bytes\[name_start - 1\] as char\)
 src/executor/conditional.rs::is_shell_name_start\(bytes\[name_start\] as char\)
 src/executor/declare_local.rs::is_shell_name_(start|char)\(c as char\)
+# declare_local.rs: `Opt(c)` only fires for a byte found in the row's
+# spec ("+acfgilnprtuxAFGI", all ASCII), so the widened byte is ASCII
+# by construction, never a UTF-8 continuation byte. (The `optopt`
+# half of the same scan is NOT allowlisted: it comes from user argv
+# and is rendered lossy, see declare_option_scan.)
+src/executor/declare_local.rs::Opt\(c\) => letters\.push\(\(c as char
+# declare_local.rs: `scan_flag_only_spec` (the byte-scan twin of the
+# machine path above) pushes `c` only after `letter_bytes.contains(&c)`
+# succeeds, where `letter_bytes` is the same row spec's letter bytes
+# (static Getopt literal, all ASCII), so the widened byte is ASCII by
+# construction, never a UTF-8 continuation byte. (The `optopt` half of
+# the same scan is NOT allowlisted: it comes from user argv and is
+# rendered lossy via String::from_utf8_lossy, see scan_flag_only_spec.)
+src/executor/declare_local.rs::letters\.push\(\(c as char, sign == b'-'\)\)
 src/executor/execution_misc.rs::(as_bytes\(\)\[0\] as char|out\.push\(byte as char\)|b'0' \+ .*as char)
 src/executor/init.rs::bytes\[0\] as char
 src/executor/parameter_case.rs::\} as char\);
 src/executor/parameter_core.rs::bytes\[index\] as char
 src/executor/path.rs::(as_bytes\(\)|bytes)\[[0-9]+\] as char
 src/executor/pipeline_exec.rs::\|byte\| byte as char
+# read_split.rs: `byte_domain_text` (#2819) widens `*byte` only after the
+# `if *byte < 0x80` guard directly above (the else branch routes >= 0x80
+# bytes to `encode_raw_byte_marker`), so the widened byte is ASCII by
+# construction — never a UTF-8 continuation byte. The widened char is
+# collected into storage text, never passed to a predicate.
+src/executor/read_split.rs::\(\*byte as char\)\.to_string\(\)
+# read_helpers.rs: `StdinCharDecoder::next_unit` (#3334) widens `byte` only
+# in the `if byte < 0x80` arm (the else arm routes >= 0x80 bytes to
+# `raw_byte_unit`), so the widened byte is ASCII by construction — never
+# a UTF-8 continuation byte. The widened char is a unit value, never
+# passed to a predicate.
+src/executor/read_helpers.rs::StdinUnit::Char\(byte as char\)
 src/executor/shift_echo_builtins.rs::\+ 0x40\) as char
+# strmatch.rs (#3839): the five `as char` sites in the strmatch port are
+# the deliberate Latin-1 lift of GNU's single-byte compile (smatch.c:301-304
+# FOLD is TOLOWER over `unsigned char`; smatch.c:585-603 xstrmatch routes
+# here only when the input is single-byte or unconvertible). The lifted
+# chars flow into gmatch() with FNM_WIDE stripped (strmatch_bytes), where
+# every predicate is ASCII-only (`is_ascii_*`, `(c as u32) <= 0x7F`, i32
+# range compares) — a widened continuation byte can never satisfy one —
+# and the wide compile (FNM_WIDE, `to_lowercase`/`isw*`) only ever sees
+# real chars decoded by `from_utf8` in xstrmatch, never widened bytes.
+# :135/:136 lift pattern/string bytes into the matcher's char domain;
+# equality and ordering are preserved by the bijection, exactly GNU's
+# `unsigned char` domain. :158 folds only after `c.is_ascii_uppercase()`,
+# so (c as u8) + 32 is 0x61..=0x7A by construction. :284 compares a
+# POSIX_COLLSYMS table byte (all ASCII) for equality only. :285 returns a
+# POSIX_COLLSYMS code byte (all <= 0x7F) as a char.
+src/executor/strmatch.rs::let pat: Vec<char> = pattern\.iter\(\)\.map\(\|&b\| b as char\)\.collect\(\);
+src/executor/strmatch.rs::let s: Vec<char> = string\.iter\(\)\.map\(\|&b\| b as char\)\.collect\(\);
+src/executor/strmatch.rs::\(\(c as u8\) \+ 32\) as char
+src/executor/strmatch.rs::a as char == b
+src/executor/strmatch.rs::return Some\(code as char\);
 # windows_drive.rs: bare `D:` command rewritten to the `D:/` drive root
 # (niubash#481/#483); the same `bytes[0].is_ascii_alphabetic()` guard pins the
 # widened byte to ASCII, never a UTF-8 continuation byte.

@@ -323,6 +323,18 @@ pub const SIGCONT_NUMBER: i32 = libc::SIGCONT;
 #[cfg(not(unix))]
 pub const SIGCONT_NUMBER: i32 = 18;
 
+/// The platform's SIGTSTP number. GNU's stop class is stable across
+/// the platforms bash models (20 on Linux and Darwin/BSD); the
+/// non-unix value keeps the Windows file-mailbox wire format's Linux
+/// numbering by contract (see SIGNALS above). Used by the Windows
+/// foreground-stop arm (rubash#3467), which matches the 128+20
+/// verdict by number.
+#[cfg(unix)]
+pub const SIGTSTP_NUMBER: i32 = libc::SIGTSTP;
+/// Non-unix (Windows mailbox wire format, Linux numbering by contract).
+#[cfg(not(unix))]
+pub const SIGTSTP_NUMBER: i32 = 20;
+
 /// The platform's SIGQUIT number for dispatch paths that special-case the
 /// shell-policy ignore (sig.c:333 sets SIGQUIT to SIG_IGN in every shell,
 /// before the interactive-only SIGINT/SIGTERM installs). Linux: 3; Darwin/
@@ -1003,6 +1015,32 @@ pub(crate) fn note_console_ctrl_c() {
     {
         // Linux mailbox wire format: SIGINT = 2.
         queue_self_signal(2);
+    }
+}
+
+/// Record a console `CTRL_Z` (the host's ^Z keypress) into this
+/// process's self-signal queue — the TSTP twin of
+/// [`note_console_ctrl_c`] (rubash#3467, companion to niubash#877).
+///
+/// The niubash host owns the console input on Windows: ^Z is a
+/// keypress, not a console control event, so no kernel delivery
+/// exists for it — the host's watch thread calls the driver face
+/// (`script_driver::inject_console_ctrl_z`) and this hook queues
+/// signal 20 the same way a mailbox SIGTSTP from another process
+/// would arrive. The foreground waits observe it through
+/// `observe_signals_while_blocked` and stop the job instead of
+/// ending it at 128+20; a trapped TSTP is re-queued there exactly
+/// like a trapped SIGINT, so the trap runs and the command is not
+/// stopped (GNU: a trapped SIGTSTP does not stop the shell).
+///
+/// Unix: no-op — the kernel delivers SIGTSTP to the foreground
+/// process group itself and waitpid reports the stop; a second
+/// injection would double-dispatch.
+pub(crate) fn note_console_ctrl_z() {
+    #[cfg(not(unix))]
+    {
+        // Linux mailbox wire format: SIGTSTP = 20.
+        queue_self_signal(20);
     }
 }
 
@@ -1909,14 +1947,10 @@ where
 }
 
 fn diagnostic_prefix() -> String {
-    if let (Ok(script), Ok(line)) = (
-        std::env::var("__RUBASH_SCRIPT_NAME"),
-        std::env::var("__RUBASH_CURRENT_LINE"),
-    ) {
-        return format!("{script}: line {line}: ");
-    }
-
-    "rubash: ".to_string()
+    // The single argv[0] carrier chain (builtins::prefix,
+    // rubash#2791): the old fallback's "rubash: " literal named
+    // every renamed shell "rubash" whenever one arm was missing.
+    crate::builtins::prefix::diagnostic_prefix(&|key: &str| std::env::var(key).ok())
 }
 
 fn deliver_rubash_signal(pid: u32, signal: i32) -> io::Result<bool> {
@@ -2642,25 +2676,77 @@ mod kernel_signals {
         Default,
     }
 
+    /// Mask of the used bits in DISPOSITION_STATE word `word` (2 bits per
+    /// managed signal; the tail of the last word is unused).
+    fn state_mask(word: u32) -> u64 {
+        let total_bits = 2 * managed_signals().len() as u32;
+        let used = total_bits.saturating_sub(64 * word);
+        if used >= 64 {
+            u64::MAX
+        } else if used == 0 {
+            0
+        } else {
+            (1u64 << used) - 1
+        }
+    }
+
     /// True when every managed signal currently sits at `Default` in the
     /// recorded disposition state, so a reconcile whose wish-list is also
     /// all-Default has nothing to do. Used by the boundary-poll fast path
     /// (rubash#437) to skip the mutex + per-signal loop on the steady-state
     /// command path. Reads the packed state words atomically; no lock.
     pub(super) fn at_default_state() -> bool {
-        let total_bits = 2 * managed_signals().len() as u32;
-        let mask = |word: u32| -> u64 {
-            let used = total_bits.saturating_sub(64 * word);
-            if used >= 64 {
-                u64::MAX
-            } else if used == 0 {
-                0
-            } else {
-                (1u64 << used) - 1
+        DISPOSITION_STATE[0].load(Ordering::Relaxed) & state_mask(0) == 0
+            && DISPOSITION_STATE[1].load(Ordering::Relaxed) & state_mask(1) == 0
+    }
+
+    /// The packed wish-space state of the ENTRY baseline: state 1
+    /// (Ignore) for each signal that was SIG_IGN when this process was
+    /// exec'd, 0 (Default) for every other managed signal. GNU snapshots
+    /// the entry dispositions once in initialize_traps
+    /// (trap.c:154, original_signals[] at trap.c:99; an entry-ignored
+    /// signal is SIG_HARD_IGNORE, trap.c:63) — a recorded baseline the
+    /// per-command path never re-derives. Built once from ENTRY_IGNORED,
+    /// which capture_entry_and_policy fills before the first boundary
+    /// reconcile; a caller that somehow ran earlier would freeze the
+    /// all-Default baseline and merely never take the fast path for a
+    /// seeded table (the pre-rubash#2630 status quo), never a wrong skip.
+    static BASELINE_STATE: std::sync::OnceLock<[u64; 2]> = std::sync::OnceLock::new();
+
+    fn baseline_state() -> [u64; 2] {
+        *BASELINE_STATE.get_or_init(|| {
+            let mut words = [0u64; 2];
+            let ignored = ENTRY_IGNORED.load(Ordering::Relaxed);
+            for (index, _) in managed_signals().iter().enumerate() {
+                if ignored & (1u64 << index) != 0 {
+                    let bits = 2 * index;
+                    words[bits / 64] |= 1u64 << (bits % 64);
+                }
             }
-        };
-        DISPOSITION_STATE[0].load(Ordering::Relaxed) & mask(0) == 0
-            && DISPOSITION_STATE[1].load(Ordering::Relaxed) & mask(1) == 0
+            words
+        })
+    }
+
+    /// True when the recorded disposition state equals the entry
+    /// baseline, so a reconcile whose wish-list is also the baseline has
+    /// nothing to do. This is the boundary fast path's state gate since
+    /// rubash#2630: seed_startup_traps materializes each entry-ignored
+    /// signal as an empty trap-table entry whose wish is Ignore, so the
+    /// recorded state parks those signals at 1 forever and the
+    /// all-Default test in at_default_state could never pass — every
+    /// command boundary paid the full slow-path reconcile (~2x per
+    /// command) in exactly the supervisor/nohup launch shape that
+    /// ignores signals on entry. The gate stays sound because it pairs
+    /// with the table-side baseline test in
+    /// reconcile_kernel_trap_dispositions: whenever the recorded state
+    /// has not yet converged to the baseline (first boundary, a trap
+    /// mutation, the FG_INT_HOLD window, the SIGINT REVERT rewrite of
+    /// the baseline itself) the slow path runs and pushes it there.
+    pub(super) fn at_baseline_state() -> bool {
+        let baseline = baseline_state();
+        DISPOSITION_STATE[0].load(Ordering::Relaxed) & state_mask(0) == baseline[0] & state_mask(0)
+            && DISPOSITION_STATE[1].load(Ordering::Relaxed) & state_mask(1)
+                == baseline[1] & state_mask(1)
     }
 
     pub(super) fn reconcile(dispositions: &[(i32, Disposition)]) {
@@ -3560,6 +3646,56 @@ pub fn revert_entry_ignored_sigint(interactive: bool) {
     kernel_signals::revert_sigint(interactive);
 }
 
+/// Whether the trap-table key `key` names a signal that was ignored on
+/// process entry. The key suffix is the trap short name; the managed set
+/// resolves through managed_trap_keys + the managed entry mask, the
+/// fatal quartet through the all-signal entry probe
+/// (kernel_signals::entry_ignored_mask_all). An unrecognized suffix is
+/// NOT entry-ignored (a user-forged key stays conservatively armed,
+/// exactly the pre-rubash#2630 verdict).
+#[cfg(unix)]
+fn trap_key_is_entry_ignored(key: &str) -> bool {
+    let Some(short) = key.strip_prefix("__RUBASH_TRAP_SIG") else {
+        return false;
+    };
+    if let Some((sig, _, _)) = managed_trap_keys()
+        .iter()
+        .find(|(_, name, _)| name == short)
+    {
+        return kernel_signals::entry_ignored(*sig);
+    }
+    let sig = match short {
+        "SEGV" => libc::SIGSEGV,
+        "BUS" => libc::SIGBUS,
+        "ILL" => libc::SIGILL,
+        "FPE" => libc::SIGFPE,
+        _ => return false,
+    };
+    kernel_signals::entry_ignored_mask_all() & (1u64 << (sig as u64 - 1)) != 0
+}
+
+/// Whether the trap-table entry under `key` is a LIVE trap the slow
+/// reconcile must apply (rubash#2630's table-side baseline test). A
+/// missing key is unarmed; a non-empty action is armed; an empty action
+/// is a user's `trap '' SIG` and stays armed — EXCEPT when the signal
+/// was ignored on entry: seed_startup_traps materializes exactly such
+/// an entry for every entry-ignored signal (GNU trap.c:154's
+/// original_signals baseline in table form), and its wish (Ignore) IS
+/// the entry disposition, so counting it as armed made the boundary
+/// fast path unreachable whenever the shell was launched with ignored
+/// signals. The distinction is safe to draw here because the fast path
+/// also requires the recorded state words to equal the entry baseline
+/// (kernel_signals::at_baseline_state): a baseline-looking table whose
+/// kernel state has not converged still takes the slow path.
+#[cfg(unix)]
+fn trap_entry_is_armed(env_vars: &std::collections::HashMap<String, String>, key: &str) -> bool {
+    match env_vars.get(key) {
+        None => false,
+        Some(action) if !action.is_empty() => true,
+        Some(_) => !trap_key_is_entry_ignored(key),
+    }
+}
+
 /// Map the executor's trap table onto the kernel dispositions (unix arm of
 /// rubash#226). Mirrors GNU's per-signal rules: `trap 'action' SIG` installs
 /// the handler (sig.c:830, sa_flags=0), `trap '' SIG` sets SIG_IGN, no trap
@@ -3571,7 +3707,9 @@ pub fn reconcile_kernel_trap_dispositions(env_vars: &std::collections::HashMap<S
     use kernel_signals::Disposition;
     // Steady-state fast path (rubash#437). The overwhelming majority of
     // boundary polls run with no managed signal trapped at all, so every
-    // disposition is Default and the kernel already holds Default. Detect
+    // disposition sits at the entry baseline (Default, or Ignore for
+    // entry-ignored signals — rubash#2630) and the kernel already holds
+    // it. Detect
     // that with six allocation-free `get`s — using the static key table so
     // no `format!` runs — and skip the disposition array + mutex entirely.
     // A non-empty reset list forces the slow path even when no key is
@@ -3599,15 +3737,16 @@ pub fn reconcile_kernel_trap_dispositions(env_vars: &std::collections::HashMap<S
     let any_armed = if env_vars.len() <= 512 {
         env_vars
             .keys()
-            .any(|key| key.starts_with("__RUBASH_TRAP_SIG"))
+            .filter(|key| key.starts_with("__RUBASH_TRAP_SIG"))
+            .any(|key| trap_entry_is_armed(env_vars, key))
     } else {
         managed_trap_keys()
             .iter()
-            .any(|(_, _, key)| env_vars.contains_key(key.as_str()))
-            || env_vars.contains_key("__RUBASH_TRAP_SIGSEGV")
-            || env_vars.contains_key("__RUBASH_TRAP_SIGBUS")
-            || env_vars.contains_key("__RUBASH_TRAP_SIGILL")
-            || env_vars.contains_key("__RUBASH_TRAP_SIGFPE")
+            .any(|(_, _, key)| trap_entry_is_armed(env_vars, key.as_str()))
+            || trap_entry_is_armed(env_vars, "__RUBASH_TRAP_SIGSEGV")
+            || trap_entry_is_armed(env_vars, "__RUBASH_TRAP_SIGBUS")
+            || trap_entry_is_armed(env_vars, "__RUBASH_TRAP_SIGILL")
+            || trap_entry_is_armed(env_vars, "__RUBASH_TRAP_SIGFPE")
     };
     // An armed EXIT trap also forces the slow path: it routes every
     // otherwise-untrapped managed signal through the handler
@@ -3624,11 +3763,16 @@ pub fn reconcile_kernel_trap_dispositions(env_vars: &std::collections::HashMap<S
         && !exit_armed
         && !interactive
         && no_reset
-        && kernel_signals::at_default_state()
+        && kernel_signals::at_baseline_state()
         && kernel_signals::fatal_at_default()
     {
-        // No trap keys exist on this path, so the trap '' record is
-        // empty by construction (rubash#1991).
+        // No LIVE trap keys exist on this path (only seeded
+        // entry-ignored baseline entries may be present), so the
+        // trap '' record can hold at most entry-ignored bits — and
+        // those are restored for fork children from the entry snapshot
+        // itself (pre_exec_child_dispositions consults ENTRY_IGNORED
+        // before TRAP_IGNORED), never from this record (rubash#1991,
+        // rubash#2630).
         kernel_signals::clear_trap_ignored_all();
         return;
     }
