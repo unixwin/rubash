@@ -187,10 +187,7 @@ impl Executor {
         cmd: &CommandNode,
         process: &mut Command,
         preopened: Option<
-            &mut std::collections::HashMap<
-                usize,
-                std::rc::Rc<crate::executor::fd_table::FileFd>,
-            >,
+            &mut std::collections::HashMap<usize, std::rc::Rc<crate::executor::fd_table::FileFd>>,
         >,
     ) -> Result<(), ExecuteError> {
         self.apply_external_stdin_redirect(cmd, process)?;
@@ -491,10 +488,7 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
         mut preopened: Option<
-            &mut std::collections::HashMap<
-                usize,
-                std::rc::Rc<crate::executor::fd_table::FileFd>,
-            >,
+            &mut std::collections::HashMap<usize, std::rc::Rc<crate::executor::fd_table::FileFd>>,
         >,
     ) -> Result<Option<ExternalStdioPlan>, ExecuteError> {
         use crate::parser::RedirectKind;
@@ -728,7 +722,8 @@ impl Executor {
                         preopened.as_deref_mut(),
                         &target,
                         redirect,
-                    )? else {
+                    )?
+                    else {
                         return Ok(None);
                     };
                     let stderr = file.try_clone().ok().map(ExternalStdioSlot::Handle);
@@ -803,7 +798,8 @@ impl Executor {
                             preopened.as_deref_mut(),
                             word,
                             redirect,
-                        )? else {
+                        )?
+                        else {
                             return Ok(None);
                         };
                         let stderr = file.try_clone().ok().map(ExternalStdioSlot::Handle);
@@ -915,7 +911,8 @@ impl Executor {
                         preopened.as_deref_mut(),
                         &target,
                         redirect,
-                    )? else {
+                    )?
+                    else {
                         return Ok(None);
                     };
                     let slot = ExternalStdioSlot::Handle(file);
@@ -1039,10 +1036,7 @@ impl Executor {
         &self,
         position: usize,
         mut preopened: Option<
-            &mut std::collections::HashMap<
-                usize,
-                std::rc::Rc<crate::executor::fd_table::FileFd>,
-            >,
+            &mut std::collections::HashMap<usize, std::rc::Rc<crate::executor::fd_table::FileFd>>,
         >,
         target: &str,
         redirect: &Redirect,
