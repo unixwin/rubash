@@ -2692,7 +2692,7 @@ pub fn stdin_source_needs_more(source: &str) -> bool {
 /// read_token fails inside the compound's own token read), so none of
 /// the compound — and nothing else on its opening line — ever runs,
 /// and the compound-EOF diagnostic is never printed (rubash#1589).
-fn unclosed_compound_open_line(text: &str) -> Option<usize> {
+pub(crate) fn unclosed_compound_open_line(text: &str) -> Option<usize> {
     let tokens = tokenize(text);
     let mut stack: Vec<(&str, usize)> = Vec::new();
     for token in &tokens {
@@ -3918,6 +3918,44 @@ fn command_tree_has_near_marker(command: &CommandNode) -> bool {
         return true;
     }
     command_tree_walk_nested(command, command_tree_has_near_marker)
+}
+
+/// True when this command (or any nested command) carries a HARD
+/// parse failure — a token the parser rejected (`__RUBASH_PARSE_ERROR_NEAR__`,
+/// a plain `__RUBASH_PARSE_ERROR__` "unexpected token" value, a
+/// `__RUBASH_PARSE_ERROR_COND__` condition error, or a
+/// `__RUBASH_COMPOUND_SYNTAX_ERROR*` compound error). GNU's reader hits
+/// these at the offending token's position, before EOF inside any
+/// matched pair is ever reached, so they preempt the unclosed-pair
+/// verdict (rubash#3641). The end-of-input marker family is excluded:
+/// an unclosed keyword compound only reports "from `X' command" when
+/// the reader reaches clean EOF, which a pair error inside it beats
+/// (parse.y:6883-6901 checks shell_eof_token before compoundcmd_top).
+pub(crate) fn command_tree_has_hard_parse_error(command: &CommandNode) -> bool {
+    let hard = command.assignments.iter().any(|(name, value)| {
+        name == "__RUBASH_PARSE_ERROR_NEAR__"
+            || name == "__RUBASH_PARSE_ERROR_COND__"
+            || name.starts_with("__RUBASH_COMPOUND_SYNTAX_ERROR")
+            || (name == "__RUBASH_PARSE_ERROR__" && value.starts_with("unexpected token"))
+    });
+    hard || command_tree_walk_nested(command, command_tree_has_hard_parse_error)
+}
+
+/// True when this command (or any nested command) carries an
+/// end-of-input verdict — the `__RUBASH_PARSE_ERROR_EOF*` marker family
+/// or the plain `__RUBASH_PARSE_ERROR__` "unexpected end of file"
+/// value (the incomplete-input family; hard `unexpected token'
+/// diagnostics are excluded). Trap-action prefix screening uses this
+/// to tell a complete command list from one GNU's parse_and_execute
+/// reader loop would still be gathering (rubash#3641).
+pub(crate) fn command_tree_has_eof_parse_error(command: &CommandNode) -> bool {
+    if command.assignments.iter().any(|(name, value)| {
+        name.starts_with("__RUBASH_PARSE_ERROR_EOF")
+            || (name == "__RUBASH_PARSE_ERROR__" && value.starts_with("unexpected end of file"))
+    }) {
+        return true;
+    }
+    command_tree_walk_nested(command, command_tree_has_eof_parse_error)
 }
 
 /// True when this command (or any nested command) carries one of the
