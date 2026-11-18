@@ -81,7 +81,7 @@ fn nested_backquote_eof_reports_single_diagnostic() {
     let script = r#"echo "3:`echo \`echo \\`echo deep\\\``"
 "#;
     let (_stdout, stderr, code) = run_rubash_file(script, "f6single");
-    assert_eq!(code, Some(1), "stderr: {stderr}");
+    assert_eq!(code, Some(2), "stderr: {stderr}");
     let diags = diagnostic_lines(&stderr);
     assert_eq!(
         diags.len(),
@@ -100,7 +100,7 @@ fn nested_backquote_eof_reports_single_diagnostic() {
 fn unclosed_dquote_names_dquote() {
     let script = "echo \"\n";
     let (_stdout, stderr, code) = run_rubash_file(script, "g1");
-    assert_eq!(code, Some(1), "stderr: {stderr}");
+    assert_eq!(code, Some(2), "stderr: {stderr}");
     assert!(
         stderr.contains("unexpected EOF while looking for matching `\"'"),
         "stderr: {stderr}"
@@ -115,7 +115,7 @@ fn closed_backquote_inside_open_dquote_names_dquote() {
     let script = r#"echo "`x`
 "#;
     let (_stdout, stderr, code) = run_rubash_file(script, "g5");
-    assert_eq!(code, Some(1), "stderr: {stderr}");
+    assert_eq!(code, Some(2), "stderr: {stderr}");
     assert!(
         stderr.contains("unexpected EOF while looking for matching `\"'"),
         "stderr: {stderr}"
@@ -187,7 +187,7 @@ fn multiline_body_quote_tests_103_105() {
 fn backquote_eof_inside_dollar_paren_names_backquote() {
     let script = "echo $(`echo 'a\n";
     let (_stdout, stderr, code) = run_rubash_file(script, "t5");
-    assert_eq!(code, Some(1), "stderr: {stderr}");
+    assert_eq!(code, Some(2), "stderr: {stderr}");
     assert!(
         stderr.contains("unexpected EOF while looking for matching ``'"),
         "stderr: {stderr:?}"
@@ -236,7 +236,7 @@ fn unclosed_keyword_body_keeps_parser_diagnostic() {
 
 fn assert_gnu_backquote_verdict(tag: &str, script: &str, wrong_needles: &[&str]) {
     let (_stdout, stderr, code) = run_rubash_file(script, tag);
-    assert_eq!(code, Some(1), "stderr: {stderr}");
+    assert_eq!(code, Some(2), "stderr: {stderr}");
     assert_eq!(diagnostic_lines(&stderr).len(), 1, "stderr: {stderr:?}");
     // GNU's bytes: "matching " + 60 60 27.
     assert!(
@@ -298,7 +298,7 @@ fn nested_backquote_eof_names_backquote() {
     let script = r#"echo "3:`echo \`echo \\`echo deep\\\``"
 "#;
     let (_stdout, stderr, code) = run_rubash_file(script, "f6full");
-    assert_eq!(code, Some(1), "stderr: {stderr}");
+    assert_eq!(code, Some(2), "stderr: {stderr}");
     assert_eq!(diagnostic_lines(&stderr).len(), 1, "stderr: {stderr:?}");
     assert!(
         stderr.contains("line 1: unexpected EOF while looking for matching ``'"),

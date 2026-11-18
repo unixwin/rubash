@@ -1207,9 +1207,12 @@ mod case_reclassification_tests {
     /// `case $(ls`.
     #[test]
     fn keeps_comsub_case_subject() {
-        // `esac` right after `in` stays the empty-case no-span shape
+        // `esac` right after `in` stays the empty-case shape
         // (keeps_empty_case_esac_shape), comsub subject or not.
-        assert_eq!(extract("$(case $(ls) in esac)"), None);
+        assert_eq!(
+            extract("$(case $(ls) in esac)").as_deref(),
+            Some("case $(ls) in esac")
+        );
         for w in [
             "$(case $(ls) in *) echo ok;; esac)",
             "$(case a$(ls)b in *) echo ok;; esac)",
