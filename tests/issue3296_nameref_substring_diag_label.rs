@@ -69,13 +69,15 @@ fn run(script: &str) -> Outcome {
 fn expect_diag_times(script: &str, needle: &str, times: usize, stdout: &[u8], ctx: &str) {
     let out = run(script);
     assert_eq!(
-        out.code, 0,
+        out.code,
+        0,
         "{ctx}: rc must be 0 (non-fatal diagnostic); stdout: {:?} stderr: {}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
     assert_eq!(
-        out.stdout, stdout,
+        out.stdout,
+        stdout,
         "{ctx}: stdout must be {stdout:?}; got {:?}",
         String::from_utf8_lossy(&out.stdout)
     );
@@ -114,9 +116,12 @@ fn scalar_offset_label_echoes_rhs_value() {
 #[test]
 fn scalar_length_operand_carries_label_once() {
     // The label also covers the length operand (same verify_substring_values
-    // call, same this_command_name window).
+    // call, same this_command_name window). The nameref must be declared:
+    // without `declare -n ref`, GNU binds `ref=1` silently and prints no
+    // diagnostic (oracle-checked 2026-11-19); the original pin dropped
+    // the declaration and asserted a diagnostic GNU never emits.
     expect_diag_times(
-        "v=abcdef; echo \"${v:1:ref=1}\"",
+        "declare -n ref; v=abcdef; echo \"${v:1:ref=1}\"",
         "v: `1': not a valid identifier",
         1,
         b"b\n",

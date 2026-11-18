@@ -169,6 +169,18 @@ pub(in crate::executor) fn clear_arith_eval_events() {
     ARITH_EVAL_EVENTS.with(|slot| slot.borrow_mut().clear());
 }
 
+/// Number of events currently in the evaluation-order event log.
+pub(in crate::executor) fn arith_eval_events_len() -> usize {
+    ARITH_EVAL_EVENTS.with(|slot| slot.borrow().len())
+}
+
+/// Drop events recorded after `len`: a probe that evaluated operands
+/// but did not claim the word must not leave its diagnostics for the
+/// real expansion's drain (rubash#3296).
+pub(in crate::executor) fn truncate_arith_eval_events(len: usize) {
+    ARITH_EVAL_EVENTS.with(|slot| slot.borrow_mut().truncate(len));
+}
+
 /// Record one non-fatal diagnostic at its production point, in
 /// evaluation order (rubash#3078), stamped with the
 /// `this_command_name` label currently in force (rubash#3295).

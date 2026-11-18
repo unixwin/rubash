@@ -723,7 +723,14 @@ impl Executor {
         // The scan is verdict-only: discard the offset/length writes
         // (rubash#3649) -- the real expansion applies them.
         let mut writes = Vec::new();
-        self.parse_parameter_substring_impl(name, true, &mut writes)
+        let parsed = self.parse_parameter_substring_impl(name, true, &mut writes);
+        // The scan is verdict-only: its offset/length evaluation must
+        // not leave diagnostics behind, or the real expansion's drain
+        // prints them a second time (rubash#3296; #3225 precedent --
+        // a probe judges truth, it does not report). The verdict
+        // itself travels in the return value.
+        crate::executor::arithmetic::clear_arith_eval_events();
+        parsed
     }
 
     fn parse_parameter_substring_impl<'a>(
@@ -944,10 +951,26 @@ impl Executor {
         // NO overlay of queued writes here: the same fragment is parsed
         // more than once by layered fan-out probes, and every parse must
         // read the same live value.
-        let (evaluated, writes, category) = eval_conditional_arith_value_categorized_with_writes(
-            &expression,
-            &self.shell_state.env_vars,
-        );
+        // GNU subst.c:10873-10878 arithsub clears this_command_name
+        // around evalexp: an operand that IS the `$(( ... ))`
+        // expansion evaluates its evalexp under the NULL window, not
+        // the varname window (rubash#3296). The textual strip above
+        // conflates the arithsub evalexp with the outer verify
+        // evalexp, so NULL only the final evaluation -- the expansion
+        // preamble still runs under the varname window, as in GNU's
+        // expand_arith_string. A `(...)` operand keeps the varname
+        // label (subst.c:8395 verify path does not NULL).
+        let dollar_arith_operand = value
+            .strip_prefix("$((")
+            .is_some_and(|inner| inner.ends_with("))"));
+        let (evaluated, writes, category) = {
+            let _arith_label = dollar_arith_operand
+                .then(|| crate::executor::arithmetic::arith_eval_label_scope(None));
+            eval_conditional_arith_value_categorized_with_writes(
+                &expression,
+                &self.shell_state.env_vars,
+            )
+        };
         if evaluated.is_none() {
             self.shell_state
                 .arithmetic_last_error_category
@@ -1213,9 +1236,18 @@ impl Executor {
         let expression = self.expand_embedded_parameters_mut(&expression);
         // The offset/length evalexp runs under parameter_brace_expand's
         // this_command_name = varname window (subst.c:9372-9378), not
-        // arithsub's NULL — inherit the label scope installed above
-        // (rubash#3295).
-        let evaluated = self.eval_arithmetic_expansion_value_inherit_label(&expression);
+        // arithsub's NULL -- inherit the label scope installed above
+        // (rubash#3295). Except when the operand IS the `$(( ... ))`
+        // expansion: its evalexp runs under arithsub's NULL window
+        // (subst.c:10873-10878; rubash#3296) -- see the &self variant.
+        let dollar_arith_operand = value
+            .strip_prefix("$((")
+            .is_some_and(|inner| inner.ends_with("))"));
+        let evaluated = {
+            let _arith_label = dollar_arith_operand
+                .then(|| crate::executor::arithmetic::arith_eval_label_scope(None));
+            self.eval_arithmetic_expansion_value_inherit_label(&expression)
+        };
         if evaluated.is_none() {
             // Save the expanded expression for report_substring_arithmetic_error
             // (same rationale as eval_parameter_substring_offset).
