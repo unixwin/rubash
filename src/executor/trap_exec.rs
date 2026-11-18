@@ -8309,6 +8309,253 @@ impl Executor {
         saves
     }
 
+    /// True when a non-`{var}` redirect entry at the current walk position
+    /// fails its expansion, limit, dup, or open check. Used by
+    /// `apply_dynamic_fd_var_redirects` to stop at the failing redirect
+    /// frontier so `{var}` entries positioned after a failing redirect are
+    /// never bound (while earlier `{var}` entries survive, matching GNU's
+    /// left-to-right `do_redirections` + `undo_partial_redirects`).
+    fn non_fd_var_redirect_fails_at(
+        &mut self,
+        redirect: &Redirect,
+        list_closed: &std::collections::HashSet<u32>,
+        walk_space: &FdWalkSpace,
+    ) -> Result<bool, ExecuteError> {
+        use crate::parser::RedirectKind;
+        if crate::executor::support_names::is_injected_group_redirect(redirect) {
+            return Ok(false);
+        }
+        if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset")
+            && !matches!(
+                redirect.kind,
+                RedirectKind::HereDoc | RedirectKind::HereString
+            )
+        {
+            let masked_target = Self::mask_recorded_process_substitutions(
+                &redirect.target_metadata.raw,
+                &redirect.target_metadata.process_substitutions,
+            );
+            let masked_target =
+                super::redirection::mask_redirect_target_quoted_spans(&masked_target);
+            if self.nounset_unbound_parameter(&masked_target).is_some() {
+                return Ok(true);
+            }
+        }
+        if matches!(
+            redirect.kind,
+            RedirectKind::HereDoc | RedirectKind::HereString
+        ) {
+            let gate_fd = redirect.fd.unwrap_or(0);
+            return Ok(self.redirect_fd_over_limit(gate_fd));
+        }
+        if matches!(
+            redirect.kind,
+            RedirectKind::CloseInput | RedirectKind::CloseOutput
+        ) {
+            return Ok(false);
+        }
+        let target = self.expand_redirect_target(redirect);
+        if self.shell_state.redirect_failglob_error.get() {
+            return Ok(true);
+        }
+        let raw_word = redirect
+            .target_metadata
+            .raw
+            .strip_prefix('&')
+            .unwrap_or(&redirect.target_metadata.raw);
+        let expanded_word = target.strip_prefix('&').unwrap_or(&target);
+        let is_dup_kind = matches!(
+            redirect.kind,
+            RedirectKind::DuplicateInput | RedirectKind::DuplicateOutput
+        );
+        let mut dup_output_err_and_out = false;
+        if is_dup_kind {
+            let gate_fd = redirect
+                .fd
+                .unwrap_or(if redirect.kind == RedirectKind::DuplicateInput {
+                    0
+                } else {
+                    1
+                });
+            if is_closed_redirect_target(&target) {
+                return Ok(false);
+            }
+            if crate::parser::raw_word_has_unquoted_process_substitution(raw_word)
+                && !(redirect.kind == RedirectKind::DuplicateOutput
+                    && gate_fd == 1
+                    && !raw_word.ends_with('-'))
+            {
+                return Ok(true);
+            }
+            if !target.starts_with('&') {
+                return Ok(false);
+            }
+            if let Some((fd, _)) = redirect_target_fd_and_move(&target) {
+                if fd == gate_fd {
+                    return Ok(false);
+                }
+                if self.redirect_fd_over_limit(gate_fd) {
+                    return Ok(true);
+                }
+                return Ok(list_closed.contains(&fd)
+                    || matches!(
+                        self.fd_walk_resolve(walk_space, fd),
+                        FdWalkBinding::Closed | FdWalkBinding::Unmodelled
+                    ));
+            }
+            if expanded_word.is_empty()
+                && !super::execution_misc::raw_word_has_quoted_span(raw_word)
+            {
+                return Ok(true);
+            }
+            if expanded_word == "-" {
+                return Ok(false);
+            }
+            if expanded_word.chars().all(|ch| ch.is_ascii_digit()) {
+                return match expanded_word
+                    .parse::<i64>()
+                    .ok()
+                    .and_then(|value| u32::try_from(value).ok())
+                {
+                    Some(fd) if fd == gate_fd => Ok(false),
+                    Some(fd) => {
+                        if self.redirect_fd_over_limit(gate_fd) {
+                            Ok(true)
+                        } else {
+                            Ok(list_closed.contains(&fd)
+                                || matches!(
+                                    self.fd_walk_resolve(walk_space, fd),
+                                    FdWalkBinding::Closed | FdWalkBinding::Unmodelled
+                                ))
+                        }
+                    }
+                    None => Ok(true),
+                };
+            }
+            let move_word = raw_word.ends_with('-');
+            dup_output_err_and_out =
+                !move_word && redirect.kind == RedirectKind::DuplicateOutput && gate_fd == 1;
+            if !dup_output_err_and_out {
+                return Ok(true);
+            }
+        }
+        let file_open_kind = dup_output_err_and_out
+            || matches!(
+                redirect.kind,
+                RedirectKind::Input
+                    | RedirectKind::ReadWrite
+                    | RedirectKind::Output
+                    | RedirectKind::Append
+                    | RedirectKind::ClobberOutput
+                    | RedirectKind::CombinedOutput
+                    | RedirectKind::CombinedAppend
+            );
+        if !file_open_kind {
+            return Ok(false);
+        }
+        let gate_fd = redirect.fd.unwrap_or(
+            if matches!(redirect.kind, RedirectKind::Input | RedirectKind::ReadWrite) {
+                0
+            } else {
+                1
+            },
+        );
+        if self.redirect_fd_over_limit(gate_fd) {
+            return Ok(true);
+        }
+        if expanded_word.is_empty()
+            || self.redirect_operand_ambiguous(redirect, &redirect.target_metadata.raw, &target)
+        {
+            return Ok(true);
+        }
+        if (super::execution_misc::is_restricted_write_redirect(&redirect.kind)
+            || dup_output_err_and_out)
+            && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "restricted")
+        {
+            return Ok(true);
+        }
+        if let Some(fd) = crate::special_paths::fd_alias_target(&target) {
+            if list_closed.contains(&fd)
+                || matches!(
+                    self.fd_walk_resolve(walk_space, fd),
+                    FdWalkBinding::Closed | FdWalkBinding::Unmodelled
+                )
+            {
+                return Ok(true);
+            }
+        }
+        if redirect.kind == RedirectKind::Input
+            && super::execution_misc::dev_stdio_redirect_fd(&target).is_none()
+            && !crate::special_paths::is_net_redirect_target(&target)
+            && !super::external_setup::redirect_target_span_is_recorded(redirect)
+            && redirect_target_fd(&target).is_none()
+            && crate::special_paths::synthetic_proc_content(&target).is_none()
+            && !crate::special_paths::is_synthetic_link_path(&target)
+            && !crate::special_paths::is_zero_device(&target)
+            && !crate::special_paths::is_full_device(&target)
+            && !crate::special_paths::is_random_device(&target)
+        {
+            let path = self.session_path(crate::executor::path::windows_operand_file_path(
+                shell_path_to_windows(&target, &self.shell_state.env_vars),
+                &self.shell_state.env_vars,
+            ));
+            let probe_verdict = match self.anchored_redirect_probe(&target, false) {
+                Some(verdict) => verdict,
+                None => super::shell_options::probe_input_redirect_gate(&path),
+            };
+            if probe_verdict.is_err() {
+                return Ok(true);
+            }
+        } else if matches!(
+            redirect.kind,
+            RedirectKind::Output
+                | RedirectKind::ClobberOutput
+                | RedirectKind::CombinedOutput
+                | RedirectKind::Append
+                | RedirectKind::CombinedAppend
+        ) && !is_closed_redirect_target(&target)
+            && redirect_target_fd(&target).is_none()
+            && super::execution_misc::dev_stdio_redirect_fd(&target).is_none()
+            && !is_null_device(&target)
+            && !target.starts_with("<(")
+            && !target.starts_with(">(")
+            && !crate::special_paths::is_net_redirect_target(&target)
+        {
+            let output_target = self.redirect_output_path_target(&target);
+            let path = self
+                .session_path(self.redirect_target_filesystem_path_for(redirect, &output_target));
+            let existed = path.exists();
+            let probe = if matches!(
+                redirect.kind,
+                RedirectKind::Append | RedirectKind::CombinedAppend
+            ) {
+                crate::executor::shell_options::probe_output_redirect_append_file(
+                    self,
+                    Some(redirect),
+                    &target,
+                )
+            } else {
+                crate::executor::shell_options::probe_output_redirect_file(
+                    self,
+                    Some(redirect),
+                    &target,
+                    redirect.clobber,
+                )
+            };
+            if probe.is_err() {
+                return Ok(true);
+            }
+            if !existed {
+                if let Ok(meta) = std::fs::metadata(&path) {
+                    if meta.is_file() && meta.len() == 0 {
+                        let _ = std::fs::remove_file(&path);
+                    }
+                }
+            }
+        }
+        Ok(false)
+    }
+
     /// GNU redir.c do_redirections → redir_varassign (redir.c:1133-1166):
     /// every `{var}` redirection allocates a fresh descriptor and assigns
     /// the number to the variable — for builtins, functions and external
@@ -8389,7 +8636,23 @@ impl Executor {
         // against the ambient table alone (#2607).
         let mut walk_space = FdWalkSpace::new();
         let mut folded_closes = 0usize;
+        let mut heredoc_twins = cmd.heredoc_redirects.iter();
+        let mut hit_failing_redirect = false;
         for (position, redirect) in cmd.redirects.iter().enumerate() {
+            let has_heredoc_twin = matches!(redirect.kind, crate::parser::RedirectKind::HereDoc)
+                || (matches!(redirect.kind, crate::parser::RedirectKind::HereString)
+                    && (redirect.fd.is_some() || redirect.fd_var.is_some()));
+            let heredoc_twin = if has_heredoc_twin {
+                heredoc_twins.next()
+            } else {
+                None
+            };
+            if redirect.fd_var.is_none()
+                && self.non_fd_var_redirect_fails_at(redirect, &list_closed, &walk_space)?
+            {
+                hit_failing_redirect = true;
+                break;
+            }
             if let Some(fd) = redirect.fd {
                 occupied_slots.insert(fd);
             }
@@ -8458,15 +8721,24 @@ impl Executor {
                 .unwrap_or_else(|| name.to_string());
             let prior = self.shell_state.env_vars.get(&resolved).cloned();
             let prior_typed = self.shell_state.variables.get(&resolved).cloned();
-            let outcome = self.execute_dynamic_fd_var_redirect(
-                redirect,
-                auto_close,
-                true,
-                &occupied_slots,
-                &list_closed,
-                position,
-                &walk_space,
-            );
+            let outcome = if let Some(heredoc_redirect) = heredoc_twin {
+                self.execute_dynamic_fd_var_heredoc(
+                    heredoc_redirect,
+                    auto_close,
+                    &occupied_slots,
+                    &walk_space,
+                )
+            } else {
+                self.execute_dynamic_fd_var_redirect(
+                    redirect,
+                    auto_close,
+                    true,
+                    &occupied_slots,
+                    &list_closed,
+                    position,
+                    &walk_space,
+                )
+            };
             // rubash#2322: fold the closes THIS entry recorded
             // (close forms and move-form dup sources, stamped with
             // their positions) into the walk overlay, and let a
@@ -8538,58 +8810,53 @@ impl Executor {
                     self.write_default_stderr(&stderr)?;
                     self.exit_code = 1;
                     redirect_failed = true;
+                    break;
                 }
                 Err(error) => return Err(error),
             }
         }
-        // `{var}<<EOF` heredocs live in heredoc_redirects, not redirects.
-        // GNU redir.c make_here_document writes the body to a temp file and
-        // redir_varassign binds the fresh fd to var, so `exec {v}<<-EOF`
-        // leaves v holding a readable descriptor (vredir1.sub).
-        // rubash#2282: heredoc entries are applied after the plain list in
-        // this AST split, so every numbered slot of the command counts as
-        // occupied for their allocations (the split does not preserve a
-        // heredoc entry's source position among the plain entries; GNU
-        // processes it at its list position).
-        occupied_slots.extend(command_own_numbered_slots(cmd));
-        for redirect in &cmd.heredoc_redirects {
-            let Some(name) = redirect.fd_var.as_deref() else {
-                continue;
-            };
-            let resolved = self
-                .resolved_variable_name(name)
-                .unwrap_or_else(|| name.to_string());
-            let prior = self.shell_state.env_vars.get(&resolved).cloned();
-            let prior_typed = self.shell_state.variables.get(&resolved).cloned();
-            let outcome = self.execute_dynamic_fd_var_heredoc(
-                redirect,
-                auto_close,
-                &occupied_slots,
-                &walk_space,
-            );
-            // rubash#2281: the applier-bound descriptor, as at the
-            // plain-list site above (a heredoc entry always binds).
-            let bound_fd = match &outcome {
-                Ok(_) => self.dynamic_fd_variable_value(&resolved),
-                _ => None,
-            };
-            self.fd_var_external_undo
-                .push((resolved, prior, prior_typed, bound_fd));
-            match outcome {
-                Ok(_) => {}
-                Err(ExecuteError::IoError(error)) => {
-                    let mut stderr = Vec::new();
-                    writeln!(
-                        &mut stderr,
-                        "{}{}",
-                        self.diagnostic_prefix(),
-                        crate::posix_errors::message(&error)
-                    )?;
-                    self.write_default_stderr(&stderr)?;
-                    self.exit_code = 1;
-                    redirect_failed = true;
+        // Any unpaired heredoc entry (a store with no `redirects` twin)
+        // still binds at the tail unless an earlier redirect failed.
+        if !hit_failing_redirect && !redirect_failed {
+            occupied_slots.extend(command_own_numbered_slots(cmd));
+            for redirect in heredoc_twins {
+                let Some(name) = redirect.fd_var.as_deref() else {
+                    continue;
+                };
+                let resolved = self
+                    .resolved_variable_name(name)
+                    .unwrap_or_else(|| name.to_string());
+                let prior = self.shell_state.env_vars.get(&resolved).cloned();
+                let prior_typed = self.shell_state.variables.get(&resolved).cloned();
+                let outcome = self.execute_dynamic_fd_var_heredoc(
+                    redirect,
+                    auto_close,
+                    &occupied_slots,
+                    &walk_space,
+                );
+                let bound_fd = match &outcome {
+                    Ok(_) => self.dynamic_fd_variable_value(&resolved),
+                    _ => None,
+                };
+                self.fd_var_external_undo
+                    .push((resolved, prior, prior_typed, bound_fd));
+                match outcome {
+                    Ok(_) => {}
+                    Err(ExecuteError::IoError(error)) => {
+                        let mut stderr = Vec::new();
+                        writeln!(
+                            &mut stderr,
+                            "{}{}",
+                            self.diagnostic_prefix(),
+                            crate::posix_errors::message(&error)
+                        )?;
+                        self.write_default_stderr(&stderr)?;
+                        self.exit_code = 1;
+                        redirect_failed = true;
+                        break;
+                    }
+                    Err(error) => return Err(error),
                 }
-                Err(error) => return Err(error),
             }
         }
         // rubash#2629: record this run's binds for a later helper

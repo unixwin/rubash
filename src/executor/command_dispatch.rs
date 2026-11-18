@@ -267,6 +267,9 @@ impl Executor {
         // conversion further down.
         let mut builtin_pregate_failed = false;
         let result = if redirect_rejected {
+            if cmd.words.first().map(String::as_str) == Some("exec") {
+                let _ = self.apply_dynamic_fd_var_redirects(cmd, false, true)?;
+            }
             Ok(())
         } else {
             // rubash#2124: GNU redir.c do_redirections opens a winning
@@ -317,6 +320,9 @@ impl Executor {
                         && self.pregate_redirect_open_check(cmd)?;
                     let result = if pregate_failed {
                         builtin_pregate_failed = true;
+                        if cmd.words.first().map(String::as_str) == Some("exec") {
+                            let _ = self.apply_dynamic_fd_var_redirects(cmd, false, true)?;
+                        }
                         Ok(())
                     } else {
                         self.execute_prepared_command(cmd)

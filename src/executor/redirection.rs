@@ -20,7 +20,7 @@ use super::*;
 /// (`$(...)`, `${...}`, backticks) pass through verbatim — the
 /// scanner owns their interiors. Double-quoted spans stay live: a
 /// `$name` inside them IS a parent reference the gate must judge.
-fn mask_redirect_target_quoted_spans(raw: &str) -> String {
+pub(in crate::executor) fn mask_redirect_target_quoted_spans(raw: &str) -> String {
     let chars: Vec<char> = raw.chars().collect();
     let mut masked = String::with_capacity(raw.len());
     let mut i = 0usize;
