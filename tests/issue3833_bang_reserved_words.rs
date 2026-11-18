@@ -78,7 +78,14 @@ fn assert_reserved_error(script: &str, token: &str, line: usize) {
 
 #[test]
 fn bang_followed_by_reserved_words_are_syntax_errors() {
-    for kw in ["fi", "then", "done", "esac", "do", "else", "elif"] {
+    // `in` belongs here, not with the non-reserved shapes below: GNU
+    // bash 5.3.20 rejects it at a command position after `!` (and bare)
+    // with rc 2 (`syntax error near unexpected token `in''), because
+    // the command grammar has no production starting with the IN
+    // token. Verified against the oracle 2026-11-18; the earlier
+    // placement of `! in` among the unchanged shapes encoded the
+    // pre-#3901 product behaviour, which was itself the #3628 defect.
+    for kw in ["fi", "then", "done", "esac", "do", "else", "elif", "in"] {
         assert_reserved_error(&format!("! {kw}"), kw, 1);
     }
 }
@@ -167,14 +174,6 @@ fn already_correct_and_non_reserved_shapes_stay_unchanged() {
     assert!(
         stderr.contains("]: command not found") || stderr.contains("command not found"),
         "expected command-not-found for `! ]`, got: {stderr}"
-    );
-
-    let (stdout, stderr, rc) = run_c("! in");
-    assert_eq!(stdout, "", "stderr: {stderr}");
-    assert_eq!(rc, 0, "stderr: {stderr}");
-    assert!(
-        stderr.contains("in: command not found") || stderr.contains("command not found"),
-        "expected command-not-found for `! in`, got: {stderr}"
     );
 
     let (stdout, stderr, rc) = run_c("! (echo hi)");
