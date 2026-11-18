@@ -4346,6 +4346,11 @@ impl Executor {
                 ch => {
                     if let Some(end) = unquoted_list_token_end(&chars, index) {
                         flush_run!();
+                        // Same beyond-the-buffer sentinel the skip helpers
+                        // return for unclosed spans (see the #743/#875 clamps
+                        // in mark_literal_ifs_chars): an unclosed `${...`
+                        // token's end lands one past the buffer.
+                        let end = end.min(chars.len());
                         let token: String = chars[index..end].iter().collect();
                         if protected_lists {
                             for (i, field) in self
@@ -4386,7 +4391,7 @@ impl Executor {
                         } else {
                             index + 1
                         };
-                        for ch in &chars[index..end] {
+                        for ch in &chars[index..end.min(chars.len())] {
                             run.push(*ch);
                         }
                         index = end;
@@ -4526,7 +4531,7 @@ impl Executor {
                 index += 2;
             } else if let Some(end) = unquoted_list_token_end(&chars, index) {
                 flush_run!();
-                let token: String = chars[index..end].iter().collect();
+                let token: String = chars[index..end.min(chars.len())].iter().collect();
                 let mut fields = self.alternate_list_fields(&token, ifs_chars, false);
                 if fields.is_empty() {
                     fields = self.expand_alternate_piece(&token);
@@ -4540,7 +4545,7 @@ impl Executor {
             {
                 flush_run!();
                 let end = balanced_alternate_span_end(&chars, index);
-                let token: String = chars[index..end].iter().collect();
+                let token: String = chars[index..end.min(chars.len())].iter().collect();
                 assembled.push_str(&self.expand_alternate_piece(&token).join(ifs_first));
                 index = end;
             } else {
@@ -7212,7 +7217,7 @@ fn segment_alternate_raw(raw: &str, squotes_literal: bool) -> Vec<AlternatePiece
         } else if ch == '`' || (ch == '$' && matches!(chars.get(index + 1), Some('(') | Some('{')))
         {
             let end = balanced_alternate_span_end(&chars, index);
-            for ch in &chars[index..end] {
+            for ch in &chars[index..end.min(chars.len())] {
                 current.push(*ch);
             }
             index = end;
@@ -7532,6 +7537,8 @@ fn emit_unquoted_alternate_fields(
 mod command_word_materialization_tests {
     use super::mark_literal_ifs_chars;
     use super::materialize_expanded_command_word;
+    use super::segment_alternate_raw;
+    use super::AlternatePiece;
     use super::{ifs_literal_marks_possible, mark_quoted_ifs_from_raw, raw_has_ifs_quote_bytes};
 
     #[test]
@@ -8038,6 +8045,21 @@ mod command_word_materialization_tests {
         // The word is `a\ : the escape hop inside the unclosed backtick span
         // lands one past the buffer; the copy loop must stop at the edge.
         let _ = mark_literal_ifs_chars(r#"`a\"#, " \t\n");
+    }
+
+    #[test]
+    fn alternate_raw_unclosed_command_substitution_does_not_panic() {
+        // The `${a+'$('\'}` alternate word (braces.tests:59): inside the
+        // enclosing `"${...}"` the `'` is literal, so `$(` opens a raw
+        // command-substitution scan whose quoted tail runs off the buffer —
+        // skip_raw_command_substitution returns len+1 and the piece copy
+        // must clamp to the buffer instead of slicing past it.
+        let pieces = segment_alternate_raw("'$('\\'", true);
+        assert_eq!(pieces.len(), 1);
+        match &pieces[0] {
+            AlternatePiece::Unquoted(text) => assert_eq!(text, "'$('\\'"),
+            AlternatePiece::Quoted(text) => panic!("unexpected quoted piece {text:?}"),
+        }
     }
 
     #[test]
