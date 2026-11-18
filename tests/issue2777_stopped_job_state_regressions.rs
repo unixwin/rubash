@@ -334,9 +334,14 @@ fn jobs_listing_shows_stopped_after_observation() {
         stdout.contains("Stopped"),
         "the listing shows the stopped job:\nstdout={stdout}\nstderr={stderr}"
     );
+    // rubash#2777: GNU 5.3.20 itself races here — probe-gnu-w.sh
+    // form A (piped -i, the nail's own cell, 6 runs) answers W=137
+    // twice and W=147 four times, so a stopped-then-killed job
+    // waits as 128+9 or 128+19; only 127 is outside GNU's value
+    // set (no record at all). Accept either legal answer.
     assert!(
-        stdout.contains("W=137"),
-        "the stopped-then-killed job waits as 128+9:\nstdout={stdout}"
+        stdout.contains("W=137") || stdout.contains("W=147"),
+        "the stopped-then-killed job waits as 128+9 or 128+19:\nstdout={stdout}"
     );
 }
 
@@ -399,7 +404,14 @@ fn tstp_stop_also_shows_stopped() {
         stdout.contains("Stopped"),
         "the listing shows the TSTP-stopped job:\nstdout={stdout}\nstderr={stderr}"
     );
-    assert!(stdout.contains("W=137"), "stdout={stdout}");
+    // rubash#2777: same GNU race as the SIGSTOP cell — the
+    // stopped-then-killed job waits as 128+9 (reaped dead) or
+    // 128+20 (recorded TSTP stop); only 127 is outside GNU's value
+    // set. See probe-gnu-w.sh form A.
+    assert!(
+        stdout.contains("W=137") || stdout.contains("W=148"),
+        "stdout={stdout}"
+    );
 }
 
 // ----------------------------------------------------------------
@@ -644,4 +656,68 @@ fn pty_jobs_shows_stopped_without_observation() {
     let transcript = session.text();
     let status = session.finish();
     assert_eq!(status.code(), Some(0), "transcript: {:?}", transcript);
+}
+
+/// rubash#2777 R1 (captain three-way cell B): the retired-jobspec
+/// link lives only through the reap that noticed the death. One
+/// intervening command line — here the plain `echo` after the
+/// reaping `sleep 1` — expires it, so `wait %1` answers 127,
+/// matching GNU 5.3.20 (notified row deleted by the intervening
+/// REAP -> cleanup_dead_jobs round, jobs.c:1303).
+#[test]
+fn retired_link_expires_after_intervening_line() {
+    let home = sandbox("expire");
+    let (stdout, stderr, _code) = run_interactive(
+        &home,
+        &[
+            "set -m",
+            "sleep 30 &",
+            "kill -STOP %1",
+            "sleep 1",
+            "jobs",
+            "kill -KILL %1",
+            "sleep 1",
+            "echo SEP",
+            "wait %1",
+            "echo W=$?",
+        ],
+    );
+    assert!(
+        stdout.contains("W=127"),
+        "one intervening line retires the link: W must be 127:\nstdout={stdout}\nstderr={stderr}"
+    );
+}
+
+/// rubash#2777 R2 (captain three-way cell E): an operand wait
+/// answered through the record consumes it — GNU wait_for_job
+/// marks the slot J_NOTIFIED after answering (jobs.c:3434-3437),
+/// so a second `wait %1` finds nothing (127). GNU itself races
+/// the first answer between 137 and 147 (stopped-then-killed);
+/// only the second answer is pinned.
+#[test]
+fn retired_link_status_is_consumed_by_wait() {
+    let home = sandbox("consume");
+    let (stdout, stderr, _code) = run_interactive(
+        &home,
+        &[
+            "set -m",
+            "sleep 30 &",
+            "kill -STOP %1",
+            "sleep 1",
+            "jobs",
+            "kill -KILL %1",
+            "wait %1",
+            "echo W1=$?",
+            "wait %1",
+            "echo W2=$?",
+        ],
+    );
+    assert!(
+        stdout.contains("W1=137") || stdout.contains("W1=147"),
+        "first wait answers the killed job's status:\nstdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        stdout.contains("W2=127"),
+        "second wait finds no record: W2 must be 127:\nstdout={stdout}"
+    );
 }

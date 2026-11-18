@@ -1316,6 +1316,39 @@ fn extglob_pattern_words_stay_single_words() {
     }
     crate::lexer::set_parse_extended_glob(false);
 }
+
+#[test]
+fn issue3813_alias_after_comsub_comment_quote_expands() {
+    // rubash#3813: a `#` comment carrying an odd number of apostrophes
+    // inside `$(...)` must not hide the aliases after the substitution.
+    // The pre-pass's `$(` scanner used to treat the apostrophe as a real
+    // quote opener, swallowing the rest of the input as one word, so the
+    // closing alias `E='}; }'` never expanded and the alias-introduced
+    // `{` stayed unclosed (GNU: parse.y:3631 shell_getc — `#` at a
+    // token start always comments to EOL).
+    let lookup = |name: &str| match name {
+        "T" => Some(("{ f() {".to_string(), false)),
+        "E" => Some(("}; }".to_string(), false)),
+        _ => None,
+    };
+    let input = "T\n  v=$(echo hi # don't\n)\n  echo \"v=[$v]\"\nE\nf\necho done\n";
+    let out = expand_aliases_in_source(input, &lookup, false);
+    assert!(
+        out.starts_with("{ f() {"),
+        "opening alias T did not expand:\n{out}"
+    );
+    assert!(
+        out.contains("}; }"),
+        "closing alias E did not expand; expansion was:\n{out}"
+    );
+    // Even counts closed the phantom quote again, so they passed even
+    // before the fix — pin them too, so the parity cannot flip back.
+    let even = "T\n  v=$(echo hi # don't can't\n)\n  echo \"v=[$v]\"\nE\nf\necho done\n";
+    assert!(
+        expand_aliases_in_source(even, &lookup, false).contains("}; }"),
+        "even-count control regressed"
+    );
+}
 #[test]
 fn dparen_arith_group_open_at_end_matches_gnu_reader() {
     // rubash#435: the feeder join gate's walker. GNU parse.y:4904

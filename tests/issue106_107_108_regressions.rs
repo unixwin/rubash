@@ -147,10 +147,13 @@ fn c_flag_skips_leading_posix_option() {
 #[test]
 fn c_flag_without_command_string_is_a_usage_error() {
     // GNU 5.3.0: `bash -c` -> "bash: -c: option requires an argument", rc 2.
+    // rubash#3254: GNU prints argv[0] verbatim, and the harness invokes
+    // by full path, so the expected name is the binary path.
     let (stdout, stderr, code) = run_rubash(&["-c"]);
+    let bin = env!("CARGO_BIN_EXE_rubash");
     assert_eq!(code, Some(2));
     assert!(stdout.is_empty());
-    assert_eq!(stderr, "bash: -c: option requires an argument\n");
+    assert_eq!(stderr, format!("{bin}: -c: option requires an argument\n"));
 }
 
 #[test]

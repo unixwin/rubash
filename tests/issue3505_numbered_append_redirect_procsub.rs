@@ -81,6 +81,15 @@ fn rubash_stdin(script: &str) -> (String, String, Option<i32>) {
     )
 }
 
+/// Spell a path so it can be interpolated into a script on any host.
+/// Windows paths carry `\` separators, and an unquoted `\U` / `\r` /
+/// ... in a shell word is an escape to the parser, so the sink file is
+/// never created. POSIX separators are inert for both parsers; on
+/// Linux/macOS this is a no-op.
+fn posix_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
 /// Poll a file until its content equals `expected` or the deadline
 /// passes; returns the last observed content.
 fn wait_file_content(path: &Path, expected: &str) -> String {
@@ -110,7 +119,7 @@ fn issue3505_brace_numbered_append_delivers_to_file() {
     let fa = dir.join("fa");
     let script = format!(
         "{{ echo X >&3; }} 3>> >(wc -c > {})\nsleep 0.5\n",
-        fa.display()
+        posix_path(&fa)
     );
     let (_stdout, stderr, code) = rubash_stdin(&script);
     assert_eq!(code, Some(0), "stderr: {stderr}");
@@ -138,7 +147,7 @@ fn issue3505_brace_bare_append_delivers_to_file() {
     let fa = dir.join("fa");
     let script = format!(
         "{{ printf hi; }} >> >(wc -c > {})\nsleep 0.5\n",
-        fa.display()
+        posix_path(&fa)
     );
     let (_stdout, stderr, code) = rubash_stdin(&script);
     assert_eq!(code, Some(0), "stderr: {stderr}");
@@ -154,7 +163,7 @@ fn issue3505_brace_numbered_append_preserves_plain_file() {
     let dir = test_dir("plain");
     let plain = dir.join("plain.txt");
     std::fs::write(&plain, "seed\n").expect("seed plain file");
-    let script = format!("{{ echo X >&3; }} 3>> {}\nsleep 0.5\n", plain.display());
+    let script = format!("{{ echo X >&3; }} 3>> {}\nsleep 0.5\n", posix_path(&plain));
     let (_stdout, stderr, code) = rubash_stdin(&script);
     assert_eq!(code, Some(0), "stderr: {stderr}");
     assert_eq!(
@@ -181,7 +190,7 @@ fn issue3505_if_numbered_append_delivers() {
     let fa = dir.join("fa");
     let script = format!(
         "if true; then echo X >&3; fi 3>> >(wc -c > {})\nsleep 0.5\n",
-        fa.display()
+        posix_path(&fa)
     );
     let (_stdout, stderr, code) = rubash_stdin(&script);
     assert_eq!(code, Some(0), "stderr: {stderr}");
@@ -197,7 +206,7 @@ fn issue3505_multidigit_numbered_append_delivers() {
     let fa = dir.join("fa");
     let script = format!(
         "{{ echo X >&10; }} 10>> >(wc -c > {})\nsleep 0.5\n",
-        fa.display()
+        posix_path(&fa)
     );
     let (_stdout, stderr, code) = rubash_stdin(&script);
     assert_eq!(code, Some(0), "stderr: {stderr}");
@@ -221,7 +230,7 @@ fn issue3505_simple_numbered_append_still_delivers() {
     // `0` for that form because nothing ever writes fd 3.)
     let dir = test_dir("simple");
     let fa = dir.join("fa");
-    let script = format!("echo X 3>> >(wc -c > {}) >&3\nsleep 0.5\n", fa.display());
+    let script = format!("echo X 3>> >(wc -c > {}) >&3\nsleep 0.5\n", posix_path(&fa));
     let (_stdout, stderr, code) = rubash_stdin(&script);
     assert_eq!(code, Some(0), "stderr: {stderr}");
     let content = wait_file_content(&fa, "2\n");
@@ -236,7 +245,7 @@ fn issue3505_brace_numbered_truncate_still_delivers() {
     let fa = dir.join("fa");
     let script = format!(
         "{{ echo X >&3; }} 3> >(wc -c > {})\nsleep 0.5\n",
-        fa.display()
+        posix_path(&fa)
     );
     let (_stdout, stderr, code) = rubash_stdin(&script);
     assert_eq!(code, Some(0), "stderr: {stderr}");
@@ -253,7 +262,7 @@ fn issue3505_brace_stderr_append_still_delivers() {
     let fa = dir.join("fa");
     let script = format!(
         "{{ echo oops >&2; }} 2>> >(wc -c > {})\nsleep 0.5\n",
-        fa.display()
+        posix_path(&fa)
     );
     let (_stdout, stderr, code) = rubash_stdin(&script);
     assert_eq!(code, Some(0), "stderr: {stderr}");

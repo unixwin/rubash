@@ -15,7 +15,7 @@ use crate::executor::markers::{
     encode_raw_byte_marker, is_marker_zone_char, CASE_PATTERN_EXPECT, CASE_PATTERN_MAY_OPEN,
     CASE_PATTERN_PAREN, COMPOUND_ASSIGNMENT_MARKER, COMSUB_PAYLOAD_SENTINEL_STR,
     FAILED_SUBSCRIPT_SENTINEL, GROUP_REDIRECT_INJECTED_MARK, MARKERS, QUOTED_HEREDOC_MARKER,
-    RAW_BYTE_MARKER_FIRST,
+    RAW_BYTE_MARKER_FIRST, SUBSCRIPT_ARITH_GRADE_TAG,
 };
 use crate::executor::substitution_metadata::decode_raw_byte_markers;
 use crate::locale::decode_to_visible_text;
@@ -145,6 +145,7 @@ fn boundary_claims_name_a_decoder() {
         ("CASE_PATTERN_EXPECT", CASE_PATTERN_EXPECT),
         ("CASE_PATTERN_MAY_OPEN", CASE_PATTERN_MAY_OPEN),
         ("CASE_PATTERN_PAREN", CASE_PATTERN_PAREN),
+        ("SUBSCRIPT_ARITH_GRADE_TAG", SUBSCRIPT_ARITH_GRADE_TAG),
     ] {
         let row = MARKERS
             .iter()
