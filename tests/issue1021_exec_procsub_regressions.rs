@@ -10,9 +10,12 @@
 //!
 //! Expectations verified byte-for-byte against GNU bash 5.3.20.
 
+#[cfg(unix)]
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
+#[cfg(unix)]
 use std::sync::mpsc;
+#[cfg(unix)]
 use std::time::Duration;
 
 /// `exec` over a slow producer must reach the next command promptly:

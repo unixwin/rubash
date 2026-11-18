@@ -240,15 +240,16 @@ fn issue2749_good_header_unclosed_body_is_compound_eof() {
 fn issue2749_single_paren_header_with_body_is_a_syntax_error() {
     // Captain regression pin (PR #2778 verification): a lone `)'
     // closing a three-section header is malformed, not unterminated —
-    // it must reach header validation (a syntax error), never the
-    // matched-pair EOF form. GNU names `;' here; exact attribution
-    // for single-`)' headers is tracked in #2781.
+    // never the matched-pair EOF form. Exact attribution landed with
+    // rubash#2781: GNU's parse_arith_cmd (parse.y:4957) fails the
+    // read at the single `)' and report_syntax_error's from-text
+    // fallback (parse.y:6874) names `;' with the whole line echoed.
     let run = run_c("for (( i=0; i<1; i++ ); do :; done");
     assert_run(
         "single-paren",
         &run,
         "",
-        "bash: -c: line 1: syntax error: `;' unexpected\nbash: -c: line 1: syntax error: `(( i=0; i<1; i++ );'\n",
+        "bash: -c: line 1: syntax error near `;'\nbash: -c: line 1: `for (( i=0; i<1; i++ ); do :; done'\n",
         2,
     );
 }

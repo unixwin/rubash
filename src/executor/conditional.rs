@@ -86,6 +86,40 @@ impl Executor {
         status
     }
 
+    /// rubash#3382: consume a fatal arithmetic evalerror latched while
+    /// expanding this `[[ ]]` command's operands, and arm the DISCARD
+    /// class for the list loop. Returns true when a fatal record was
+    /// consumed. GNU has no cross-command error state at all: expr.c's
+    /// evalerror jumps DISCARD for the CURRENT command only, so the
+    /// `[[ ]]` command itself must own the failure — the flags may
+    /// not survive into the next command (where `abort_on_expansion_errors`
+    /// would discard an innocent command instead). Nounset is excluded:
+    /// it has its own FORCE_EOF path (`[[ $((b)) = x ]]` under `set -u`
+    /// aborts the script, and the next command's abort check is what
+    /// fires it today). Nonfatal arith errors (e.g. a ternary
+    /// assignment error) do not fire this check — they print and the
+    /// command continues with status 1.
+    pub(super) fn take_conditional_arith_evalerror(&mut self) -> bool {
+        if self.shell_state.arithmetic_expansion_error.get()
+            && self.shell_state.arithmetic_fatal_error.get()
+            && !self.shell_state.arithmetic_nounset_error.get()
+        {
+            self.shell_state.arithmetic_expansion_error.set(false);
+            self.shell_state.arithmetic_fatal_error.set(false);
+            // A nonfatal flag latched by this command's operands
+            // belongs to this command too; leaving it standing would
+            // let the next command's funnel misread it as its own.
+            self.shell_state.arithmetic_nonfatal_error.set(false);
+            // rubash#1518: the arithmetic evalerror class — the
+            // reader's errexit promotion skips it, so the DISCARD
+            // does not exit the script under `set -e`.
+            self.evalerror_arith_pending.set(true);
+            true
+        } else {
+            false
+        }
+    }
+
     /// rubash#1915: mask the process-substitution spans the parser
     /// recorded for THIS conditional word out of the text a `[[ ]]`
     /// nounset scan is about to judge. The lookup is by the word's
@@ -137,7 +171,12 @@ impl Executor {
             return if left == 0 {
                 self.execute_conditional(&args[index + 1..])
             } else {
-                1
+                // GNU execute_cmd.c:3997-4001 (COND_AND): a non-zero
+                // left result — including an error code such as the
+                // rc 2 a `-t` operand raises (test.c:106
+                // TEST_ERREXIT_STATUS) — propagates verbatim; only a
+                // success evaluates the right side.
+                left
             };
         }
 
@@ -237,8 +276,13 @@ impl Executor {
                 let args = vec![op.to_string(), w];
                 self.sync_fd_terminal_marks(None);
                 i32::from(
-                    !(crate::builtins::test::execute(&args, false, &self.shell_state.env_vars)
-                        .unwrap_or(1)
+                    !(crate::builtins::test::execute(
+                        &args,
+                        false,
+                        &self.shell_state.env_vars,
+                        self.shell_state.positional_len(),
+                    )
+                    .unwrap_or(1)
                         == 0),
                 )
             }
@@ -252,8 +296,13 @@ impl Executor {
                 let args = vec![op.to_string(), w];
                 self.sync_fd_terminal_marks(None);
                 i32::from(
-                    !(crate::builtins::test::execute(&args, false, &self.shell_state.env_vars)
-                        .unwrap_or(1)
+                    !(crate::builtins::test::execute(
+                        &args,
+                        false,
+                        &self.shell_state.env_vars,
+                        self.shell_state.positional_len(),
+                    )
+                    .unwrap_or(1)
                         == 0),
                 )
             }
@@ -377,6 +426,22 @@ impl Executor {
     }
 
     fn expand_conditional_word(&mut self, word: &str) -> String {
+        // rubash#3605: GNU raises comsub_ignore_return around a flagged
+        // `[[ ]]`'s operand expansion (execute_cmd.c:4012, :4060,
+        // :4067 — `ignore` = the cond node's CMD_IGNORE_RETURN), so a
+        // `$( )` inside an exempt conditional stamps CMD_IGNORE_RETURN
+        // on its body commands (builtins/evalstring.c:496).
+        if self.suppress_errexit > 0 {
+            self.comsub_ignore_return += 1;
+        }
+        let result = self.expand_conditional_word_inner(word);
+        if self.comsub_ignore_return > 0 {
+            self.comsub_ignore_return -= 1;
+        }
+        result
+    }
+
+    fn expand_conditional_word_inner(&mut self, word: &str) -> String {
         // rubash#1422: an earlier operand already hit the DISCARD-class
         // error below; GNU abandons the conditional at the first bad
         // word, so later operands are never expanded at all.
@@ -426,6 +491,7 @@ impl Executor {
                     let line = format!("{}{}: {}\n", self.diagnostic_prefix(), name, message);
                     let _ = self.write_diagnostic_fd2(line.as_bytes());
                     self.exit_code = if self.expansion_error_is_interactive_discard() {
+                        self.note_unit_expansion_error_discard();
                         1
                     } else {
                         self.expansion_fatal_status()
@@ -499,7 +565,10 @@ impl Executor {
                 self.conditional_status_with_metadata(&args[index + 1..], &metadata[index + 1..])
                     .unwrap_or_else(|| self.execute_conditional(&args[index + 1..]))
             } else {
-                1
+                // Same GNU COND_AND rule as execute_conditional
+                // (execute_cmd.c:3997-4001): propagate the left
+                // result verbatim, error codes included.
+                left
             });
         }
 
@@ -646,8 +715,19 @@ impl Executor {
                 let right = self.expand_conditional_word(right);
                 self.xtrace_conditional_term(op, &left, Some(&right));
                 let right_pattern = self.quote_aware_glob_rhs(&right, &metadata[2]);
-                let matched =
-                    crate::executor::conditional::case_pattern_matches(&right_pattern, &left);
+                let nocasematch = crate::builtins::shopt::option_enabled(
+                    &self.shell_state.env_vars,
+                    "nocasematch",
+                );
+                let matched = if raw_rhs_has_unquoted_extglob_group(&metadata[2].raw) {
+                    if nocasematch {
+                        extglob_case_pattern_matches_nocase(&right_pattern, &left)
+                    } else {
+                        extglob_case_pattern_matches(&right_pattern, &left)
+                    }
+                } else {
+                    crate::executor::conditional::case_pattern_matches(&right_pattern, &left)
+                };
                 Some(match op.as_str() {
                     "!=" => i32::from(matched),
                     _ => i32::from(!matched),
@@ -663,8 +743,19 @@ impl Executor {
                 let right = self.expand_conditional_word(right);
                 self.xtrace_conditional_term(op, &left, Some(&right));
                 let right_pattern = self.quote_aware_glob_rhs(&right, &metadata[2]);
-                let matched =
-                    crate::executor::conditional::case_pattern_matches(&right_pattern, &left);
+                let nocasematch = crate::builtins::shopt::option_enabled(
+                    &self.shell_state.env_vars,
+                    "nocasematch",
+                );
+                let matched = if raw_rhs_has_unquoted_extglob_group(&metadata[2].raw) {
+                    if nocasematch {
+                        extglob_case_pattern_matches_nocase(&right_pattern, &left)
+                    } else {
+                        extglob_case_pattern_matches(&right_pattern, &left)
+                    }
+                } else {
+                    crate::executor::conditional::case_pattern_matches(&right_pattern, &left)
+                };
                 Some(match op.as_str() {
                     "!=" => i32::from(matched),
                     _ => i32::from(!matched),
@@ -891,7 +982,11 @@ impl Executor {
         let base = rewritten.split('[').next().unwrap_or(&rewritten);
         let overlaid_env = self.env_with_frame_arrays(&[base]);
         let env_vars = overlaid_env.as_ref().unwrap_or(&self.shell_state.env_vars);
-        Ok(crate::builtins::test::variable_is_set(&rewritten, env_vars))
+        Ok(crate::builtins::test::variable_is_set(
+            &rewritten,
+            env_vars,
+            self.shell_state.positional_len(),
+        ))
     }
 
     pub(super) fn conditional_string_unary(&mut self, op: &str, operand: &str) -> bool {
@@ -978,7 +1073,14 @@ impl Executor {
             self.sync_fd_alias_facts_scoped(None, redirects.as_deref());
         }
         let args = vec![op.to_string(), value];
-        crate::builtins::test::execute(&args, false, &self.shell_state.env_vars).unwrap_or(1) == 0
+        crate::builtins::test::execute(
+            &args,
+            false,
+            &self.shell_state.env_vars,
+            self.shell_state.positional_len(),
+        )
+        .unwrap_or(1)
+            == 0
     }
 
     /// rubash#545 (cell 3): GNU realizes a `[[ ]]` process-substitution
@@ -1042,8 +1144,31 @@ impl Executor {
         let left_exp = self.expand_conditional_word(left);
         let right_exp = self.expand_conditional_word(right);
         self.xtrace_conditional_term(op, &left_exp, Some(&right_exp));
+        // rubash#3432: the binary file operators (-ef/-nt/-ot) resolve
+        // an fd-alias operand through the fd table (sh_stataccess
+        // stats the current binding, eaccess.c:116), so the marks
+        // must be fresh for THIS evaluation — the same contract as
+        // the unary arm above and the [ ] path's fused scan. The
+        // binary arm never synced at all: without this, [[ ]] binary
+        // ops read the marks stale from a previous evaluation (or
+        // none) and fall to the literal path, whose OS fd namespace
+        // is shifted one fd down from the user's.
+        if crate::special_paths::fd_alias_target(&left_exp).is_some()
+            || crate::special_paths::fd_alias_target(&right_exp).is_some()
+        {
+            self.sync_fd_pipe_marks();
+            let redirects = self.current_conditional_redirects.clone();
+            self.sync_fd_alias_facts_scoped(None, redirects.as_deref());
+        }
         let args = vec![left_exp, op.to_string(), right_exp];
-        crate::builtins::test::execute(&args, false, &self.shell_state.env_vars).unwrap_or(1) == 0
+        crate::builtins::test::execute(
+            &args,
+            false,
+            &self.shell_state.env_vars,
+            self.shell_state.positional_len(),
+        )
+        .unwrap_or(1)
+            == 0
     }
 
     pub(super) fn conditional_regex_match(&mut self, left: &str, right: &str) -> bool {
@@ -1125,6 +1250,10 @@ impl Executor {
         if !crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset") {
             return false;
         }
+        // niubash#993 §1: the operand walks below record `:=`/`=` binds
+        // as they pass them — start from a fresh table so a previous
+        // command's scan records never adjudicate this `[[ =~ ]]`.
+        crate::executor::expand_braced_indices::scan_ctx_begin();
         let mut prefix_comsubs: Vec<String> = Vec::new();
         for word in [left, right] {
             // rubash#1915: same recorded-span masking as the operand
@@ -1158,6 +1287,7 @@ impl Executor {
             return None;
         }
         if self.expansion_error_is_interactive_discard() {
+            self.note_unit_expansion_error_discard();
             self.exit_code = 1;
             self.command_expansion_failed.set(true);
             return Some(Err(ExecuteError::ExpansionFailure(1)));
@@ -1321,6 +1451,13 @@ impl Executor {
         // differently (nested `?`, empty-minimum intervals): rewrite
         // to the nested form before compiling (rubash#1058).
         let pattern = translate_posix_ere_quantifiers(&pattern);
+        // Byte mode (rubash#3791): expand non-ASCII chars to their
+        // `\xHH` byte escapes — see expand_non_ascii_to_byte_escapes.
+        let pattern = if byte_mode {
+            Self::expand_non_ascii_to_byte_escapes(&pattern)
+        } else {
+            pattern
+        };
         // GNU regcomp is called WITHOUT REG_NEWLINE (lib/sh/shmatch.c
         // sh_regmatch), so `.` matches a newline (rubash#1058).
         // Granularity follows the locale model (rubash#1061): glibc
@@ -1342,6 +1479,66 @@ impl Executor {
                 .dot_matches_new_line(true)
                 .build()
                 .map(CompiledConditionalRegex::Text)
+        }
+    }
+
+    /// Byte-mode only (rubash#3791): glibc regcomp in the C locale
+    /// reads the pattern as bytes — a non-ASCII char inside a bracket
+    /// expression is the set of its UTF-8 bytes (`[é]` is {0xC3,
+    /// 0xA9}, `[é-ÿ]` is the byte range 0xA9-0xC3 plus 0xC3/0xBF;
+    /// lib/sh/shmatch.c:79-86 sh_regmatch regcomps with REG_EXTENDED
+    /// and no multibyte decoding). The regex crate in bytes mode
+    /// (unicode(false)) rejects every non-ASCII char inside a class
+    /// with "Unicode not allowed here", so expand each one to its
+    /// `\xHH` byte escapes before compiling: ranges then resolve on
+    /// bytes exactly as glibc resolves them, and a literal non-ASCII
+    /// char outside brackets keeps the byte-sequence meaning it
+    /// already had. A backslash before a non-ASCII char is dropped —
+    /// glibc reads `\` + byte as the literal byte, while the crate
+    /// rejects `\é` as an unrecognized escape. Runs after the bracket
+    /// translation (which doubles bare backslashes inside brackets,
+    /// so a `\` + non-ASCII pair can only be an outside-bracket
+    /// escape here) and after the quantifier rewrite (which copies
+    /// bracket spans verbatim). Raw-byte marker pairs (U+E000…)
+    /// expand the same way; pattern and subject stay in the same
+    /// marker encoding, so their consistency is preserved.
+    fn expand_non_ascii_to_byte_escapes(pattern: &str) -> String {
+        let chars: Vec<char> = pattern.chars().collect();
+        let mut out = String::with_capacity(pattern.len());
+        let mut index = 0usize;
+        while index < chars.len() {
+            let c = chars[index];
+            if c == '\\' && index + 1 < chars.len() {
+                let next = chars[index + 1];
+                if next == '\\' {
+                    out.push('\\');
+                    out.push('\\');
+                    index += 2;
+                    continue;
+                }
+                if !next.is_ascii() {
+                    Self::push_char_as_byte_escapes(&mut out, next);
+                    index += 2;
+                    continue;
+                }
+                out.push('\\');
+                index += 1;
+                continue;
+            }
+            if c.is_ascii() {
+                out.push(c);
+            } else {
+                Self::push_char_as_byte_escapes(&mut out, c);
+            }
+            index += 1;
+        }
+        out
+    }
+
+    fn push_char_as_byte_escapes(out: &mut String, c: char) {
+        let mut buf = [0u8; 4];
+        for byte in c.encode_utf8(&mut buf).as_bytes() {
+            out.push_str(&format!("\\x{byte:02X}"));
         }
     }
 
@@ -1552,7 +1749,7 @@ impl Executor {
             // Mirror the per-eval boundary: a successful eval clears the
             // stale evalerror record and leaves no diagnostics.
             let _ = crate::executor::arithmetic::take_arith_eval_error();
-            let _ = crate::executor::arithmetic::take_arith_eval_diags();
+            crate::executor::arithmetic::clear_arith_eval_events();
             self.xtrace_conditional_term(op, left, Some(right));
             // A literal can never queue an arithmetic write, but keep the
             // boundary identical to the full path (the take-walk is empty).
@@ -1583,19 +1780,27 @@ impl Executor {
         // (expr.c:1502-1510), hence no_expand inside the parser.
         let left_eval = self.expand_arith_indexed_subscripts(&left_expanded);
         let left_dynamic = self.arith_dynamic_context();
-        let (Some(left_val), _) = eval_mutable_arith_value_with_random_flags(
-            &left_eval,
-            &mut self.shell_state.env_vars,
-            Some(&self.shell_state.random_state),
-            Some(&left_dynamic),
-            true,
-            Some(&self.shell_state.variables),
-        ) else {
-            self.flush_arith_diags(Some("[["));
+        // GNU execute_cmd.c:4164 execute_cond_command sets
+        // this_command_name = "[[" for the whole conditional; the
+        // arithcomp evalexp diagnostics carry that label
+        // (rubash#3295).
+        let (Some(left_val), _) = ({
+            let _arith_label =
+                crate::executor::arithmetic::arith_eval_label_scope(Some("[[".to_string()));
+            eval_mutable_arith_value_with_random_flags(
+                &left_eval,
+                &mut self.shell_state.env_vars,
+                Some(&self.shell_state.random_state),
+                Some(&left_dynamic),
+                true,
+                Some(&self.shell_state.variables),
+            )
+        }) else {
+            self.flush_arith_diags();
             self.report_conditional_arithmetic_error(&left_eval);
             return 1;
         };
-        self.flush_arith_diags(Some("[["));
+        self.flush_arith_diags();
         // rubash#404: GNU test.c:357-372 arithcomp -> evalexp binds the
         // operand's assignment side effects into the one variable store, so
         // the next parameter expansion sees them (`n=1; x='n+=2';
@@ -1608,19 +1813,23 @@ impl Executor {
         }
         let right_eval = self.expand_arith_indexed_subscripts(&right_expanded);
         let right_dynamic = self.arith_dynamic_context();
-        let (Some(right_val), _) = eval_mutable_arith_value_with_random_flags(
-            &right_eval,
-            &mut self.shell_state.env_vars,
-            Some(&self.shell_state.random_state),
-            Some(&right_dynamic),
-            true,
-            Some(&self.shell_state.variables),
-        ) else {
-            self.flush_arith_diags(Some("[["));
+        let (Some(right_val), _) = ({
+            let _arith_label =
+                crate::executor::arithmetic::arith_eval_label_scope(Some("[[".to_string()));
+            eval_mutable_arith_value_with_random_flags(
+                &right_eval,
+                &mut self.shell_state.env_vars,
+                Some(&self.shell_state.random_state),
+                Some(&right_dynamic),
+                true,
+                Some(&self.shell_state.variables),
+            )
+        }) else {
+            self.flush_arith_diags();
             self.report_conditional_arithmetic_error(&right_eval);
             return 1;
         };
-        self.flush_arith_diags(Some("[["));
+        self.flush_arith_diags();
         super::arithmetic::sync_arith_writes(self);
         i32::from(!conditional_numeric_matches(left_val, op, right_val))
     }
@@ -1646,6 +1855,7 @@ impl Executor {
         );
         let _ = self.write_diagnostic_fd2(line.as_bytes());
         self.exit_code = if self.expansion_error_is_interactive_discard() {
+            self.note_unit_expansion_error_discard();
             1
         } else {
             self.expansion_fatal_status()
@@ -1749,6 +1959,42 @@ fn contains_extglob_pattern(pattern: &str) -> bool {
         if matches!(ch, '@' | '*' | '+' | '?' | '!') && chars.peek() == Some(&'(') {
             return true;
         }
+    }
+    false
+}
+
+/// Whether the raw spelling of a `[[ == ]]` / `[[ != ]]` RHS carries an
+/// extglob group operator in an unquoted span. GNU forces
+/// `extended_glob = 1` for the conditional pattern test
+/// (execute_cmd.c:4116-4118) and expands the RHS with mode 1
+/// (execute_cmd.c:4068), so quoting inside a group only makes the quoted
+/// characters literal — the group itself stays live, with or without
+/// `shopt extglob`. The cooked pattern cannot carry this decision (a
+/// fully quoted `"@(a)"` cooks to text shaped like a group), so the raw
+/// spelling is scanned: nested expansion bodies, backslash escapes and
+/// quoted spans are skipped as units, and only an operator character met
+/// in the remaining unquoted text counts.
+fn raw_rhs_has_unquoted_extglob_group(raw: &str) -> bool {
+    let chars: Vec<char> = raw.chars().collect();
+    let mut index = 0;
+    while index < chars.len() {
+        if let Some(next) = crate::parser::pathname_pattern::skip_nested_expansion(&chars, index) {
+            index = next;
+            continue;
+        }
+        if chars[index] == '\\' {
+            index += 2;
+            continue;
+        }
+        if let Some((_, _, end)) = raw_quote_at(&chars, index) {
+            index = end + 1;
+            continue;
+        }
+        if matches!(chars[index], '@' | '*' | '+' | '?' | '!') && chars.get(index + 1) == Some(&'(')
+        {
+            return true;
+        }
+        index += 1;
     }
     false
 }
@@ -2570,7 +2816,18 @@ fn regexp_error_reason(pattern: &str) -> &'static str {
 
 fn append_literal_glob_text(output: &mut String, text: &str) {
     for ch in text.chars() {
-        if matches!(ch, '*' | '?' | '[' | '\\') {
+        // GNU pathexp.c:212 quote_string_for_globbing backslash-escapes
+        // every quoted character in pathexp.c:164 glob_char_p's set;
+        // under EXTENDED_GLOB that set includes the group-grammar
+        // characters `(`, `|`, `)` alongside the plain glob operators.
+        // A quoted paren or pipe that reached the pattern bare would be
+        // read by the extglob scanner as group structure (opening,
+        // closing, or splitting the group), so `@("a(b")` never matched
+        // (rubash#3231). The matchers' `\` arms (and the group scanners'
+        // escape skips, lib/glob/sm_loop.c:676 PATSCAN) treat `\(`,
+        // `\)`, `\|` as the literal characters, in both the extglob and
+        // the plain pattern matcher.
+        if matches!(ch, '*' | '?' | '[' | '\\' | '(' | ')' | '|') {
             output.push('\\');
         }
         output.push(ch);

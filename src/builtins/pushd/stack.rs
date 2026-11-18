@@ -102,22 +102,32 @@ pub(super) fn logical_dir_exists(dir: &str, env_vars: &HashMap<String, String>) 
     // The shell keeps POSIX-looking paths in PWD even on Windows.  Resolve
     // those paths before checking them, while allowing relative operands such
     // as `pushd .` and `pushd ..` against the process working directory.
+    // rubash#3788: the gate is the chdir verdict, not a bare existence
+    // probe — a directory without the search bit fails GNU's
+    // cd_builtin with EACCES, so it must not pass the gate.
     (!crate::executor::path::shell_root_configured(env_vars)
         && matches!(dir, "/" | "/bin" | "/etc" | "/tmp" | "/usr"))
-        || shell_path_to_windows(dir, env_vars).is_dir()
+        || {
+            let mapped = shell_path_to_windows(dir, env_vars);
+            mapped.is_dir() && crate::executor::path::directory_has_search_permission(&mapped)
+        }
 }
 
 /// The failure text for a directory operand `logical_dir_exists` rejected:
 /// GNU pushd.def routes the operand through cd_builtin, whose
 /// change_to_directory (cd.def) reports the chdir errno — a path that
 /// exists but is not a directory fails ENOTDIR ("Not a directory"), a
-/// missing path fails ENOENT ("No such file or directory"). Reporting
-/// ENOENT for both mislabels the regular-file case (rubash#1350).
+/// missing path fails ENOENT ("No such file or directory"), and a
+/// directory without the search bit fails EACCES ("Permission denied",
+/// rubash#3788). Reporting ENOENT for both mislabels the regular-file case (rubash#1350).
 pub(super) fn dir_operand_error_text(
     dir: &str,
     env_vars: &HashMap<String, String>,
 ) -> &'static str {
-    if shell_path_to_windows(dir, env_vars).exists() {
+    let mapped = shell_path_to_windows(dir, env_vars);
+    if mapped.is_dir() && !crate::executor::path::directory_has_search_permission(&mapped) {
+        "Permission denied"
+    } else if mapped.exists() {
         "Not a directory"
     } else {
         "No such file or directory"
@@ -126,19 +136,39 @@ pub(super) fn dir_operand_error_text(
 
 /// Resolve a directory operand to the logical name stored in the stack.
 ///
-/// Relative operands are resolved against the shell logical PWD. This lexical
-/// step stays separate from Windows filesystem mapping so POSIX paths remain
-/// visible as POSIX paths.
-pub(super) fn normalize_stack_dir(dir: &str, env_vars: &HashMap<String, String>) -> String {
+/// Relative operands are resolved against the VALIDATED logical cwd:
+/// $PWD only while it still names the working directory, the physical
+/// session cwd otherwise (cd/paths.rs validated_logical_pwd, rubash#2143).
+/// That is the G-02 analogue of GNU's getcwd base: pushd.def:296-302
+/// delegates the Dir operand to cd_builtin, whose change_to_directory
+/// (cd.def:522ff) chdirs the operand as-is, so the kernel resolves a
+/// relative operand against the real cwd, never $PWD (builtins/common.c:592
+/// get_working_directory is getcwd). Joining onto the raw $PWD made
+/// `unset PWD; pushd a` look up `/a` and `PWD=/wrong; pushd a` look up
+/// `/wrong/a` (rubash#3396). This lexical step stays separate from
+/// Windows filesystem mapping so POSIX paths remain visible as POSIX paths.
+pub(super) fn normalize_stack_dir(
+    dir: &str,
+    env_vars: &HashMap<String, String>,
+    cwd: &Path,
+) -> String {
     let dir = dir.replace('\\', "/");
-    let base = env_vars
-        .get("PWD")
-        .map(|value| value.replace('\\', "/"))
-        .unwrap_or_else(|| "/".to_string());
-    let combined = if dir.starts_with('/') || is_drive_absolute(&dir) {
-        dir
+    let base = shell_pwd_display_path(&validated_logical_pwd(env_vars, cwd).to_string_lossy());
+    let absolute = dir.starts_with('/') || is_drive_absolute(&dir);
+    let combined = if absolute {
+        dir.clone()
     } else {
         format!("{base}/{dir}")
+    };
+    // The exactly-two-slashes evidence is the spelling the path was
+    // built FROM — the operand itself for an absolute operand, the
+    // base $PWD for a relative one — never the joined text, which
+    // manufactures a double slash at the seam (the rule
+    // cd/paths.rs logical_destination_display follows, rubash#2211).
+    let slash_evidence = if absolute {
+        dir.as_str()
+    } else {
+        base.as_str()
     };
 
     let (prefix, rest) = if combined.starts_with('/') {
@@ -160,7 +190,7 @@ pub(super) fn normalize_stack_dir(dir: &str, env_vars: &HashMap<String, String>)
     }
 
     let joined = parts.join("/");
-    if prefix == "/" {
+    let result = if prefix == "/" {
         if joined.is_empty() {
             "/".to_string()
         } else {
@@ -172,7 +202,13 @@ pub(super) fn normalize_stack_dir(dir: &str, env_vars: &HashMap<String, String>)
         format!("{prefix}/")
     } else {
         format!("{prefix}/{joined}")
-    }
+    };
+    // POSIX leaves exactly two leading slashes implementation-defined
+    // and GNU preserves them through canonicalization (change_to_
+    // directory -> sh_canonpath); three or more collapse to one
+    // (rubash#3197). The component walk above cannot represent the
+    // prefix, so re-apply it through cd's own preservation helper.
+    crate::builtins::cd::paths::preserve_leading_double_slash(slash_evidence, &result)
 }
 
 fn is_drive_absolute(path: &str) -> bool {

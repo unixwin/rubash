@@ -230,3 +230,109 @@ fn issue1555_repeated_reference_reports_per_expansion() {
     assert_eq!(stdout, "d=[]\n");
     assert_eq!(diag_count(&stderr, "v"), 2, "stderr: {stderr}");
 }
+
+#[test]
+fn issue3225_substring_form_reports_once() {
+    // rubash#3225: the substring form alone reported THREE times —
+    // the verdict-only error pre-scan parsed the fragment through
+    // parse_parameter_substring, whose NULL probe fetched the element
+    // through the reporting path (twice: the fetch plus its
+    // error-value fallback, with no AEPV memo frame active in the
+    // scan), and the real expansion reported once more. GNU's single
+    // fetch (subst.c:9777 parameter_brace_expand ->
+    // array_value_internal, subst.c:10179 handing the fetched value
+    // to parameter_brace_substring) reports exactly once. The pattern
+    // form was never duplicated (its scan reaches no probe); the
+    // combined cell in
+    // issue1555_nonliteral_and_pattern_and_substring_forms_report
+    // read 4 = pattern 1 + substring 3.
+    let (stdout, stderr, code) = rubash("v=99\necho \"sub=[${v[-1]:0:1}]\"");
+    assert_eq!(code, Some(0));
+    assert_eq!(stdout, "sub=[]\n");
+    assert_eq!(diag_count(&stderr, "v"), 1, "stderr: {stderr}");
+
+    // Unquoted and assignment-RHS positions take the same scan.
+    let (stdout, stderr, code) = rubash("v=99\necho sub=[${v[-1]:0:1}]");
+    assert_eq!(code, Some(0));
+    assert_eq!(stdout, "sub=[]\n");
+    assert_eq!(diag_count(&stderr, "v"), 1, "stderr: {stderr}");
+
+    // A genuine array's unresolvable negative subscript slices the
+    // same way: one report from the single fetch.
+    let (stdout, stderr, code) = rubash("a=(1 2 3)\necho \"s=[${a[-4]:0:1}]\"");
+    assert_eq!(code, Some(0));
+    assert_eq!(stdout, "s=[]\n");
+    assert_eq!(diag_count(&stderr, "a"), 1, "stderr: {stderr}");
+}
+
+#[test]
+fn issue3225_nonliteral_subscript_substring_reports_once() {
+    // Non-literal subscripts reach the same scan probe: the verdict
+    // must not come from evaluating them (pre_scan_operator_value
+    // leaves them undecidable and the scan takes the NULL shortcut),
+    // and the real expansion's single fetch reports once.
+    let (stdout, stderr, code) = rubash("v=99; i=-1\necho \"s=[${v[i]:0:1}]\"");
+    assert_eq!(code, Some(0));
+    assert_eq!(stdout, "s=[]\n");
+    assert_eq!(diag_count(&stderr, "v"), 1, "stderr: {stderr}");
+
+    let (stdout, stderr, code) = rubash("v=99; i=-1\necho \"s=[${v[$i]:0:1}]\"");
+    assert_eq!(code, Some(0));
+    assert_eq!(stdout, "s=[]\n");
+    assert_eq!(diag_count(&stderr, "v"), 1, "stderr: {stderr}");
+
+    // The subscript itself is still evaluated exactly once: i++
+    // advances by one while its (bad) result reports once.
+    let (stdout, stderr, code) = rubash("v=99; i=-2\necho \"s=[${v[i++]:0:1}] i=$i\"");
+    assert_eq!(code, Some(0));
+    assert_eq!(stdout, "s=[] i=-1\n");
+    assert_eq!(diag_count(&stderr, "v"), 1, "stderr: {stderr}");
+}
+
+#[test]
+fn issue3225_pattern_form_reports_once() {
+    // The pattern-removal form never duplicated (GNU 1, rubash 1
+    // before and after): pin it so the substring repair cannot be
+    // "fixed" by suppressing a report this form owns.
+    let (stdout, stderr, code) = rubash("v=99\necho \"pat=[${v[-1]#9}]\"");
+    assert_eq!(code, Some(0));
+    assert_eq!(stdout, "pat=[]\n");
+    assert_eq!(diag_count(&stderr, "v"), 1, "stderr: {stderr}");
+
+    let (stdout, stderr, code) = rubash("v=99\necho \"pat=[${v[-1]%9}]\"");
+    assert_eq!(code, Some(0));
+    assert_eq!(stdout, "pat=[]\n");
+    assert_eq!(diag_count(&stderr, "v"), 1, "stderr: {stderr}");
+}
+
+#[test]
+fn issue3225_substring_verdicts_unchanged() {
+    // The scan twin must preserve the verdicts the reporting parse
+    // produced: a bad subscript makes the value NULL, so a negative
+    // length is NOT a substring error (parameter_brace_substring's
+    // early NULL return, subst.c:9050-9057) — only the single
+    // bad-subscript report fires and the command runs.
+    let (stdout, stderr, code) = rubash("v=99\necho \"s=[${v[-1]:0:-1}]\"\necho \"rc=$?\"");
+    assert_eq!(code, Some(0));
+    assert_eq!(stdout, "s=[]\nrc=0\n");
+    assert_eq!(diag_count(&stderr, "v"), 1, "stderr: {stderr}");
+    assert!(!stderr.contains("substring expression"), "stderr: {stderr}");
+
+    // A set parameter with an adjusted-negative length still raises
+    // the scan's substring verdict and abandons the command
+    // (subst.c:8395 verify_substring_values).
+    let (stdout, stderr, code) = rubash("v=99\necho \"s=[${v:0:-5}]\"\necho \"rc=$?\"");
+    assert_eq!(code, Some(0));
+    assert_eq!(stdout, "rc=1\n");
+    assert!(
+        stderr.contains("substring expression < 0"),
+        "stderr: {stderr}"
+    );
+
+    // An unset parameter's garbage offsets stay silent (rubash#3024):
+    // the NULL shortcut precedes offset evaluation in both parses.
+    let (stdout, stderr, code) = rubash("unset u\necho \"s=[${u:t5:h2}]\"\necho \"rc=$?\"");
+    assert_eq!(code, Some(0));
+    assert_eq!(stdout, "s=[]\nrc=0\n");
+    assert!(!stderr.contains("bad array subscript"), "stderr: {stderr}");
+}

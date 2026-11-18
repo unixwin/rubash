@@ -325,8 +325,15 @@ impl Executor {
     /// cached value, not a fresh computation (rubash#2973). Record
     /// the materialization for the getter-backed scalar cells; the
     /// live-maintained faces (PIPESTATUS, the stack arrays, the
-    /// option strings, the table-backed BASH_ARGV0) keep their own
-    /// storage and are not cached here.
+    /// option strings) keep their own storage and are not cached here.
+    /// BASH_ARGV0 is stored too: its GNU cell is an ordinary
+    /// INIT_DYNAMIC_VAR (variables.c:1850) that is absent from
+    /// listings only while value_cell is NULL (print_assignment's
+    /// early return, variables.c:1097-1100), and get_bash_argv0's
+    /// set_string_value (variables.c:1520-1524) binds dollar_vars[0]
+    /// into the cell on every find_variable read — the `values` entry
+    /// here is that cell's contents (a stale snapshot after a later
+    /// assign_bash_argv0 swallow, exactly like GNU's).
     pub(in crate::executor) fn dynamic_parameter_value(&self, name: &str) -> Option<String> {
         let value = self.dynamic_parameter_value_live(name)?;
         match name {
@@ -338,7 +345,8 @@ impl Executor {
                 cells.integer_earned.insert(name.to_string());
             }
             "EPOCHSECONDS" | "EPOCHREALTIME" | "BASH_MONOSECONDS" | "RANDOM" | "SRANDOM"
-            | "BASHPID" | "BASH_SUBSHELL" | "HISTCMD" | "LINENO" | "BASH_COMMAND" => {
+            | "BASHPID" | "BASH_SUBSHELL" | "HISTCMD" | "LINENO" | "BASH_COMMAND"
+            | "BASH_ARGV0" => {
                 self.shell_state
                     .dynamic_cells
                     .borrow_mut()
@@ -701,14 +709,14 @@ impl Executor {
     /// dynamic_declaration_view's render arms encode (integer:
     /// RANDOM/SECONDS/SRANDOM/BASHPID/HISTCMD via their att_integer
     /// registration, variables.c:1858-1875; array: the stack/group
-    /// carriers). Listing filters adjudicate dynamic names by this
-    /// class (rubash#2700).
+    /// carriers, FUNCNAME included — its INIT_DYNAMIC_ARRAY_VAR cell
+    /// carries att_array, variables.c:1835-1839). Listing filters
+    /// adjudicate dynamic names by this class (rubash#2700).
     pub(in crate::executor) fn dynamic_declaration_class(name: &str) -> (bool, bool) {
         match name {
             "RANDOM" | "SECONDS" | "SRANDOM" | "BASHPID" | "HISTCMD" => (true, false),
-            "GROUPS" | "PIPESTATUS" | "BASH_ARGC" | "BASH_ARGV" | "BASH_SOURCE" | "BASH_LINENO" => {
-                (false, true)
-            }
+            "GROUPS" | "PIPESTATUS" | "BASH_ARGC" | "BASH_ARGV" | "BASH_SOURCE" | "BASH_LINENO"
+            | "FUNCNAME" => (false, true),
             _ => (false, false),
         }
     }
@@ -727,7 +735,11 @@ impl Executor {
     /// bindings the table walk already owns. The invisible provider
     /// scalars never appear in print_var_list (their cells are
     /// value-less until read, and print_assignment skips unset-valued
-    /// cells), so they stay out of this supply.
+    /// cells), so they stay out of this supply. FUNCNAME joins the
+    /// supply on the same rule GNU's print_var_list applies
+    /// (variables.c:1066-1073 skips att_invisible cells): at depth 0
+    /// the array is invisible and empty, so no line; inside a
+    /// function the live stack renders (rubash#2770).
     pub(in crate::executor) fn dynamic_set_views(
         &self,
     ) -> Vec<crate::builtins::set::DynamicSetView> {
@@ -750,7 +762,56 @@ impl Executor {
             views.push(crate::builtins::set::DynamicSetView {
                 name: name.to_string(),
                 storage: format_indexed_array_values(values),
+                scalar: false,
             });
+        }
+        // rubash#3026: BASH_ARGV0's GNU cell is never att_invisible —
+        // it is absent from print_var_list only while value_cell is
+        // NULL (variables.c:1097-1100 print_assignment early-return),
+        // and every by-name read binds dollar_vars[0] into it via
+        // get_bash_argv0's set_string_value (variables.c:1520-1524).
+        // The `values` entry is that stored cell; while it is absent
+        // the cell is valueless and the listing shows no line, and the
+        // INVISIBLE mark (the unset-cell stand-in, init.rs) must not
+        // hide the materialized name from this supply either. A
+        // shadowed or unset name is skipped on the same rule as the
+        // names above.
+        if !is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, "BASH_ARGV0")
+            && !self.dynamic_name_shadowed("BASH_ARGV0")
+        {
+            if let Some(value) = self
+                .shell_state
+                .dynamic_cells
+                .borrow()
+                .values
+                .get("BASH_ARGV0")
+            {
+                views.push(crate::builtins::set::DynamicSetView {
+                    name: "BASH_ARGV0".to_string(),
+                    storage: value.clone(),
+                    scalar: true,
+                });
+            }
+        }
+        // rubash#2770: FUNCNAME is invisible (and empty) at depth 0,
+        // so the assignment form shows no line there — only a live,
+        // non-empty stack renders, exactly when GNU's print_var_list
+        // stops skipping the cell (make_funcname_visible,
+        // variables.c:1812-1824). An empty storage would print a
+        // phantom `FUNCNAME=()` the oracle never shows.
+        if !is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, "FUNCNAME")
+            && !self.dynamic_name_shadowed("FUNCNAME")
+        {
+            let values = self
+                .dynamic_stack_array_values("FUNCNAME")
+                .unwrap_or_default();
+            if !values.is_empty() {
+                views.push(crate::builtins::set::DynamicSetView {
+                    name: "FUNCNAME".to_string(),
+                    storage: format_indexed_array_values(values),
+                    scalar: false,
+                });
+            }
         }
         if matches!(
             self.shell_state.pipestatus_shape,
@@ -767,6 +828,7 @@ impl Executor {
                         .map(|(_, status)| status.to_string())
                         .collect(),
                 ),
+                scalar: false,
             });
         }
         views
@@ -822,7 +884,8 @@ impl Executor {
             {
                 return None;
             }
-            "PIPESTATUS" | "BASH_SOURCE" | "BASH_LINENO" | "BASH_ARGC" | "BASH_ARGV" => {
+            "PIPESTATUS" | "BASH_SOURCE" | "BASH_LINENO" | "BASH_ARGC" | "BASH_ARGV"
+            | "FUNCNAME" => {
                 return self.dynamic_view(name);
             }
             "GROUPS" => {
@@ -841,6 +904,33 @@ impl Executor {
                     text: format!("declare -a{readonly}{exported} GROUPS=({elements})"),
                     integer: false,
                     array: true,
+                });
+            }
+            // rubash#3026: the declaration listing enumerates
+            // BASH_ARGV0's cell — never att_invisible in GNU, only
+            // valueless until a find_variable read stores into it
+            // (the `values` entry dynamic_parameter_value records).
+            // Unmaterialized it renders nothing, like the Absent
+            // PIPESTATUS arm above.
+            "BASH_ARGV0" => {
+                let cells = self.shell_state.dynamic_cells.borrow();
+                let Some(value) = cells.values.get("BASH_ARGV0") else {
+                    return None;
+                };
+                let mut flags = String::new();
+                flags.push_str(readonly);
+                flags.push_str(exported);
+                if flags.is_empty() {
+                    flags.push('-');
+                }
+                return Some(crate::builtins::declare::DynamicDeclarationView {
+                    name: name.to_string(),
+                    text: format!(
+                        "declare -{flags} BASH_ARGV0={}",
+                        sh_double_quote_text(value)
+                    ),
+                    integer: false,
+                    array: false,
                 });
             }
             _ => {}
@@ -994,6 +1084,45 @@ impl Executor {
                 .join(" ");
             return Some(format!(
                 "declare -a{readonly}{exported} {name}=({elements})"
+            ));
+        }
+        // rubash#2770: FUNCNAME is the same class — a dynamic stack
+        // array (variables.c:1835-1839 init_funcname_var:
+        // INIT_DYNAMIC_ARRAY_VAR with att_invisible|att_noassign);
+        // make_funcname_visible (variables.c:1812-1824) clears
+        // att_invisible at function entry. GNU show_var_attributes
+        // (builtins/setattr.def:510-511) prints an invisible array
+        // as its bare name (`declare -a FUNCNAME` at depth 0), and
+        // with elements once visible. Render from the composed view
+        // element reads use, before the scalar gate below — the
+        // scalar getter is element 0, so the declaration match would
+        // otherwise fall through (the named-print seed covered only
+        // the named form; listings never saw the live stack).
+        if name == "FUNCNAME" {
+            let exported = if is_marked_var(&self.shell_state.env_vars, EXPORTED_VARS, name) {
+                "x"
+            } else {
+                ""
+            };
+            let readonly = if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, name) {
+                "r"
+            } else {
+                ""
+            };
+            let values = self
+                .dynamic_stack_array_values("FUNCNAME")
+                .unwrap_or_default();
+            if values.is_empty() {
+                return Some(format!("declare -a{readonly}{exported} FUNCNAME"));
+            }
+            let elements = values
+                .iter()
+                .enumerate()
+                .map(|(index, value)| format!("[{index}]={}", sh_double_quote_text(value)))
+                .collect::<Vec<_>>()
+                .join(" ");
+            return Some(format!(
+                "declare -a{readonly}{exported} FUNCNAME=({elements})"
             ));
         }
         let value = match self.dynamic_parameter_value(name) {
@@ -1215,6 +1344,12 @@ impl Executor {
                 | "BASHOPTS"
                 | "PIPESTATUS"
                 | "HISTCMD"
+                // The owner-table views: an unsevered BASH_ALIASES /
+                // BASH_CMDS is set (GNU materializes even the empty
+                // assoc); `unset` then severs it via UNSET_DYNAMIC_VARS
+                // like every other dynamic name (rubash#3573).
+                | "BASH_ALIASES"
+                | "BASH_CMDS"
         )
     }
 
@@ -1330,6 +1465,22 @@ impl Executor {
                 .shell_state
                 .env_vars
                 .contains_key(crate::script_driver::READ_STDIN_MARKER)
+    }
+
+    /// rubash#3125: the bottom entry of a BASH_SOURCE stack is the
+    /// `$0` seed only when it equals the seed value recorded at
+    /// seeding time (`set_env(__RUBASH_SCRIPT_NAME)`). Seeding
+    /// replaces the whole stack with one element and real frames only
+    /// ever enter at index 0, so the seed — when one was installed —
+    /// is always the bottom entry (`stack.last()`); a stack whose
+    /// bottom differs from the recorded seed, or any stack in a
+    /// session that never seeded (`bash_source_seed` is None, e.g.
+    /// interactive), holds only real frames there.
+    pub(in crate::executor) fn bash_source_bottom_is_seed(&self, stack: &[String]) -> bool {
+        self.shell_state
+            .bash_source_seed
+            .as_ref()
+            .is_some_and(|seed| stack.last().is_some_and(|bottom| bottom == seed))
     }
 
     /// GNU keeps a bottom BASH_LINENO frame of "0" for the main script frame
@@ -1522,9 +1673,16 @@ impl Executor {
                 // installed on the respawn birth path), so the pop must
                 // not eat one; the inherited view — already rendered
                 // by the parent — goes beneath the child's own frames.
+                // rubash#3125: pop the bottom entry only when it
+                // really is the recorded seed — an interactive session
+                // never seeds, so its bottom entry is a real
+                // sourced-file frame and must survive.
                 let inherited = self.shell_state.inherited_fork_frames.as_ref();
                 let inherited_main = inherited.is_some_and(|frames| frames.has_main_frame);
-                if !self.has_script_main_frame() && !inherited_main && !stack.is_empty() {
+                if !self.has_script_main_frame()
+                    && !inherited_main
+                    && self.bash_source_bottom_is_seed(&stack)
+                {
                     stack.pop();
                 }
                 if let Some(inherited) = inherited {
@@ -1714,7 +1872,12 @@ impl Executor {
                 // (probe: `bash -c 't2; ...'` → BASH_SOURCE=(bash), top
                 // level ()). The bottom sits at the end because function
                 // calls insert at index 0.
-                if !self.has_script_main_frame() && !stack.is_empty() {
+                // rubash#3125: pop the bottom entry only when it
+                // really is the recorded seed (same rule as the
+                // direct arm above); a never-seeded session — e.g.
+                // interactive, or a respawn child — holds only real
+                // frames at the bottom.
+                if !self.has_script_main_frame() && self.bash_source_bottom_is_seed(&stack) {
                     stack.pop();
                 }
                 return Some(format_indexed_array_values(stack));
@@ -1729,11 +1892,19 @@ impl Executor {
         if name == "DIRSTACK" && !self.dirstack_shadowed() {
             return Some(self.dirstack_storage());
         }
-        if name == "BASH_ALIASES" {
-            return Some(self.bash_aliases_storage());
-        }
-        if name == "BASH_CMDS" {
-            return Some(self.bash_cmds_storage());
+        if matches!(name, "BASH_ALIASES" | "BASH_CMDS")
+            && !is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, name)
+        {
+            // Unsevered only: once `unset` (or a direct whole-name bind,
+            // rubash#3573) cut the dynamic link the owner-table view is
+            // gone for good (variables.c:3839) — fall through to the
+            // plain variable read below, which reports the bound value
+            // or unbound exactly like any ordinary name.
+            return Some(if name == "BASH_ALIASES" {
+                self.bash_aliases_storage()
+            } else {
+                self.bash_cmds_storage()
+            });
         }
         self.shell_state.env_vars.get(name).cloned()
     }
@@ -1742,7 +1913,15 @@ impl Executor {
         self.resolved_variable_name(name)
             .as_deref()
             .is_some_and(|name| {
-                is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, name)
+                // A severed dynamic name keeps its stale ASSOC_VARS mark
+                // until rebind; for the unbound variable GNU would see,
+                // the mark does not exist — whole compound assignment to
+                // it builds an INDEXED array (do_compound_assignment
+                // subst.c:3441; rubash#3573). A live typed assoc cell
+                // (e.g. redeclared `declare -A` after the unset) still
+                // counts, exactly like any other bound variable.
+                (is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, name)
+                    && !is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, name))
                     || self
                         .shell_state
                         .variables
@@ -1870,6 +2049,161 @@ impl Executor {
         true
     }
 
+    /// The whole-variable assignment door for the two dynamic
+    /// associative variables, BASH_ALIASES and BASH_CMDS (rubash#3211).
+    /// GNU registers both with element assign hooks — assign_aliasvar
+    /// (variables.c:1785: valid_alias_name check, then add_alias) and
+    /// assign_hashcmd (variables.c:1715: phash_insert(key, value, 0,
+    /// 0)) — and every whole-variable bind reaches those hooks element
+    /// by element: compound lists through assign_compound_array_list
+    /// (arrayfunc.c:700) via bind_assoc_var_internal, scalar binds
+    /// through bind_variable_internal's assign_func arm with key "0"
+    /// (variables.c:3140). The owner table is never flushed by a bind:
+    /// entries the list does not name keep their owner state (phash
+    /// hit counts included — phash_insert runs only for listed keys),
+    /// and an invalid alias name reports and skips while the remaining
+    /// elements still land with the statement's status unchanged.
+    ///
+    /// Without this door the generic machinery wrote the value into
+    /// the mirror + typed cell only; the command-boundary
+    /// reconciliation (sync_dynamic_assoc_cells) then rebuilt both
+    /// from the untouched owner table and the assignment vanished —
+    /// the split brain #3107's residual recorded. Mirrors the DIRSTACK
+    /// door above: the caller stands the door down for unset dynamic
+    /// names and plain-cell (local/tempenv shadow) binds.
+    pub(in crate::executor) fn apply_dynamic_assoc_assignment(
+        &mut self,
+        name: &str,
+        value: &str,
+        append: bool,
+    ) -> bool {
+        let owner_storage = if name == "BASH_ALIASES" {
+            self.bash_aliases_storage()
+        } else {
+            self.bash_cmds_storage()
+        };
+        if let Some(compound) = value.strip_prefix(COMPOUND_ASSIGNMENT_MARKER) {
+            if !(compound.starts_with('(') && compound.ends_with(')')) {
+                return true;
+            }
+            // Same subscript rewrite + compound scan as the generic
+            // path, so list semantics (subscript arithmetic, kvpair
+            // form, intra-list [k]+= appends, integer attribute
+            // conversion) match a plain associative variable exactly.
+            let rewritten =
+                match self.rewrite_compound_element_subscripts(name, compound, true, true) {
+                    Ok(rewritten) => rewritten,
+                    Err(partial) => {
+                        // Mirror the generic path: the successfully
+                        // rewritten prefix still binds, the statement
+                        // fails.
+                        let entries =
+                            self.scan_dynamic_assoc_entries(name, &partial, &owner_storage, append);
+                        self.route_dynamic_assoc_entries(name, entries);
+                        self.exit_code = 1;
+                        return false;
+                    }
+                };
+            let entries = self.scan_dynamic_assoc_entries(name, &rewritten, &owner_storage, append);
+            self.route_dynamic_assoc_entries(name, entries);
+            return true;
+        }
+        // Scalar bind = element bind under key "0"
+        // (bind_variable_internal, variables.c:3140); the append form
+        // concatenates onto the owner's current element 0 first
+        // (make_variable_value ASS_APPEND, variables.c:3328).
+        let scalar = if append {
+            let current = assoc_entries(&owner_storage)
+                .into_iter()
+                .find(|(key, _)| key == "0")
+                .map(|(_, existing)| existing)
+                .unwrap_or_default();
+            format!("{current}{value}")
+        } else {
+            value.to_string()
+        };
+        self.route_dynamic_assoc_entries(name, vec![("0".to_string(), scalar)]);
+        true
+    }
+
+    /// Scan one rewritten compound list for the dynamic-assoc door and
+    /// return the (key, value) pairs the bind must route into the
+    /// owner table. A replacement bind scans against an empty table,
+    /// so intra-list `[k]+=v` appends compose within the list (GNU
+    /// builds the new cell projection from nothing and fires the hook
+    /// per element in order). An append bind scans against the
+    /// owner's live table for the final values but routes only the
+    /// keys the list names — unlisted owner entries keep their exact
+    /// owner state (hash hit counts included).
+    fn scan_dynamic_assoc_entries(
+        &mut self,
+        name: &str,
+        compound: &str,
+        owner_storage: &str,
+        append: bool,
+    ) -> Vec<(String, String)> {
+        let integer = is_marked_var(&self.shell_state.env_vars, INTEGER_VARS, name);
+        if !append {
+            let merged =
+                append_assoc_value("()", compound, integer, &self.shell_state.env_vars, name);
+            return assoc_entries(&merged);
+        }
+        let merged = append_assoc_value(
+            owner_storage,
+            compound,
+            integer,
+            &self.shell_state.env_vars,
+            name,
+        );
+        let merged_entries = assoc_entries(&merged);
+        let listed = append_assoc_value("()", compound, integer, &self.shell_state.env_vars, name);
+        assoc_entries(&listed)
+            .into_iter()
+            .map(|(key, _)| {
+                let value = merged_entries
+                    .iter()
+                    .find(|(merged_key, _)| *merged_key == key)
+                    .map(|(_, merged_value)| merged_value.clone())
+                    .unwrap_or_default();
+                (key, value)
+            })
+            .collect()
+    }
+
+    /// Route scanned entries into the variable's owner structure,
+    /// mirroring the GNU assign hooks, then republish the mirror +
+    /// typed cell from the owner (sync_dynamic_assoc_vars).
+    fn route_dynamic_assoc_entries(&mut self, name: &str, entries: Vec<(String, String)>) {
+        if name == "BASH_ALIASES" {
+            for (key, entry_value) in entries {
+                // assign_aliasvar (variables.c:1785): an invalid name
+                // reports and skips — the element is dropped, the
+                // remaining elements still land, and the statement
+                // keeps its status.
+                if !valid_alias_assignment_name(&key) {
+                    let line = format!("{}`{key}': invalid alias name\n", self.diagnostic_prefix());
+                    self.emit_assignment_diag(line);
+                    continue;
+                }
+                self.shell_state
+                    .aliases
+                    .insert(key, crate::builtins::alias::Alias::new(&entry_value));
+            }
+        } else {
+            for (key, entry_value) in entries {
+                // assign_hashcmd (variables.c:1715): phash_insert with
+                // found = 0 — a routed entry's hit count resets,
+                // unrouted entries are untouched.
+                crate::builtins::hash::set_hashed_path(
+                    &mut self.shell_state.env_vars,
+                    &key,
+                    &entry_value,
+                );
+            }
+        }
+        self.sync_dynamic_assoc_vars();
+    }
+
     pub(in crate::executor) fn bashpid_value(&self) -> u32 {
         let pid = std::process::id();
         let depth = self.shell_state.subshell_depth.get();
@@ -1911,15 +2245,92 @@ impl Executor {
         // `declare -a | ignore_builtin_arrays` lines). See
         // sync_dirstack_cell for the named-access materialization.
         let storage = self.bash_aliases_storage();
-        self.shell_state
-            .env_vars
-            .insert("BASH_ALIASES".to_string(), storage);
-        mark_env_name(&mut self.shell_state.env_vars, ASSOC_VARS, "BASH_ALIASES");
+        self.publish_dynamic_assoc_var("BASH_ALIASES", &storage);
         let storage = self.bash_cmds_storage();
+        self.publish_dynamic_assoc_var("BASH_CMDS", &storage);
+    }
+
+    /// Publish one dynamic associative variable's owner-table render as
+    /// its mirror, refreshing a live typed cell from the same render.
+    ///
+    /// GNU has ONE object here: `get_aliasvar` / `get_hashcmd`
+    /// (variables.c:1745 / :1675) rebuild the assoc cell from the alias
+    /// table / `hashed_filenames` on every access, so the cell can never
+    /// disagree with its owner. Rubash splits the object into the
+    /// env mirror plus a typed `AssociativeArray` cell; republishing
+    /// the mirror under a live cell without refreshing the cell leaves
+    /// the pair incoherent — the next command boundary's verifier
+    /// panics, and element reads trust the stale cell (rubash#3107:
+    /// `declare -p BASH_ALIASES; alias ll='ls -l'; declare -p
+    /// BASH_ALIASES`). An absent cell stays absent, exactly like
+    /// `sync_dirstack_cell` (rubash#2424): the cell materializes only
+    /// on named access.
+    fn publish_dynamic_assoc_var(&mut self, name: &str, storage: &str) {
+        // GNU variables.c:3839 unbind_variable: an unset dynamic variable
+        // stays unbound for the shell's lifetime — the owner-table render
+        // must neither resurrect it after `unset` (declare -p then
+        // reports not found) nor overwrite a user's own whole-name
+        // binding (rubash#3573). Mirrors the UNSET_DYNAMIC_VARS skip in
+        // sync_dynamic_assoc_cells.
+        if is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, name) {
+            return;
+        }
         self.shell_state
             .env_vars
-            .insert("BASH_CMDS".to_string(), storage);
-        mark_env_name(&mut self.shell_state.env_vars, ASSOC_VARS, "BASH_CMDS");
+            .insert(name.to_string(), storage.to_string());
+        mark_env_name(&mut self.shell_state.env_vars, ASSOC_VARS, name);
+        if matches!(
+            self.shell_state
+                .variables
+                .get(name)
+                .map(|variable| &variable.value),
+            Some(crate::shell::ShellValue::AssociativeArray(_))
+        ) {
+            super::arrays::sync_typed_assoc_storage(&mut self.shell_state.variables, name, storage);
+            self.note_typed_cell_synced(name);
+        }
+    }
+
+    /// Command-boundary reconciliation for the two dynamic associative
+    /// variables (rubash#3107). Their owner tables mutate WITHOUT a
+    /// mirror write — `alias` / `unalias` rewrite `shell_state.aliases`
+    /// (alias.c add_alias / remove_alias), and `hash -p` / `hash -d` /
+    /// `hash -r` plus ordinary command lookups rewrite
+    /// `hashed_filenames` (hashcmd.c phash_insert / phash_remove /
+    /// phash_flush) — so a typed cell materialized by an earlier named
+    /// access goes stale in place, with neither half of the pair
+    /// recording the write. GNU's getters rebuild the cell from the
+    /// owner on every access (variables.c:1745 build_aliasvar,
+    /// variables.c:1675 build_hashcmd); the boundary is rubash's
+    /// rebuild point. Only a name with a live typed cell pays the
+    /// render, and only when the render actually moved: an unmaterialized
+    /// name keeps the mirror-only state every read already renders live.
+    pub(in crate::executor) fn sync_dynamic_assoc_cells(&mut self) {
+        for name in ["BASH_ALIASES", "BASH_CMDS"] {
+            if is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, name) {
+                continue;
+            }
+            if !matches!(
+                self.shell_state
+                    .variables
+                    .get(name)
+                    .map(|variable| &variable.value),
+                Some(crate::shell::ShellValue::AssociativeArray(_))
+            ) {
+                continue;
+            }
+            let storage = if name == "BASH_ALIASES" {
+                self.bash_aliases_storage()
+            } else {
+                self.bash_cmds_storage()
+            };
+            if self.shell_state.env_vars.get(name) == Some(&storage)
+                && self.shell_state.env_vars.cell_is_fresh(name)
+            {
+                continue;
+            }
+            self.publish_dynamic_assoc_var(name, &storage);
+        }
     }
 
     /// True while the dynamic DIRSTACK variable does NOT own its name,

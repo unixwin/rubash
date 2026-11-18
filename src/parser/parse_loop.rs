@@ -345,15 +345,29 @@ fn run_command_loop_walk(tokens: &[Token], state: &mut ParseState, start: usize)
             // reserved_word_acceptable's set) is grammatical without a `;'
             // terminator: compound_list's `newline_list list1' production
             // (parse.y:1262) accepts a single pipeline_command with no
-            // terminator, and reserved_word_acceptable (parse.y:5899,
-            // COND_END in the set) recognizes `then'/`do` there —
-            // `if [[ $x == y ]] then' inside a function body (cond.tests:230,
+            // terminator, and reserved_word_acceptable (parse.y:5899-5940,
+            // ARITH_CMD and COND_END in the predecessor set) recognizes the
+            // reserved word there — `if [[ $x == y ]] then' inside a
+            // function body (cond.tests:230,
             // shell_function_n_shortcuts/.shortcut). After a plain WORD the
             // word is still an argument (`if true then' stays rejected), and
             // after `]]' any non-reserved word keeps the old error.
+            //
+            // rubash#2646: the exemption is not `then'/`do'-only. GNU's
+            // CHECK_FOR_RESERVED_WORD (parse.y:3168) treats EVERY reserved
+            // word alike at a command boundary — the grammar level that
+            // owns the current section then decides whether that word is
+            // legal there (an if-body's `fi'/`elif'/`else' closes or
+            // continues the clause; a stray one errors at that level).
+            // The #460 value set only covered the CONDITION position, so
+            // a body-level compound (`if ((1)) then ((2)) fi',
+            // arith.tests:351; `if true; then (echo s) fi') still died
+            // here before the section stop could accept its closer.
+            // `command_boundary_keyword_allowed' is the predecessor half
+            // of reserved_word_acceptable; this guard is the word half.
             let reserved_follows_compound = tokens.get(next_i).is_some_and(|next| {
                 next.kind == TokenKind::Keyword
-                    && matches!(next.value.as_str(), "then" | "do")
+                    && crate::lexer::is_keyword(&next.value)
                     && super::command_boundary_keyword_allowed(tokens, next_i)
             });
             if !separated
@@ -737,18 +751,30 @@ fn mark_parse_time_extglob_errors(ast: &mut Ast, tokens: &[Token]) {
     let mut saw_shopt = false;
     let mut saw_enable = false;
     let mut extglob_enabled_in_unit = false;
+    // rubash#3205: the shopt that arms this marker must itself have
+    // been read under the OFF gate. Every token carries the gate of
+    // the pass that lexed it (`Token::extglob_gate`); if the gate
+    // was already on when this unit started — an earlier unit's
+    // shopt executed, or the invocation state — the pattern words
+    // later in the unit were read legitimately under that state,
+    // and a same-line `shopt -s` merely re-asserts it: GNU decides
+    // pattern validity at read time from the unit-start state
+    // (parse.y:5466), so there is no error to mark.
+    let mut shopt_read_with_gate_off = false;
 
     for token in tokens {
         if token.kind == TokenKind::Semicolon && !token.line_break {
-            if saw_shopt && saw_enable {
+            if saw_shopt && saw_enable && shopt_read_with_gate_off {
                 extglob_enabled_in_unit = true;
             }
             saw_shopt = false;
             saw_enable = false;
+            shopt_read_with_gate_off = false;
             continue;
         }
         if token.value == "shopt" {
             saw_shopt = true;
+            shopt_read_with_gate_off = !token.extglob_gate;
             continue;
         }
         if saw_shopt && token.value == "-s" {
@@ -772,6 +798,7 @@ fn mark_parse_time_extglob_errors(ast: &mut Ast, tokens: &[Token]) {
         if token.kind != TokenKind::Semicolon {
             saw_shopt = false;
             saw_enable = false;
+            shopt_read_with_gate_off = false;
         }
     }
 }
@@ -1042,6 +1069,16 @@ fn fold_pipeline_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
         pipeline.inverted = first.inverted;
         pipeline.background = last.background;
         pipeline.and_or = last.and_or;
+        // GNU's reader advances `line_number` while parsing the WHOLE
+        // pipeline before any element runs — when execute_cmd.c:854's
+        // do_redirections expands a compound stage's `<(` body, the
+        // ambient line the procsub fork inherits (subst.c:6362
+        // make_child) is the pipeline's parse-end line (rubash#3299:
+        // `{ } < <(x) | cat` reports the line of `cat`, not the
+        // group's). The stage lines stay on the stages; the folded
+        // node's end_line is the last stage's parse-end so the
+        // executor's ambient-line stamp sees the same value.
+        pipeline.end_line = last.end_line.or(last.line);
         if let Some(first_stage) = stages.first_mut() {
             first_stage.inverted = false;
         }
@@ -1460,6 +1497,18 @@ fn time_prefix_from_command(command: &mut CommandNode) -> Option<TimePipelinePre
             })
         })
         .collect();
+    // rubash#3053: the strip above is the moment the timed command's
+    // first element becomes the node's first element — apply the
+    // candidate its intake recorded (the end line of the first word,
+    // assignment word, or redirection target after the prefix
+    // chain). A candidate exists only when every recorded element
+    // was the chain plus that one element, so applying it here —
+    // inside the fold, under the fold's own admission — leaves
+    // every non-folded node byte-identical.
+    if command.time_prefix_first_element_end_line != 0 {
+        command.first_word_end_line = Some(command.time_prefix_first_element_end_line);
+        command.time_prefix_first_element_end_line = 0;
+    }
     reclassify_leading_assignment_words(command);
     Some(TimePipelinePrefix {
         keyword,
@@ -1567,7 +1616,23 @@ pub(crate) fn reclassify_leading_assignment_words(command: &mut CommandNode) {
             (name.to_string(), value.to_string(), raw_rhs)
         };
         let pattern_name = name.strip_suffix('+').unwrap_or(&name).to_string();
-        record_extglob_patterns_for_assignment(command, &pattern_name, &value, &raw_rhs, None);
+        // rubash#3224: this reclassification has no token at hand; the
+        // word's patterns were already recorded (and gate-stamped) by
+        // the word intake under their word index, so inherit the stamp
+        // from that record — unstamped words stay unstamped.
+        let read_gate_on = command
+            .extglob_patterns
+            .iter()
+            .filter(|pattern| pattern.word_index == Some(consumed))
+            .any(|pattern| pattern.read_gate_on);
+        record_extglob_patterns_for_assignment(
+            command,
+            &pattern_name,
+            &value,
+            &raw_rhs,
+            None,
+            read_gate_on,
+        );
         command.insert_assignment_with_raw(name, value, raw_rhs);
         consumed += 1;
     }
@@ -1614,7 +1679,13 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
                 state.diagnostic_text.as_deref(),
                 state.source_line_offset,
             ),
-            None => unclosed_keyword_eof_node(tokens, i, "if"),
+            None => unclosed_keyword_eof_node(
+                tokens,
+                i,
+                "if",
+                state.diagnostic_text.as_deref(),
+                state.source_line_offset,
+            ),
         };
         // GNU parse.y: line_number at EOF is PHYSICAL — every newline
         // read advances it, including comment-only and blank trailing
@@ -1703,7 +1774,13 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
             .any(|t| t.kind == TokenKind::Keyword && t.value == "done")
         {
             let command = match first_mismatched_closer(&tokens[i + 1..], opener) {
-                None => unclosed_keyword_eof_node(tokens, i, opener),
+                None => unclosed_keyword_eof_node(
+                    tokens,
+                    i,
+                    opener,
+                    state.diagnostic_text.as_deref(),
+                    state.source_line_offset,
+                ),
                 Some(rel) => mismatched_closer_node(
                     tokens,
                     i + 1 + rel,
@@ -1736,7 +1813,13 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
                 state.diagnostic_text.as_deref(),
                 state.source_line_offset,
             ),
-            None => unclosed_keyword_eof_node(tokens, i, opener),
+            None => unclosed_keyword_eof_node(
+                tokens,
+                i,
+                opener,
+                state.diagnostic_text.as_deref(),
+                state.source_line_offset,
+            ),
         };
         state.current_cmd = command;
         state
@@ -1784,6 +1867,7 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
             let mut close = open;
             let mut close_span = 0usize;
             let mut header_closed = false;
+            let mut single_paren_close = false;
             for j in open..tokens.len() {
                 let t = &tokens[j];
                 let op = |v: &str| super::is_unquoted_operator(t, v);
@@ -1802,30 +1886,80 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
                         break;
                     }
                     depth -= 1;
-                } else if op(")") && depth == 0 && semicolons >= 2 {
-                    // A lone `)' at header depth, after the header's
-                    // three sections are complete: the pair scan HAS run
-                    // into a close paren, just not the closing pair —
-                    // the header is malformed, not unterminated. GNU's
-                    // parse_dparen stops inside the header on this shape
-                    // (and yyerror names a header token); the EOF form
-                    // below is only for a header no `)' ever reaches (or
-                    // one whose sections never completed, e.g.
-                    // `for ((i=0;)'). Treating it as closed routes the
-                    // shape to the continuation + header validation,
-                    // which report it as the syntax error it is (captain
-                    // fix at PR #2778 verification: the EOF form regressed
-                    // master's behaviour and broke cli_tests'
-                    // malformed_pipeline_and_if_are_syntax_errors;
-                    // exact GNU token attribution for single-`)'
-                    // headers is tracked in #2781).
-                    close = j;
-                    close_span = 1;
-                    header_closed = true;
-                    break;
+                } else if op("(") {
+                    // A lone `(' inside the header is one nesting
+                    // level of the same matched pair (parse_matched_pair
+                    // counts single parens, parse.y:3877).
+                    depth += 1;
+                } else if op(")") {
+                    if depth == 0 {
+                        // The matched pair closed at a SINGLE `)':
+                        // parse_arith_cmd (parse.y:4957) then reads one
+                        // more character, finds it is not the second
+                        // `)', and parse_dparen's FOR arm fails the read
+                        // (parse.y:4900s) — a read-time syntax error,
+                        // reported by report_syntax_error's
+                        // error_token_from_text fallback (parse.y:6772),
+                        // whatever the header's sections or the
+                        // following text look like (rubash#2781: the
+                        // shape used to route to the EOF form when the
+                        // sections were incomplete — `for ((i=0;)' —
+                        // and to header validation when they were
+                        // complete; GNU gives the short from-text form
+                        // for both). The EOF form below is only for a
+                        // header no `)' ever reaches.
+                        close = j;
+                        close_span = 1;
+                        single_paren_close = true;
+                        break;
+                    }
+                    depth -= 1;
                 } else if depth == 0 && t.kind == TokenKind::Semicolon {
+                    // Section count for the closed-header validation
+                    // below (its `;' unexpected vs arithmetic-required
+                    // choice); the single-paren arm above does not
+                    // consult it — GNU's from-text report is the same
+                    // whatever the sections look like.
                     semicolons += 1;
                 }
+            }
+            if single_paren_close {
+                // report_syntax_error's from-text fallback (parse.y:6874-
+                // 6885): the stored message is the backticked token
+                // itself, which the shared renderer prints after
+                // `syntax error near ' — NOT the `unexpected token'
+                // wording, which belongs to the grammar-token branch
+                // (parse.y:6856). The same-line pop mirrors
+                // push_unexpected_token_error_named: yyerror aborts the
+                // whole input line.
+                let near = arith_for_single_paren_near(state, tokens, close);
+                let error_line = tokens[close].position;
+                while state
+                    .ast
+                    .commands
+                    .last()
+                    .is_some_and(|command| command.line == Some(error_line))
+                {
+                    state.ast.commands.pop();
+                }
+                state.current_cmd.line = Some(error_line);
+                state
+                    .current_cmd
+                    .insert_assignment("__RUBASH_PARSE_ERROR__".to_string(), format!("`{near}'"));
+                state.current_cmd.insert_assignment(
+                    "__RUBASH_PARSE_SOURCE__".to_string(),
+                    offending_line_text(
+                        tokens,
+                        close,
+                        state.diagnostic_text.as_deref(),
+                        state.source_line_offset,
+                    ),
+                );
+                state
+                    .ast
+                    .commands
+                    .push(std::mem::take(&mut state.current_cmd));
+                return Some(tokens.len());
             }
             if !header_closed {
                 // GNU parse_matched_pair (parse.y:3877) scans the header
@@ -1869,7 +2003,13 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
                     return Some(index + 1);
                 }
                 ArithForContinuation::EndOfInput => {
-                    let command = unclosed_keyword_eof_node(tokens, i, "for");
+                    let command = unclosed_keyword_eof_node(
+                        tokens,
+                        i,
+                        "for",
+                        state.diagnostic_text.as_deref(),
+                        state.source_line_offset,
+                    );
                     state.current_cmd = command;
                     state
                         .ast
@@ -1950,7 +2090,13 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
             .any(|t| t.kind == TokenKind::Keyword && t.value == "done")
         {
             let command = match first_mismatched_closer(&tokens[i + 1..], "for") {
-                None => unclosed_keyword_eof_node(tokens, i, "for"),
+                None => unclosed_keyword_eof_node(
+                    tokens,
+                    i,
+                    "for",
+                    state.diagnostic_text.as_deref(),
+                    state.source_line_offset,
+                ),
                 Some(rel) => mismatched_closer_node(
                     tokens,
                     i + 1 + rel,
@@ -2036,7 +2182,13 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
             let command = match tail.first() {
                 // `case x in` + EOF: the empty clause list is legal - only
                 // `esac` is missing.
-                None => Some(unclosed_keyword_eof_node(tokens, i, "case")),
+                None => Some(unclosed_keyword_eof_node(
+                    tokens,
+                    i,
+                    "case",
+                    state.diagnostic_text.as_deref(),
+                    state.source_line_offset,
+                )),
                 Some(first) if first.kind == TokenKind::Word && !clause_prefix => {
                     match tail.get(1) {
                         // `case x in a` EOF - GNU blames the virtual
@@ -2061,9 +2213,13 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
                         }
                         // `a |` continues the pattern - still inside the
                         // clause list at EOF.
-                        Some(next) if next.value == "|" => {
-                            Some(unclosed_keyword_eof_node(tokens, i, "case"))
-                        }
+                        Some(next) if next.value == "|" => Some(unclosed_keyword_eof_node(
+                            tokens,
+                            i,
+                            "case",
+                            state.diagnostic_text.as_deref(),
+                            state.source_line_offset,
+                        )),
                         Some(_) => Some(mismatched_closer_node(
                             tokens,
                             i + 1 + tail_start + 1,
@@ -2073,7 +2229,13 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
                     }
                 }
                 Some(_) if clause_prefix => Some(match first_mismatched_closer(rest, "case") {
-                    None => unclosed_keyword_eof_node(tokens, i, "case"),
+                    None => unclosed_keyword_eof_node(
+                        tokens,
+                        i,
+                        "case",
+                        state.diagnostic_text.as_deref(),
+                        state.source_line_offset,
+                    ),
                     Some(rel) => mismatched_closer_node(
                         tokens,
                         i + 1 + rel,
@@ -2122,7 +2284,13 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
             .any(|t| t.kind == TokenKind::Keyword && t.value == "done")
         {
             let command = match first_mismatched_closer(&tokens[i + 1..], "select") {
-                None => unclosed_keyword_eof_node(tokens, i, "select"),
+                None => unclosed_keyword_eof_node(
+                    tokens,
+                    i,
+                    "select",
+                    state.diagnostic_text.as_deref(),
+                    state.source_line_offset,
+                ),
                 Some(rel) => mismatched_closer_node(
                     tokens,
                     i + 1 + rel,
@@ -2151,7 +2319,7 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
 
     if command_allows_compound_start(&state.current_cmd)
         && ((token.kind == TokenKind::Keyword && token.value == "(")
-            || token.value.starts_with("(("))
+            || (token.value.starts_with("((") && token.raw == token.value))
     {
         if let Some((arith_cmd, next_i)) = parse_arithmetic_command(tokens, i) {
             push_compound_command(state, arith_cmd);
@@ -2159,7 +2327,11 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
         }
     }
 
-    if command_allows_compound_start(&state.current_cmd) && token.value == "[[" {
+    // rubash#3557: `[[` opens a conditional only unquoted — a `'[['` word
+    // is a command name (parse.y:3667 read_token emits `[[` as COND only
+    // for unquoted text).
+    if command_allows_compound_start(&state.current_cmd) && super::is_unquoted_operator(token, "[[")
+    {
         if let Some((conditional_cmd, next_i)) = parse_conditional_command(
             tokens,
             i,
@@ -2204,7 +2376,7 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
 
     if command_accepts_embedded_arithmetic_command(&state.current_cmd)
         && ((token.kind == TokenKind::Keyword && token.value == "(")
-            || token.value.starts_with("(("))
+            || (token.value.starts_with("((") && token.raw == token.value))
     {
         if let Some((arith_cmd, next_i)) = parse_arithmetic_command(tokens, i) {
             note_command_line(&mut state.current_cmd, token);
@@ -2228,10 +2400,15 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
             push_compound_command(state, brace_cmd);
             return Some(next_i);
         }
-        if token.value == "{"
+        // rubash#3557 (parse.y:3667 read_token): quoted `{` is a WORD —
+        // `{ : command not found`, never a group opener; only unquoted
+        // `{` (Word raw==value or a collapsed `{...;` Keyword) may demand
+        // the `}` closer here.
+        if is_unquoted_operator(token, "{")
             || (token.value.starts_with('{')
                 && token.value.contains(';')
-                && !token.value.contains('}'))
+                && !token.value.contains('}')
+                && (token.kind == TokenKind::Keyword || token.raw == token.value))
         {
             return Some(push_parse_error_until(
                 state,
@@ -2346,6 +2523,18 @@ pub(super) fn push_unexpected_token_error_named(
     let token_text = name_override.unwrap_or_else(|| {
         if tokens[i].value.starts_with('{') {
             "{"
+        } else if tokens[i].kind == TokenKind::Keyword
+            && tokens[i].value.starts_with("((")
+            && tokens[i].value.ends_with("))")
+        {
+            // GNU's ARITH_CMD token string IS the arithmetic body:
+            // parse_arith_cmd (parse.y:4963) stores the matched-pair
+            // content as the token's word, so the error names the body —
+            // `((1)) (( 2 + 3 ))' names ` 2 + 3 ', `((1)) ((x=1))' names
+            // `x=1' — never the scanner's whole folded `((…))' text
+            // (rubash#3204). The parse_dparen fold branch is the only
+            // producer of a Keyword token with this value shape.
+            &tokens[i].value[2..tokens[i].value.len() - 2]
         } else {
             tokens[i].value.as_str()
         }
@@ -2484,10 +2673,35 @@ fn push_unclosed_paren_error(state: &mut ParseState, tokens: &[Token], start: us
     //       line echo (`((X=([a]))]`, `( (echo hi) x`).
     //
     // Scan left to right; the earliest event owns the diagnostic.
+    // rubash#3405: a dangling redirection inside the unclosed `(` is the
+    // same token-level verdict the keyword-EOF arms already report via
+    // `dangling_redirect_in_region` (parse.y:532 `redirection: '>' WORD`
+    // + parse.y:6833 report_syntax_error): the operator's successor —
+    // `newline' at end of input, a closer, ... — is the first offending
+    // token, and it preempts the pure-EOF report exactly when it precedes
+    // every #413 event below. The scan returns whichever event its token
+    // position reaches first, so the dangling candidate is consulted at
+    // the top of each iteration by absolute token index.
+    let (dangling_at, mut dangling_node) = match dangling_redirect_in_region(
+        &tokens[start + 1..],
+        state.diagnostic_text.as_deref(),
+        state.source_line_offset,
+    ) {
+        Some((offending, node)) => (Some(start + 1 + offending), Some(node)),
+        None => (None, None),
+    };
     {
         let mut depth = 1usize;
         let mut scan = start + 1;
         while scan < tokens.len() {
+            if dangling_at == Some(scan) {
+                state.ast.commands.push(
+                    dangling_node
+                        .take()
+                        .expect("dangling node travels with its index"),
+                );
+                return tokens.len();
+            }
             let token = &tokens[scan];
             if token.compound_unclosed {
                 state.current_cmd.line = Some(token.position);
@@ -2561,7 +2775,7 @@ fn push_unclosed_paren_error(state: &mut ParseState, tokens: &[Token], start: us
         }
         if token.kind != TokenKind::HereDocBody {
             if index > start {
-                last_line = last_line.max(token.position);
+                last_line = last_line.max(token_last_consumed_line(token));
             }
             continue;
         }
@@ -2725,6 +2939,8 @@ pub(super) fn unclosed_brace_eof_node(
             // rubash#3028: the end line shifts in lockstep (it defaults
             // to the fragment-relative position, like `position`).
             token.end_position = token.end_position + brace_line - 1;
+            // rubash#3605: the heredoc gather end line too.
+            token.heredoc_end_line = token.heredoc_end_line.map(|line| line + brace_line - 1);
         }
         region_owned = inner;
         &region_owned
@@ -2736,11 +2952,17 @@ pub(super) fn unclosed_brace_eof_node(
     let last_line = if inner_text.is_empty() {
         region
             .iter()
-            .map(|token| token.position)
+            .map(token_last_consumed_line)
             .max()
             .unwrap_or(brace_line)
     } else {
-        brace_line + inner_text.matches('\n').count()
+        // The swallowed text IS the consumed tail: a final `\n' completes
+        // its line rather than starting a new one.
+        brace_line
+            + inner_text
+                .matches('\n')
+                .count()
+                .saturating_sub(usize::from(inner_text.ends_with('\n')))
     };
     let continuation = if inner_text.is_empty() {
         false
@@ -2751,16 +2973,12 @@ pub(super) fn unclosed_brace_eof_node(
     // `syntax error near unexpected token `X'' at that token — the same
     // foreign-closer verdict the if/loop EOF arms already report — not
     // the end-of-file diagnostic (`{ echo c\n)` names `)', not the EOF).
-    if let Some(rel) = first_mismatched_closer(region, "{") {
-        return mismatched_closer_node(region, rel, diagnostic_text, line_offset);
+    // rubash#3405: a dangling redirection in the region is the same
+    // class of token-level verdict; the earlier offending token wins.
+    if let Some(node) = preempting_token_error_node(region, "{", diagnostic_text, line_offset) {
+        return node;
     }
-    compound_eof_error_node(
-        "{",
-        brace_line,
-        region,
-        last_line,
-        eof_line_extra(last_line, continuation),
-    )
+    compound_eof_error_node("{", brace_line, region, last_line, continuation)
 }
 
 /// `name() (` with no closing `)`: the same EOF reporting names the `(`.
@@ -2773,26 +2991,142 @@ pub(super) fn unclosed_paren_eof_node(
     let paren_line = tokens[paren_index].position;
     let region = &tokens[paren_index + 1..];
     // Same foreign-closer family as the `{` arm: `fi`/`}`/`;;` reaching an
-    // open `(` is a mismatched-closer diagnostic, not EOF (niubash#482).
-    if let Some(rel) = first_mismatched_closer(region, "(") {
-        return mismatched_closer_node(region, rel, diagnostic_text, line_offset);
+    // open `(` is a mismatched-closer diagnostic, not EOF (niubash#482);
+    // a dangling redirection preempts by the same token order
+    // (rubash#3405).
+    if let Some(node) = preempting_token_error_node(region, "(", diagnostic_text, line_offset) {
+        return node;
     }
     let last_line = region
         .iter()
-        .map(|token| token.position)
+        .map(token_last_consumed_line)
         .max()
         .unwrap_or(paren_line);
-    compound_eof_error_node(
-        "(",
-        paren_line,
-        region,
-        last_line,
-        eof_line_extra(last_line, false),
-    )
+    compound_eof_error_node("(", paren_line, region, last_line, false)
+}
+
+/// The last physical input line a region token consumed. `position` is
+/// only the token's first line: a line-break `;' that swallowed a `\n\n'
+/// tail ends at `end_position` (the physical line of its last byte), and
+/// a heredoc body's gather ran to `heredoc_end_line` even though its
+/// `position` stays at the `<<' line to feed the `at line N' warning
+/// (rubash#3605). GNU's EOF report counts every physical line the reader
+/// consumed before the failed fetch — parse.y:2504's per-line bump plus
+/// the final exhaustion read — so the last consumed line is the max over
+/// all three stamps.
+fn token_last_consumed_line(token: &Token) -> usize {
+    token
+        .position
+        .max(token.end_position)
+        .max(token.heredoc_end_line.unwrap_or(0))
 }
 
 fn eof_line_extra(last_line: usize, continuation: bool) -> usize {
     last_line + 1 + usize::from(continuation)
+}
+
+/// Whether the token region ends with a continuation pending at end of
+/// input: the last token's raw ends in an odd run of backslashes (the
+/// lexer surfaces a dangling `\` as its own token or as a word tail).
+/// Heredoc bodies are literal text — a trailing backslash there is
+/// data the reader never treats as a continuation.
+fn region_ends_with_continuation(region: &[Token]) -> bool {
+    let Some(last) = region.last() else {
+        return false;
+    };
+    if last.kind == TokenKind::HereDocBody {
+        return false;
+    }
+    let trailing = last
+        .raw
+        .bytes()
+        .rev()
+        .take_while(|byte| *byte == b'\\')
+        .count();
+    trailing % 2 == 1
+}
+
+/// GNU error_token_from_text (parse.y:6772-6808): the token
+/// report_syntax_error names when the grammar has no token text for
+/// the failure — computed from the input line and the reader index
+/// (the first character not yet consumed). The walk first steps back
+/// over whitespace, fixes token_end one past the last character the
+/// reader consumed, then walks back over non-break characters
+/// (` \n\t;|&` are the breaks), landing ON the break character that
+/// stops it — which therefore stays in the report when it is not
+/// whitespace (`;' reports as `;', `;i<3)' keeps its leading `;').
+/// One further character past the consumed run — the character AT
+/// the reader index — joins the report through token_end when the
+/// backward walk reaches it (the `(#' of `[[ a == (#i)bar]]').
+pub(super) fn error_token_from_text(line: &str, index: usize) -> String {
+    let t = line.as_bytes();
+    let at = |i: usize| -> u8 { t.get(i).copied().unwrap_or(0) };
+    let mut i = index.min(t.len());
+    if i > 0 && at(i) == 0 {
+        i -= 1;
+    }
+    while i > 0 && matches!(at(i), b' ' | b'\t' | b'\n') {
+        i -= 1;
+    }
+    let token_end = if i > 0 { i + 1 } else { 0 };
+    while i > 0 && !matches!(at(i), b' ' | b'\n' | b'\t' | b';' | b'|' | b'&') {
+        i -= 1;
+    }
+    while i != token_end && matches!(at(i), b' ' | b'\t' | b'\n') {
+        i += 1;
+    }
+    if token_end > 0 {
+        String::from_utf8_lossy(&t[i..token_end]).into_owned()
+    } else if i == 0 && token_end == 0 {
+        // The one-character-token arm (parse.y:6800-6805).
+        String::from_utf8_lossy(&t[..1.min(t.len())]).into_owned()
+    } else {
+        String::new()
+    }
+}
+
+/// The near token GNU names for an arithmetic-`for' header whose
+/// matched pair closed at a single `)' (rubash#2781): the reader
+/// stopped just after that paren, so error_token_from_text runs over
+/// the paren's line with the index one past it. The line text is the
+/// parse's original input line when the caller carried it
+/// (diagnostic_text), else the token reconstruction of that line —
+/// the offset walk (leading_ws + raw per token of the line) must
+/// agree with the chosen text at the paren byte; on disagreement the
+/// reconstruction wins, since it is the text the offset was measured
+/// against.
+fn arith_for_single_paren_near(state: &ParseState, tokens: &[Token], close: usize) -> String {
+    let line_number = tokens[close].position;
+    let mut rebuilt = String::new();
+    let mut reader_index = 0usize;
+    for (j, token) in tokens.iter().enumerate() {
+        if token.position != line_number {
+            continue;
+        }
+        rebuilt.push_str(&token.leading_ws);
+        if j == close {
+            reader_index = rebuilt.len() + token.raw.len();
+        }
+        rebuilt.push_str(&token.raw);
+        if j == close {
+            break;
+        }
+    }
+    let line_text = state
+        .diagnostic_text
+        .as_ref()
+        .and_then(|text| {
+            line_number
+                .checked_sub(state.source_line_offset)
+                .and_then(|in_text| source_line_by_number(text, in_text))
+        })
+        .filter(|verbatim| {
+            // The verbatim line must contain the close paren at the
+            // measured index for the pair (text, index) to be sound.
+            verbatim.as_bytes().get(reader_index.wrapping_sub(1)) == Some(&b')')
+        })
+        .unwrap_or(rebuilt);
+    error_token_from_text(&line_text, reader_index)
 }
 
 /// How the input continues after a closed arithmetic-`for` header —
@@ -2855,21 +3189,26 @@ pub(super) fn unclosed_keyword_eof_node(
     tokens: &[Token],
     opener_index: usize,
     opener: &'static str,
+    diagnostic_text: Option<&str>,
+    line_offset: usize,
 ) -> CommandNode {
     let opener_line = tokens[opener_index].position;
     let region = &tokens[opener_index + 1..];
+    // rubash#3405: a dangling redirection inside the compound is a
+    // token-level verdict GNU's parse dies on before input ends
+    // (`while true; do >' names `newline', not the `while' EOF form).
+    // Foreign closers keep their existing caller-side routing
+    // (first_mismatched_closer / the head-offender scans), so only the
+    // dangling scan is consulted here.
+    if let Some((_, node)) = dangling_redirect_in_region(region, diagnostic_text, line_offset) {
+        return node;
+    }
     let last_line = region
         .iter()
-        .map(|token| token.position)
+        .map(token_last_consumed_line)
         .max()
         .unwrap_or(opener_line);
-    compound_eof_error_node(
-        opener,
-        opener_line,
-        region,
-        last_line,
-        eof_line_extra(last_line, false),
-    )
+    compound_eof_error_node(opener, opener_line, region, last_line, false)
 }
 
 /// GNU parse.y reserved-word grammar: while a keyword compound frame is
@@ -3280,13 +3619,135 @@ pub(super) fn mismatched_closer_node(
     command
 }
 
+/// The token-level verdict that preempts an unclosed compound's
+/// end-of-file report, if the region carries one. GNU's
+/// report_syntax_error (parse.y:6833) has two disjoint exits: at a
+/// concrete token (current_token != 0, EOF_Reached == 0,
+/// parse.y:6852-6865) it prints the near-token form, and only when
+/// the parse survives to exhaustion does the EOF branch
+/// (parse.y:6890-6901) report the open compound. A parse therefore
+/// dies on the FIRST token-level error in the stream — between the
+/// region's mismatched closer and its first dangling redirection,
+/// whichever offending token comes earlier wins (rubash#3405).
+pub(super) fn preempting_token_error_node(
+    region: &[Token],
+    opener: &'static str,
+    diagnostic_text: Option<&str>,
+    line_offset: usize,
+) -> Option<CommandNode> {
+    let mismatched = first_mismatched_closer(region, opener);
+    let dangling = dangling_redirect_in_region(region, diagnostic_text, line_offset);
+    match (mismatched, dangling) {
+        (Some(rel), Some((offending, _))) if offending > rel => Some(mismatched_closer_node(
+            region,
+            rel,
+            diagnostic_text,
+            line_offset,
+        )),
+        (_, Some((_, node))) => Some(node),
+        (Some(rel), None) => Some(mismatched_closer_node(
+            region,
+            rel,
+            diagnostic_text,
+            line_offset,
+        )),
+        (None, None) => None,
+    }
+}
+
+/// The first dangling redirection in `region`: a redirect operator
+/// whose WORD operand never arrives (GNU parse.y:532 `redirection:
+/// '>' WORD` and its sibling productions). report_syntax_error
+/// (parse.y:6833) fires at the token that follows the operator — the
+/// newline at end of input, a `;', a closer — DURING the parse, so
+/// when input ends inside an unclosed compound whose region carries
+/// such an operator, the near-token verdict precedes every
+/// end-of-file report for the compound (parse.y:6890-6901 is only
+/// reached when yyparse survives to EOF): `X() { (a)>` reports
+/// `syntax error near unexpected token \`newline'', never the
+/// unclosed-`{' EOF form (rubash#3405).
+///
+/// Returns the region index of the OFFENDING token (the operator's
+/// successor, or the operator itself when it is the region's last
+/// token) alongside the error node, so callers can order the verdict
+/// against a mismatched closer in the same region — GNU's reader
+/// meets whichever comes first in the token stream.
+///
+/// A continuation pending at end of input suppresses a candidate on
+/// the region's last line: the newline that would offend was elided
+/// by the trailing backslash and never reached the grammar
+/// (`X() { (a)>\` at EOF keeps the compound-EOF report, the
+/// rubash#3183-locked exception). A candidate on an earlier line
+/// stands — its newline was real. An operator glued to a following
+/// `(` is a process-substitution introducer, not a redirection
+/// awaiting its operand (`echo <(x)` is a word, `echo > (x)` is the
+/// error), so the glued pair is skipped.
+pub(super) fn dangling_redirect_in_region(
+    region: &[Token],
+    diagnostic_text: Option<&str>,
+    line_offset: usize,
+) -> Option<(usize, CommandNode)> {
+    let continuation = region_ends_with_continuation(region);
+    let last_line = region.iter().map(|token| token.position).max().unwrap_or(0);
+    for (index, token) in region.iter().enumerate() {
+        if !matches!(
+            token.kind,
+            TokenKind::RedirectIn
+                | TokenKind::RedirectOut
+                | TokenKind::Append
+                | TokenKind::RedirectErr
+                | TokenKind::RedirectErrAppend
+                | TokenKind::HereDoc
+                | TokenKind::HereString
+        ) {
+            continue;
+        }
+        if region.get(index + 1).is_some_and(|next| {
+            next.kind == TokenKind::Keyword
+                && next.value == "("
+                && next.column == token.column + token.raw.len()
+        }) {
+            continue;
+        }
+        if continuation && token.position >= last_line {
+            continue;
+        }
+        if let Some(node) = super::token_actions::missing_redirect_target_node(
+            region,
+            index,
+            diagnostic_text,
+            line_offset,
+        ) {
+            let offending = if index + 1 < region.len() {
+                index + 1
+            } else {
+                index
+            };
+            return Some((offending, node));
+        }
+    }
+    None
+}
+
 fn compound_eof_error_node(
     opener: &str,
     open_line: usize,
     region: &[Token],
     last_line: usize,
-    eof_line: usize,
+    continuation_hint: bool,
 ) -> CommandNode {
+    // GNU's reader counts one more line when input ends with a
+    // continuation pending: shell_getc's string-input exhaustion bumps
+    // line_number before the EOF report (parse.y:2504 region), so EVERY
+    // compound-EOF arm reports last_line + 2 when the final token is a
+    // dangling backslash, not just the collapsed-brace arm that used to
+    // compute this from its swallowed text (rubash#3183: `if true;
+    // then \', `g() { \' and `( \' all gain the line). The brace arm's
+    // text-derived signal survives as the hint; the region's last token
+    // is the general evidence (an odd trailing backslash run — an
+    // escaped `\\' is data, not a continuation).
+    let continuation = continuation_hint || region_ends_with_continuation(region);
+    let eof_line = eof_line_extra(last_line, continuation);
     let (name, name_line) =
         innermost_unclosed_compound(region).unwrap_or_else(|| (opener.to_string(), open_line));
 
@@ -3481,7 +3942,12 @@ pub(super) fn parse_time_prefixed_compound_command(
         parse_coproc_command(tokens, i)?
     } else if let Some(parsed) = parse_function_command(tokens, i) {
         parsed
-    } else if tokens.get(i).is_some_and(|token| token.value == "[[") {
+    // rubash#3557: `[[` is syntax only unquoted — a `'[['` word is a
+    // command name (`[[: command not found`).
+    } else if tokens
+        .get(i)
+        .is_some_and(|token| is_unquoted_operator(token, "[["))
+    {
         parse_conditional_command(tokens, i, None, 0)?
     } else if is_keyword(tokens, i, "{")
         || tokens.get(i).is_some_and(|token| {
@@ -3643,11 +4109,14 @@ fn time_prefixed_shell_command_starts_with_compound(tokens: &[Token], index: usi
         return true;
     }
 
+    // rubash#3557: quoted head words (`'for'`, `'[['`, `'((x))'`) are data,
+    // not compound openers — require the unquoted spelling (raw == value).
     if tokens.get(index).is_some_and(|token| {
-        matches!(
-            token.value.as_str(),
-            "for" | "case" | "select" | "coproc" | "if" | "while" | "until" | "[[" | "function"
-        ) || token.value.starts_with("((")
+        token.raw == token.value
+            && (matches!(
+                token.value.as_str(),
+                "for" | "case" | "select" | "coproc" | "if" | "while" | "until" | "[[" | "function"
+            ) || token.value.starts_with("(("))
     }) {
         return true;
     }

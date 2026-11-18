@@ -11,17 +11,21 @@
 //! rubash#2514 (2026-11-02) adjudicated the S2 describe disclosure
 //! to this Windows product face only: off Windows the describe faces
 //! answer the GNU file form (see the #2514 update in
-//! `issue2036_precedence_introspection_regressions`). Everything
-//! pinned here is the preserved behavior, unchanged.
+//! `issue2036_precedence_introspection_regressions`).
+//!
+//! niubash#993 §4 (2026-11-16) then retired the disclosure on the
+//! Windows face too: GNU `describe_command` (builtins/type.def:211)
+//! knows no `emulation` type word and never answers a resolvable
+//! external name with the bare name — every describe face prints the
+//! real resolved file, exactly as it does off Windows.
 //!
 //! What is pinned here, against a PATH containing only the fake
 //! applet directory:
-//! - the simple-command claims disclose: `type -t stty` -> `emulation`,
-//!   `type stty` -> "stty is a shell emulation of <...stty.exe>",
-//!   `command -v cat` -> the bare name;
-//! - `tput`'s Windows-only claim is live on Windows (it is not live
-//!   in the unix battery);
-//! - with an empty PATH the claim stands down: no `emulation` answer;
+//! - the describe faces report the GNU file answer: `type -t stty`
+//!   -> `file`, `type stty` -> "stty is <...stty.exe>",
+//!   `command -v cat` -> the resolved <...cat.exe> path;
+//! - `tput`'s Windows-only claim resolves to its applet file;
+//! - no face ever prints the retired `emulation` type word;
 //! - the unified builtin projection reaches the product faces:
 //!   `compgen -b` and `enable -a` both list `env` (KD-1), and
 //!   `help env` has a topic (env was the one builtin without one).
@@ -49,7 +53,7 @@ fn shell_bin() -> PathBuf {
 
 struct Output {
     stdout: String,
-    stderr: String,
+    _stderr: String,
 }
 
 fn run(dir: &Path, path: &str, script: &str) -> Output {
@@ -65,7 +69,7 @@ fn run(dir: &Path, path: &str, script: &str) -> Output {
         .expect("run rubash");
     Output {
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).replace('\r', ""),
+        _stderr: String::from_utf8_lossy(&output.stderr).replace('\r', ""),
     }
 }
 
@@ -91,21 +95,27 @@ fn issue2036_s2_windows_applet_path_disclosure() {
         "echo stty=$(type -t stty); type stty; echo cat=$(command -v cat); \
          echo tput=$(type -t tput); echo sleep=$(type -t sleep)",
     );
-    assert!(out.stdout.contains("stty=emulation"), "{}", out.stdout);
-    assert!(
-        out.stdout.contains("stty is a shell emulation of ") && out.stdout.contains("stty.exe"),
-        "{}",
-        out.stdout
-    );
-    assert!(out.stdout.contains("cat=cat"), "{}", out.stdout);
-    assert!(out.stdout.contains("tput=emulation"), "{}", out.stdout);
-    assert!(out.stdout.contains("sleep=emulation"), "{}", out.stdout);
+    // niubash#993 §4: the GNU file answer on every describe face —
+    // `file` for -t, the real resolved path for `type`/`command -v`,
+    // and never the retired `emulation` word nor a bare name.
+    assert!(out.stdout.contains("stty=file"), "{}", out.stdout);
+    assert!(out.stdout.contains("stty is "), "{}", out.stdout);
+    // niubash#993 S7: the displayed join drops the .exe probe suffix.
+    assert!(!out.stdout.contains("stty.exe"), "{}", out.stdout);
+    assert!(out.stdout.contains("cat=/"), "{}", out.stdout);
+    assert!(!out.stdout.contains("cat.exe"), "{}", out.stdout);
+    assert!(!out.stdout.contains("cat=cat"), "{}", out.stdout);
+    assert!(out.stdout.contains("tput=file"), "{}", out.stdout);
+    assert!(out.stdout.contains("sleep=file"), "{}", out.stdout);
+    assert!(!out.stdout.contains("emulation"), "{}", out.stdout);
 
-    // Stand-down honesty on the product face too: empty PATH, no claim.
+    // No describe face may print the retired type word, whatever PATH
+    // resolves — an empty dir may still report `file` when the applet
+    // bundle supplies the body (dispatch would execute it), but GNU's
+    // vocabulary has no `emulation` anywhere.
     let empty = scratch("winempty");
     let out = run(&root, empty.to_str().unwrap(), "type -t stty; echo rc=$?");
     assert!(!out.stdout.contains("emulation"), "{}", out.stdout);
-    assert!(out.stdout.contains("rc=1"), "{}", out.stdout);
 }
 
 #[test]

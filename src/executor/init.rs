@@ -25,6 +25,33 @@ fn shell_pwd_display_impl(path: &str) -> String {
 fn shell_pwd_display_impl(path: &str) -> String {
     path.to_string()
 }
+
+/// rubash#3268 (e): the strerror text of a failed birth getcwd, for
+/// the shell-init line — GNU prints strerror(errno) verbatim
+/// (builtins/common.c:611-614 get_working_directory).
+#[cfg(unix)]
+fn getcwd_strerror(error: &std::io::Error) -> String {
+    match error.raw_os_error() {
+        Some(code) => {
+            // SAFETY: strerror returns a static string (or NULL for
+            // an unknown code); it is only read, never freed.
+            let text = unsafe { libc::strerror(code) };
+            if text.is_null() {
+                error.to_string()
+            } else {
+                unsafe { std::ffi::CStr::from_ptr(text) }
+                    .to_string_lossy()
+                    .into_owned()
+            }
+        }
+        None => error.to_string(),
+    }
+}
+
+#[cfg(not(unix))]
+fn getcwd_strerror(error: &std::io::Error) -> String {
+    error.to_string()
+}
 /// Process-global flag: this process is a respawned internal `rubash -c`
 /// child (the __RUBASH_SHELL_PID/__RUBASH_COPROC_CHILD marker was seen at
 /// Executor::new AND its provenance validated — see
@@ -63,6 +90,132 @@ pub const RESPAWN_SPAWNER_PID_KEY: &str = "__RUBASH_SPAWNER_PID";
 /// staging leftovers as deliveries and rotated every carrier by one
 /// (the #2521 regression of the #2333 restore).
 pub const FD_DELIVERY_AT_STAMPED_KEY: &str = "__RUBASH_FD_AT_STAMPED";
+
+/// rubash#3300: transport keys for the per-spawn fd/pipe provenance
+/// proof (DESIGN.md in ~/workspace/fix-3300). Every fork-shaped
+/// respawn mints a fresh anonymous pipe holding a fresh 16-byte nonce
+/// (32 hex chars) and hands the child the read end at a spawner-chosen
+/// number >= 100 plus these two keys. The keys are per-spawn proof,
+/// not fork-context state: they are NEVER added to
+/// FORK_TRANSPORT_KEYS or rubash_spawn_inherited_state, never
+/// forwarded to grandchildren (a grandchild's proof is minted fresh
+/// by its own spawner), and never surface as shell variables — they
+/// are consumed at entry with the other transport keys below.
+pub const RESPAWN_PROOF_FD_KEY: &str = "__RUBASH_RESPAWN_PROOF_FD";
+pub const RESPAWN_PROOF_KEY: &str = "__RUBASH_RESPAWN_PROOF";
+
+/// rubash#3300: the respawn proof verdict, computed exactly once per
+/// process. The helper is called from both entry paths — main.rs's
+/// async-child entry (before any Executor exists) and
+/// `Executor::new_inner` — and the second call must not re-read or
+/// re-close the fd: the pipe is drained on first validation, so a
+/// second validation would see EOF and report a false negative. The
+/// verdict is a property of this process's birth, not of each
+/// Executor, so one process-global cache is the correct shape.
+#[cfg(unix)]
+static RESPAWN_PROOF_VALIDATED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// rubash#3300: read the two proof keys from the process env,
+/// validate the pipe, close it on success, remove the keys from the
+/// process env (they are transport keys, consumed at entry, never to
+/// surface as shell variables or ride the mirror into children), and
+/// cache the verdict. Returns false on every failure shape, including
+/// absent keys — a child spawned without proof simply takes the old
+/// two arms of `respawn_provenance_validated`.
+#[cfg(unix)]
+fn respawn_proof_validated() -> bool {
+    *RESPAWN_PROOF_VALIDATED.get_or_init(|| {
+        let fd = std::env::var(RESPAWN_PROOF_FD_KEY)
+            .ok()
+            .and_then(|v| v.parse::<std::os::unix::io::RawFd>().ok());
+        let nonce = std::env::var(RESPAWN_PROOF_KEY).ok();
+        // Remove the keys either way: even a failed proof leaves
+        // nothing behind for a grandchild to inherit or a variable
+        // table to import.
+        mirror_env_remove(RESPAWN_PROOF_FD_KEY);
+        mirror_env_remove(RESPAWN_PROOF_KEY);
+        let Some(fd) = fd else {
+            return false;
+        };
+        let Some(nonce) = nonce else {
+            return false;
+        };
+        if fd < 0 || !validate_respawn_proof_fd(fd, &nonce) {
+            // Failed validation leaves the fd open as an ordinary
+            // inherited fd (the #1557 rule: an unclaimed fd is
+            // adopted, never closed).
+            return false;
+        }
+        // Success owns the fd: close it so the proof cannot be
+        // re-read, replayed, or inherited by a grandchild.
+        unsafe {
+            libc::close(fd);
+        }
+        true
+    })
+}
+
+#[cfg(not(unix))]
+fn respawn_proof_validated() -> bool {
+    false
+}
+
+/// rubash#3300: validate the proof pipe named by `fd` against the
+/// 16-byte `nonce` (32 hex chars). Every step must hold:
+/// fstat says FIFO (not a file, socket, or tty a hostile parent
+/// pre-planted); O_NONBLOCK first, so a hostile fd can never hang
+/// entry; exactly 16 bytes read and equal to the nonce; the next read
+/// must be EOF — the spawner closed the write end before spawn, so
+/// EOF is what distinguishes this pipe (write end already gone) from
+/// any pipe a hostile parent still holds open. Returns false on every
+/// failure shape; never closes `fd` (the caller owns that decision).
+#[cfg(unix)]
+fn validate_respawn_proof_fd(fd: std::os::unix::io::RawFd, nonce_hex: &str) -> bool {
+    let Some(want) = crate::fd::respawn_proof_nonce_bytes(nonce_hex) else {
+        return false;
+    };
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut st) } != 0 {
+        return false;
+    }
+    if (u32::from(st.st_mode) & u32::from(libc::S_IFMT)) != u32::from(libc::S_IFIFO) {
+        return false;
+    }
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return false;
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return false;
+    }
+    let mut buf = [0u8; 16];
+    let mut got = 0;
+    while got < 16 {
+        let n = unsafe { libc::read(fd, buf[got..].as_mut_ptr() as *mut libc::c_void, 16 - got) };
+        if n == 0 {
+            return false; // EOF before 16 bytes: not our pipe.
+        }
+        if n < 0 {
+            let e = std::io::Error::last_os_error().raw_os_error();
+            if e == Some(libc::EINTR) {
+                continue;
+            }
+            // EAGAIN: no data yet — the write end is still open (or
+            // the pipe is empty), so this is not a mint-closed proof.
+            return false;
+        }
+        got += n as usize;
+    }
+    if buf != want {
+        return false;
+    }
+    // Second read must be EOF: the spawner closed the write end
+    // before spawn. Extra data, or EAGAIN (write end still open),
+    // both fail.
+    let mut extra = [0u8; 1];
+    let n = unsafe { libc::read(fd, extra.as_mut_ptr() as *mut libc::c_void, 1) };
+    n == 0
+}
 
 /// The parent process id of this process, where the platform exposes it
 /// cheaply. Windows enumerates a Toolhelp snapshot, so callers invoke
@@ -234,8 +387,15 @@ fn stamped_spawner_gone(pid: u32, stamp_start: Option<u64>) -> bool {
 /// * the stamp names our live parent (`getppid()`), or
 /// * we were orphaned to the namespace init (ppid 1) and the stamped
 ///   spawner is gone — the async child whose shell exited while it
-///   started. A live unrelated parent fails both arms, which is what
-///   makes a leaked or planted claim in a normal session inert.
+///   started, or
+/// * (rubash#3300) we were orphaned to a live unrelated parent — a
+///   subreaper that adopted us after our spawner died — and we hold a
+///   valid per-spawn fd/pipe proof (`proof_valid`): the pipe is
+///   unforgeable evidence that the stamped spawner really spawned us,
+///   which no ppid value can supply after reparenting. The proof arm
+///   still requires the stamped spawner to be gone, so a live
+///   unrelated parent with a planted claim and no proof fails every
+///   arm, exactly as before.
 ///
 /// A parent that deliberately stamps its own pid is in the same trust
 /// class GNU extends to BASH_ENV/SHELLOPTS: it already controls the
@@ -243,6 +403,7 @@ fn stamped_spawner_gone(pid: u32, stamp_start: Option<u64>) -> bool {
 pub(crate) fn respawn_provenance_validated(
     claim_present: bool,
     spawner_stamp: Option<(u32, Option<u64>)>,
+    proof_valid: bool,
 ) -> bool {
     if !claim_present {
         return false;
@@ -253,7 +414,13 @@ pub(crate) fn respawn_provenance_validated(
     match parent_process_id() {
         Some(ppid) if ppid == stamp_pid => true,
         Some(1) => stamped_spawner_gone(stamp_pid, stamp_start),
-        _ => false,
+        // rubash#3300: orphaned to a live unrelated parent (a
+        // subreaper, not init). The ppid cannot testify here, so the
+        // per-spawn fd/pipe proof carries the verdict — but only
+        // together with the stamped spawner being gone. Never relax
+        // this arm to any ppid: that would reopen the #2136 stranger
+        // hole the first two arms closed.
+        _ => proof_valid && stamped_spawner_gone(stamp_pid, stamp_start),
     }
 }
 
@@ -266,7 +433,10 @@ pub fn respawn_provenance_validated_from_process_env() -> bool {
     let stamp = std::env::var(RESPAWN_SPAWNER_PID_KEY)
         .ok()
         .and_then(|value| parse_spawner_stamp(&value));
-    respawn_provenance_validated(claim, stamp)
+    // rubash#3300: the proof verdict comes from the OnceLock helper —
+    // exactly once per process, even though this form and new_inner
+    // below both ask for it.
+    respawn_provenance_validated(claim, stamp, respawn_proof_validated())
 }
 
 impl Executor {
@@ -323,21 +493,60 @@ impl Executor {
         // value channel applies. The process_env_snapshot FIELD keeps
         // the raw values: the Drop-time restore writes them back to
         // the process environment verbatim.
-        let mut env_vars = if process_exit {
-            crate::shell::var_table::VarTable::from_values(
-                crate::executor::env_helpers::entry_encode_imported_env(
-                    crate::executor::env_helpers::process_env_pairs()
-                        .into_iter()
-                        .collect(),
-                ),
-            )
+        // rubash#3049: the respawn provenance must be decided on the RAW
+        // environment, before VarTable::from_values imports any
+        // `__RUBASH_*_VARS` attribute strings — and every other member
+        // of the fork/respawn transport family
+        // (compound_exec::fork_respawn_transport_key). Those keys are
+        // the respawn protocol's state channel: legitimate only in an
+        // env a rubash spawner deliberately minted for a `rubash -c`
+        // fork child. Anywhere else they are foreign pollution — GNU's
+        // exec boundary hands a fresh shell exactly the export
+        // environment (variables.c maybe_make_export_env /
+        // make_env_array_from_var_list), so attribute lists, spawn
+        // stamps and serialized table state must be inert: stripped
+        // from the import below AND removed from the process env so
+        // they cannot ride the compose_child_environment mirror into
+        // this process's own children either. Without this, a
+        // respawned process's transport residue crossed the exec
+        // boundary into bats-exec-test and VarTable::from_values
+        // applied the parent's readonly/array marks to a fresh shell —
+        // BATS_TEST_TAGS was born `declare -ar` and its registration
+        // assignment (`BATS_TEST_TAGS=("${tags[@]+${tags[@]}}")`,
+        // bats-core test_functions.bash) failed "readonly variable",
+        // deadlocking bats-core test #71.
+        let mut raw_env: HashMap<String, String> = if process_exit {
+            crate::executor::env_helpers::process_env_pairs()
+                .into_iter()
+                .collect()
         } else {
-            crate::shell::var_table::VarTable::from_values(
-                crate::executor::env_helpers::entry_encode_imported_env(
-                    process_env_snapshot.clone(),
-                ),
-            )
+            process_env_snapshot.clone()
         };
+        let coproc_child_claimed =
+            raw_env.get("__RUBASH_COPROC_CHILD").map(String::as_str) == Some("1");
+        let provenance_claim = coproc_child_claimed || raw_env.contains_key("__RUBASH_SHELL_PID");
+        let spawner_stamp = raw_env
+            .get(RESPAWN_SPAWNER_PID_KEY)
+            .and_then(|value| parse_spawner_stamp(value));
+        let internal_respawn = respawn_provenance_validated(
+            provenance_claim,
+            spawner_stamp,
+            respawn_proof_validated(),
+        );
+        if !internal_respawn {
+            let foreign: Vec<String> = raw_env
+                .keys()
+                .filter(|key| super::compound_exec::fork_respawn_transport_key(key))
+                .cloned()
+                .collect();
+            for key in foreign {
+                raw_env.remove(&key);
+                mirror_env_remove(&key);
+            }
+        }
+        let mut env_vars = crate::shell::var_table::VarTable::from_values(
+            crate::executor::env_helpers::entry_encode_imported_env(raw_env),
+        );
         // rubash#2356: out-of-band respawn state transport — the
         // spawn side moved every oversized environment entry into a
         // temp file and left only its path under
@@ -354,18 +563,34 @@ impl Executor {
         // can leak into a grandchild or surface as a shell variable,
         // exactly the __RUBASH_CMD_FILE contract; a malformed file
         // applies nothing (decode is all-or-nothing).
-        if let Some(state_path) = env_vars
-            .get(crate::invocation::RESPAWN_STATE_FILE_ENV_KEY)
-            .cloned()
-        {
-            env_vars.remove(crate::invocation::RESPAWN_STATE_FILE_ENV_KEY);
-            mirror_env_remove(crate::invocation::RESPAWN_STATE_FILE_ENV_KEY);
-            if let Ok(bytes) = std::fs::read(&state_path) {
-                let _ = std::fs::remove_file(&state_path);
-                if let Some(entries) = crate::invocation::decode_respawn_state_entries(&bytes) {
-                    for (key, value) in entries {
-                        env_vars.insert(key.clone(), value.clone());
-                        mirror_env_set(&key, &value);
+        // rubash#3049: only a validated respawn may splice — for every
+        // other birth the key was already stripped from raw_env above
+        // (a planted pointer must not make this shell read and delete
+        // a file it was never spawned through).
+        if internal_respawn {
+            if let Some(state_path) = env_vars
+                .get(crate::invocation::RESPAWN_STATE_FILE_ENV_KEY)
+                .cloned()
+            {
+                env_vars.remove(crate::invocation::RESPAWN_STATE_FILE_ENV_KEY);
+                mirror_env_remove(crate::invocation::RESPAWN_STATE_FILE_ENV_KEY);
+                if let Ok(bytes) = std::fs::read(&state_path) {
+                    let _ = std::fs::remove_file(&state_path);
+                    if let Some(entries) = crate::invocation::decode_respawn_state_entries(&bytes) {
+                        for (key, value) in entries {
+                            env_vars.insert(key.clone(), value.clone());
+                            // rubash#3049: restore the execve-shape env
+                            // WITHOUT journaling — the journal records
+                            // session writes, and these entries are
+                            // transport residue of this process's own
+                            // birth, not session state. Journaling them
+                            // would let compose_child_environment's
+                            // session-write gate re-project them into
+                            // this process's real children.
+                            crate::executor::local_helpers::with_process_state_lock(|| {
+                                std::env::set_var(&key, &value);
+                            });
+                        }
                     }
                 }
             }
@@ -501,15 +726,34 @@ impl Executor {
         for name in imported_functions.keys() {
             mark_env_name(&mut env_vars, EXPORTED_FUNCTIONS, name);
         }
-        // GNU variables.c import refusal (the ShellShock guard) reports
-        // both lines under the shell's invocation name (rubash#1276).
-        if !failed_function_imports.is_empty() {
+        // GNU variables.c import refusals report under the shell's
+        // invocation name, split by failure class (rubash#2728): a
+        // parse failure prints the parser's own diagnostics first
+        // (evalstring.c parse_command failure arm), a parsed-but-not-
+        // a-definition attempt prints only the warning
+        // (evalstring.c:478); both end with variables.c:441's single
+        // error line and leave last_command_exit_value at
+        // EXECUTION_FAILURE (variables.c:440), seeded below.
+        let function_import_failed = !failed_function_imports.is_empty();
+        if function_import_failed {
             let shell_name = std::env::args()
                 .next()
                 .unwrap_or_else(|| "rubash".to_string());
-            for name in &failed_function_imports {
-                eprintln!("{shell_name}: warning: {name}: ignoring function definition attempt");
-                eprintln!("{shell_name}: error importing function definition for `{name}'");
+            for failure in &failed_function_imports {
+                match failure {
+                    ImportedFunctionFailure::Parse { name, diagnostics } => {
+                        for (line, message) in diagnostics {
+                            eprintln!("{shell_name}: {name}: line {line}: {message}");
+                        }
+                        eprintln!("{shell_name}: error importing function definition for `{name}'");
+                    }
+                    ImportedFunctionFailure::IgnoredAttempt { name } => {
+                        eprintln!(
+                            "{shell_name}: warning: {name}: ignoring function definition attempt"
+                        );
+                        eprintln!("{shell_name}: error importing function definition for `{name}'");
+                    }
+                }
             }
         }
         // GNU variables.c:397-446 (initialize_shell_variables,
@@ -604,13 +848,11 @@ impl Executor {
         // door — falls back to the plain top-level defaults, while the
         // keys themselves are still consumed so they never surface as
         // shell variables or ride the process-env mirror into children.
-        let coproc_child_claimed =
-            env_vars.get("__RUBASH_COPROC_CHILD").map(String::as_str) == Some("1");
-        let provenance_claim = coproc_child_claimed || env_vars.contains_key("__RUBASH_SHELL_PID");
-        let spawner_stamp = env_vars
-            .get(RESPAWN_SPAWNER_PID_KEY)
-            .and_then(|value| parse_spawner_stamp(value));
-        let internal_respawn = respawn_provenance_validated(provenance_claim, spawner_stamp);
+        // rubash#3049: provenance was already decided on the raw env
+        // before import (above — the transport family must be stripped
+        // for non-respawns BEFORE from_values reads the attribute
+        // strings). The claim keys are consumed here either way so
+        // they never surface as shell variables.
         env_vars.remove(RESPAWN_SPAWNER_PID_KEY);
         env_vars.remove("__RUBASH_COPROC_CHILD");
         // rubash#2137 (F9): POSIX mode gets ONE source of truth — the
@@ -750,9 +992,89 @@ impl Executor {
         mirror_env_remove(crate::executor::path::COMPATIBLE_SHELL_PATH_ENV);
         // Birth context: the session cwd field (set in the ShellState
         // literal below) starts at the process cwd.
-        Self::initialize_fresh_shell_env_vars(
+        //
+        // rubash#3268 (e): the birth cwd is captured ONCE, here, and
+        // the single value feeds both this env seed and the ShellState
+        // field below — the two used to call current_dir()
+        // independently and could disagree across a getcwd boundary.
+        // A FAILED capture has no honest string form: GNU keeps no
+        // cwd string state at all (the process inode IS the state;
+        // variables.c:907 set_pwd seeds only $PWD), so the field
+        // takes the empty path — the "unknown" spelling, which never
+        // resolves and never equals a real directory — in place of
+        // the old "/" fabrication, which transplanted the whole
+        // session to the root directory (pwd printed /, children
+        // were stamped into /, relative operands resolved against
+        // /). The inode itself is still known — the process sits in
+        // it — so the literal below opens the birth anchor on "."
+        // and the two-state anchor machinery (stamp_spawn_cwd /
+        // read_session_anchored) serves the session from the inode
+        // until the first successful cd replaces field and anchor.
+        let (birth_cwd, birth_anchor): (PathBuf, Option<crate::shell::state::CwdAnchor>) =
+            match std::env::current_dir() {
+                Ok(path) => (path, None),
+                Err(error) => {
+                    // GNU prints the shell-init line once at startup
+                    // when set_pwd's get_working_directory fails
+                    // (variables.c:907 -> builtins/common.c:611, errstr
+                    // general.c:70). A validated respawn is GNU's forked
+                    // child (execute_cmd.c), which never re-runs startup,
+                    // so it stays silent; the per-command
+                    // job-working-directory repeats GNU prints after
+                    // later commands are its working-directory cache
+                    // bookkeeping and are deliberately not followed.
+                    if !internal_respawn {
+                        eprintln!(
+                            "shell-init: error retrieving current directory: \
+                         getcwd: cannot access parent directories: {}",
+                            getcwd_strerror(&error)
+                        );
+                    }
+                    // The respawned child's fork snapshot is its
+                    // inheritance: GNU's fork child keeps
+                    // the_current_working_directory verbatim, with no
+                    // set_pwd revalidation, so a validated respawn adopts
+                    // the transported PWD as its field when it names an
+                    // absolute path — its spawner stamped it into the
+                    // very inode that string names (stamp_spawn_cwd, or
+                    // the whitelisted spawn's anchor fchdir), and the
+                    // #3275 identity gate keeps the adopted string from
+                    // ever being mistaken for a resolution of it. Any
+                    // other birth leaves the field empty: an ambient PWD
+                    // is never trusted, because variables.c:907's
+                    // same_file gate cannot pass for a directory the
+                    // kernel can no longer stat through its name.
+                    let adopted = if internal_respawn {
+                        env_vars.get("PWD").and_then(|transported| {
+                            let candidate = PathBuf::from(transported);
+                            candidate.is_absolute().then_some(candidate)
+                        })
+                    } else {
+                        None
+                    };
+                    let field = adopted.unwrap_or_default();
+                    // The process sits in the birth inode even though
+                    // its name is gone: open "." once so the anchor can
+                    // name the field from birth. Off Unix the anchor
+                    // holds no directory handle, so none is constructed
+                    // (the spawn stamp there falls back to the
+                    // unstamped spawn, as before).
+                    #[cfg(unix)]
+                    let anchor =
+                        std::fs::File::open(".")
+                            .ok()
+                            .map(|dir| crate::shell::state::CwdAnchor {
+                                path: field.clone(),
+                                dir: std::sync::Arc::new(dir),
+                            });
+                    #[cfg(not(unix))]
+                    let anchor: Option<crate::shell::state::CwdAnchor> = None;
+                    (field, anchor)
+                }
+            };
+        let startup_logical_cwd = Self::initialize_fresh_shell_env_vars(
             &mut env_vars,
-            &std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+            &birth_cwd,
             internal_respawn,
             process_exit,
         );
@@ -819,6 +1141,21 @@ impl Executor {
             };
         env_vars.remove(super::compound_exec::POSITIONAL_PARAMS_TRANSPORT);
         mirror_env_remove(super::compound_exec::POSITIONAL_PARAMS_TRANSPORT);
+
+        // rubash#3605: the fork-shaped children that execute the
+        // parent's flagged command node (the async `&` wrapper and
+        // the coproc respawn — execute_cmd.c:1576/:2546 through
+        // execute_in_subshell) stamp the live CMD_IGNORE_RETURN
+        // depth under SUPPRESS_ERREXIT_TRANSPORT; seed it only for
+        // internal respawns and strip it either way so it never
+        // surfaces as a shell variable. A nonzero seed suppresses
+        // `set -e` inside the body, matching GNU's node-flag model —
+        // exec16's `! coproc C { set -e; false; echo reached coproc
+        // body; }`.
+        let respawn_suppress_errexit = internal_respawn
+            && env_vars.contains_key(super::compound_exec::SUPPRESS_ERREXIT_TRANSPORT);
+        env_vars.remove(super::compound_exec::SUPPRESS_ERREXIT_TRANSPORT);
+        mirror_env_remove(super::compound_exec::SUPPRESS_ERREXIT_TRANSPORT);
 
         // rubash#2058: the fork-context stamp (see
         // Executor::fork_context_transport_entries) — the parent's
@@ -923,6 +1260,19 @@ impl Executor {
         let fd_delivery_at_stamped =
             env_vars.remove(FD_DELIVERY_AT_STAMPED_KEY).as_deref() == Some("1");
         mirror_env_remove(FD_DELIVERY_AT_STAMPED_KEY);
+        // rubash#3300: the respawn proof keys are consumed here with
+        // the other transport keys so they never surface as shell
+        // variables or ride the process-env mirror into children. The
+        // OnceLock helper already removed the process-env copies at
+        // first validation; this removes the imported-table copies the
+        // construction-start snapshot may still carry. (Deliberately
+        // NOT in FORK_TRANSPORT_KEYS: the proof is per-spawn, never
+        // forwarded — a grandchild's proof is minted fresh by its own
+        // spawner.)
+        env_vars.remove(RESPAWN_PROOF_FD_KEY);
+        env_vars.remove(RESPAWN_PROOF_KEY);
+        mirror_env_remove(RESPAWN_PROOF_FD_KEY);
+        mirror_env_remove(RESPAWN_PROOF_KEY);
 
         // Forked-child fd table restore: a `rubash -c` background/subshell
         // child inherits the parent's fd>=3 File endpoints through the
@@ -1004,6 +1354,12 @@ impl Executor {
             true
         };
 
+        // variables.c:6168-6177 sv_histtimefmt runs for the variables
+        // imported from the process environment too: a HISTTIMEFORMAT
+        // present at birth has already armed history_comment_char
+        // before the first command runs (rubash#3535).
+        let history_comment_char_armed_seed = env_vars.contains_key("HISTTIMEFORMAT");
+
         let mut executor = Self {
             shell_state: ShellState {
                 // rubash#3108: bind from the table with its attribute
@@ -1016,8 +1372,26 @@ impl Executor {
                 // G-02: a root session is born in the process cwd (the
                 // host's directory at Executor::new, exactly what GNU's
                 // startup getcwd reports); from here on the field, not
-                // the process, carries the session's cwd.
-                cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+                // the process, carries the session's cwd. The value is
+                // the single birth capture taken above (rubash#3268
+                // (e)): empty when the capture failed — the honest
+                // "unknown" — never a fabricated "/".
+                cwd: birth_cwd,
+                // rubash#3198: the cwd inode anchor is a lazy cache —
+                // it is opened by the first spawn stamp (or cd) that
+                // finds the path resolvable, never at construction.
+                // rubash#3268 (e): the one birth exception — when the
+                // birth capture failed, the process still sits in the
+                // inode it was born in, so the anchor opens "."
+                // eagerly and names the (empty or respawn-adopted)
+                // field; the two-state machinery then serves the
+                // session from that inode. A successful capture keeps
+                // the anchor lazy: no per-birth open is added to the
+                // respawn-hot path.
+                cwd_anchor: std::cell::RefCell::new(birth_anchor),
+                // variables.c:907 set_pwd via initialize_fresh_shell_env_vars
+                // above: the adopted-or-physical logical cwd.
+                logical_cwd: Some(startup_logical_cwd),
                 array_compact_budget: HashMap::new(),
                 // rubash#2130: born unshaped — the ambient carriers
                 // were stripped from the import above (#2259), and
@@ -1034,6 +1408,7 @@ impl Executor {
                 // (the host declares the shape after construction);
                 // a respawned child re-derives it there too.
                 forced_interactive: false,
+                history_comment_char_armed: history_comment_char_armed_seed,
                 aliases: HashMap::new(),
                 functions: imported_functions,
                 function_definition_redirects: HashMap::new(),
@@ -1069,6 +1444,7 @@ impl Executor {
                 ),
                 bash_lineno_stack: Vec::new(),
                 bash_source_stack: Vec::new(),
+                bash_source_seed: None,
                 exit_unwind_leaked_frames: std::cell::Cell::new(0),
                 inherited_fork_frames: respawn_inherited_frames,
                 respawn_function_line_spans,
@@ -1118,8 +1494,10 @@ impl Executor {
                 // process boundary (rubash#2487).
                 job_control: Cell::new(false),
                 subshell_source_text: None,
+                reader_unit_source: std::cell::RefCell::new(None),
                 in_command_substitution: Cell::new(false),
                 stdin_redir: Cell::new(false),
+                element_pipe_stdin: Cell::new(false),
                 xtrace_indirection_level: Cell::new(0),
                 xtrace_suspended: Cell::new(0),
                 job_table: crate::jobs::table::JobTable::default(),
@@ -1127,8 +1505,8 @@ impl Executor {
                 last_procsub_pid: None,
                 coproc_names: HashMap::new(),
                 completion_specs: crate::builtins::complete::CompletionRegistry::new(),
-                pcomp_curcs: None,
-                pcomp_curcmd: None,
+                pcomp_curcs: std::rc::Rc::new(std::cell::RefCell::new(None)),
+                pcomp_curcmd: std::rc::Rc::new(std::cell::RefCell::new(None)),
                 line_completion_depth: 0,
                 bind_registry: std::rc::Rc::new(std::cell::RefCell::new(
                     crate::shell::bind_registry::BindRegistry::default(),
@@ -1143,6 +1521,7 @@ impl Executor {
                 conditional_nounset_error: Cell::new(false),
                 arithmetic_last_error_category: Cell::new(None),
                 parameter_bad_substitution: Cell::new(false),
+                bad_substitution_reported: Cell::new(false),
                 redirect_failglob_error: Cell::new(false),
                 redirect_failglob_seen: Cell::new(false),
                 debug_trap_command: std::cell::RefCell::new(None),
@@ -1151,16 +1530,25 @@ impl Executor {
                 procsub_streams: std::cell::RefCell::new(HashMap::new()),
                 procsub_adhoc_carriers: std::cell::RefCell::new(Vec::new()),
                 fork_saved_process_umask: None,
+                fork_saved_process_rlimits: None,
             },
             fd_table: FdTable::new(),
-            exit_code: 0,
+            // variables.c:440: a refused function import leaves
+            // last_command_exit_value = EXECUTION_FAILURE, so the
+            // first command observes `$?` = 1 (rubash#2728).
+            exit_code: if function_import_failed { 1 } else { 0 },
             parse_error_occurred: false,
             signal_discard_pending: false,
             errexit_unwind_pending: false,
             errexit_unwind_armed: false,
+            errexit_suppressed_terminal: Cell::new(false),
             unit_signal_discard: false,
+            unit_expansion_error_discard: false,
             termsig_death_pending: None,
             termsig_death_trap_status: None,
+            comsub_drain_permit: Cell::new(false),
+            comsub_parent_exit_armed: Cell::new(false),
+            comsub_termsig_pending: Cell::new(None),
             bash_logout_sourced: false,
             shell_pid,
             bashpid_origin_depth: bg_bashpid_base.unwrap_or(0),
@@ -1198,7 +1586,8 @@ impl Executor {
             conditional_output_procsubs: Vec::new(),
             current_conditional_redirects: None,
             pending_scalar_assignment: false,
-            suppress_errexit: 0,
+            suppress_errexit: if respawn_suppress_errexit { 1 } else { 0 },
+            comsub_ignore_return: 0,
             errexit_ignore_frame: 0,
             parse_and_execute_frames: Vec::new(),
             command_builtin_depth: 0,
@@ -1228,21 +1617,21 @@ impl Executor {
             // rubash#1175: a process root IS its process's shell; the
             // image-replacement gates live at the exec dispatcher.
             owns_process_image: true,
+            emulated_child_depth: std::cell::Cell::new(0),
             source_nest_depth: 0,
             sigchld_notifications_pending: std::cell::Cell::new(0),
             pending_signal_notices: std::cell::RefCell::new(Vec::new()),
+            wait_notice_pids: Vec::new(),
             host_internal_depth: std::cell::Cell::new(0),
             debug_trap_function_line: None,
             arithmetic_last_error_expression: std::cell::RefCell::new(String::new()),
             arithmetic_last_eval_input: std::cell::RefCell::new(String::new()),
             assignment_command_name: None,
-            buffer_assignment_diagnostics: false,
             getopts_optind_arith_fatal: false,
             defer_stage_time_report: false,
             pending_stage_time_report: None,
             defer_list_time_report: false,
             pending_list_time_reports: Vec::new(),
-            pending_assignment_diagnostics: Vec::new(),
             parameter_assignment_failure: Cell::new(false),
             parameter_assignment_failure_prev_status: Cell::new(None),
             no_closing_brace_failure: Cell::new(false),
@@ -1269,6 +1658,7 @@ impl Executor {
             command_expansion_failed: Cell::new(false),
             err_trap_fired_at_dispatch: Cell::new(false),
             exit_trap_ran: Cell::new(false),
+            nohist_parse_depth: Cell::new(0),
             err_trap_armed_sample: Cell::new(None),
             evalerror_exec_depth: Cell::new(0),
             reader_command_line: Cell::new(None),
@@ -1286,7 +1676,9 @@ impl Executor {
             exec_replace_shlvl_snapshot: Cell::new(None),
             line_lex_locales: std::cell::RefCell::new(HashMap::new()),
             unit_lex_locale: std::cell::RefCell::new(None),
+            line_lex_extquotes: std::cell::RefCell::new(HashMap::new()),
             ambient_line: Cell::new(None),
+            err_trap_line: Cell::new(None),
             inside_compound_condition: Cell::new(false),
             conditional_invert_pending: Cell::new(false),
             inside_assignment_rhs: Cell::new(false),
@@ -1296,9 +1688,11 @@ impl Executor {
             pipeline_stdin_consumed: Cell::new(None),
             pipeline_stage_fds_pre_wired: std::cell::Cell::new(false),
             stage_dup_channel_payloads: std::cell::RefCell::new(Vec::new()),
+            pipeline_stage_ordered_chunks: std::cell::RefCell::new(None),
             pipeline_final_stage: std::cell::Cell::new(false),
             pipeline_stage_pre_traced: std::cell::Cell::new(false),
             pipeline_stage_restricted_refused: std::cell::Cell::new(false),
+            pipeline_stage_bad_substitution_discarded: std::cell::Cell::new(false),
             last_heredoc_warning_source: RefCell::new(None),
             heredoc_admission_declined_source: RefCell::new(None),
             comsub_leading_newlines: Cell::new(0),
@@ -1308,27 +1702,34 @@ impl Executor {
             comsub_error_reported_out: Cell::new(false),
             last_command_substitution_parse_error_backtick: Cell::new(false),
             backtick_body_diagnostic: Cell::new(false),
+            arith_fallback_comsub_body: Cell::new(false),
             parser_error_errexited: Cell::new(false),
             last_command_inverted: Cell::new(false),
             compound_redirect_failed: Cell::new(false),
             noclobber_prepared_targets: std::cell::RefCell::new(std::collections::HashSet::new()),
+            pending_preopened_redirects: std::cell::RefCell::new(std::collections::HashMap::new()),
             exit_jump_pending: Cell::new(false),
             run_diagnostics: std::cell::RefCell::new(None),
             errexit_status_converted: Cell::new(false),
             posix_special_status_converted: Cell::new(false),
             exec_do_redirections_failed: Cell::new(false),
             timed_dispatch_depth: Cell::new(0),
+            timed_root_redirect_failure: Cell::new(false),
+            timed_err_owned_by_body: Cell::new(None),
             special_builtin_failed: Cell::new(false),
             last_builtin_write_failed: Cell::new(false),
             alias_introduced_words: Cell::new(0),
             redirect_target_memo: RefCell::new(HashMap::new()),
             redirect_target_single_glob_match: RefCell::new(std::collections::HashSet::new()),
+            redirect_target_transport_spellings: RefCell::new(HashMap::new()),
+            redirect_target_node_spellings: RefCell::new(HashMap::new()),
             assignment_expansion_memo: RefCell::new(HashMap::new()),
             alias_select_scan_memo: RefCell::new(None),
             fd_var_external_undo: Vec::new(),
             fd_var_deferred_closes: Vec::new(),
             fd_var_pending_closes: Vec::new(),
             fd_var_close_generation: 0,
+            fd_var_apply_snapshot: None,
             fd_var_pending_close_generation: 0,
             fd_var_close_restore: Vec::new(),
             deferred_varredir_closes: Vec::new(),
@@ -1347,6 +1748,8 @@ impl Executor {
             pipeline_stdout_stream: None,
             pipeline_stdin_stream: None,
             pipeline_stage_stderr_live: false,
+            pipeline_stage_feed_sigpipe: Cell::new(false),
+            pipeline_stage_spawn_dead: Cell::new(false),
             external_stdio_outcome: None,
             external_stdio_piped_fallback: false,
             host_external_command_handler: None,
@@ -1405,6 +1808,7 @@ impl Executor {
             let read_rc = read_h.map(|handle| {
                 Rc::new(FileFd {
                     handle: restore_handle(handle),
+                    closed: std::cell::Cell::new(false),
                     path: path.clone(),
                 })
             });
@@ -1415,20 +1819,37 @@ impl Executor {
                     Some(rc) if read_h == Some(handle) => Some(rc.clone()),
                     _ => Some(Rc::new(FileFd {
                         handle: restore_handle(handle),
+                        closed: std::cell::Cell::new(false),
                         path: path.clone(),
                     })),
                 },
                 None => None,
             };
-            if let Some(rc) = read_rc {
-                executor
-                    .fd_table
-                    .open_input(fd, FdReadEndpoint::File(rc), false);
-            }
-            if let Some(rc) = write_rc {
-                executor
-                    .fd_table
-                    .open_output(fd, FdWriteEndpoint::File(rc), false);
+            // rubash#3655: when both arms restore, they are ONE
+            // description — a single open_readwrite install, or the
+            // output restore would retire the read arm (dup2
+            // wholesale). Either arm alone keeps its
+            // single-direction install.
+            match (read_rc, write_rc) {
+                (Some(read), Some(write)) => {
+                    executor.fd_table.open_readwrite(
+                        fd,
+                        FdReadEndpoint::File(read),
+                        FdWriteEndpoint::File(write),
+                        false,
+                    );
+                }
+                (Some(rc), None) => {
+                    executor
+                        .fd_table
+                        .open_input(fd, FdReadEndpoint::File(rc), false);
+                }
+                (None, Some(rc)) => {
+                    executor
+                        .fd_table
+                        .open_output(fd, FdWriteEndpoint::File(rc), false);
+                }
+                (None, None) => {}
             }
         }
         // rubash#1557: adopt whatever descriptors the process itself
@@ -1468,22 +1889,56 @@ impl Executor {
         // anti-leak heuristic: their "environment" is a parent
         // session's serialization or a shared host process env.
         process_startup: bool,
-    ) {
+    ) -> String {
         env_vars.remove("BASH_ARGV0");
         env_vars.remove("BASH_EXECUTION_STRING");
-        // GNU Bash derives PWD from the real working directory at startup
-        // (variables.c initialize_shell_variables): it only trusts an
-        // inherited PWD that still matches the current directory, and
-        // otherwise falls back to getcwd(). WSL interop forwards the Windows
-        // session's PWD (e.g. D:/repo/rubash) rather than the WSL shell's
-        // actual CWD; trusting it desynchronized cd/OLDPWD, so `cd $OLDPWD`
-        // (assoc.tests) landed in the wrong directory and subsequent
-        // `./assocN.sub` lookups failed. Always align PWD with the real CWD.
-        // G-02: the "real CWD" is the caller's session cwd field, passed in
-        // (at process birth it is the process cwd; for an in-process fresh
-        // shell it is the parent session's cwd).
-        let pwd = shell_pwd_display(&cwd.to_string_lossy().replace('\\', "/"));
-        env_vars.insert("PWD".to_string(), pwd);
+        // GNU variables.c:907 set_pwd: an imported $PWD that is
+        // absolute and names the current directory (same_file with
+        // ".") is ADOPTED as the shell's logical cwd,
+        // the_current_working_directory, canonicalized by sh_canonpath
+        // — and the $PWD variable keeps its imported spelling in
+        // non-POSIX mode. Only a value naming ANOTHER directory (or no
+        // directory) is replaced: WSL interop forwards the Windows
+        // session's PWD (e.g. D:/repo/rubash) rather than the WSL
+        // shell's actual CWD, and trusting THAT value desynchronized
+        // cd/OLDPWD (`cd $OLDPWD` in assoc.tests landed in the wrong
+        // directory). The unconditional overwrite also discarded a
+        // VALID inherited logical PWD — a child shell born in a
+        // symlinked directory reset its logical cwd to the physical
+        // path (rubash#2799). G-02: the "real CWD" is the caller's
+        // session cwd field, passed in (at process birth it is the
+        // process cwd; for an in-process fresh shell it is the parent
+        // session's cwd). The adopted-or-physical logical cwd is this
+        // function's return value; the caller stores it in
+        // ShellState::logical_cwd.
+        //
+        // rubash#3268 (e): an empty cwd is the unknown birth state
+        // (the birth getcwd failed). GNU does not rebind PWD there:
+        // set_pwd calls get_working_directory("shell-init"), which
+        // fails WITHOUT binding the variable (variables.c:907), so an
+        // imported PWD keeps its stale value and an absent one stays
+        // unbound; no logical value is adopted either — the readers
+        // gate on the empty field itself.
+        // rubash#3570: the `\`→`/` rewrite is a Windows path-form
+        // normalization — on Unix a backslash is an ordinary filename byte
+        // (general.h:264-270 ABSPATH), and GNU set_pwd (variables.c:907)
+        // binds the get_working_directory spelling verbatim, so a physical
+        // cwd named `dir\name` must NOT become the nonexistent `dir/name`.
+        #[cfg(windows)]
+        let physical_pwd = shell_pwd_display(&cwd.to_string_lossy().replace('\\', "/"));
+        #[cfg(not(windows))]
+        let physical_pwd = shell_pwd_display(cwd.to_string_lossy().as_ref());
+        let startup_logical_cwd = if cwd.as_os_str().is_empty() {
+            String::new()
+        } else {
+            match crate::builtins::pwd::adopted_logical_pwd(env_vars, cwd) {
+                Some(logical) => logical,
+                None => {
+                    env_vars.insert("PWD".to_string(), physical_pwd.clone());
+                    physical_pwd
+                }
+            }
+        };
         // Windows-only: suites write $TMPDIR/$HOME into generated scripts
         // unquoted (posix2.tests conftest2: `$TMPDIR/conftest2 "$@"`; exp.tests
         // `${x#$HOME}`), and an inherited Windows backslash path is escape
@@ -1584,23 +2039,35 @@ impl Executor {
         // rubash#2058: see the keep_shlvl parameter.
         if !keep_shlvl {
             initialize_shell_level(env_vars);
+            mark_initial_exported_vars(env_vars, process_startup);
+            mark_env_name(env_vars, EXPORTED_VARS, "OLDPWD");
+            // Undo the export mark for the SHELL/PATH fallbacks
+            // fabricated above (see the note at the SHELL bind): GNU
+            // binds both without att_exported, so `env -i` shells must
+            // not export them (rubash#1325). Inherited values keep
+            // their imported mark.
+            if !shell_inherited {
+                unmark_env_name(env_vars, EXPORTED_VARS, "SHELL");
+            }
+            #[cfg(unix)]
+            if !path_inherited {
+                unmark_env_name(env_vars, EXPORTED_VARS, "PATH");
+            }
+            if !this_sh_inherited {
+                unmark_env_name(env_vars, EXPORTED_VARS, "THIS_SH");
+            }
         }
-        mark_initial_exported_vars(env_vars, process_startup);
-        mark_env_name(env_vars, EXPORTED_VARS, "OLDPWD");
-        // Undo the export mark for the SHELL/PATH fallbacks fabricated
-        // above (see the note at the SHELL bind): GNU binds both without
-        // att_exported, so `env -i` shells must not export them
-        // (rubash#1325). Inherited values keep their imported mark.
-        if !shell_inherited {
-            unmark_env_name(env_vars, EXPORTED_VARS, "SHELL");
-        }
-        #[cfg(unix)]
-        if !path_inherited {
-            unmark_env_name(env_vars, EXPORTED_VARS, "PATH");
-        }
-        if !this_sh_inherited {
-            unmark_env_name(env_vars, EXPORTED_VARS, "THIS_SH");
-        }
+        // keep_shlvl (a validated respawn) skips the whole export-set
+        // recompute: GNU's forked child copies the variable table
+        // verbatim (execute_cmd.c execute_in_subshell / make_child;
+        // subst.c process_substitute), so the exported set is exactly
+        // the parent's — already imported into the structured attrs
+        // from the transported __RUBASH_EXPORTED_VARS list.
+        // mark_initial_exported_vars would promote every serialized
+        // env entry — including the parent's UNEXPORTED variables, which
+        // ride the respawn env as the fork channel — to att_exported,
+        // after which compose_child_environment emitted them into real
+        // exec'd children as a snowballing leak (rubash#3049).
         // GNU variables.c initialize_shell_variables only imports TMPDIR from
         // the environment — it never invents a value (WSL probe: `env -i
         // bash -c 'echo ${TMPDIR-UNSET}'` prints UNSET), and a value it never
@@ -1844,5 +2311,6 @@ impl Executor {
         mark_env_name(env_vars, INTEGER_VARS, "UID");
         mark_env_name(env_vars, INTEGER_VARS, "EUID");
         mark_env_name(env_vars, INTEGER_VARS, "PPID");
+        startup_logical_cwd
     }
 }

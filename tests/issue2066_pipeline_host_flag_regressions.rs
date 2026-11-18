@@ -25,9 +25,12 @@
 //! The tput arm is Windows-only and has no pin here; its gate is
 //! the same three lines, compile-covered by the Windows CI.
 
+#[cfg(unix)]
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::sync::Mutex;
 
+#[cfg(unix)]
 use rubash::api::{RunOptions, Session};
 
 /// Command resolution keeps a process-global cache with a single
@@ -37,18 +40,22 @@ use rubash::api::{RunOptions, Session};
 /// thrash it and can serve each other's results, so these pins
 /// serialize (the same pattern as issue681's SERIAL) and every
 /// session starts with `hash -r` to purge leaked hash entries.
+#[cfg(unix)]
 static SERIAL: Mutex<()> = Mutex::new(());
 
+#[cfg(unix)]
 fn serial() -> std::sync::MutexGuard<'static, ()> {
     SERIAL.lock().unwrap_or_else(|p| p.into_inner())
 }
 
+#[cfg(unix)]
 fn temp_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("rubash-issue2066-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     dir
 }
 
+#[cfg(unix)]
 fn opts() -> RunOptions {
     RunOptions::default()
 }

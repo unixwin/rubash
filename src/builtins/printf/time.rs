@@ -54,7 +54,10 @@ pub(super) fn format_time_value(
     } else {
         seconds
     };
-    let timezone = TimeZoneRule::from_env(env_vars.get("TZ").map(String::as_str));
+    let timezone = TimeZoneRule::from_env(
+        env_vars.get("TZ").map(String::as_str),
+        env_vars.get("TZDIR").map(String::as_str),
+    );
     let local = timezone.local_time(seconds);
     let format = spec.time_format.as_deref().unwrap_or_default();
     let format = if format.is_empty() { "%X" } else { format };
@@ -69,7 +72,10 @@ pub(super) fn format_time_value(
 }
 
 pub(crate) fn format_current_time(format: &str, env_vars: &HashMap<String, String>) -> String {
-    let timezone = TimeZoneRule::from_env(env_vars.get("TZ").map(String::as_str));
+    let timezone = TimeZoneRule::from_env(
+        env_vars.get("TZ").map(String::as_str),
+        env_vars.get("TZDIR").map(String::as_str),
+    );
     let local = timezone.local_time(current_epoch_seconds());
     strftime_subset(format, &local)
 }
@@ -83,7 +89,10 @@ pub(crate) fn format_epoch_time(
     epoch: i64,
     env_vars: &HashMap<String, String>,
 ) -> String {
-    let timezone = TimeZoneRule::from_env(env_vars.get("TZ").map(String::as_str));
+    let timezone = TimeZoneRule::from_env(
+        env_vars.get("TZ").map(String::as_str),
+        env_vars.get("TZDIR").map(String::as_str),
+    );
     let local = timezone.local_time(epoch);
     strftime_subset(format, &local)
 }
@@ -113,7 +122,10 @@ pub(crate) fn format_epoch_time_if_valid(
     if utc_year < i64::from(i32::MIN) + 2 || utc_year > i64::from(i32::MAX) - 2 {
         return None;
     }
-    let timezone = TimeZoneRule::from_env(env_vars.get("TZ").map(String::as_str));
+    let timezone = TimeZoneRule::from_env(
+        env_vars.get("TZ").map(String::as_str),
+        env_vars.get("TZDIR").map(String::as_str),
+    );
     let local = timezone.local_time(epoch);
     let local_days = (epoch + i64::from(local.offset)).div_euclid(86_400);
     if civil_year_from_days(local_days) != i64::from(local.year) {

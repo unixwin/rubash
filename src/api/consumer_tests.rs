@@ -3483,6 +3483,40 @@ fn issue2859_jobs_face_procsub_child_does_not_count() {
     );
 }
 
+/// rubash#3292: the cell needs a real rubash binary for its `<(`
+/// child, and a lib-only run (`cargo test --lib`) on a fresh target
+/// builds none — so fail fast naming the precondition instead of
+/// letting the spawn fall back to the lib-test binary, which
+/// rejects `-c` with a misleading error.
+fn issue2875_require_rubash_binary() {
+    let binary_name = if cfg!(windows) {
+        "rubash.exe"
+    } else {
+        "rubash"
+    };
+    let env_arm = crate::executor::test_rubash_binary_from_env();
+    let exe_arm = crate::executor::test_rubash_binary_from_current_exe();
+    let current = std::env::current_exe().ok();
+    let resolved = env_arm
+        .clone()
+        .or(exe_arm.clone())
+        .or_else(|| current.clone());
+    let is_rubash = resolved
+        .as_ref()
+        .is_some_and(|path| path.file_name().and_then(|name| name.to_str()) == Some(binary_name));
+    assert!(
+        is_rubash,
+        "issue2875 precondition (rubash#3292): no rubash binary found — on a fresh target run `cargo build --locked --bin rubash` first, or run the full `cargo test` so cargo builds the bin; otherwise the `<(` child falls back to the lib-test binary, which rejects `-c`.\n\
+         diagnostics: CARGO_BIN_EXE_rubash={:?} env_arm={:?} exe_arm={:?} current_exe={:?} resolved={:?}",
+        std::env::var_os("CARGO_BIN_EXE_rubash"),
+        env_arm,
+        exe_arm,
+        current,
+        resolved,
+    );
+}
+
+#[test]
 /// rubash#2875: an input process-substitution child must be a real
 /// rubash shell, not the lib-test binary. The `<(` spawn resolved
 /// its exe as `CARGO_BIN_EXE_rubash` -> `current_exe()` with no
@@ -3492,8 +3526,8 @@ fn issue2859_jobs_face_procsub_child_does_not_count() {
 /// `-c`: it printed `error: Unrecognized option: 'c'` and wrote
 /// nothing to the pipe, so the body never ran. With the fallback
 /// the child is the real rubash binary and the body executes.
-#[test]
 fn issue2875_input_procsub_child_runs_as_rubash_shell() {
+    issue2875_require_rubash_binary();
     let mut session = issue863_gap6_session();
     issue863_gap6_run(
         &mut session,
@@ -5451,6 +5485,57 @@ fn issue863_gap13_register_binding_reads_back_through_bind_view() {
     assert_eq!(issue863_gap3_entry(&view, r"\C-b").keymap, "vi-movement");
 }
 
+// rubash#3013: the view carries a keymap-valued kind — a
+// `prefix-meta` registration reads back as `BindKindView::Keymap`
+// with its real target map, and the kind round-trips through
+// `register_binding` verbatim.
+#[test]
+fn issue3013_keymap_kind_round_trips_through_the_view() {
+    let mut session = issue863_gap3_session();
+    // The old-style keyname arm is the one GNU's PREFIX_META_HACK
+    // intercepts (bind.c:1845-1855): it binds the key to the
+    // emacs-meta KEYMAP (ISKMAP), not to a function name.
+    issue863_gap3_run(&mut session, r#"bind 'Control-v: prefix-meta'"#);
+    let view = session.bind_view();
+    let entry = view
+        .entries
+        .iter()
+        .find(|entry| matches!(entry.kind, BindKindView::Keymap { .. }))
+        .expect("a Keymap entry registered");
+    match &entry.kind {
+        BindKindView::Keymap { name } => {
+            assert_eq!(name, "emacs-meta");
+        }
+        _ => unreachable!(),
+    }
+    // The ISKMAP slot keeps its raw-byte keyseq form.
+    assert_eq!(entry.bytes, vec![0x16]);
+    // GNU's dumper still prints the ISKMAP slot as `prefix-meta`.
+    assert!(
+        entry.dump.ends_with(": prefix-meta"),
+        "dump={:?}",
+        entry.dump
+    );
+
+    // The write face accepts the kind too (GAP-13 register path).
+    session.register_binding(
+        r"\C-w",
+        BindKindView::Keymap {
+            name: "vi-insert".to_string(),
+        },
+        Some("emacs"),
+    );
+    let view = session.bind_view();
+    let entry = issue863_gap3_entry(&view, r"\C-w");
+    assert_eq!(entry.keymap, "emacs-standard");
+    assert_eq!(
+        entry.kind,
+        BindKindView::Keymap {
+            name: "vi-insert".to_string()
+        }
+    );
+}
+
 #[test]
 fn issue863_gap13_reregister_replaces_in_place_and_bumps_generation_once() {
     let mut session = issue863_gap13_session();
@@ -5760,4 +5845,178 @@ fn issue863_gap13_applied_invocation_shopt_flag_last_entry_wins() {
         on.applied_invocation_shopt_flag("expand_aliases"),
         Some(true)
     );
+}
+
+// ---- rubash#2794: the expansion-error discard face on the classification ----
+//
+// The fate matrix these cells ride on is locked by
+// tests/issue2794_expansion_error_discard_classification.rs; the
+// assertions here are the classification face that pin could not
+// reference before the field existed. GNU law: the FATAL
+// word-expansion class (`${var:?}` — subst.c:10416-10418;
+// nounset unbound — subst.c:11032-11034; arithmetic nounset —
+// expr.c:1208-1216) returns the error descriptor in an
+// interactive shell and the fatal descriptor otherwise, so the
+// interactive fate is a DISCARD: status 1, the line dropped,
+// the session alive — indistinguishable from an ordinary
+// status-1 completion until the classification carries the
+// fact. The face reports the executor's adjudication at its
+// raise points, never a session-layer re-derivation; the
+// lesser expansion classes (bad substitution and kin) carry
+// no interactive/fatal branch in GNU and stay off this face.
+
+#[test]
+fn issue2794_discard_face_grouped_and_line_routes() {
+    let mut session = issue863_gap1_interactive_session();
+    let options = issue863_gap1_interactive_options();
+    let outcome = session
+        .run("echo ${q6_undef:?boom}", &options)
+        .expect("run");
+    assert_eq!(outcome.status, 1);
+    assert_eq!(outcome.flow, Flow::Completed);
+    let class = outcome.classification;
+    assert!(class.expansion_error_discard);
+    assert!(!class.parse_error);
+    assert!(!class.signal_discard);
+    assert_eq!(class.unwind, None);
+    // The record is the run's own: the next run classifies clear.
+    let outcome = session.run("true", &options).expect("run");
+    assert_eq!(outcome.status, 0);
+    assert!(!outcome.classification.expansion_error_discard);
+
+    // The line route reports the same fact.
+    let mut session = issue863_gap1_interactive_session();
+    let outcome = session
+        .run_line("echo ${q6_undef:?boom}")
+        .expect("run_line");
+    assert_eq!(outcome.status, 1);
+    assert!(outcome.classification.expansion_error_discard);
+    let outcome = session.run_line("true").expect("run_line");
+    assert_eq!(outcome.status, 0);
+    assert!(!outcome.classification.expansion_error_discard);
+}
+
+#[test]
+fn issue2794_discard_face_coexists_with_errexit_verdict() {
+    // The discard happened; the errexit verdict on its status
+    // ends the session. Both facts stand — the verdict does
+    // not erase the discard (evalstring.c:387-393).
+    let mut session = issue863_gap1_interactive_session();
+    let options = issue863_gap1_interactive_options();
+    session.run("set -e", &options).expect("run");
+    let outcome = session
+        .run("echo ${q6_undef:?boom}", &options)
+        .expect("run");
+    assert_eq!(outcome.status, 1);
+    assert_eq!(outcome.flow, Flow::ErrexitBreak(1));
+    let class = outcome.classification;
+    assert!(class.expansion_error_discard);
+    assert!(class.errexit_break);
+    assert_eq!(class.unwind, Some(RunUnwind::ErrexitBreak));
+}
+
+#[test]
+fn issue2794_fatal_face_stays_off_the_discard_face() {
+    // Non-interactive, the same error is the fatal descriptor:
+    // an exit jump, not a discard — the face stays clear.
+    let mut session = Session::builder().build().expect("session builds");
+    let outcome = session
+        .run("echo ${q6_undef:?boom}", &RunOptions::new())
+        .expect("run");
+    assert_eq!(outcome.status, 1);
+    let class = outcome.classification;
+    assert!(!class.expansion_error_discard);
+    assert!(class.exit_jump);
+    assert_eq!(class.unwind, Some(RunUnwind::ExitJump));
+}
+
+#[test]
+fn issue2794_nounset_member_of_the_class_reports_the_face() {
+    // subst.c:11032-11034: nounset unbound is the same
+    // interactive-error / non-interactive-fatal branch.
+    let mut session = issue863_gap1_interactive_session();
+    let options = issue863_gap1_interactive_options();
+    session.run("set -u", &options).expect("run");
+    let outcome = session.run("echo $q6_undef", &options).expect("run");
+    assert_eq!(outcome.status, 1);
+    assert_eq!(outcome.flow, Flow::Completed);
+    assert!(outcome.classification.expansion_error_discard);
+}
+
+#[test]
+fn issue2794_plain_failure_and_lesser_class_stay_clear() {
+    let mut session = issue863_gap1_interactive_session();
+    let options = issue863_gap1_interactive_options();
+    // An ordinary status-1 completion is not a discard — the
+    // distinction this face exists to carry.
+    let outcome = session.run("false", &options).expect("run");
+    assert_eq!(outcome.status, 1);
+    assert!(!outcome.classification.expansion_error_discard);
+    // A lesser expansion class (bad substitution) abandons the
+    // command in every mode; GNU gives it no interactive/fatal
+    // branch, so it is not this face.
+    let outcome = session.run("echo ${#:}", &options).expect("run");
+    assert_eq!(outcome.status, 1);
+    assert_eq!(outcome.flow, Flow::Completed);
+    assert!(!outcome.classification.expansion_error_discard);
+}
+
+#[test]
+fn issue2794_bare_arithmetic_nounset_reports_the_face() {
+    // The bare-arithmetic fast entry makes its own DISCARD
+    // ruling on the arithmetic nounset latch (expr.c:1208-1216)
+    // without passing the generic `(( ))` route; the ruling is
+    // noted at the fast entry's own arm.
+    let mut session = issue863_gap1_interactive_session();
+    let options = issue863_gap1_interactive_options();
+    session.run("set -u", &options).expect("run");
+    let outcome = session.run("(( q6_undef + 1 ))", &options).expect("run");
+    assert_eq!(outcome.status, 1);
+    assert_eq!(outcome.flow, Flow::Completed);
+    assert!(outcome.classification.expansion_error_discard);
+    // The record is the run's own: the next run classifies clear.
+    let outcome = session.run("true", &options).expect("run");
+    assert_eq!(outcome.status, 0);
+    assert!(!outcome.classification.expansion_error_discard);
+
+    // The line route reports the same fact.
+    let mut session = issue863_gap1_interactive_session();
+    session.run_line("set -u").expect("run_line");
+    let outcome = session.run_line("(( q6_undef + 1 ))").expect("run_line");
+    assert_eq!(outcome.status, 1);
+    assert!(outcome.classification.expansion_error_discard);
+    let outcome = session.run_line("true").expect("run_line");
+    assert_eq!(outcome.status, 0);
+    assert!(!outcome.classification.expansion_error_discard);
+}
+
+#[test]
+fn issue2794_assignment_only_arithmetic_nounset_reports_the_face() {
+    // An assignment-only command consumes the arithmetic
+    // nounset latch itself, ahead of any word-expansion
+    // consumer (expr.c:1208-1216); its DISCARD ruling rides
+    // the same face.
+    let mut session = issue863_gap1_interactive_session();
+    let options = issue863_gap1_interactive_options();
+    session.run("set -u", &options).expect("run");
+    let outcome = session.run("x=$((q6_undef + 1))", &options).expect("run");
+    assert_eq!(outcome.status, 1);
+    assert_eq!(outcome.flow, Flow::Completed);
+    assert!(outcome.classification.expansion_error_discard);
+}
+
+#[test]
+fn issue2794_conditional_arith_compare_nounset_reports_the_face() {
+    // The `[[ ]]` arithmetic-comparison nounset trap rules
+    // DISCARD where the trap fires (expr.c:1208-1216 through
+    // cond's arithcomp evaluation); the conditional wrapper
+    // only unwinds the parked status, so the note belongs to
+    // the trap, not the conversion.
+    let mut session = issue863_gap1_interactive_session();
+    let options = issue863_gap1_interactive_options();
+    session.run("set -u", &options).expect("run");
+    let outcome = session.run("[[ q6_undef -eq 1 ]]", &options).expect("run");
+    assert_eq!(outcome.status, 1);
+    assert_eq!(outcome.flow, Flow::Completed);
+    assert!(outcome.classification.expansion_error_discard);
 }

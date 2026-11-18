@@ -201,10 +201,13 @@ pub(in crate::executor) fn append_assoc_value(
                     if integer {
                         // GNU bind_assoc_variable: an integer append adds the
                         // two expressions arithmetically (wheat[foo bar]+=7
-                        // with wheat[foo bar]=eval(flix)=9 stores 16).
-                        *entry_value = (eval_conditional_arith_value(entry_value, env_vars)
-                            .unwrap_or(0)
-                            + eval_conditional_arith_value(&rhs, env_vars).unwrap_or(0))
+                        // with wheat[foo bar]=eval(flix)=9 stores 16). The
+                        // sum is intmax_t (variables.c:2936-2946), so it
+                        // wraps at INT64_MAX (rubash#3782).
+                        *entry_value = crate::executor::arithmetic::intmax_append_sum(
+                            eval_conditional_arith_value(entry_value, env_vars).unwrap_or(0),
+                            eval_conditional_arith_value(&rhs, env_vars).unwrap_or(0),
+                        )
                         .to_string();
                     } else {
                         // GNU make_variable_value ASS_APPEND case branch
@@ -460,8 +463,12 @@ pub(in crate::executor) fn append_assoc_scalar_append_value(
     let value = unquote_storage_value(value);
     if let Some((_, entry_value)) = entries.iter_mut().rev().find(|(key, _)| key == "0") {
         if integer {
-            *entry_value = (eval_conditional_arith_value(entry_value, env_vars).unwrap_or(0)
-                + eval_conditional_arith_value(&value, env_vars).unwrap_or(0))
+            // The sum is intmax_t (variables.c:2936-2946), so it wraps at
+            // INT64_MAX (rubash#3782).
+            *entry_value = crate::executor::arithmetic::intmax_append_sum(
+                eval_conditional_arith_value(entry_value, env_vars).unwrap_or(0),
+                eval_conditional_arith_value(&value, env_vars).unwrap_or(0),
+            )
             .to_string();
         } else {
             *entry_value = convert(append_scalar_value(entry_value, &value));
@@ -969,13 +976,16 @@ pub(in crate::executor) fn split_indexed_tagged_token(
 /// included: `IFS=:; declare -A v=( $v 3 )` with v='a:b' keys `a:b`);
 /// indexed storage re-splits at every tag+IFS-character boundary
 /// (split_indexed_tagged_token). Fields are located as verbatim substrings
-/// of `value`; a field the splitter rewrote (IFS_GLUE protection) falls
-/// back to a synthetic tag+space separator — identical boundaries for the
-/// indexed consumer. An empty field list transports no word — an unquoted
-/// expansion producing nothing contributes no element (subst.c:13219).
+/// of `value`; a field the splitter rewrote (IFS_GLUE protection, or a
+/// raw-byte pair the value carries as U+E000+payload) falls back to a
+/// synthetic tag+separator boundary (the live IFS first char, rubash#3102)
+/// — identical boundaries for the indexed consumer. An empty field list
+/// transports no word — an unquoted expansion producing nothing contributes
+/// no element (subst.c:13219).
 pub(in crate::executor) fn compound_field_split_transport(
     value: &str,
     fields: Vec<String>,
+    separator: &str,
 ) -> Vec<String> {
     if fields.is_empty() {
         return Vec::new();
@@ -984,20 +994,28 @@ pub(in crate::executor) fn compound_field_split_transport(
     let mut pos = 0usize;
     // Tracking stays true while every field so far was located as a
     // verbatim substring of `value`; the first miss (a field the splitter
-    // rewrote, e.g. IFS_GLUE protection) degrades the rest to synthetic
-    // tag+space separators — identical boundaries for the indexed consumer.
+    // rewrote, e.g. IFS_GLUE protection or a raw-byte pair the value
+    // carries as U+E000+payload) degrades the rest to synthetic
+    // tag+separator boundaries — identical boundaries for the indexed
+    // consumer (the separator is the live IFS first char, rubash#3102).
     let mut tracking = true;
     // A body was already emitted (a separator needs a leader); empty
     // fields since the last located field, held for the next gap.
     let mut started = false;
     let mut pending: usize = 0;
-    // Synthetic fallback for one held/degraded body: the historical
-    // tag+space separator (correct under whitespace IFS; degraded
-    //-identical elsewhere).
+    // Synthetic fallback for one held/degraded body: tag + the live IFS
+    // first char (rubash#3102). The re-splitter only honors a tag
+    // boundary when the following char is in IFS, so a hardcoded space
+    // glued the fields into one token under a non-whitespace IFS
+    // (e.g. IFS=$'\n' with a raw \x1f field: the field holds the raw
+    // byte, the value its U+E000 carrier pair, tracking fails, and the
+    // synthetic tag+space never split). An empty separator falls back to
+    // the historical space (IFS unset already yields " " from the caller).
+    let separator_char = separator.chars().next().unwrap_or(' ');
     let mut synthetic_body = |out: &mut String, started: &mut bool, body: &str| {
         if *started {
             out.push(crate::executor::markers::COMPOUND_EXPANSION_WS_TAG);
-            out.push(' ');
+            out.push(separator_char);
         }
         out.push_str(body);
         *started = true;
@@ -1188,8 +1206,19 @@ impl Iterator for StorageWordIter<'_> {
             // the marker and its whitespace into the word so assoc kv-pairs
             // keep them; the indexed callers re-split on the marker. The
             // \x1c IFS-protection sentinel takes the same glued form here.
+            // So does CTLESC (\x11, markers.rs): GNU quote_string
+            // (subst.c:4773) prefixes EVERY character of a quoted string
+            // with CTLESC, so a protected character is data, never syntax
+            // — dequote_string (subst.c:4807) strips the pairs only at the
+            // end. Without this glue a protected `"` toggled the quote
+            // state (same rubash#3350 shape as the declare storage twin:
+            // the `\x10"..."` transport word's protected `"` closed the
+            // wrapper's span and swallowed the element boundary). Keep
+            // this twin in lockstep with the declare twin in
+            // builtins/declare/storage/words.rs.
             if ch == crate::executor::markers::IFS_GLUE
                 || ch == crate::executor::COMPOUND_EXPANSION_WS_TAG
+                || ch == crate::executor::markers::CTLESC
             {
                 word.push(ch);
                 if let Some((_, next)) = chars.next() {

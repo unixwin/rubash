@@ -172,6 +172,14 @@ pub(crate) fn word_value_from_raw(
 /// re-derivation. Inside a `$'...'` span every `\` starts an escape; the
 /// escaped-backslash `\\` form consumes its follower, so only a `\`
 /// directly followed by `u`/`U` counts.
+/// Cheap admission for the rubash#2772 read-time extquote re-derivation:
+/// the raw word mentions a `$'...'` span inside a `${...}` unit — the
+/// only shape whose cooked form depends on the line's read-time
+/// extquote state.
+pub(crate) fn raw_has_dolbrace_ansi_c(raw: &str) -> bool {
+    raw.contains("${") && raw.contains("$'")
+}
+
 pub(crate) fn raw_has_ansi_u_escape(raw: &str) -> bool {
     let bytes = raw.as_bytes();
     let mut index = 0usize;
@@ -812,12 +820,26 @@ impl<'a> Lexer<'a> {
         } else {
             head
         };
+        // rubash#3495: GNU token_is_assignment (parse.y:5270) builds
+        // `name=` and calls assignment() (general.c:480), which returns 0
+        // unless the FIRST character passes legal_variable_starter
+        // (general.c:498-502) — an ASCII letter or `_`. A digit-leading
+        // head such as `9bad` therefore never opens the parse.y:5653
+        // compound branch: the `(` is a shellbreak, the word ends at
+        // `9bad=`, and the parser reports `syntax error near unexpected
+        // token `('` (rc 2, whole script dies). The old
+        // all-alnum-plus-any-alpha test accepted `9bad`, folding the word
+        // whole so the declare builtin reported InvalidId (rc 1) instead.
+        // This matches the sibling validators
+        // classification::is_assignment and
+        // token_actions::valid_compound_assignment_lhs, which already
+        // enforce the starter rule.
         let bytes = head.as_bytes();
         !bytes.is_empty()
+            && (bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
             && bytes
                 .iter()
                 .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
-            && bytes.iter().any(|b| b.is_ascii_alphabetic() || *b == b'_')
     }
 
     // The text after the matching `]` when the word begun near the scan

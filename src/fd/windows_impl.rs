@@ -1116,6 +1116,27 @@ fn wait_socket_readable(h: HANDLE, timeout: std::time::Duration) -> ReadWait {
     }
 }
 
+/// Whether `h` names a directory (rubash#3777): a directory handle
+/// opened with FILE_FLAG_BACKUP_SEMANTICS reports FILE_TYPE_DISK
+/// like a regular file, so neither GetFileType nor the open outcome
+/// separates it — only the file attributes do.
+fn is_directory_handle(h: HANDLE) -> bool {
+    let mut info = BY_HANDLE_FILE_INFORMATION {
+        dwFileAttributes: 0,
+        ftCreationTime: [0; 2],
+        ftLastAccessTime: [0; 2],
+        ftLastWriteTime: [0; 2],
+        dwVolumeSerialNumber: 0,
+        nFileSizeHigh: 0,
+        nFileSizeLow: 0,
+        nNumberOfLinks: 0,
+        nFileIndexHigh: 0,
+        nFileIndexLow: 0,
+    };
+    let ok = unsafe { GetFileInformationByHandle(h, &mut info) } != 0;
+    ok && (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0
+}
+
 /// Read up to `n` bytes; ERROR_BROKEN_PIPE (drained anonymous pipe) is EOF.
 pub fn read_some(h: HANDLE, n: usize) -> std::io::Result<Vec<u8>> {
     // rubash#1976: a netopen endpoint is a socket handle — recv, not
@@ -1146,6 +1167,17 @@ pub fn read_some(h: HANDLE, n: usize) -> std::io::Result<Vec<u8>> {
         const ERROR_BROKEN_PIPE: DWORD = 109;
         if std::io::Error::last_os_error().raw_os_error() == Some(ERROR_BROKEN_PIPE as i32) {
             return Ok(Vec::new());
+        }
+        // rubash#3777: ReadFile on a directory handle fails with
+        // ERROR_INVALID_FUNCTION (1) where GNU read(2) fails EISDIR
+        // (read.def:911) — the fd layer reports the POSIX errno, so
+        // every reader of a directory descriptor (read, mapfile, the
+        // emulated cat drain) sees the same failure GNU's reader sees.
+        if is_directory_handle(h) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::IsADirectory,
+                "Is a directory",
+            ));
         }
         return Err(std::io::Error::last_os_error());
     }
@@ -1539,6 +1571,12 @@ pub struct WhitelistedSpawn {
     /// passed as CreateProcessW's lpCurrentDirectory. None keeps the
     /// process cwd (host-level spawns with no session).
     pub cwd: Option<std::path::PathBuf>,
+    /// rubash#3268 (e): the spawning session's cwd anchor fd, spent by
+    /// the Unix backend to fchdir the child into a deleted session
+    /// cwd. Unix-only semantics (Windows cannot hold a deleted
+    /// directory as a process cwd); accepted for struct parity and
+    /// ignored by this backend.
+    pub cwd_anchor_fd: Option<i32>,
     /// rubash#2241: job-control process grouping for async respawns.
     /// Unix-only semantics (Windows has no process groups); accepted
     /// for struct parity and ignored by this backend.
@@ -1843,6 +1881,23 @@ impl From<std::process::Child> for SpawnedChild {
     fn from(child: std::process::Child) -> Self {
         Self {
             inner: SpawnedChildInner::Std(child),
+        }
+    }
+}
+
+impl SpawnedChild {
+    /// Wrap an already-owned process handle as a Whitelisted child
+    /// (rubash#3467): the foreground-stop arm duplicates a live
+    /// `std::process::Child`'s handle so the stopped process stays
+    /// waitable after the caller drops the `Child` that waited on it.
+    /// The duplicate carries the same access as the source handle, so
+    /// `try_wait`/`wait`/`kill` behave exactly like the Std form.
+    pub fn from_owned_handle(handle: std::os::windows::io::OwnedHandle, pid: u32) -> Self {
+        Self {
+            inner: SpawnedChildInner::Whitelisted {
+                process: handle,
+                pid,
+            },
         }
     }
 }

@@ -257,11 +257,20 @@ impl Executor {
         } else {
             pre_attrs
         };
-        if name == "BASH_ALIASES" {
+        // rubash#3573: an unbound dynamic variable stays unbound
+        // (variables.c:3839) — the element bind lands on the plain
+        // variable GNU's generic path builds (indexed, arithmetic
+        // subscript), never in the alias table.
+        if name == "BASH_ALIASES"
+            && !is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, name)
+        {
             // TODO(variables.c/alias.c): BASH_ALIASES is a dynamic
             // associative array backed by the alias table. Keep this narrow
             // bridge here so array assignment does not swallow alias.tests'
-            // invalid-name diagnostic.
+            // invalid-name diagnostic. A severed name (explicit `unset`,
+            // or a whole-name bind — variables.c:3839 makes it an ordinary
+            // variable for the rest of the shell's lifetime, rubash#3573)
+            // falls through to the normal element bind instead.
             let alias_name = index
                 .trim_end_matches(']')
                 .trim_matches('\'')
@@ -345,6 +354,17 @@ impl Executor {
                         let raw = if raw.contains("$\"") {
                             decoded_locale = super::arithmetic::decode_locale_quote_spans(raw);
                             decoded_locale.as_str()
+                        } else {
+                            raw
+                        };
+                        // rubash#3085: a `$'...'` span is decoded and
+                        // sh_single_quote'd before the arith pass (the
+                        // generic arm below documents the GNU anchors), so
+                        // evalexp receives `'x y'`, never the raw spelling.
+                        let requoted;
+                        let raw = if raw.contains("$'") {
+                            requoted = super::arithmetic::requote_arith_span_token_text(raw);
+                            requoted.as_str()
                         } else {
                             raw
                         };
@@ -447,7 +467,12 @@ impl Executor {
             self.exit_code = 0;
             return true;
         }
-        if name == "BASH_CMDS" {
+        // rubash#3573: same unbind stand-down as the BASH_ALIASES arm
+        // above — the element bind lands on the plain variable
+        // (variables.c:3839), never in the hashed-command table.
+        if name == "BASH_CMDS"
+            && !is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, name)
+        {
             let command_name = index
                 .trim_end_matches(']')
                 .trim_matches('\'')
@@ -534,9 +559,9 @@ impl Executor {
                 // conversion, exactly like the indexed branch's #1401
                 // handling below) — `declare -uA h; h[k]=abc` stores ABC.
                 let stored = if attrs.uppercase {
-                    stored.to_uppercase()
+                    crate::locale::simple_uppercase(&stored)
                 } else if attrs.lowercase {
-                    stored.to_lowercase()
+                    crate::locale::simple_lowercase(&stored)
                 } else if is_marked_var(&self.shell_state.env_vars, CAPCASE_VARS, name) {
                     // rubash#1619: capcase has no typed-cell bit (it lives
                     // only in the marker list), so the #1400 chain missed
@@ -608,6 +633,18 @@ impl Executor {
                         // (rubash#1510). NoCell leaves no structured cell,
                         // so the helper no-ops there.
                         self.note_typed_cell_synced(name);
+                        // rubash#3097: the element bind completed here.
+                        // A bare element statement dispatches to THIS
+                        // executor, never through apply_shell_assignment,
+                        // so the locale funnel note lives at this store:
+                        // GNU's assignment driver runs
+                        // stupidly_hack_special_variables after
+                        // assign_array_element (subst.c:8169) and
+                        // sv_locale (variables.c:6272) reads the NEW
+                        // scalar projection (get_string_value,
+                        // variables.c:2495: element 0 / the "0" key).
+                        // One bind, one note, recorded nowhere else.
+                        self.note_locale_assignment(name);
                         self.exit_code = 0;
                         return true;
                     }
@@ -657,9 +694,9 @@ impl Executor {
             // this `value` is the final stored text for both `=` and the
             // `+=` combined result (GNU converts the post-append value).
             let value = if attrs.uppercase {
-                value.to_uppercase()
+                crate::locale::simple_uppercase(&value)
             } else if attrs.lowercase {
-                value.to_lowercase()
+                crate::locale::simple_lowercase(&value)
             } else if is_marked_var(&self.shell_state.env_vars, CAPCASE_VARS, name) {
                 // rubash#1619: capcase on the canonical assoc path too.
                 super::variable_state::capitalize_value(&value)
@@ -713,6 +750,10 @@ impl Executor {
             // The canonical render above synced the cell from the same
             // entry list it folded into the mirror (rubash#1510).
             self.note_typed_cell_synced(name);
+            // rubash#3097: same funnel note as the fast-append arm
+            // above — the element bind completed at this store
+            // (subst.c:8169 -> variables.c:6272).
+            self.note_locale_assignment(name);
             self.exit_code = 0;
             return true;
         }
@@ -782,6 +823,24 @@ impl Executor {
                     let raw = if raw.contains("$\"") {
                         decoded_locale = super::arithmetic::decode_locale_quote_spans(raw);
                         decoded_locale.as_str()
+                    } else {
+                        raw
+                    };
+                    // rubash#3085: a `$'...'` span in the raw subscript is
+                    // ANSI-C decoded and sh_single_quote'd before the arith
+                    // pass — GNU's assignment word is cooked at parse time
+                    // (read_token_word's `$'` arm: ansiexpand, then
+                    // sh_single_quote re-quote; the runtime arith form is
+                    // expand_string_dollar_quote, subst.c:4133), so evalexp
+                    // receives `'x y'` and even `'1'` fails as a quoted
+                    // literal, while expansions inside the span still run
+                    // under the arith pass below (`$'$(echo 1+2)'` tokens
+                    // `'1+2'`). Without this the raw `$'...'` spelling
+                    // reached evalexp and its `$` leaked into the token.
+                    let requoted;
+                    let raw = if raw.contains("$'") {
+                        requoted = super::arithmetic::requote_arith_span_token_text(raw);
+                        requoted.as_str()
                     } else {
                         raw
                     };
@@ -999,9 +1058,9 @@ impl Executor {
         // (GNU applies the case attribute on element store, not just
         // compound init and scalar assignment).
         let element = if attrs.uppercase {
-            element.to_uppercase()
+            crate::locale::simple_uppercase(&element)
         } else if attrs.lowercase {
-            element.to_lowercase()
+            crate::locale::simple_lowercase(&element)
         } else if is_marked_var(&self.shell_state.env_vars, CAPCASE_VARS, name) {
             // rubash#1619: `declare -c a; a[0]=hello` stores Hello — the
             // capcase attribute lives only in the marker list (no typed
@@ -1198,6 +1257,12 @@ impl Executor {
             .map(|(index, element)| (index as i64, element.trim().parse::<i32>().unwrap_or(0)))
             .collect();
         }
+        // rubash#3097: every indexed store arm above (in-place append,
+        // budgeted overwrite, canonical rebuild) converges here with
+        // the element bind complete — the funnel note lives at this
+        // single convergence, one bind, one note (subst.c:8169 ->
+        // variables.c:6272), reading the NEW projection.
+        self.note_locale_assignment(name);
         self.exit_code = 0;
         true
     }

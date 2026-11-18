@@ -78,7 +78,21 @@ thread_local! {
     static EXPAND_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-const MAX_EXPAND_DEPTH: usize = 50;
+// Expansion-depth fuse (rubash#2685): the walker recurses once per nested
+// `$((` / `${` / `$(` level, so this cap bounds input-nesting depth, not
+// value-driven recursion (values are spliced, never re-walked). GNU bash
+// 5.3 has no fixed cap and is correct to 12000 levels (SIGSEGV at 16000);
+// the old value 50 failed real input at 52 levels, so it was recalibrated
+// from measurement, not raised blindly. Debug peak RSS of the shell on
+// nested `$((` input (Simular box, guard raised, 2026-11-10): ~42MiB at
+// 1000 levels, ~337MiB at 5000, ~1.17GiB at 10000, ~2.5GiB at 15000, and
+// OOM-killed (SIGKILL) at 20000 — the cost grows roughly quadratically
+// with depth, so the binding constraint is machine RAM, not the 512MiB
+// `rubash-main` thread stack. 1000 keeps worst-case debug memory in the
+// tens of MiB while giving 2x headroom over the 500 levels GNU parity
+// requires, 10x below the lowest measured-safe depth (10000) and 20x
+// below the kill boundary.
+const MAX_EXPAND_DEPTH: usize = 1000;
 
 /// Whether the embedded-parameter walker is past its recursion limit: at the
 /// limit it returns the (masked) word unchanged, so fast paths that bypass
@@ -116,7 +130,8 @@ impl Executor {
             return word.to_string();
         }
         EXPAND_DEPTH.with(|d| d.set(depth + 1));
-        let result = self.expand_embedded_parameters_inner(word, false, false, false, false, true);
+        let result =
+            self.expand_embedded_parameters_inner(word, false, false, false, false, true, false);
         EXPAND_DEPTH.with(|d| d.set(depth));
         result
     }
@@ -137,7 +152,8 @@ impl Executor {
             return word.to_string();
         }
         EXPAND_DEPTH.with(|d| d.set(depth + 1));
-        let result = self.expand_embedded_parameters_inner(word, false, false, true, false, false);
+        let result =
+            self.expand_embedded_parameters_inner(word, false, false, true, false, false, false);
         EXPAND_DEPTH.with(|d| d.set(depth));
         result
     }
@@ -183,6 +199,11 @@ impl Executor {
         // Snapshot the expansion-verdict latches; a false→true transition
         // inside the walk is the walk's own failure verdict.
         let bad_sub_before = self.shell_state.parameter_bad_substitution.replace(false);
+        // rubash#3499: the print budget rides with the verdict — the walk
+        // is a read-side render, so a diagnostic it prints must not spend
+        // the enclosing command's one report, and a report the enclosing
+        // command already spent must not be re-printed here.
+        let bad_sub_reported_before = self.shell_state.bad_substitution_reported.replace(false);
         let arith_err_before = self.shell_state.arithmetic_expansion_error.replace(false);
         let arith_fatal_before = self.shell_state.arithmetic_fatal_error.replace(false);
         let arith_nonfatal_before = self.shell_state.arithmetic_nonfatal_error.replace(false);
@@ -197,7 +218,12 @@ impl Executor {
         // prior command's status. Snapshot and restore the overlay too so
         // the prompt pass is transparent to both read paths.
         let word_comsub_exit_before = self.word_expansion_comsub_exit.replace(None);
-        let result = self.expand_embedded_parameters_inner(word, false, false, false, true, false);
+        // The prompt pass is a double-quoted context (Q_DOUBLE_QUOTES):
+        // record it so pattern sub-words of fragments walked here judge
+        // a nested `$'name'` by that quoting (rubash#2650).
+        let result = crate::executor::expand_word::with_extquote_name_quoted_context(true, || {
+            self.expand_embedded_parameters_inner(word, false, false, false, true, false, false)
+        });
         self.last_command_substitution_status
             .set(comsub_status_before);
         self.word_expansion_comsub_exit.set(word_comsub_exit_before);
@@ -217,6 +243,11 @@ impl Executor {
                 .shell_state
                 .arithmetic_nonfatal_error
                 .replace(arith_nonfatal_before);
+        // rubash#3499: restore the print budget with the verdict (see
+        // the snapshot above).
+        self.shell_state
+            .bad_substitution_reported
+            .set(bad_sub_reported_before);
         EXPAND_DEPTH.with(|d| d.set(depth));
         if failed {
             return word.to_string();
@@ -228,7 +259,38 @@ impl Executor {
     // inside quotes is marked \x1c so the field splitter keeps it glued
     // (posixexp2 37), while bare spaces stay splittable.
     pub(in crate::executor) fn expand_embedded_parameters_protect_ifs(&self, word: &str) -> String {
-        self.expand_embedded_parameters_with_context_inner(word, false, true)
+        self.expand_embedded_parameters_with_context_inner(word, false, true, false)
+    }
+
+    /// Alternate-word-half variant on the non-mut path (rubash#3088):
+    /// like `expand_embedded_parameters_protect_ifs`, but expansion-result
+    /// backslashes and single-quoted-span backslashes ride as the U+E30D
+    /// carrier through the caller's final unescape pass, which would
+    /// otherwise fold them as source escapes (GNU subst.c:4773/4807:
+    /// assembled data is never re-scanned as escape syntax). Live source
+    /// escapes still resolve in that pass — the fall-through backslash
+    /// arm stays unprotected, so source `\\` still collapses to one `\`
+    /// and `\q` still drops its backslash. The caller restores the
+    /// carrier after its pass.
+    pub(in crate::executor) fn expand_embedded_parameters_protect_ifs_and_data(
+        &self,
+        word: &str,
+    ) -> String {
+        self.expand_embedded_parameters_with_context_inner(word, false, true, true)
+    }
+
+    /// Non-mut data-protecting walk without IFS marking (rubash#3088):
+    /// the same expansion-result / single-quoted-span backslash
+    /// protection as `expand_embedded_parameters_protect_ifs_and_data`,
+    /// for callers whose final unescape pass is the double-quote one
+    /// (`unescape_parameter_operator_result`) rather than the unquoted
+    /// one — the `&self` quoted chain's operator arms. The caller
+    /// restores the carrier after its pass.
+    pub(in crate::executor) fn expand_embedded_parameters_protect_data(
+        &self,
+        word: &str,
+    ) -> String {
+        self.expand_embedded_parameters_with_context_inner(word, false, false, true)
     }
 
     pub(in crate::executor) fn expand_embedded_parameters_for_heredoc(&self, word: &str) -> String {
@@ -236,7 +298,7 @@ impl Executor {
     }
 
     fn expand_embedded_parameters_with_context(&self, word: &str, heredoc: bool) -> String {
-        self.expand_embedded_parameters_with_context_inner(word, heredoc, false)
+        self.expand_embedded_parameters_with_context_inner(word, heredoc, false, false)
     }
 
     fn expand_embedded_parameters_with_context_inner(
@@ -244,14 +306,22 @@ impl Executor {
         word: &str,
         heredoc: bool,
         protect_ifs: bool,
+        protect_data: bool,
     ) -> String {
         let depth = EXPAND_DEPTH.with(|d| d.get());
         if depth >= MAX_EXPAND_DEPTH {
             return word.to_string();
         }
         EXPAND_DEPTH.with(|d| d.set(depth + 1));
-        let result =
-            self.expand_embedded_parameters_inner(word, heredoc, protect_ifs, false, false, false);
+        let result = self.expand_embedded_parameters_inner(
+            word,
+            heredoc,
+            protect_ifs,
+            false,
+            false,
+            false,
+            protect_data,
+        );
         EXPAND_DEPTH.with(|d| d.set(depth));
         result
     }
@@ -264,6 +334,7 @@ impl Executor {
         preserve_quotes: bool,
         double_quoted: bool,
         protect_results: bool,
+        protect_data: bool,
     ) -> String {
         // TODO(subst.c/subst.h): This is a narrow parameter-expansion subset.
         // GNU Bash handles quoting state, operators like ${name:-word},
@@ -423,6 +494,77 @@ impl Executor {
                     }
                     continue;
                 }
+                if protect_ifs && protect_data {
+                    // rubash#3116 — GNU subst.c:11614-11678
+                    // expand_word_internal's backslash branch, resolved at
+                    // walk time where quote state is still known (the
+                    // `${var:-word}` alternate rhs rides
+                    // expand_string_for_rhs with quoted == 0 →
+                    // parameter_brace_expand_rhs subst.c:7966). An
+                    // unquoted `\` escapes ANY character, and the escaped
+                    // char is CTLESC-quoted data (subst.c:11671-11674) —
+                    // `\$` is a literal `$` that can never re-trigger an
+                    // expansion. The fall-through below would push the
+                    // raw `\` and let the next iteration re-scan `$` as a
+                    // live trigger, so live triggers are emitted as their
+                    // carriers here; pairs GNU also resolves only in the
+                    // trailing pass (`\q`, `\}`, escaped whitespace) keep
+                    // falling through to that pass byte-for-byte.
+                    match chars.peek().copied() {
+                        Some('\n') => {
+                            chars.next();
+                            continue;
+                        }
+                        Some('$') => {
+                            chars.next();
+                            output.push(crate::executor::markers::DATA_DOLLAR);
+                            continue;
+                        }
+                        Some('\\') => {
+                            chars.next();
+                            output.push(crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH);
+                            continue;
+                        }
+                        Some('"') => {
+                            chars.next();
+                            output.push('"');
+                            continue;
+                        }
+                        Some('`') => {
+                            chars.next();
+                            output.push(crate::executor::markers::DATA_BACKTICK);
+                            continue;
+                        }
+                        Some('\'') if !in_double => {
+                            chars.next();
+                            output.push('\'');
+                            continue;
+                        }
+                        // rubash#3117 — the dq half of the same GNU branch
+                        // (syntax.h:58 CBSDQUOTE): inside a "..." span of
+                        // the rhs a backslash is an escape only before
+                        // $ ` " \ and newline (resolved by the arms
+                        // above); before any other char BOTH bytes are
+                        // literal data (subst.c:11661-11665 copies `\`+c).
+                        // The pair rides the backslash carrier so the
+                        // caller's trailing UNQUOTED unescape — which no
+                        // longer sees the span boundary — cannot refold
+                        // it; restore_deferred_operator_backslashes
+                        // restores the `\` after that pass. Escaped
+                        // whitespace stays glued exactly like the walk's
+                        // own in-double whitespace marking above.
+                        Some(other) if in_double => {
+                            chars.next();
+                            output.push(crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH);
+                            if matches!(other, ' ' | '\t') {
+                                output.push(crate::executor::markers::IFS_GLUE);
+                            }
+                            output.push(other);
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
                 match chars.peek() {
                     Some('\'') if !in_double => {
                         chars.next();
@@ -479,8 +621,11 @@ impl Executor {
                     // read_token_word hands it to add_quoted_string
                     // CTLESC-protected); in the protecting walk its
                     // backslashes ride as the carrier like any other
-                    // data backslash.
-                    if protect_results && quoted_ch == '\\' {
+                    // data backslash. rubash#3088: the alternate-word
+                    // walk also protects them (`protect_data`) — a
+                    // literal span's `\\` is data, not a source escape
+                    // to be collapsed by the caller's final unescape.
+                    if (protect_results || protect_data) && quoted_ch == '\\' {
                         output.push(crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH);
                     } else {
                         output.push(quoted_ch);
@@ -595,6 +740,13 @@ impl Executor {
                 continue;
             }
 
+            // QUOTED_EXPANSION_SITE marks a `$` expansion the lexer saw
+            // inside `"..."` (or `'...'` groupings) — for a `${}`
+            // fragment that is GNU's `quoted` bit (subst.c `quoted` from
+            // Q_DOUBLE_QUOTES on the word), which the #3581 `#`/`%` gate
+            // consults via EXTQUOTE_NAME_QUOTED_CONTEXT. Capture it here
+            // so the `${}` dispatch below can record it.
+            let fragment_site_quoted = quoted_site;
             if quoted_site {
                 quoted_span_start = Some(output.len());
                 quoted_site = false;
@@ -618,7 +770,10 @@ impl Executor {
                     if preserve_quotes {
                         push_preserved_expansion_output(&mut output, &value, in_double);
                     } else {
-                        output.push_str(&protect_result_backslashes(&value, protect_results));
+                        output.push_str(&protect_result_backslashes(
+                            &value,
+                            protect_results || protect_data,
+                        ));
                     }
                 }
                 Some('*') => {
@@ -627,7 +782,10 @@ impl Executor {
                     if preserve_quotes {
                         push_preserved_expansion_output(&mut output, &value, in_double);
                     } else {
-                        output.push_str(&protect_result_backslashes(&value, protect_results));
+                        output.push_str(&protect_result_backslashes(
+                            &value,
+                            protect_results || protect_data,
+                        ));
                     }
                 }
                 Some('#') => {
@@ -715,15 +873,26 @@ impl Executor {
                             for _ in 0..=close {
                                 chars.next();
                             }
+                            // This arm only fires for a fragment in a
+                            // quoted region (see the condition above):
+                            // record that context for the fragment's
+                            // pattern sub-words (rubash#2650).
                             let value = crate::executor::expand_word::with_pending_diagnostic_word(
                                 word,
-                                || self.expand_word(&format!("${{{body}}}")),
+                                || {
+                                    crate::executor::expand_word::with_extquote_name_quoted_context(
+                                        true,
+                                        || self.expand_word(&format!("${{{body}}}")),
+                                    )
+                                },
                             );
                             if preserve_quotes {
                                 push_preserved_expansion_output(&mut output, &value, in_double);
                             } else {
-                                output
-                                    .push_str(&protect_result_backslashes(&value, protect_results));
+                                output.push_str(&protect_result_backslashes(
+                                    &value,
+                                    protect_results || protect_data,
+                                ));
                             }
                             continue;
                         }
@@ -785,14 +954,20 @@ impl Executor {
                         //   the message into the value — the value falls
                         //   back with the enclosing command still at 0.
                         if !terminated {
-                            self.write_diagnostic_fd2(
-                                format!(
-                                    "{}{}: bad substitution\n",
-                                    self.diagnostic_prefix(),
-                                    crate::executor::expand_word::bad_substitution_display(word)
-                                )
-                                .as_bytes(),
-                            );
+                            // rubash#3499: one diagnostic per latch
+                            // lifetime (see bad_substitution_report_first).
+                            if self.bad_substitution_report_first() {
+                                self.write_diagnostic_fd2(
+                                    format!(
+                                        "{}{}: bad substitution\n",
+                                        self.diagnostic_prefix(),
+                                        crate::executor::expand_word::bad_substitution_display(
+                                            word
+                                        )
+                                    )
+                                    .as_bytes(),
+                                );
+                            }
                             self.shell_state.parameter_bad_substitution.set(true);
                             continue;
                         }
@@ -816,17 +991,34 @@ impl Executor {
                                         "parameter not set".to_string()
                                     }
                                 } else {
-                                    self.expand_parameter_word(&message)
-                                };
-                                self.write_diagnostic_fd2(
-                                    format!(
-                                        "{}{}: {}\n",
-                                        self.diagnostic_prefix(),
-                                        error_name,
-                                        message
+                                    // rubash#3260: same display-text decode
+                                    // as the pre-scan arm — the `:?` message
+                                    // word keeps quoted whitespace behind the
+                                    // IFS_GLUE carrier for field splitting
+                                    // (GNU subst.c:8216 parameter_brace_expand_error
+                                    // reports the expanded plain text), so
+                                    // decode it through the sanctioned
+                                    // visible-text face before printing.
+                                    crate::locale::decode_to_visible_text(
+                                        &self.expand_parameter_word(&message),
                                     )
-                                    .as_bytes(),
-                                );
+                                };
+                                // rubash#3499: one diagnostic per latch
+                                // lifetime (see
+                                // bad_substitution_report_first) — the
+                                // first expansion failure of the word list
+                                // owns the report, whatever its class.
+                                if self.bad_substitution_report_first() {
+                                    self.write_diagnostic_fd2(
+                                        format!(
+                                            "{}{}: {}\n",
+                                            self.diagnostic_prefix(),
+                                            error_name,
+                                            message
+                                        )
+                                        .as_bytes(),
+                                    );
+                                }
                                 self.shell_state.parameter_bad_substitution.set(true);
                                 continue;
                             }
@@ -846,6 +1038,7 @@ impl Executor {
                     if !double_quoted
                         && !in_double
                         && !heredoc
+                        && !crate::executor::expand_word::extquote_name_quoted_context()
                         && !self
                             .shell_state
                             .env_vars
@@ -853,28 +1046,41 @@ impl Executor {
                         && crate::executor::expand_word::resolve_dollar_quoted_parameter_name(&name)
                             .is_some()
                     {
-                        self.write_diagnostic_fd2(
-                            format!(
-                                "{}{}: bad substitution\n",
-                                self.diagnostic_prefix(),
-                                crate::executor::expand_word::bad_substitution_display(word)
-                            )
-                            .as_bytes(),
-                        );
+                        // rubash#3499: one diagnostic per latch lifetime
+                        // (see bad_substitution_report_first).
+                        if self.bad_substitution_report_first() {
+                            self.write_diagnostic_fd2(
+                                format!(
+                                    "{}{}: bad substitution\n",
+                                    self.diagnostic_prefix(),
+                                    crate::executor::expand_word::bad_substitution_display(word)
+                                )
+                                .as_bytes(),
+                            );
+                        }
                         self.shell_state.parameter_bad_substitution.set(true);
                         continue;
                     }
                     // A bad-substitution diagnostic inside this fragment must
                     // name the whole enclosing word (GNU subst.c:10278),
                     // not just the `${...}` span (rubash#758).
+                    // The fragment's pattern sub-words inherit this
+                    // walker's quote context for the extquote-name gate
+                    // (rubash#2650): record it for the dispatch.
                     let value =
                         crate::executor::expand_word::with_pending_diagnostic_word(word, || {
-                            self.expand_word(&format!("${{{name}}}"))
+                            crate::executor::expand_word::with_extquote_name_quoted_context(
+                                in_double || double_quoted || heredoc || fragment_site_quoted,
+                                || self.expand_word(&format!("${{{name}}}")),
+                            )
                         });
                     if preserve_quotes {
                         push_preserved_expansion_output(&mut output, &value, in_double);
                     } else {
-                        output.push_str(&protect_result_backslashes(&value, protect_results));
+                        output.push_str(&protect_result_backslashes(
+                            &value,
+                            protect_results || protect_data,
+                        ));
                     }
                 }
                 Some('(') => {
@@ -925,11 +1131,17 @@ impl Executor {
                         // queue (overlaid so earlier queued writes are
                         // visible) for the mutable caller to apply.
                         let overlaid = crate::executor::expand_braced_indices::env_vars_with_pending_subscript_writes(&self.shell_state.env_vars);
-                        let (value, writes, actual_category) =
+                        // GNU subst.c:10873-10878 arithsub clears
+                        // this_command_name around evalexp
+                        // (rubash#3295).
+                        let (value, writes, actual_category) = {
+                            let _arith_label =
+                                crate::executor::arithmetic::arith_eval_label_scope(None);
                             eval_conditional_arith_value_categorized_with_writes(
                                 &expression,
                                 &overlaid,
-                            );
+                            )
+                        };
                         if !writes.is_empty() {
                             crate::executor::expand_braced_indices::PENDING_SUBSCRIPT_WRITES
                                 .with(|pending| pending.borrow_mut().extend(writes));
@@ -1187,9 +1399,15 @@ impl Executor {
                         } else {
                             crate::executor::arithmetic::arith_string_quote_removal(&expression)
                         };
-                        if let Some(value) =
+                        // GNU subst.c arithsub clears this_command_name
+                        // around evalexp for the legacy `$[...]` spelling
+                        // too (rubash#3295).
+                        let arith_value = {
+                            let _arith_label =
+                                crate::executor::arithmetic::arith_eval_label_scope(None);
                             eval_conditional_arith_value(&expression, &self.shell_state.env_vars)
-                        {
+                        };
+                        if let Some(value) = arith_value {
                             let value = value.to_string();
                             if preserve_quotes && !in_double {
                                 output
@@ -1238,7 +1456,10 @@ impl Executor {
                         if preserve_quotes {
                             push_preserved_expansion_output(&mut output, value, in_double);
                         } else {
-                            output.push_str(&protect_result_backslashes(value, protect_results));
+                            output.push_str(&protect_result_backslashes(
+                                value,
+                                protect_results || protect_data,
+                            ));
                         }
                     }
                 }
@@ -1261,8 +1482,34 @@ impl Executor {
                         } else if preserve_quotes {
                             push_preserved_expansion_output(&mut output, &value, in_double);
                         } else {
-                            output.push_str(&protect_result_backslashes(&value, protect_results));
+                            output.push_str(&protect_result_backslashes(
+                                &value,
+                                protect_results || protect_data,
+                            ));
                         }
+                    }
+                }
+                Some('"') if !heredoc && !in_double && !double_quoted => {
+                    chars.next();
+                    // rubash#3086: `$"..."` is a locale string — in the C
+                    // locale it expands exactly like `"..."` in every word
+                    // context (GNU subst.c:4133 expand_string_dollar_quote
+                    // `$"` arm; subst.c:1639 sh_mkdoublequoted), so the
+                    // dollar is quote syntax, not an expansion introducer
+                    // glued onto the span content. Consume it and open a
+                    // double-quoted span exactly like the bare `"` arm
+                    // above; the span body and its closing quote are then
+                    // scanned by the same loop (in_double semantics,
+                    // IFS protection and quote removal included). The arm
+                    // must not fire inside an open double-quoted span —
+                    // there `$` before `"` is literal data and the `"`
+                    // closes the span (GNU: "a$"b"c" -> a$bc) — nor in
+                    // heredoc / double-quoted word contexts, where quote
+                    // characters are data; those shapes keep the literal
+                    // fall-through below.
+                    in_double = true;
+                    if preserve_quotes {
+                        output.push('"');
                     }
                 }
                 Some(other) => {

@@ -2564,6 +2564,14 @@ impl Executor {
             // array unassigned too (GNU validates every name before
             // the array store; see the post-scan validation comment).
             if !invalid_name {
+                // rubash#3659: convert each split word through the array's
+                // attributes before the store (GNU read.def:976
+                // assign_array_var_from_word_list -> make_variable_value,
+                // variables.c:2905).
+                let values: Vec<String> = values
+                    .into_iter()
+                    .map(|value| self.convert_array_element_value(&name, &value))
+                    .collect();
                 let value = read_array_storage(&values);
                 let _ = replace_typed_indexed_array(&mut self.shell_state.variables, &name, values);
                 self.shell_state.env_vars.insert(name.clone(), value);
@@ -2598,7 +2606,12 @@ impl Executor {
         };
         if !scalar_names.is_empty() || fail_after_read {
             if char_limit == Some(0) {
-                let assign_status = self.assign_read_scalar_names(&scalar_names, "", raw);
+                let assign_status = {
+                    let row = crate::executor::builtin_table::builtin_table_row("read")
+                        .expect("read row");
+                    let mut diag = crate::executor::builtin_diag::Diag::new(row, &mut stderr);
+                    self.assign_read_scalar_names(&scalar_names, "", raw, &mut diag)
+                };
                 if assign_status != 0 {
                     return self.finish_read_error(cmd, &stderr, assign_status);
                 }
@@ -2640,14 +2653,25 @@ impl Executor {
                 let assign_status = if exact_char_limit {
                     // rubash#776: `-N` binds the record whole (see
                     // assign_read_exact_names); `-n` keeps IFS splitting.
-                    self.assign_read_exact_names(&scalar_names, &line, raw)
+                    {
+                        let row = crate::executor::builtin_table::builtin_table_row("read")
+                            .expect("read row");
+                        let mut diag = crate::executor::builtin_diag::Diag::new(row, &mut stderr);
+                        self.assign_read_exact_names(&scalar_names, &line, raw, &mut diag)
+                    }
                 } else {
-                    self.assign_read_scalar_names_with_field_count(
-                        &scalar_names,
-                        &line,
-                        raw,
-                        scalar_field_count,
-                    )
+                    {
+                        let row = crate::executor::builtin_table::builtin_table_row("read")
+                            .expect("read row");
+                        let mut diag = crate::executor::builtin_diag::Diag::new(row, &mut stderr);
+                        self.assign_read_scalar_names_with_field_count(
+                            &scalar_names,
+                            &line,
+                            raw,
+                            scalar_field_count,
+                            &mut diag,
+                        )
+                    }
                 };
                 if assign_status != 0 {
                     return self.finish_read_error(cmd, &stderr, assign_status);
@@ -2687,11 +2711,17 @@ impl Executor {
                 // it. Binding "" here made `read -u 3 v` on a
                 // directory fd clear a pre-existing v (GNU keeps it).
                 let assign_status = if initial_text.is_some() {
-                    self.assign_read_scalar_names(
-                        &scalar_names,
-                        initial_text.as_deref().unwrap_or(""),
-                        raw,
-                    )
+                    {
+                        let row = crate::executor::builtin_table::builtin_table_row("read")
+                            .expect("read row");
+                        let mut diag = crate::executor::builtin_diag::Diag::new(row, &mut stderr);
+                        self.assign_read_scalar_names(
+                            &scalar_names,
+                            initial_text.as_deref().unwrap_or(""),
+                            raw,
+                            &mut diag,
+                        )
+                    }
                 } else {
                     0
                 };
@@ -2716,11 +2746,17 @@ impl Executor {
                 // `read x <&-` left x set-but-empty). The -i prefill arm
                 // keeps binding the initial text (readline behavior).
                 let assign_status = if initial_text.is_some() {
-                    self.assign_read_scalar_names(
-                        &scalar_names,
-                        initial_text.as_deref().unwrap_or(""),
-                        raw,
-                    )
+                    {
+                        let row = crate::executor::builtin_table::builtin_table_row("read")
+                            .expect("read row");
+                        let mut diag = crate::executor::builtin_diag::Diag::new(row, &mut stderr);
+                        self.assign_read_scalar_names(
+                            &scalar_names,
+                            initial_text.as_deref().unwrap_or(""),
+                            raw,
+                            &mut diag,
+                        )
+                    }
                 } else {
                     0
                 };
@@ -2743,11 +2779,17 @@ impl Executor {
                     0
                 }
             } else if read_fd.is_some() || command_redirects_stdin(cmd) {
-                let assign_status = self.assign_read_scalar_names(
-                    &scalar_names,
-                    initial_text.as_deref().unwrap_or(""),
-                    raw,
-                );
+                let assign_status = {
+                    let row = crate::executor::builtin_table::builtin_table_row("read")
+                        .expect("read row");
+                    let mut diag = crate::executor::builtin_diag::Diag::new(row, &mut stderr);
+                    self.assign_read_scalar_names(
+                        &scalar_names,
+                        initial_text.as_deref().unwrap_or(""),
+                        raw,
+                        &mut diag,
+                    )
+                };
                 if assign_status != 0 {
                     return self.finish_read_error(cmd, &stderr, assign_status);
                 }
@@ -2757,11 +2799,17 @@ impl Executor {
                     0
                 }
             } else if self.shell_state.env_vars.contains_key(FUNCTION_STDIN) {
-                let assign_status = self.assign_read_scalar_names(
-                    &scalar_names,
-                    initial_text.as_deref().unwrap_or(""),
-                    raw,
-                );
+                let assign_status = {
+                    let row = crate::executor::builtin_table::builtin_table_row("read")
+                        .expect("read row");
+                    let mut diag = crate::executor::builtin_diag::Diag::new(row, &mut stderr);
+                    self.assign_read_scalar_names(
+                        &scalar_names,
+                        initial_text.as_deref().unwrap_or(""),
+                        raw,
+                        &mut diag,
+                    )
+                };
                 if assign_status != 0 {
                     return self.finish_read_error(cmd, &stderr, assign_status);
                 }
@@ -2774,11 +2822,17 @@ impl Executor {
                 // GNU read.def:539-562: a timeout still assigns the partial
                 // input (empty here) and returns 128+SIGALRM — do not fall
                 // through to another blocking read.
-                let assign_status = self.assign_read_scalar_names(
-                    &scalar_names,
-                    initial_text.as_deref().unwrap_or(""),
-                    raw,
-                );
+                let assign_status = {
+                    let row = crate::executor::builtin_table::builtin_table_row("read")
+                        .expect("read row");
+                    let mut diag = crate::executor::builtin_diag::Diag::new(row, &mut stderr);
+                    self.assign_read_scalar_names(
+                        &scalar_names,
+                        initial_text.as_deref().unwrap_or(""),
+                        raw,
+                        &mut diag,
+                    )
+                };
                 if assign_status != 0 {
                     return self.finish_read_error(cmd, &stderr, assign_status);
                 }
@@ -2794,11 +2848,17 @@ impl Executor {
                 // parent's still-open stdin pipe (readhang regression:
                 // `while read -r f; do :; done < list.txt` under a piped
                 // stdin never finished the loop).
-                let assign_status = self.assign_read_scalar_names(
-                    &scalar_names,
-                    initial_text.as_deref().unwrap_or(""),
-                    raw,
-                );
+                let assign_status = {
+                    let row = crate::executor::builtin_table::builtin_table_row("read")
+                        .expect("read row");
+                    let mut diag = crate::executor::builtin_diag::Diag::new(row, &mut stderr);
+                    self.assign_read_scalar_names(
+                        &scalar_names,
+                        initial_text.as_deref().unwrap_or(""),
+                        raw,
+                        &mut diag,
+                    )
+                };
                 if assign_status != 0 {
                     return self.finish_read_error(cmd, &stderr, assign_status);
                 }
@@ -2820,11 +2880,17 @@ impl Executor {
                 // `read` at Ctrl-D on a transient-EOF transport).
                 // Assign the empty record and fail, like the
                 // fd0-bound-away arm above.
-                let assign_status = self.assign_read_scalar_names(
-                    &scalar_names,
-                    initial_text.as_deref().unwrap_or(""),
-                    raw,
-                );
+                let assign_status = {
+                    let row = crate::executor::builtin_table::builtin_table_row("read")
+                        .expect("read row");
+                    let mut diag = crate::executor::builtin_diag::Diag::new(row, &mut stderr);
+                    self.assign_read_scalar_names(
+                        &scalar_names,
+                        initial_text.as_deref().unwrap_or(""),
+                        raw,
+                        &mut diag,
+                    )
+                };
                 if assign_status != 0 {
                     return self.finish_read_error(cmd, &stderr, assign_status);
                 }
@@ -2849,11 +2915,17 @@ impl Executor {
                 // reader on the same descriptor, which swallowed the
                 // EOF verdict and blocked forever. Assign the empty
                 // record and fail, like the EOF arms above.
-                let assign_status = self.assign_read_scalar_names(
-                    &scalar_names,
-                    initial_text.as_deref().unwrap_or(""),
-                    raw,
-                );
+                let assign_status = {
+                    let row = crate::executor::builtin_table::builtin_table_row("read")
+                        .expect("read row");
+                    let mut diag = crate::executor::builtin_diag::Diag::new(row, &mut stderr);
+                    self.assign_read_scalar_names(
+                        &scalar_names,
+                        initial_text.as_deref().unwrap_or(""),
+                        raw,
+                        &mut diag,
+                    )
+                };
                 if assign_status != 0 {
                     return self.finish_read_error(cmd, &stderr, assign_status);
                 }
@@ -2902,11 +2974,18 @@ impl Executor {
                         130
                     }
                     Ok((0, _, false, false, _)) => {
-                        let assign_status = self.assign_read_scalar_names(
-                            &scalar_names,
-                            initial_text.as_deref().unwrap_or(""),
-                            raw,
-                        );
+                        let assign_status = {
+                            let row = crate::executor::builtin_table::builtin_table_row("read")
+                                .expect("read row");
+                            let mut diag =
+                                crate::executor::builtin_diag::Diag::new(row, &mut stderr);
+                            self.assign_read_scalar_names(
+                                &scalar_names,
+                                initial_text.as_deref().unwrap_or(""),
+                                raw,
+                                &mut diag,
+                            )
+                        };
                         if assign_status != 0 {
                             return self.finish_read_error(cmd, &stderr, assign_status);
                         }
@@ -2940,8 +3019,13 @@ impl Executor {
                         } else {
                             line
                         };
-                        let assign_status =
-                            self.assign_read_scalar_names(&scalar_names, &line, raw);
+                        let assign_status = {
+                            let row = crate::executor::builtin_table::builtin_table_row("read")
+                                .expect("read row");
+                            let mut diag =
+                                crate::executor::builtin_diag::Diag::new(row, &mut stderr);
+                            self.assign_read_scalar_names(&scalar_names, &line, raw, &mut diag)
+                        };
                         if assign_status != 0 {
                             return self.finish_read_error(cmd, &stderr, assign_status);
                         }
@@ -3096,6 +3180,16 @@ impl Executor {
         // source's availability.
         if let Some(available) = self.own_input_binding_availability(cmd, fd) {
             return available;
+        }
+        // rubash#3774: an own OUTPUT winner leaves the descriptor
+        // open but write-only (`read -u 3 x 3>file`). sh_validfd
+        // judges the REDIRECTED state (read.def:377-381), so the
+        // descriptor counts as available here and the read itself
+        // fails EBADF in the funnel (read.def:911) — reporting it
+        // unavailable at this gate would misstate an open fd as an
+        // invalid one.
+        if self.own_list_leaves_fd_write_only(cmd, fd) {
+            return true;
         }
         if self.fd_table.is_open_for_read(fd) {
             return true;

@@ -123,6 +123,34 @@ impl TimedInput {
         self.expected_len == len
     }
 
+    /// The recorded arrival segments, in cumulative-length order.
+    pub(crate) fn arrivals(&self) -> &[(usize, Duration)] {
+        &self.arrivals
+    }
+
+    /// The same schedule re-expressed for a rewritten buffer
+    /// (rubash#3293): the caller maps the arrival segments into the
+    /// new buffer's coordinates and supplies its total length, while
+    /// the production identity (start, duration) and the virtual-wait
+    /// accounting carry over. A byte-served record rewrites the
+    /// FUNCTION_STDIN mirror (the tail is re-encoded), which changes
+    /// the buffer length the schedule was recorded for; without the
+    /// rebase every later read on the stream fails `matches_len` and
+    /// the timed judge stays silently off for the rest of the stream.
+    pub(crate) fn rebased(
+        &self,
+        arrivals: Vec<(usize, Duration)>,
+        expected_len: usize,
+    ) -> TimedInput {
+        TimedInput {
+            started: self.started,
+            duration: self.duration,
+            arrivals,
+            skipped_wait: self.skipped_wait,
+            expected_len,
+        }
+    }
+
     /// Arrival time of the byte prefix ending at `end`: the events, in
     /// cumulative-length order, are the buffer's append segments, and
     /// the prefix exists once EVERY segment covering it has landed —

@@ -566,9 +566,9 @@ impl VariableStore {
                     return None;
                 };
                 let value = if variable.uppercase {
-                    value.to_uppercase()
+                    crate::locale::simple_uppercase(value)
                 } else if variable.lowercase {
-                    value.to_lowercase()
+                    crate::locale::simple_lowercase(value)
                 } else {
                     value.clone()
                 };

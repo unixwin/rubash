@@ -44,6 +44,21 @@ pub struct BindXRunOutcome {
     /// unconditionally when it is 124 (bashline.c:4701-4706 comment);
     /// hosts that always repaint after a widget can ignore it.
     pub status: i32,
+    /// niubash#977: true when this run was unwound by an UNTRAPPED
+    /// SIGINT — the foreground job died by SIGINT and the list
+    /// threw to the top-level reader, discarding the rest of the
+    /// command (GNU jobs.c:3316 waitchld ADDINTERRUPT). The
+    /// verdict is recorded by the engine at the unit's
+    /// unwind-capture point (the Q6 arm B unit signal-discard
+    /// record, noted where the source driver classifies the
+    /// unwind); `status` alone cannot carry it, because a discard
+    /// and an ordinary failure share statuses. A trapped SIGINT
+    /// (the trap runs and the list continues) and an ignored one
+    /// (a no-op) both leave this false, as does normal completion
+    /// and an `exit` jump. Hosts discard the edit line when it is
+    /// true (and settle `$?` from the status per their own
+    /// contract).
+    pub interrupted: bool,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -86,6 +101,31 @@ impl Executor {
         Ok(status)
     }
 
+    /// bind.def:122-131 — the bind prologue, shared by the handler
+    /// and the `--help` gate (rubash#3340): the line-editing warning
+    /// prints first, then initialize_readline runs ONCE per process
+    /// (bashline.c:278 bash_readline_initialized) — on the first
+    /// `bind` invocation in ANY shell mode, which is what makes
+    /// $INPUTRC/~/.inputrc apply to `bind -v` even under `-c` (GNU
+    /// probe: INPUTRC + `bash --norc -c 'bind -v'` shows the file's
+    /// variables). Both run BEFORE the option scan (CASE_HELPOPT at
+    /// bind.def:191), so the gate replays this prologue before the
+    /// long help — otherwise `bind --help` in a non-interactive
+    /// shell loses its warning.
+    pub(in crate::executor) fn bind_pre_help_prologue(
+        &mut self,
+        line_editing_enabled: bool,
+        prefix: &str,
+        stderr: &mut Vec<u8>,
+    ) {
+        if !line_editing_enabled {
+            let _ = writeln!(stderr, "{prefix}bind: warning: line editing not enabled");
+        }
+        if !self.bind_registry().borrow().readline_initialized {
+            self.initialize_readline();
+        }
+    }
+
     /// bind.def:114 bind_builtin. Dispatch order mirrors the C: listings
     /// (-l/-p/-P/-s/-S/-v/-V), then -f, then -q/-u/-r, then -x, then -X,
     /// then the remaining arguments as inputrc-form bindings
@@ -98,18 +138,7 @@ impl Executor {
         stdout: &mut Vec<u8>,
         stderr: &mut Vec<u8>,
     ) -> i32 {
-        // bind.def:127-131: the line-editing warning prints first, then
-        // initialize_readline runs ONCE per process (bashline.c:278
-        // bash_readline_initialized) — on the first `bind` invocation in
-        // ANY shell mode, which is what makes $INPUTRC/~/.inputrc apply
-        // to `bind -v` even under `-c` (GNU probe: INPUTRC +
-        // `bash --norc -c 'bind -v'` shows the file's variables).
-        if !line_editing_enabled {
-            let _ = writeln!(stderr, "{prefix}bind: warning: line editing not enabled");
-        }
-        if !self.bind_registry().borrow().readline_initialized {
-            self.initialize_readline();
-        }
+        self.bind_pre_help_prologue(line_editing_enabled, prefix, stderr);
 
         let mut flags = BindFlags::default();
         let mut return_code: Option<i32> = None;
@@ -639,7 +668,16 @@ impl Executor {
         self.set_env("READLINE_POINT", &point.to_string());
         self.set_env("READLINE_MARK", &mark.to_string());
 
+        // niubash#977: this route is the run's driver — no grouped
+        // driver or Session outcome will consume the unit
+        // signal-discard record for it, so take (clear) any stale
+        // record before the run, and take THIS run's record after
+        // it. The record itself is noted at the unwind-capture
+        // point inside the source driver, where the unwind is
+        // classified; nothing is inferred from the status here.
+        let _ = self.take_unit_signal_discard();
         let status = crate::script_driver::run_source(self, command, false);
+        let interrupted = self.take_unit_signal_discard();
 
         let length = read_back_line_length(self);
         let out_line = self.get_env("READLINE_LINE").map(str::to_owned);
@@ -653,6 +691,7 @@ impl Executor {
             point: clamp(self.get_env("READLINE_POINT")),
             mark: clamp(self.get_env("READLINE_MARK")),
             status,
+            interrupted,
         };
 
         // unbind_readline_variables (bashline.c:4573-4581): the variables
@@ -926,6 +965,7 @@ mod tests {
         // unbound (unbind_readline_variables, bashline.c:4573).
         let outcome = executor.run_bind_x_command("COPIED=$READLINE_LINE", "hello", 2, 0);
         assert_eq!(outcome.status, 0);
+        assert!(!outcome.interrupted);
         assert_eq!(outcome.line.as_deref(), Some("hello"));
         // Unchanged READLINE_LINE reads back identical; the editor keeps
         // its own buffer (maybe_make_readline_line is a no-op then).
@@ -1045,6 +1085,9 @@ mod tests {
         let mut executor = Executor::new();
         let outcome = executor.run_bind_x_command("exit 3", "line", 0, 0);
         assert_eq!(outcome.status, 3);
+        // An `exit` jump is an exit classification, not a signal
+        // discard (niubash#977).
+        assert!(!outcome.interrupted);
     }
 
     #[test]

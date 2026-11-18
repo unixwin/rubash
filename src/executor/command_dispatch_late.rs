@@ -170,8 +170,13 @@ impl Executor {
         let overlaid_env = self.env_with_frame_arrays(&v_bases_ref);
         let env_vars = overlaid_env.as_ref().unwrap_or(&self.shell_state.env_vars);
         let mut stderr = Vec::new();
-        let status =
-            crate::builtins::test::execute_with_stderr(&merged, bracket, env_vars, &mut stderr)?;
+        let status = crate::builtins::test::execute_with_stderr(
+            &merged,
+            bracket,
+            env_vars,
+            self.shell_state.positional_len(),
+            &mut stderr,
+        )?;
         self.write_buffered_builtin_output(cmd, &[], &stderr)?;
         Ok(status)
     }
@@ -401,11 +406,30 @@ impl Executor {
                             }
                             return Err(error);
                         }
+                        // GNU execute_cmd.c:4138 — same post-redirect
+                        // line_number_for_err_trap stamp as the
+                        // with-redirects path (rubash#3553).
+                        if !self.error_trap_running {
+                            self.err_trap_line.set(cmd.line);
+                        }
                         self.exit_code = self.execute_conditional_command(command);
                         // rubash#1177: same `=~` nounset-fatal conversion
                         // as the with-redirects path.
                         if let Some(result) = self.take_conditional_nounset_fatal() {
                             return result;
+                        }
+                        // rubash#3382: same fatal-arith consumption as
+                        // the primary `[[ ]]` wrapper in
+                        // command_prepare.rs — the operands' evalerror
+                        // belongs to THIS command. The nounset check
+                        // above runs first so a FORCE_EOF is never
+                        // downgraded to a DISCARD when both are latched.
+                        if self.take_conditional_arith_evalerror() {
+                            self.exit_code = 1;
+                            // rubash#439: an expansion error, not a
+                            // failed command.
+                            self.command_expansion_failed.set(true);
+                            return Err(ExecuteError::ExpansionFailure(1));
                         }
                         Ok(())
                     }
@@ -413,6 +437,15 @@ impl Executor {
                 }
             }
             Some(LateSlot::Arithmetic) => {
+                // rubash#3557: a literal `((` head word — quoted, the only
+                // way `((` survives parse as a plain word since the lexer
+                // folds unquoted `(( ... ))` into an arithmetic_command
+                // node — is a command name, not arithmetic syntax
+                // (parse.y:3667 read_token: `((` is read as ARITH_CMD only
+                // unquoted). GNU runs `((: command not found`.
+                if cmd.arithmetic_command.is_none() {
+                    return self.execute_external(cmd);
+                }
                 // rubash#846 (GNU execute_cmd.c:854-883): the `(( ))`
                 // command's OWN redirect failure — mark it for the `!` flip
                 // sites.
@@ -428,8 +461,12 @@ impl Executor {
                 // `((a+=1)) 2>&1` reports on stdout (rubash#1127). Bind the
                 // output redirects in the fd table around the evaluation;
                 // the diagnostic printers route through fd 2 (arith_diag).
+                // rubash#3287: execute_arithmetic_command returns
+                // Err(ExpansionFailure) when this `(( ))`'s own expansion
+                // failed fatally — propagate it so the DISCARD abandons
+                // the rest of the line.
                 let arith_status = self.with_compound_output_redirects(cmd, |executor| {
-                    Ok(executor.execute_arithmetic_command(cmd))
+                    executor.execute_arithmetic_command(cmd)
                 })?;
                 self.exit_code = arith_status;
                 // GNU expr.c:1190-1216: an unbound variable under `set -u`
@@ -454,6 +491,7 @@ impl Executor {
                     // child contains the jump at execute_cmd.c:1811 and
                     // exits 1 (niubash#163).
                     if self.expansion_error_is_interactive_discard() {
+                        self.note_unit_expansion_error_discard();
                         self.exit_code = 1;
                         return Err(ExecuteError::ExpansionFailure(1));
                     }
@@ -469,6 +507,12 @@ impl Executor {
                 // set PATH without it, rubash#1545) they must not run.
                 if !self.emulated_external_stands_down("dirname") {
                     if let Some(status) = self.try_execute_dirname_fast_path(cmd) {
+                        // rubash#2736: an answered fast path records
+                        // the PATH resolution, as GNU's locate does.
+                        super::execution_misc::record_fastpath_command_resolution(
+                            &mut self.shell_state.env_vars,
+                            "dirname",
+                        );
                         self.exit_code = status;
                         return Ok(());
                     }
@@ -478,6 +522,12 @@ impl Executor {
             Some(LateSlot::Basename) => {
                 if !self.emulated_external_stands_down("basename") {
                     if let Some(status) = self.try_execute_basename_fast_path(cmd) {
+                        // rubash#2736: an answered fast path records
+                        // the PATH resolution, as GNU's locate does.
+                        super::execution_misc::record_fastpath_command_resolution(
+                            &mut self.shell_state.env_vars,
+                            "basename",
+                        );
                         self.exit_code = status;
                         return Ok(());
                     }

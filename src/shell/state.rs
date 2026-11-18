@@ -105,6 +105,20 @@ pub struct DynamicCellState {
     pub(crate) groups_materialized: bool,
 }
 
+/// rubash#3198: the inode anchor for the session cwd (see the
+/// `cwd_anchor` field on ShellState). `path` records which cwd value
+/// the handle was opened for; the handle is only spent when the cwd
+/// field still equals it but no longer resolves by name. On non-Unix
+/// targets there is no fchdir, so the anchor carries the path only
+/// and the spawn stamp falls back to leaving the child unstamped
+/// (inherit) instead of failing the spawn on a deleted directory.
+#[derive(Debug, Clone)]
+pub(crate) struct CwdAnchor {
+    pub(crate) path: PathBuf,
+    #[cfg(unix)]
+    pub(crate) dir: std::sync::Arc<std::fs::File>,
+}
+
 #[derive(Debug)]
 pub struct ShellState {
     /// variables.c shell_variables — typed store carrying attributes,
@@ -125,7 +139,74 @@ pub struct ShellState {
     /// relative path resolution anchors here. `$PWD` in `env_vars` is
     /// the logical display twin maintained by the cd family; this field
     /// is the physical truth the filesystem sees.
+    ///
+    /// rubash#3268 (e): the EMPTY path is a first-class value of this
+    /// field — the honest "unknown". It is installed only at birth,
+    /// when the process was started inside an already-deleted
+    /// directory and the birth getcwd failed: GNU has no string for
+    /// that state at all (its only state is the process inode), so no
+    /// string may be invented — the previous "/" fallback made the
+    /// whole session live in the root directory. The birth anchor
+    /// (below) is opened on "." at the same moment and names this
+    /// empty value, so every two-state consumer takes the anchor
+    /// route for the session's whole abnormal life; the first
+    /// successful cd replaces field and anchor and the state ends.
+    /// An empty field never resolves and never equals a real
+    /// directory — code that would join or display it must treat it
+    /// as "no known directory", not as a path.
     pub(crate) cwd: std::path::PathBuf,
+    /// rubash#3198: an open directory handle anchoring `cwd`, kept so a
+    /// spawn can still land a child in the session cwd after the
+    /// directory has been UNLINKED. GNU's cwd lives in the process
+    /// (builtins/cd.def cd_builtin -> chdir), so a deleted cwd stays a
+    /// valid cwd for forked children (execute_cmd.c execute_disk_command
+    /// forks and the child inherits it; no path is ever re-resolved).
+    /// Under G-02 this port's process cwd never moves, so the path
+    /// string was the only carrier — and `Command::current_dir(path)`
+    /// re-resolves it at spawn time, failing ENOENT once the directory
+    /// is gone and refusing EVERY external spawn with 127. The anchor
+    /// is the inode-level twin of the field: refreshed whenever the
+    /// cwd is (re)entered while its path still resolves, and consumed
+    /// by the spawn stamp (executor::external_inner::stamp_spawn_cwd)
+    /// via fchdir when the path no longer resolves. A RefCell because
+    /// spawn faces include &self routes (the comsub shortcut spawner);
+    /// the anchor is a cache of an OS resource, not session semantics —
+    /// a stale anchor is only ever used when its recorded path still
+    /// equals the cwd field, and the field remains the truth.
+    ///
+    /// Normally lazy (opened by the first consumer that finds the
+    /// path resolvable). rubash#3268 (e): the ONE eager case is a
+    /// birth inside an already-deleted directory — the birth capture
+    /// in Executor::new opens "." (which succeeds on a deleted
+    /// directory, exactly as it does on a live one) and installs the
+    /// anchor naming the empty "unknown" field (or a validated
+    /// respawn's adopted field), because no later moment can recover
+    /// that inode once the path is gone.
+    pub(crate) cwd_anchor: RefCell<Option<CwdAnchor>>,
+    /// GNU's `the_current_working_directory` (builtins/common.c:589):
+    /// the shell's LOGICAL cwd, a value of its own, distinct from both
+    /// the physical `cwd` field above (the getcwd truth) and the $PWD
+    /// variable in `env_vars` (a bind target a user assignment can
+    /// desynchronize). GNU keeps exactly one such string: `cd` in
+    /// logical mode sets it from sh_canonpath's textual canonicalization
+    /// (builtins/cd.def change_to_directory), `pwd -L` prints it
+    /// verbatim (cd.def pwd_builtin), and startup adopts an inherited
+    /// $PWD into it when the value names the current directory
+    /// (variables.c:907 set_pwd). rubash used to re-derive this value
+    /// from $PWD on every read, which lost it whenever the variable was
+    /// reassigned, unset, non-canonical, or pointed at a directory the
+    /// physical field no longer named (rubash#2796/#2797/#2799). The
+    /// cd family and the startup funnel maintain this field; other
+    /// movers (pushd/popd) do not, so readers must confirm it still
+    /// names `cwd` before trusting it and fall back to the derived
+    /// value when it does not. `None` until a session funnel seeds it,
+    /// and `None` again after a failed physical resolution poisons it
+    /// (rubash#3349: GNU builtins/cd.def:183-191 resetpwd frees
+    /// the_current_working_directory, leaving it NULL, so the next
+    /// logical face re-derives through the getcwd gate instead of
+    /// printing the stale value). Like `cwd`, it rides the Clone fork
+    /// boundary.
+    pub(crate) logical_cwd: Option<String>,
     /// rubash#618/#616: element writes append one storage segment in O(1)
     /// instead of re-rendering every key, so the storage string accumulates
     /// duplicate segments until the next canonical render folds them. This is
@@ -168,6 +249,15 @@ pub struct ShellState {
     /// `$-` changes). Like the invocation fields it rides the
     /// Clone fork boundary: a subshell renders the letter too.
     pub(crate) forced_interactive: bool,
+    /// lib/readline/histexpand.c:94 `history_comment_char`, as armed by
+    /// variables.c:6168-6177 sv_histtimefmt: the first bind that leaves
+    /// HISTTIMEFORMAT existing sets it to '#' and NOTHING ever resets
+    /// it — unsetting HISTTIMEFORMAT only clears
+    /// history_write_timestamps. This latch is that process-global's
+    /// port: once true it stays true for the session (rubash#3535).
+    /// It rides the Clone fork boundary like the invocation fields:
+    /// a forked child inherits the parent's comment char.
+    pub(crate) history_comment_char_armed: bool,
     /// alias.c aliases.
     pub(crate) aliases: HashMap<String, Alias>,
     /// variables.c shell_functions.
@@ -238,6 +328,18 @@ pub struct ShellState {
     /// variables.c BASH_LINENO/BASH_SOURCE stacks.
     pub(crate) bash_lineno_stack: Vec<String>,
     pub(crate) bash_source_stack: Vec<String>,
+    /// rubash#3125: the `$0` seed value installed into
+    /// `bash_source_stack` by `set_env(__RUBASH_SCRIPT_NAME)`, if
+    /// any. The seed is a local device — GNU's `bash_source_a`
+    /// (variables.c:5721 `push_source`) holds only real frames, so
+    /// the BASH_SOURCE views must pop the bottom entry ONLY when it
+    /// really is the seed. An interactive session never installs one
+    /// (`None`), so its bottom entry is a real sourced-file frame
+    /// and must survive. The seed, when present, is always the
+    /// bottom entry: seeding replaces the whole stack with one
+    /// element, real frames only ever enter at index 0
+    /// (`push_bash_source`, function entry) and leave from index 0.
+    pub(crate) bash_source_seed: Option<String>,
     /// rubash#2482: frames an ExitCode/LastpipeExit unwind deliberately
     /// left on the three call stacks above. GNU's fatal unwinds
     /// (errexit via execute_cmd.c's exit_immediately_on_error, the
@@ -446,6 +548,20 @@ pub struct ShellState {
     /// clone_for_child_save, so the wholesale boundary restore
     /// reverts it to the parent's value like every other field here.
     pub(crate) subshell_source_text: Option<String>,
+    /// The reader unit currently executing: its verbatim source text
+    /// and the line offset the driver parsed it under (absolute line =
+    /// offset + string-relative line). GNU's parser holds the current
+    /// input in shell_input_line while it reads, so a syntax error
+    /// inside a command-substitution body — parsed by GNU inside the
+    /// enclosing reader — echoes the ENCLOSING line verbatim
+    /// (parse.y:6814 print_offending_line); rubash parses the body at
+    /// expansion time, when only the body fragment survives on the
+    /// error node, so the driver parks the unit text here for the
+    /// unit's extent (run_source_impl_inner's guard) and the comsub
+    /// body reporter reads the physical line back out of it
+    /// (rubash#2783). Fork copies inherit it through Clone exactly as
+    /// a forked child inherits the parent's input stream position.
+    pub(crate) reader_unit_source: std::cell::RefCell<Option<(std::rc::Rc<str>, usize)>>,
     /// execute_cmd.c subshell_environment & SUBSHELL_COMSUB — set while a
     /// `$( )`/backtick body runs (shared-executor and cloned-executor
     /// paths). jobs.c:3837-3843 start_job refuses fg/bg inside it.
@@ -477,6 +593,22 @@ pub struct ShellState {
     /// off or inside a subshell, a cleared flag sends the child's stdin to
     /// /dev/null; a set flag inherits the redirected stream instead.
     pub(crate) stdin_redir: Cell<bool>,
+    /// rubash#3605: one-shot `pipe_in != NO_PIPE` marker for a pipeline
+    /// element's own compound dispatch. GNU's element grandchild
+    /// (execute_cmd.c:4570 `stdin_redir |= pipe_in != NO_PIPE`, and the
+    /// execute_in_subshell re-dispatch at :1731-1739/:1759-1764 that
+    /// consumes `command->redirects` before the inner
+    /// execute_command_internal sees them) decides stdin_redir at two
+    /// sites that need this bit: the `( )` assign at :1733
+    /// (`stdin_redirects(own) || pipe_in`) and the :826 control-structure
+    /// assign, which GNU skips for pipe-connected elements because the
+    /// redirects are already NULL there. Set on the compound stage
+    /// clone; consumed (replace(false)) at the element's own compound
+    /// dispatch so nested `( )`/control structures never see it — a
+    /// nested `( )` assigns `own redirects || NO_PIPE` and clears the
+    /// inherited flag, exactly like GNU (`{ ( cat & wait ); } <file`
+    /// feeds the async cat /dev/null, not the file).
+    pub(crate) element_pipe_stdin: Cell<bool>,
     /// jobs.c bookkeeping — the job registry (jobs.c `jobs` array /
     /// `job_table`): bash-observable job identity, pipeline pids, states,
     /// and notification bits. Process handles are Executor resources and
@@ -501,11 +633,21 @@ pub struct ShellState {
     /// gen_progcomp_completions saves/restores around nesting) so the bare
     /// `compopt` form can operate on it (complete.def:862-886
     /// compopt_builtin). `None` outside a completion function run.
-    pub(crate) pcomp_curcs: Option<crate::builtins::complete::Compspec>,
+    ///
+    /// The handle is SHARED across state clones, like `bind_registry`
+    /// below: in GNU these are process globals, and rubash runs `compgen`
+    /// in-process, so a completion function that reaches `compgen` through
+    /// a command substitution executes on a fork-copy executor whose
+    /// `compopt` mutation must still land on the attempt's live copy and
+    /// fold back into candidate generation (rubash#2611; the copy is
+    /// installed and restored value-wise by the attempt owner, so sharing
+    /// the cell does not leak it across attempts).
+    pub(crate) pcomp_curcs: Rc<RefCell<Option<crate::builtins::complete::Compspec>>>,
     /// pcomplete.c:181 `pcomp_curcmd` port: the command name whose compspec
     /// `pcomp_curcs` governs (printed by the bare `compopt` report form,
-    /// complete.def:872 print_compopts (pcomp_curcmd, ...)).
-    pub(crate) pcomp_curcmd: Option<String>,
+    /// complete.def:872 print_compopts (pcomp_curcmd, ...)). Shares the
+    /// `pcomp_curcs` handle.
+    pub(crate) pcomp_curcmd: Rc<RefCell<Option<String>>>,
     /// Readline's RL_STATE_COMPLETING port: the depth of the host
     /// completion attempts currently in flight
     /// (`Executor::complete_line`, including nested `compgen`
@@ -545,8 +687,8 @@ pub struct ShellState {
     pub(crate) arithmetic_fatal_error: Cell<bool>,
     pub(crate) arithmetic_nounset_error: Cell<bool>,
     /// rubash#1238: the readonly diagnostic for a failed arithmetic bind
-    /// was already printed by report_arithmetic_readonly_error; the
-    /// command-layer reporters must not follow it with a synthesized
+    /// was already printed by the evaluation-order drain's Readonly arm;
+    /// the command-layer reporters must not follow it with a synthesized
     /// syntax error (GNU prints exactly one line for `((ro++))`).
     pub(crate) arithmetic_readonly_error: Cell<bool>,
     /// Latch for a nounset fatal raised while expanding a `[[ =~ ]]`
@@ -563,6 +705,19 @@ pub struct ShellState {
     /// substitution's command list, never the enclosing word's command.
     /// TODO: Move to ShellState::clone() for automatic isolation (requires &mut self API change)
     pub(crate) parameter_bad_substitution: Cell<bool>,
+    /// One-shot print budget for the `bad substitution` diagnostic
+    /// (rubash#3499). GNU subst.c:10277-10288 reports the FIRST
+    /// expansion failure of a word list and abandons the rest, so a
+    /// word (or element) expanded on several paths — the pipeline
+    /// scan plus the dispatch arms, a speculative concurrent attempt
+    /// plus the sequential re-expansion — must print the diagnostic
+    /// exactly once per latch lifetime. The verdict latch above still
+    /// sets at every site; only the print is deduplicated. This cell
+    /// rides every boundary the verdict rides (clone, interior
+    /// snapshot, comsub clears, the verdict consumers) so a spent
+    /// budget can neither suppress a later command's diagnostic nor
+    /// re-print inside one command's expansion.
+    pub(crate) bad_substitution_reported: Cell<bool>,
     /// A redirect-target pathname expansion failed under failglob (GNU
     /// subst.c:12668 report_error + exp_jump_to_top_level(DISCARD) inside
     /// redirection_expand -> expand_words_no_vars). The diagnostic prints
@@ -623,6 +778,18 @@ pub struct ShellState {
     /// own copy is inert. None where there is no process umask
     /// (Windows) or when the state was never a fork snapshot.
     pub(crate) fork_saved_process_umask: Option<u32>,
+    /// rubash#2636: the PROCESS rlimit set recorded at the same
+    /// fork-save point as `fork_saved_process_umask`. The `ulimit`
+    /// builtin drives the real setrlimit on unix
+    /// (builtins/ulimit.rs plat::set), and a flat `( )` region has no
+    /// fork to discard the child's limits the way GNU's
+    /// execute_in_subshell (execute_cmd.c:1576) does — so the save
+    /// point snapshots the process rlimits into the saved state and
+    /// `restore_flat_subshell` re-applies them when the region ends.
+    /// Only the SAVED snapshot's copy is ever read; the live state's
+    /// own copy is inert. None where there are no process rlimits
+    /// (Windows: the emulated table rides the env save/restore).
+    pub(crate) fork_saved_process_rlimits: Option<Vec<(char, u64, u64)>>,
 }
 
 /// The shape of the PIPESTATUS variable cell (variables.c:6291
@@ -761,6 +928,7 @@ pub(crate) struct InteriorSnapshot {
     conditional_nounset_error: bool,
     arithmetic_last_error_category: Option<crate::executor::arithmetic::ArithmeticErrorCategory>,
     parameter_bad_substitution: bool,
+    bad_substitution_reported: bool,
     redirect_failglob_error: bool,
     redirect_failglob_seen: bool,
     debug_trap_command: Option<String>,
@@ -774,6 +942,13 @@ pub(crate) struct InteriorSnapshot {
     /// cannot reach the parent (the `( )` boundary's twin fix rides
     /// `fork_saved_process_umask` on the full-state snapshot).
     process_umask: Option<u32>,
+    /// rubash#2636: the PROCESS rlimit set at the command-
+    /// substitution boundary — a `ulimit` inside `$( )` re-limits
+    /// this same process (builtins/ulimit.def set_limit ->
+    /// setrlimit), while GNU's substitution child discards its
+    /// limits at exit. Twin of `process_umask` above; the `( )`
+    /// boundary's version rides `fork_saved_process_rlimits`.
+    process_rlimits: Option<Vec<(char, u64, u64)>>,
 }
 
 impl InteriorSnapshot {
@@ -825,12 +1000,14 @@ impl ShellState {
             conditional_nounset_error: self.conditional_nounset_error.get(),
             arithmetic_last_error_category: self.arithmetic_last_error_category.get(),
             parameter_bad_substitution: self.parameter_bad_substitution.get(),
+            bad_substitution_reported: self.bad_substitution_reported.get(),
             redirect_failglob_error: self.redirect_failglob_error.get(),
             redirect_failglob_seen: self.redirect_failglob_seen.get(),
             debug_trap_command: self.debug_trap_command.borrow().clone(),
             xtrace_fd: self.xtrace_fd.get(),
             xtrace_fd_source: self.xtrace_fd_source.borrow().clone(),
             process_umask: crate::builtins::umask::snapshot_process_umask(),
+            process_rlimits: crate::builtins::ulimit::snapshot_process_rlimits(),
         }
     }
 
@@ -851,6 +1028,23 @@ impl ShellState {
         // same process, so only a snapshot taken NOW lets the restore
         // put the parent's mask back (see the field docs).
         saved.fork_saved_process_umask = crate::builtins::umask::snapshot_process_umask();
+        // rubash#2636: the same fork boundary snapshots the PROCESS
+        // rlimit set — a `ulimit` set inside the region re-limits
+        // this process, and only a snapshot taken NOW lets the
+        // restore put the parent's limits back (see the field docs).
+        saved.fork_saved_process_rlimits = crate::builtins::ulimit::snapshot_process_rlimits();
+        // rubash#3387: the fork boundary also snapshots the process's
+        // raw rusage — the child face's `times` reads current minus
+        // this baseline (GNU's forked child starts near zero;
+        // builtins/times.def:65-84). Popped by restore_flat_subshell
+        // (or the direct-assignment restore in external_finish.rs)
+        // when the stack top is this boundary at the same depth;
+        // `saved` carries the entry depth, which is the depth the
+        // boundary was entered from.
+        crate::executor::read_helpers::push_times_baseline(
+            crate::executor::read_helpers::TimesBaselineKind::CloneBoundary,
+            saved.subshell_depth.get(),
+        );
         saved
     }
 
@@ -879,6 +1073,8 @@ impl ShellState {
             .set(snapshot.arithmetic_last_error_category);
         self.parameter_bad_substitution
             .set(snapshot.parameter_bad_substitution);
+        self.bad_substitution_reported
+            .set(snapshot.bad_substitution_reported);
         self.redirect_failglob_error
             .set(snapshot.redirect_failglob_error);
         self.redirect_failglob_seen
@@ -892,6 +1088,10 @@ impl ShellState {
         if let Some(mask) = snapshot.process_umask {
             crate::builtins::umask::apply_process_umask(mask);
         }
+        // rubash#2636: the same for the boundary's process rlimits.
+        if let Some(rlimits) = &snapshot.process_rlimits {
+            crate::builtins::ulimit::apply_process_rlimits(rlimits);
+        }
     }
 }
 
@@ -901,10 +1101,13 @@ impl Clone for ShellState {
             variables: self.variables.clone(),
             env_vars: self.env_vars.clone(),
             cwd: self.cwd.clone(),
+            cwd_anchor: RefCell::new(self.cwd_anchor.borrow().clone()),
+            logical_cwd: self.logical_cwd.clone(),
             array_compact_budget: self.array_compact_budget.clone(),
             invocation_interactive: self.invocation_interactive,
             invocation_login: self.invocation_login,
             forced_interactive: self.forced_interactive,
+            history_comment_char_armed: self.history_comment_char_armed,
             aliases: self.aliases.clone(),
             functions: self.functions.clone(),
             function_definition_redirects: self.function_definition_redirects.clone(),
@@ -921,6 +1124,7 @@ impl Clone for ShellState {
             dynamic_cells: self.dynamic_cells.clone(),
             bash_lineno_stack: self.bash_lineno_stack.clone(),
             bash_source_stack: self.bash_source_stack.clone(),
+            bash_source_seed: self.bash_source_seed.clone(),
             inherited_fork_frames: self.inherited_fork_frames.clone(),
             respawn_function_line_spans: self.respawn_function_line_spans.clone(),
             respawn_root_line_spans: self.respawn_root_line_spans.clone(),
@@ -949,10 +1153,12 @@ impl Clone for ShellState {
             subshell_login_cleared: Cell::new(self.subshell_login_cleared.get()),
             job_control: Cell::new(self.job_control.get()),
             subshell_source_text: self.subshell_source_text.clone(),
+            reader_unit_source: std::cell::RefCell::new(self.reader_unit_source.borrow().clone()),
             xtrace_indirection_level: Cell::new(self.xtrace_indirection_level.get()),
             xtrace_suspended: Cell::new(self.xtrace_suspended.get()),
             in_command_substitution: Cell::new(self.in_command_substitution.get()),
             stdin_redir: Cell::new(self.stdin_redir.get()),
+            element_pipe_stdin: Cell::new(self.element_pipe_stdin.get()),
             job_table: self.job_table.clone(),
             last_background_pid: self.last_background_pid,
             last_procsub_pid: self.last_procsub_pid,
@@ -978,6 +1184,7 @@ impl Clone for ShellState {
             conditional_nounset_error: Cell::new(self.conditional_nounset_error.get()),
             arithmetic_last_error_category: Cell::new(self.arithmetic_last_error_category.get()),
             parameter_bad_substitution: Cell::new(self.parameter_bad_substitution.get()),
+            bad_substitution_reported: Cell::new(self.bad_substitution_reported.get()),
             redirect_failglob_error: Cell::new(self.redirect_failglob_error.get()),
             redirect_failglob_seen: Cell::new(self.redirect_failglob_seen.get()),
             xtrace_fd: Cell::new(self.xtrace_fd.get()),
@@ -991,6 +1198,7 @@ impl Clone for ShellState {
             // its own ad-hoc carriers.
             procsub_adhoc_carriers: RefCell::new(Vec::new()),
             fork_saved_process_umask: self.fork_saved_process_umask,
+            fork_saved_process_rlimits: self.fork_saved_process_rlimits.clone(),
         }
     }
 }

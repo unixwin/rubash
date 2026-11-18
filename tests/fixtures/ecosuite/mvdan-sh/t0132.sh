@@ -1,0 +1,6 @@
+f1 <<EOF1
+h1
+EOF1
+f2 <<EOF2
+h2
+EOF2

@@ -219,6 +219,9 @@ impl Executor {
         // A live readonly PIPESTATUS array prints in array form under
         // `readonly -p`, not the table's valueless line (rubash#1363).
         self.substitute_pipestatus_print_line(&mut stdout);
+        // GNU variables.c:5820/6257-6266 sv_strict_posix: a readonly
+        // bind of POSIXLY_CORRECT re-derives the mode (rubash#3661).
+        self.sync_posix_mode_if_assignment_operands(&args);
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
         Ok(status)
     }
@@ -233,42 +236,46 @@ impl Executor {
         W: Write,
         E: Write,
     {
+        // Same Diag-over-the-face's-stderr shape as the export face
+        // (Stage-2 ④ Phase 4).
+        let row =
+            crate::executor::builtin_table::builtin_table_row("readonly").expect("readonly row");
+        let mut diag = crate::executor::builtin_diag::Diag::new(row, stderr);
         let mut print = false;
-        let mut index = 0;
-        while let Some(arg) = args.get(index) {
-            if arg == "--" {
-                index += 1;
-                break;
-            }
-            if !arg.starts_with('-') || arg == "-" {
-                break;
-            }
-            for option in arg[1..].chars() {
-                match option {
-                    'f' => {}
-                    'p' => print = true,
-                    'a' | 'A' => {}
-                    // GNU setattr.def ATTROPTS includes `n`; for readonly it's
-                    // a silently-disallowed undo (no-op here too).
-                    'n' => {}
-                    other => {
-                        writeln!(
-                            stderr,
-                            "{}readonly: -{other}: invalid option",
-                            self.diagnostic_prefix()
-                        )?;
-                        writeln!(
-                            stderr,
-                            "readonly: usage: readonly [-aAf] [name[=value] ...] or readonly -p"
-                        )?;
+        let operands: Vec<&str> = {
+            let mut opt =
+                crate::executor::builtin_opt::BuiltinOpt::new(row, args, &mut diag, false);
+            loop {
+                match opt.next() {
+                    crate::executor::builtin_opt::OptEvent::Help => {
+                        crate::builtins::help::print_builtin_help(row.name, stdout)?;
                         return Ok(2);
                     }
+                    crate::executor::builtin_opt::OptEvent::End => break,
+                    crate::executor::builtin_opt::OptEvent::Opt(c) => match c {
+                        b'f' => {}
+                        b'p' => print = true,
+                        b'a' | b'A' => {}
+                        // GNU setattr.def ATTROPTS includes `n`; for
+                        // readonly the undo is silently disallowed
+                        // (no-op here too — the face only marks).
+                        b'n' => {}
+                        _ => {}
+                    },
+                    crate::executor::builtin_opt::OptEvent::OptArg(_, _) => {}
                 }
             }
-            index += 1;
-        }
+            let operands: Vec<&str> = opt.operands().iter().map(String::as_str).collect();
+            drop(opt);
+            if diag.status() != 0 {
+                diag.usage();
+                diag.flush_with(|| self.diagnostic_prolog());
+                return Ok(diag.status());
+            }
+            operands
+        };
 
-        if index >= args.len() {
+        if operands.is_empty() {
             // declare.def set_or_show_attributes(NULL, f|r): `readonly -f`
             // and `readonly -fp` both print each readonly function's full
             // definition followed by the `declare -fr NAME` attribute line.
@@ -284,13 +291,9 @@ impl Executor {
         }
 
         let mut status = 0;
-        for name in &args[index..] {
+        for name in operands.iter().copied() {
             let Some(body) = self.shell_state.functions.get(name) else {
-                writeln!(
-                    stderr,
-                    "{}readonly: {name}: not a function",
-                    self.diagnostic_prefix()
-                )?;
+                diag.free(format_args!("{name}: not a function"));
                 status = 1;
                 continue;
             };
@@ -300,6 +303,7 @@ impl Executor {
             }
             mark_env_name(&mut self.shell_state.env_vars, READONLY_FUNCTIONS, name);
         }
+        diag.flush_with(|| self.diagnostic_prolog());
 
         Ok(status)
     }
@@ -398,12 +402,49 @@ impl Executor {
             // or an older binary's copy must still not be handed to
             // this session's children: interactivity and its sibling
             // shapes are re-derived by every process itself.
+            //
+            // rubash#3049: `__RUBASH_*` names project only when THIS
+            // session wrote them — the mirror's contract is "the
+            // session's own mirrored assignments reach children"
+            // (G-03/ms_stopbleed), and a session write is exactly what
+            // the env-write journal records. Everything else carrying
+            // the prefix is transport RESIDUE: a respawned process's
+            // environ keeps the serialized table state and spawn
+            // stamps of its own fork-emulated birth, and re-projecting
+            // those to an exec'd child crosses a boundary GNU never
+            // has (variables.c make_env_array_from_var_list exports
+            // variables only) — the residue's attribute lists made
+            // bats-exec-test's fresh BATS_TEST_TAGS `declare -ar`,
+            // deadlocking bats-core test #71 on its readonly
+            // assignment. The journal-gated rule also reproduces the
+            // rubash#2259 adjudication: a script's own entry-stamped
+            // __RUBASH_SCRIPT_NAME is a journaled write and keeps
+            // projecting, while an ambient foreign copy is consumed
+            // (journaled-remove) at init and stays blocked.
+            // __RUBASH_CURRENT_LINE/__RUBASH_CURRENT_FILE are journaled
+            // too, but they are AMBIENT frame stamps, not session
+            // state — a per-line/per-source re-stamp is not an
+            // assignment the session wants its children to inherit
+            // (GNU's line_number/BASH_SOURCE are C globals that never
+            // exist in environ), so they stay blocked on emission even
+            // when the journal has a set record (rubash#2259's
+            // ambient_frame_stamps_do_not_reach_script_children arm).
             if name == "TMPDIR"
                 || crate::executor::local_helpers::INVOCATION_STATE_ENV_KEYS
                     .contains(&name.as_str())
                 || !crate::executor::local_helpers::shell_assignment_needs_process_env(&name)
                 || (name.starts_with("__RUBASH_TRAP")
                     && name != crate::builtins::trap::TRAP_ORIG_IGNORES)
+                || matches!(
+                    name.as_str(),
+                    "__RUBASH_CURRENT_LINE" | "__RUBASH_CURRENT_FILE"
+                )
+                || (name.starts_with("__RUBASH_")
+                    && self
+                        .env_write_journal
+                        .borrow()
+                        .get(&name)
+                        .is_none_or(|state| state.is_none()))
                 || !is_valid_process_env(&name, &value)
             {
                 continue;

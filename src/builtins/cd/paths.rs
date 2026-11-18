@@ -114,6 +114,70 @@ pub(super) fn logical_destination_display(old_pwd: &Path, target: &Path) -> Stri
     preserve_leading_double_slash(slash_evidence, &normalized)
 }
 
+/// The existence half of GNU's logical canonicalization, which the
+/// textual destination above cannot express: lib/sh/pathcanon.c
+/// sh_canonpath runs cd's logical mode with PATH_CHECKEXISTS |
+/// PATH_CHECKDOTDOT — every real component is stat-checked as a
+/// directory the moment it is appended, and the accumulated path is
+/// stat-checked again before a `..` chops its last component, so a
+/// component the textual walk ERASES must still name an existing
+/// directory or canonpath returns NULL. change_to_directory
+/// (builtins/cd.def) then adjudicates by the verbatim chdir, never by
+/// the canonical form. The surviving components need no check here —
+/// the destination probe's canonicalize walks them through the
+/// kernel — so this walk replays only the erasures: it rebuilds the
+/// combined spelling's component stack exactly as
+/// logical_destination_display does, and each time a `..` would pop a
+/// component, the accumulated prefix (that component included) must
+/// resolve to an existing directory. A `..` at the stack floor pops
+/// nothing and checks nothing (canonpath's dotdot watermark: the root
+/// of a rooted spelling, or the leading `..` run of an unrooted one,
+/// which canon keeps verbatim).
+pub(super) fn logical_canon_erased_components_exist(
+    old_pwd: &Path,
+    target: &Path,
+    env_vars: &HashMap<String, String>,
+) -> bool {
+    let target_display = path_display_text(target);
+    let old_display = path_display_text(old_pwd);
+    let absolute_target = target.is_absolute() || target_display.starts_with('/');
+    let combined_raw = if absolute_target {
+        target_display.clone()
+    } else {
+        format!("{old_display}/{target_display}")
+    };
+    let rooted = combined_raw.starts_with('/');
+    let mut stack: Vec<&str> = Vec::new();
+    let mut floor = 0usize;
+    for part in combined_raw.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if stack.len() > floor {
+                    let prefix = if rooted {
+                        format!("/{}", stack.join("/"))
+                    } else {
+                        stack.join("/")
+                    };
+                    let fs_path = filesystem_path_for_display(&prefix, env_vars);
+                    if !std::fs::metadata(&fs_path)
+                        .map(|meta| meta.is_dir())
+                        .unwrap_or(false)
+                    {
+                        return false;
+                    }
+                    stack.pop();
+                } else if !rooted {
+                    stack.push("..");
+                    floor = stack.len();
+                }
+            }
+            other => stack.push(other),
+        }
+    }
+    true
+}
+
 /// POSIX leaves the meaning of exactly two leading slashes
 /// implementation-defined, and GNU bash preserves them through logical
 /// path normalization — `cd //tmp` binds PWD=`//tmp`, and the prefix
@@ -121,7 +185,7 @@ pub(super) fn logical_destination_display(old_pwd: &Path, target: &Path) -> Stri
 /// `/`); three or more slashes collapse to one. On Windows this prefix
 /// is the UNC root (rubash#1415). The component-wise normalizers cannot
 /// represent it, so re-apply it from the raw combined text.
-pub(super) fn preserve_leading_double_slash(raw: &str, normalized: &str) -> String {
+pub(crate) fn preserve_leading_double_slash(raw: &str, normalized: &str) -> String {
     let exactly_two = raw.starts_with("//") && !raw.starts_with("///");
     if exactly_two && normalized.starts_with('/') && !normalized.starts_with("//") {
         format!("/{normalized}")

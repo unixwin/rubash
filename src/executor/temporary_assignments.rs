@@ -1,4 +1,5 @@
 use super::*;
+use crate::executor::builtin_diag::Diag;
 use crate::executor::markers::STORAGE_WORD_PREFIX;
 
 impl Executor {
@@ -35,7 +36,7 @@ impl Executor {
             // GNU subst.c:10404+ expand_word_error -> DISCARD: a failed
             // assignment word (failglob no-match, readonly violation, ...)
             // abandons the rest of this command's assignment list.
-            if !self.apply_shell_assignment(name, expanded_value) {
+            if !self.apply_shell_assignment(name, expanded_value, None) {
                 // GNU subst.c:10404+ expand_word_error -> DISCARD: the failed
                 // assignment reports status 1 and the evalerror abort armed
                 // inside the apply path bounds the discard to this command
@@ -48,8 +49,16 @@ impl Executor {
             // with `declare -i i`) reports evalerror and propagates exit
             // status 1. apply_shell_assignment resets exit_code to 0 on
             // success, so promote the arithmetic_expansion_error flag here.
+            // rubash#3287: consume the WHOLE error record, not just the
+            // latch — a stale `arithmetic_fatal_error` left standing
+            // here skipped the NEXT `(( ))` / `let` / `for (( ))`
+            // (eval_arithmetic_command_value_with_flags bails out early
+            // on it). The #1226 prefix consumer below already clears
+            // all three flags together; this site must match it.
             if self.shell_state.arithmetic_expansion_error.get() {
                 self.shell_state.arithmetic_expansion_error.set(false);
+                self.shell_state.arithmetic_fatal_error.set(false);
+                self.shell_state.arithmetic_nonfatal_error.set(false);
                 self.exit_code = 1;
                 return false;
             }
@@ -177,6 +186,19 @@ impl Executor {
         // the previous shell variable values (both the legacy env_vars value
         // and the typed shell_state.variables owner, so parameter expansion
         // does not keep seeing a leaked temporary value).
+        // variables.c:6168-6177 sv_histtimefmt: a temporary (prefix)
+        // bind of HISTTIMEFORMAT is still a bind — GNU arms
+        // history_comment_char while the variable exists and never
+        // disarms it, so the arming must latch NOW, before
+        // restore_temporary_assignments removes the variable and the
+        // per-command boundary in execute_command can no longer see
+        // that it ever existed (rubash#3535).
+        if assignments
+            .iter()
+            .any(|(name, _)| assignment_name_and_append(name).0 == "HISTTIMEFORMAT")
+        {
+            self.shell_state.history_comment_char_armed = true;
+        }
         self.tempenv_marks.push(self.tempenv_names.len());
         // rubash#3071: the bound-value frame for this apply, popped by
         // restore_temporary_assignments in lockstep with the mark. The
@@ -649,7 +671,7 @@ impl Executor {
                         // every name-keyed hook; only the attribute
                         // marks it leaves on the cell are the leak, so
                         // reset them to the fresh tempvar shape.
-                        if !self.apply_shell_assignment(name, expanded_value) {
+                        if !self.apply_shell_assignment(name, expanded_value, None) {
                             assignments_failed = true;
                         } else {
                             set_var_attrs(
@@ -752,7 +774,7 @@ impl Executor {
             // error) reports and keeps going through the REST of the operand
             // list here; the caller decides posix fatality (execute_cmd.c
             // jump_to_top_level on bash_variable_assignment_error).
-            let bind_ok = self.apply_shell_assignment(name, expanded_value.clone());
+            let bind_ok = self.apply_shell_assignment(name, expanded_value.clone(), None);
             if !bind_ok {
                 assignments_failed = true;
             }
@@ -818,7 +840,29 @@ impl Executor {
             };
             self.shell_state.env_vars.remove(name);
             self.shell_state.variables.remove(name);
-            self.apply_shell_assignment(name, value);
+            // rubash#2771: GNU's merge_temporary_env pops the tempvar
+            // before its bind_variable replay (variables.c:4662), so the
+            // rebind runs with no temporary cell in scope — the dynamic
+            // assign hook then fires on the kept value. A kept command's
+            // tempenv frame is still live here (keep means no restore
+            // popped its mark), so the name's registration would still
+            // shadow the dynamic cell: dynamic_bind_targets_plain_cell
+            // stands the hook down and the replay would land a second
+            // plain cell (`SECONDS=100 :` under posix read back a static
+            // 100). Retire the tempvar's frame registration — and the
+            // frame's pre-bind snapshot, which no restore will consume —
+            // exactly the pop GNU performs.
+            if let Some(mark) = self.tempenv_marks.last().copied() {
+                let mut index = self.tempenv_names.len();
+                while index > mark {
+                    index -= 1;
+                    if self.tempenv_names[index] == name {
+                        self.tempenv_names.remove(index);
+                    }
+                }
+            }
+            self.tempenv_previous.remove(name);
+            self.apply_shell_assignment(name, value, None);
         }
     }
 
@@ -1070,6 +1114,15 @@ impl Executor {
                 .insert(elem_base.to_string(), new_value);
             self.shell_state.env_vars.clear_array_cells_dirty();
             self.exit_code = 0;
+            // rubash#3097: an element bind is a completed bind — GNU's
+            // assignment driver runs stupidly_hack_special_variables
+            // after assign_array_element just as after bind_variable
+            // (subst.c:8169), and sv_locale (variables.c:6272) reads the
+            // NEW scalar projection (get_string_value, variables.c:2495:
+            // element 0 / the "0" key). This arm returns before the
+            // generic store tail, so the funnel note lives here, at the
+            // store — one bind, one note, recorded nowhere else.
+            self.note_locale_assignment(elem_base);
             return true;
         }
         // arrayfunc.c array_expand_index -> evalexp under no_expand rules:
@@ -1138,6 +1191,10 @@ impl Executor {
             .insert(elem_base.to_string(), format_indexed_array_storage(entries));
         self.shell_state.env_vars.clear_array_cells_dirty();
         self.exit_code = 0;
+        // rubash#3097: same funnel note as the assoc arm above — the
+        // element bind completed here, before the generic store tail
+        // could ever see it (subst.c:8169 -> variables.c:6272).
+        self.note_locale_assignment(elem_base);
         true
     }
 
@@ -1193,9 +1250,10 @@ impl Executor {
         command: &str,
         name: &str,
         value: String,
+        mut diag: Option<&mut Diag>,
     ) -> bool {
         let previous = self.assignment_command_name.replace(command.to_string());
-        let result = self.apply_shell_assignment(name, value);
+        let result = self.apply_shell_assignment(name, value, diag.as_deref_mut());
         self.assignment_command_name = previous;
         result
     }
@@ -1204,10 +1262,7 @@ impl Executor {
     /// a caller opted in (GNU builtin_error ordering/redirection), otherwise
     /// writes process stderr directly like eprintln!.
     pub(in crate::executor) fn emit_assignment_diag(&mut self, line: String) {
-        if self.buffer_assignment_diagnostics {
-            self.pending_assignment_diagnostics
-                .extend_from_slice(line.as_bytes());
-        } else if !self.fd_table.is_closed(2) && self.fd_table.output_endpoint(2).is_none() {
+        if !self.fd_table.is_closed(2) && self.fd_table.output_endpoint(2).is_none() {
             // No fd-2 binding in the table: the process stderr is the
             // destination, as with the raw write this replaces.
             let _ = std::io::stderr().write_all(line.as_bytes());
@@ -1218,6 +1273,23 @@ impl Executor {
             // stay silent. The raw process-stderr write bypassed every
             // compound binding (rubash#1317; same class as rubash#167).
             self.write_diagnostic_fd2(line.as_bytes());
+        }
+    }
+
+    /// The Diag-threaded twin of [`emit_assignment_diag`] (Stage-2 ④
+    /// Phase 4, A3-R1): when a caller supplies a Diag, the prebuilt line
+    /// goes straight to its sink — the command's own stderr, already bound
+    /// to its redirections — instead of the fd-table/process-stderr
+    /// fallback. Callers that pass `None` keep the legacy routing.
+    pub(in crate::executor) fn emit_assignment_diag_for(
+        &mut self,
+        diag: Option<&mut Diag>,
+        line: String,
+    ) {
+        if let Some(diag) = diag {
+            diag.sink().write_str(&line);
+        } else {
+            self.emit_assignment_diag(line);
         }
     }
 
@@ -1277,8 +1349,59 @@ impl Executor {
         &mut self,
         name: &str,
         value: String,
+        mut diag: Option<&mut Diag>,
     ) -> bool {
-        let result = self.apply_shell_assignment_inner(name, value);
+        // GNU variables.c:3128-3144 bind_variable_internal: a scalar
+        // whole-name bind on a LIVE dynamic assoc dispatches to the
+        // variable's assign_func with key "0" — assign_aliasvar /
+        // assign_hashcmd (variables.c:1785 / :1715) write the value into
+        // the OWNER table as element [0], so `BASH_ALIASES=hello` adds
+        // alias `0='hello'` and `declare -p` renders `([r]="echo r"
+        // [0]="hello")` with the dynamic link intact (5.3.20 oracle:
+        // a later `alias s=…` still merges in). Only `unset` severs the
+        // name (variables.c:3839) — a severed name has no assign_func
+        // and falls through to the plain store below. A compound
+        // `NAME=(...)` on the live name is a separate merge mechanism
+        // owned by the assoc write-through path, so the scalar arm
+        // excludes `(`-led values.
+        {
+            let (base, append) = assignment_name_and_append(name);
+            if matches!(base, "BASH_ALIASES" | "BASH_CMDS")
+                && !is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, base)
+                && !value.trim_start().starts_with('(')
+            {
+                // ASS_APPEND rebuilds the bound string from the old
+                // value first (variables.c:3137 make_variable_value):
+                // `NAME+=x` appends to element [0]'s current text.
+                let bound = if append {
+                    let prev = if base == "BASH_ALIASES" {
+                        self.shell_state
+                            .aliases
+                            .get("0")
+                            .map(|alias| alias.value.clone())
+                    } else {
+                        crate::builtins::hash::hashed_path(&self.shell_state.env_vars, "0")
+                    };
+                    prev.map_or(value.clone(), |prev| prev + &value)
+                } else {
+                    value.clone()
+                };
+                if base == "BASH_ALIASES" {
+                    self.shell_state
+                        .aliases
+                        .insert("0".to_string(), Alias::new(&bound));
+                } else {
+                    crate::builtins::hash::set_hashed_path(
+                        &mut self.shell_state.env_vars,
+                        "0",
+                        &bound,
+                    );
+                }
+                self.sync_dynamic_assoc_vars();
+                return true;
+            }
+        }
+        let result = self.apply_shell_assignment_inner(name, value, diag.as_deref_mut());
         // GNU variables.c:5761 { "BASH_XTRACEFD", sv_xtracefd }: assigning
         // the variable retargets xtrace (or reports an invalid fd) through
         // the bind hook, independent of which builtin stored the value.
@@ -1359,7 +1482,7 @@ impl Executor {
                 // reports bare `BASH_COMPAT: ...`), so the plain
                 // diagnostic_prefix is used, not the assignment one.
                 let line = format!("{}{diagnostic}\n", self.diagnostic_prefix());
-                self.emit_assignment_diag(line);
+                self.emit_assignment_diag_for(diag.as_deref_mut(), line);
             }
         }
         // GNU variables.c:5819 { "PATH", sv_path } -> variables.c:5919
@@ -1372,10 +1495,24 @@ impl Executor {
         if result && base == "PATH" {
             crate::builtins::hash::flush_command_hash_table(&mut self.shell_state.env_vars);
         }
+        // GNU variables.c:5820 { "POSIXLY_CORRECT", sv_strict_posix }
+        // -> variables.c:6257-6266: every successful bind of the name
+        // (scalar, append, element or compound — this funnel carries
+        // them all, plus the read/for/select/getopts binds) re-derives
+        // posixly_correct from the variable's isset-ness and runs
+        // posix_initialize + set_shellopts (rubash#3661).
+        if result && base == "POSIXLY_CORRECT" {
+            self.sync_posix_mode_from_variable();
+        }
         result
     }
 
-    fn apply_shell_assignment_inner(&mut self, name: &str, value: String) -> bool {
+    fn apply_shell_assignment_inner(
+        &mut self,
+        name: &str,
+        value: String,
+        mut diag: Option<&mut Diag>,
+    ) -> bool {
         // TODO(variables.c/arrayfunc.c): Bash stores append assignment state
         // separately on WORD_DESC/ASSIGNMENT_WORD. This narrow path handles
         // scalar `name+=value` until SHELL_VAR attributes and arrays own it.
@@ -1407,7 +1544,7 @@ impl Executor {
                         self.assignment_error_prefix(),
                         base_name
                     );
-                    self.emit_assignment_diag(line);
+                    self.emit_assignment_diag_for(diag.as_deref_mut(), line);
                     self.assign_circular_fallback(base_name, value.clone(), append);
                     return true;
                 }
@@ -1419,7 +1556,7 @@ impl Executor {
                     self.assignment_error_prefix(),
                     base_name
                 );
-                self.emit_assignment_diag(line);
+                self.emit_assignment_diag_for(diag.as_deref_mut(), line);
                 return false;
             }
             NamerefResolution::MaxDepth => {
@@ -1431,7 +1568,7 @@ impl Executor {
                     self.assignment_error_prefix(),
                     base_name
                 );
-                self.emit_assignment_diag(line);
+                self.emit_assignment_diag_for(diag.as_deref_mut(), line);
                 return false;
             }
             // Unresolved cell: resolve to the nameref itself; the
@@ -1455,7 +1592,7 @@ impl Executor {
 ",
                 self.assignment_diagnostic_prefix()
             );
-            self.emit_assignment_diag(line);
+            self.emit_assignment_diag_for(diag.as_deref_mut(), line);
             self.exit_code = 1;
             return false;
         }
@@ -1511,7 +1648,7 @@ impl Executor {
                     "{}`{offender}': not a valid identifier\n",
                     self.assignment_diagnostic_prefix()
                 );
-                self.emit_assignment_diag(line);
+                self.emit_assignment_diag_for(diag.as_deref_mut(), line);
                 self.exit_code = 1;
                 return false;
             }
@@ -1555,7 +1692,7 @@ impl Executor {
                     ) {
                         let line =
                             format!("{}{}: readonly variable\n", self.error_prefix(), elem_base);
-                        self.emit_assignment_diag(line);
+                        self.emit_assignment_diag_for(diag.as_deref_mut(), line);
                         self.exit_code = 1;
                         return false;
                     }
@@ -1585,7 +1722,7 @@ impl Executor {
                         self.assignment_diagnostic_prefix(),
                         base_name
                     );
-                    self.emit_assignment_diag(line);
+                    self.emit_assignment_diag_for(diag.as_deref_mut(), line);
                     self.exit_code = 1;
                     return false;
                 }
@@ -1598,7 +1735,7 @@ impl Executor {
                         self.assignment_error_prefix(),
                         base_name
                     );
-                    self.emit_assignment_diag(line);
+                    self.emit_assignment_diag_for(diag.as_deref_mut(), line);
                     self.exit_code = 1;
                     return false;
                 }
@@ -1614,7 +1751,7 @@ impl Executor {
                         // bind_read_variable -> variables.c bind_variable).
                         let line =
                             format!("{}{}: readonly variable\n", self.error_prefix(), elem_base);
-                        self.emit_assignment_diag(line);
+                        self.emit_assignment_diag_for(diag.as_deref_mut(), line);
                         self.exit_code = 1;
                         return false;
                     }
@@ -1639,7 +1776,7 @@ impl Executor {
             base_name,
         ) {
             let line = format!("{}{}: readonly variable\n", self.error_prefix(), base_name);
-            self.emit_assignment_diag(line);
+            self.emit_assignment_diag_for(diag.as_deref_mut(), line);
             self.exit_code = 1;
             return false;
         }
@@ -1725,7 +1862,7 @@ impl Executor {
                 self.shell_state.random_state.last_value.set(0);
             } else if let Some(record) = crate::executor::arithmetic::take_arith_eval_error() {
                 let line = format!("{}{}\n", self.diagnostic_prefix(), record.render());
-                self.emit_assignment_diag(line);
+                self.emit_assignment_diag_for(diag.as_deref_mut(), line);
             } else {
                 // No value and no error (empty string): seed 0.
                 self.shell_state.random_state.rseed.set(0);
@@ -1783,6 +1920,18 @@ impl Executor {
         // takes the generic store below and the caller's
         // note_pipestatus_assignment derives the shape from the
         // stored form (rubash#1364, rubash#2369).
+        // rubash#3211: the dynamic associative pair routes whole-variable
+        // binds through the owner-table door, mirroring the DIRSTACK arm
+        // above — GNU's assign_aliasvar / assign_hashcmd hooks fire for
+        // every bind form (compound list, scalar, append; variables.c:1785
+        // / 1715). Without the door the generic machinery wrote the mirror
+        // + typed cell only and the command-boundary reconciliation
+        // rebuilt both from the untouched owner table, discarding the
+        // assignment. Unset names and plain-cell shadows (local/tempenv)
+        // stand the door down exactly as for DIRSTACK.
+        if matches!(base_name, "BASH_ALIASES" | "BASH_CMDS") && !dynamic_unbound && !dynamic_plain {
+            return self.apply_dynamic_assoc_assignment(base_name, &value, append);
+        }
         if is_noassign_bash_array(base_name) && !append {
             return true;
         }
@@ -2029,6 +2178,10 @@ impl Executor {
                 // (Materialize the small scalar text: the checked eval
                 // takes &mut self, so the borrowed mirror cannot be held
                 // across it. This arm is scalar-only by construction.)
+                // The sum itself is intmax_t (variables.c:2936-2946
+                // `rval += lval; retval = itos (rval)`), so it wraps at
+                // INT64_MAX instead of storing the out-of-range i128
+                // decimal (rubash#3782).
                 let current = current.to_string();
                 let Some(current) = self.eval_integer_assignment_checked(&current) else {
                     return false;
@@ -2036,7 +2189,7 @@ impl Executor {
                 let Some(value) = self.eval_integer_assignment_checked(&value) else {
                     return false;
                 };
-                (current + value).to_string()
+                crate::executor::arithmetic::intmax_append_sum(current, value).to_string()
             } else {
                 append_scalar_value(current, &value)
             }
@@ -2072,7 +2225,7 @@ impl Executor {
                     base_name,
                     bare
                 );
-                self.emit_assignment_diag(line);
+                self.emit_assignment_diag_for(diag.as_deref_mut(), line);
             }
             // GNU assign_assoc_from_kvlist (arrayfunc.c:644-650): a kvpair
             // word whose expanded key is empty reports `<word>: bad array
@@ -2087,7 +2240,7 @@ impl Executor {
                     self.assignment_error_prefix(),
                     word
                 );
-                self.emit_assignment_diag(line);
+                self.emit_assignment_diag_for(diag.as_deref_mut(), line);
             }
             if !bare_elements.is_empty() {
                 self.exit_code = 1;
@@ -2222,6 +2375,14 @@ impl Executor {
                 self.mark_exported(base_name);
             }
             self.exit_code = 0;
+            // rubash#3097: this arm is a completed bind too — GNU's
+            // bind lands in element 0 (variables.c:3128-3142) and the
+            // driver hack reads it back (subst.c:8169; for the for-loop
+            // caller, execute_cmd.c:3093/3097-3100). The arm returns
+            // before the generic tail, so the funnel note lives here:
+            // one bind, one note, at the store (the #3060 discipline —
+            // the for caller must not note a second time).
+            self.note_locale_assignment(base_name);
             return true;
         }
         if !is_array {
@@ -2273,6 +2434,11 @@ impl Executor {
                 self.mark_exported(base_name);
             }
             self.exit_code = 0;
+            // rubash#3097: the assoc twin of the scalar-over-array arm
+            // above — the bind landed on the "0" key (variables.c:
+            // 3139-3140) and the funnel reads that projection; note it
+            // here, once, at the store.
+            self.note_locale_assignment(base_name);
             return true;
         }
         // rubash#616 (1a): final mirror write — a compound `a=(...)` render
@@ -2350,7 +2516,7 @@ impl Executor {
             // GNU arrayfunc err_badarraysub (report_error family): honors
             // gnu_errfmt (rubash#1038).
             let line = format!("{}{}: bad array subscript\n", self.error_prefix(), word);
-            self.emit_assignment_diag(line);
+            self.emit_assignment_diag_for(diag.as_deref_mut(), line);
             self.exit_code = 1;
             // Bad-subscript class for the eval boundary (rubash#637), armed
             // alongside the abort the top-level list needs.

@@ -9,7 +9,8 @@ mod unset;
 pub(crate) use options::{
     is_flag_only_shell_option, is_shell_option, print_shell_option, print_shell_options,
     print_shell_options_by_state, set_shell_option, shell_option_enabled, shell_option_names,
-    shellopts_value, sync_shell_option_flag, SET_O_PRINT_WIDTH, SHOPT_O_PRINT_WIDTH,
+    shellopts_value, sync_posix_mode_from_variable, sync_shell_option_flag, SET_O_PRINT_WIDTH,
+    SHOPT_O_PRINT_WIDTH,
 };
 pub use unset::unset;
 pub(crate) use unset::unset_with_stderr;
@@ -125,14 +126,28 @@ pub fn set(args: &[String], env_vars: &mut crate::shell::var_table::VarTable) ->
 /// the same env cells `builtin_error_prefix` reads (the executor
 /// path builds its own via `Executor::diagnostic_prolog`).
 fn prolog_for_env(env_vars: &crate::shell::var_table::VarTable) -> Prolog {
+    // The name cells derive from the single argv[0] carrier chain
+    // (builtins::prefix, rubash#2791), as in shopt's twin of this
+    // composition: error_name follows the get_name_for_error chain
+    // via builtin_diag::error_report_name (rubash#3355: the
+    // presence-based $0 step — an empty $0 prints an empty name,
+    // not the hard-coded "rubash" brand), while shell_basename
+    // keeps the shared basename derivation (the old cells printed
+    // the shell-name carrier VERBATIM as the interactive name —
+    // a renamed shell invoked by path reported its full path —
+    // and a hard-coded "rubash" as the error name, rubash#3256).
+    // rubash#3048: the file arm prefers the FRAME file carrier
+    // (__RUBASH_CURRENT_FILE = BASH_SOURCE[0], the definition file
+    // inside a function) over the top-level SCRIPT_NAME —
+    // prefix::error_file_name, the same pairing
+    // Executor::current_error_file_name composes.
+    let get = |key: &str| env_vars.get(key).cloned();
+    let script_file = crate::builtins::prefix::error_file_name(&get);
     Prolog {
         interactive: env_vars.get("__RUBASH_INTERACTIVE").is_some(),
-        shell_basename: env_vars
-            .get("__RUBASH_SHELL_NAME")
-            .cloned()
-            .unwrap_or_else(|| "rubash".to_string()),
-        error_name: "rubash".to_string(),
-        script_file: env_vars.get("__RUBASH_SCRIPT_NAME").cloned(),
+        shell_basename: crate::builtins::prefix::shell_basename(&get),
+        error_name: crate::executor::builtin_diag::error_report_name(&script_file, env_vars),
+        script_file,
         line: env_vars.get("__RUBASH_CURRENT_LINE").cloned(),
     }
 }
@@ -144,34 +159,32 @@ fn prolog_for_env(env_vars: &crate::shell::var_table::VarTable) -> Prolog {
 /// Executor::diagnostic_prefix), matching GNU's script-relative prolog.
 /// Interactive mode (shell reading from a terminal) omits the line segment.
 pub fn builtin_error_prefix(env_vars: &HashMap<String, String>) -> String {
+    // The name in every arm derives from the single argv[0] carrier
+    // chain (builtins::prefix, rubash#2791): the interactive arm is
+    // base_pathname(shell_name), never the carrier verbatim, and the
+    // non-interactive arms are the chain's diagnostic_prefix — the
+    // hard-coded "rubash" this function used to print for the
+    // line-only and carrier-less arms named a renamed shell by the
+    // wrong name (rubash#3256). The one arm the chain has no
+    // counterpart for is the eval frame's `eval:` segment, kept
+    // here in its existing shape (script + line carriers present).
+    let get = |key: &str| env_vars.get(key).cloned();
     if env_vars.contains_key("__RUBASH_INTERACTIVE") {
         // Interactive mode: report only the shell name, no line segment.
         // GNU error.c:88-120 (get_name_for_error) for interactive shells
         // returns base_pathname(shell_name) with no line number.
-        if let Some(shell_name) = env_vars.get("__RUBASH_SHELL_NAME") {
-            return format!("{shell_name}: ");
-        }
-        return "rubash: ".to_string();
+        return format!("{}: ", crate::builtins::prefix::shell_basename(&get));
     }
 
     // Script/-c mode: line segment present
     let line = env_vars.get("__RUBASH_CURRENT_LINE");
     let script = env_vars.get("__RUBASH_SCRIPT_NAME");
-    match (script, line) {
-        (Some(script), Some(line)) => {
-            if env_vars.contains_key("__RUBASH_EVAL_CONTEXT") {
-                format!("{script}: eval: line {line}: ")
-            } else {
-                // Script mode: "script: line N:"
-                format!("{script}: line {line}: ")
-            }
+    if let (Some(script), Some(line)) = (script, line) {
+        if env_vars.contains_key("__RUBASH_EVAL_CONTEXT") {
+            return format!("{script}: eval: line {line}: ");
         }
-        (None, Some(line)) => {
-            // -c mode: "rubash: line N:"
-            format!("rubash: line {line}: ")
-        }
-        _ => "rubash: ".to_string(),
     }
+    crate::builtins::prefix::diagnostic_prefix(&get)
 }
 
 pub(crate) fn set_with_io<'a, W>(
@@ -423,6 +436,11 @@ where
 pub(crate) struct DynamicSetView {
     pub name: String,
     pub storage: String,
+    /// True for a scalar cell (BASH_ARGV0): its storage text renders
+    /// through print_var_value's scalar quoting, not array_to_assign
+    /// — the visible registry class was uniformly array-valued until
+    /// rubash#3026.
+    pub scalar: bool,
 }
 
 /// GNU `set` with no arguments: print_var_list (variables.c) — assignment
@@ -481,8 +499,14 @@ where
         // GNU att_invisible (variables.c print_var_list skips
         // invisible_p): COMP_WORDBREAKS is bound invisible at startup, so
         // `set` never lists it even though the variable exists
-        // (rubash#1325).
-        if unset::is_marked_variable(env_vars, INVISIBLE_VARS, name) {
+        // (rubash#1325). A dynamic-set view supersedes the mark: the
+        // mark stands for the dynamic variable's unset cell, and a
+        // supplied view means a by-name read already stored a value
+        // into it — the GNU cell was never att_invisible and now lists
+        // (BASH_ARGV0's materialization, rubash#3026).
+        if unset::is_marked_variable(env_vars, INVISIBLE_VARS, name)
+            && !entry_storage.contains_key(name)
+        {
             continue;
         }
         // GNU variables.c:511-526 (initialize_shell_variables): environment
@@ -533,15 +557,26 @@ where
         }
         // A dynamic registry entry supersedes the mirror cell: the
         // composition is the live value (rubash#2700). The visible
-        // registry class is array-valued, so it renders through the
-        // same array_to_assign form as an array cell.
-        if let Some(storage) = entry_storage.get(name) {
-            writeln!(
-                stdout,
-                "{}={}",
-                name,
-                crate::builtins::declare::format_array_for_output(storage)
-            )?;
+        // registry class is array-valued and renders through the same
+        // array_to_assign form as an array cell; a scalar cell (the
+        // materialized BASH_ARGV0, rubash#3026) takes print_var_value's
+        // scalar quoting like a table entry.
+        if let Some(view) = dynamic.iter().find(|entry| entry.name.as_str() == name) {
+            if view.scalar {
+                writeln!(
+                    stdout,
+                    "{}={}",
+                    name,
+                    shell_quote(&view.storage, posix_mode)
+                )?;
+            } else {
+                writeln!(
+                    stdout,
+                    "{}={}",
+                    name,
+                    crate::builtins::declare::format_array_for_output(&view.storage)
+                )?;
+            }
             continue;
         }
         let Some(value) = value else {
@@ -585,7 +620,7 @@ where
     Ok(())
 }
 
-fn shell_quote(value: &str, posix_mode: bool) -> String {
+pub(crate) fn shell_quote(value: &str, posix_mode: bool) -> String {
     // GNU variables.c print_var_value: dollar-quote for values containing
     // non-printing characters (ansic_shouldquote), sh_single_quote for
     // values containing shell metacharacters (sh_contains_shell_metas),
@@ -645,8 +680,10 @@ mod tests {
     use super::*;
 
     fn run(args: &[&str], env_vars: &mut crate::shell::var_table::VarTable) -> (i32, String) {
+        let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let status = unset_with_stderr(args.iter().copied(), env_vars, &mut stderr).unwrap();
+        let status =
+            unset_with_stderr(args.iter().copied(), env_vars, &mut stdout, &mut stderr).unwrap();
         (status, String::from_utf8(stderr).unwrap())
     }
 

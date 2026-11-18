@@ -269,7 +269,7 @@ impl Executor {
                 // context-owned status maps to 127 under -c via
                 // shell.c:1471-1472 and stays 1 for scripts and contained
                 // subshells); default mode fails the command only.
-                if !self.apply_shell_assignment(&for_command.variable, value.clone()) {
+                if !self.apply_shell_assignment(&for_command.variable, value.clone(), None) {
                     self.exit_code = 1;
                     if self.posix_assignment_failure_is_fatal() {
                         let code = self.expansion_fatal_status();
@@ -383,6 +383,12 @@ impl Executor {
                 self.exit_code = 1;
                 return Ok(());
             }
+        }
+        // rubash#3454: same `set -u` unbound-target gate as `if` —
+        // `for ... done > $nope` aborts in GNU's compound
+        // do_redirections before any expansion side effect.
+        if self.compound_redirect_nounset_fatal(cmd)? {
+            return Err(ExecuteError::ExitCode(1));
         }
         // rubash#2246: same borrow conversion as the if wrapper — the
         // cmd + for_command deep clones existed only for the procsub
@@ -498,7 +504,7 @@ impl Executor {
                 _ => None,
             };
         }
-        let path = self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
+        let path = self.session_path(self.redirect_target_filesystem_path(&target));
         if redirect.append {
             let _ = OpenOptions::new()
                 .create(true)

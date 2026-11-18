@@ -302,19 +302,14 @@
    "id": "sleep-fake",
    "name": "sleep",
    "face": "fastpath",
-   "status": "registered",
-   "ref": "stand_down Replace ruled (#2036 S3 table, sleep row)",
+   "status": "gnu",
+   "ref": "#3488 user ruling 2026-11-14 (#3510): the unix simple-command face yields every parseable sleep form to a real spawn — the fake in PATH runs, which is the GNU shape (the Replace-era registered expectation was retired with the flip)",
    "path": "fakes",
    "script": "sleep 0; echo rc=$?",
    "fakes": {
     "sleep": "echo FAKE-sleep"
    },
    "expect": {
-    "rc": 0,
-    "stdout": "rc=0\n",
-    "stderr": ""
-   },
-   "gnu": {
     "rc": 0,
     "stdout": "FAKE-sleep\nrc=0\n"
    }

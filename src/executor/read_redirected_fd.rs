@@ -36,7 +36,8 @@ impl Executor {
 
         self.read_redirected_fd_entry(
             redirect,
-            cmd.line,
+            // rubash#3210/#3299: body seed is procsub_body_seed_line (first-element end line for simple commands, ambient line for compounds).
+            super::command_text::procsub_body_seed_line(cmd, self.ambient_line.get()),
             delimiter,
             char_limit,
             exact_char_limit,
@@ -75,7 +76,8 @@ impl Executor {
             })?;
         self.read_redirected_fd_entry(
             redirect,
-            cmd.line,
+            // rubash#3210/#3299: body seed is procsub_body_seed_line (first-element end line for simple commands, ambient line for compounds).
+            super::command_text::procsub_body_seed_line(cmd, self.ambient_line.get()),
             delimiter,
             char_limit,
             exact_char_limit,
@@ -136,22 +138,16 @@ impl Executor {
                 }
             }
             let output = self.process_substitution_output(source)?;
-            self.read_eof_no_delimiter |= slurped_record_eof_no_delimiter(
-                &output,
-                delimiter,
-                char_limit,
-                exact_char_limit,
-                escape_aware,
-                raw,
-            );
-            return Some(trim_read_input(
+            let (record, eof_no_delimiter) = slurped_record(
                 output,
                 delimiter,
                 char_limit,
                 exact_char_limit,
                 escape_aware,
                 raw,
-            ));
+            );
+            self.read_eof_no_delimiter |= eof_no_delimiter;
+            return Some(record);
         }
 
         let target = self.expand_redirect_target(redirect);
@@ -245,22 +241,16 @@ impl Executor {
                 Ok(bytes) => crate::executor::substitution_metadata::bytes_to_shell_text(&bytes),
                 Err(_) => return None,
             };
-            self.read_eof_no_delimiter |= slurped_record_eof_no_delimiter(
-                &input,
-                delimiter,
-                char_limit,
-                exact_char_limit,
-                escape_aware,
-                raw,
-            );
-            return Some(trim_read_input(
+            let (record, eof_no_delimiter) = slurped_record(
                 input,
                 delimiter,
                 char_limit,
                 exact_char_limit,
                 escape_aware,
                 raw,
-            ));
+            );
+            self.read_eof_no_delimiter |= eof_no_delimiter;
+            return Some(record);
         }
         // Same byte-preserving contract as read_io.rs for the shell-owned
         // descriptor path (GNU redir.c feeds raw bytes to the read owner).
@@ -268,22 +258,16 @@ impl Executor {
             Ok(text) => text,
             Err(_) => return None,
         };
-        self.read_eof_no_delimiter |= slurped_record_eof_no_delimiter(
-            &input,
-            delimiter,
-            char_limit,
-            exact_char_limit,
-            escape_aware,
-            raw,
-        );
-        Some(trim_read_input(
+        let (record, eof_no_delimiter) = slurped_record(
             input,
             delimiter,
             char_limit,
             exact_char_limit,
             escape_aware,
             raw,
-        ))
+        );
+        self.read_eof_no_delimiter |= eof_no_delimiter;
+        Some(record)
     }
 
     pub(in crate::executor) fn read_heredoc_fd_input(
@@ -370,66 +354,48 @@ impl Executor {
             if let crate::parser::StdinBody::Preexpanded(text) = carrier {
                 let mut input = text.clone();
                 input.push('\n');
-                self.read_eof_no_delimiter |= slurped_record_eof_no_delimiter(
-                    &input,
-                    delimiter,
-                    char_limit,
-                    exact_char_limit,
-                    escape_aware,
-                    raw,
-                );
-                return Some(trim_read_input(
+                let (record, eof_no_delimiter) = slurped_record(
                     input,
                     delimiter,
                     char_limit,
                     exact_char_limit,
                     escape_aware,
                     raw,
-                ));
+                );
+                self.read_eof_no_delimiter |= eof_no_delimiter;
+                return Some(record);
             }
         }
         if let Some(word) = body.strip_prefix(STORAGE_WORD_PREFIX) {
             let mut input =
                 decode_ansi_c_quoted_word(word).unwrap_or_else(|| self.expand_word(word));
             input.push('\n');
-            self.read_eof_no_delimiter |= slurped_record_eof_no_delimiter(
-                &input,
-                delimiter,
-                char_limit,
-                exact_char_limit,
-                escape_aware,
-                raw,
-            );
-            return Some(trim_read_input(
+            let (record, eof_no_delimiter) = slurped_record(
                 input,
                 delimiter,
                 char_limit,
                 exact_char_limit,
                 escape_aware,
                 raw,
-            ));
+            );
+            self.read_eof_no_delimiter |= eof_no_delimiter;
+            return Some(record);
         }
         let input = if let Some(pre) = preexpanded_stdin_body(body) {
             pre.to_string()
         } else {
             strip_unterminated_heredoc_marker(strip_quoted_heredoc_marker(body)).to_string()
         };
-        self.read_eof_no_delimiter |= slurped_record_eof_no_delimiter(
-            &input,
-            delimiter,
-            char_limit,
-            exact_char_limit,
-            escape_aware,
-            raw,
-        );
-        Some(trim_read_input(
+        let (record, eof_no_delimiter) = slurped_record(
             input,
             delimiter,
             char_limit,
             exact_char_limit,
             escape_aware,
             raw,
-        ))
+        );
+        self.read_eof_no_delimiter |= eof_no_delimiter;
+        Some(record)
     }
 }
 
@@ -592,6 +558,63 @@ impl Executor {
             | Some((_position, OwnInputBinding::Heredoc)) => Some(true),
             None => None,
         }
+    }
+
+    /// rubash#3774: whether the command's OWN redirect list leaves
+    /// `fd` write-only — the output-side mirror of
+    /// own_input_binding_scan. GNU applies the list in order before
+    /// the builtin runs (redir.c:237 do_redirections), so the LAST
+    /// entry naming the fd — across kinds, not per kind — is the
+    /// descriptor the builtin faces: an Output / Append /
+    /// ClobberOutput winner leaves it open for writing only, and
+    /// builtin_read's read(2) fails EBADF (read.def:911). An
+    /// input-side winner (file, heredoc, here-string, `<>`) leaves
+    /// it readable; dup and close winners keep their existing serves
+    /// and are not classified here. The naming rule follows each
+    /// kind's GNU default descriptor (input kinds default to fd 0,
+    /// output kinds to fd 1 — cf. fd0_stdin_redirect_winner's
+    /// unwrap_or(0) over input kinds), and a `{var}` redirect binds
+    /// no fixed descriptor. execute_read never binds the command's
+    /// own redirects into the fd table (builtin_redirects.rs), so
+    /// without this scan the funnel sees only the ambient entry —
+    /// fd 0's readable process stdin — and reads it to a silent EOF.
+    pub(in crate::executor) fn own_list_leaves_fd_write_only(
+        &self,
+        cmd: &CommandNode,
+        fd: u32,
+    ) -> bool {
+        let mut write_only = false;
+        for redirect in &cmd.redirects {
+            if redirect.fd_var.is_some() {
+                continue;
+            }
+            let (names_fd, is_output) = match redirect.kind {
+                crate::parser::RedirectKind::Input
+                | crate::parser::RedirectKind::ReadWrite
+                | crate::parser::RedirectKind::HereDoc
+                | crate::parser::RedirectKind::HereString
+                | crate::parser::RedirectKind::DuplicateInput
+                | crate::parser::RedirectKind::CloseInput => {
+                    (redirect.fd.unwrap_or(0) == fd, false)
+                }
+                crate::parser::RedirectKind::Output
+                | crate::parser::RedirectKind::Append
+                | crate::parser::RedirectKind::ClobberOutput
+                | crate::parser::RedirectKind::CombinedOutput
+                | crate::parser::RedirectKind::CombinedAppend => {
+                    (redirect.fd.unwrap_or(1) == fd, true)
+                }
+                crate::parser::RedirectKind::DuplicateOutput
+                | crate::parser::RedirectKind::CloseOutput => {
+                    (redirect.fd.unwrap_or(1) == fd, false)
+                }
+                crate::parser::RedirectKind::Unknown => continue,
+            };
+            if names_fd {
+                write_only = is_output;
+            }
+        }
+        write_only
     }
 
     /// Serve one record for a Duplicate own binding (`read -u 3 x
