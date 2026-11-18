@@ -1471,6 +1471,7 @@ fn match_dparen(buf: &[char], mut pos: usize) -> Option<usize> {
         match buf[pos] {
             '\\' => pos = (pos + 2).min(buf.len()),
             '\'' => pos = skip_single_quote(buf, pos),
+            '$' if buf.get(pos + 1) == Some(&'\'') => pos = skip_ansi_quote(buf, pos + 2),
             '"' => pos = skip_double_quote(buf, pos),
             '`' => pos = skip_backtick(buf, pos),
             '$' if buf.get(pos + 1) == Some(&'\'') => {

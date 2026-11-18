@@ -1921,8 +1921,11 @@ fn issue863_gap2_unclosed_quote_reports_a_diagnostic_value() {
     let mut session = Session::builder().build().expect("session builds");
     let mut options = RunOptions::new();
     options.source_name = Some("gap2-pin".to_string());
+    // GNU 5.3.20 exits 1 here: an unclosed `'` inside a word dies in
+    // read_token_word at EXECUTION_FAILURE (issue #3605 exit-status
+    // split, parse.y:489-490 only covers the command-position classes).
     let outcome = session.run("echo 'abc", &options).expect("run");
-    assert_eq!(outcome.status, 2);
+    assert_eq!(outcome.status, 1);
     assert!(outcome.classification.parse_error);
     assert_eq!(outcome.diagnostics.len(), 1);
     let diagnostic = &outcome.diagnostics[0];
@@ -1979,7 +1982,9 @@ fn issue863_gap2_heredoc_delimiter_unclosed_quote_reports() {
     // literal text and reports nothing (GNU-verified).
     let mut session = Session::builder().build().expect("session builds");
     let outcome = session.run("cat << \"q", &RunOptions::new()).expect("run");
-    assert_eq!(outcome.status, 2);
+    // GNU 5.3.20 exits 1 (word-internal matched pair, same split as
+    // above).
+    assert_eq!(outcome.status, 1);
     assert!(outcome.classification.parse_error);
     assert_eq!(outcome.diagnostics.len(), 1);
     assert_eq!(
