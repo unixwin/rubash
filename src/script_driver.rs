@@ -5517,8 +5517,69 @@ pub(crate) fn process_console_size() -> Option<(i32, i32)> {
     None
 }
 
+/// (rows, cols) of the terminal behind `fd` via TIOCGWINSZ, or None
+/// when the fd is not a terminal or reports a degenerate size.
+/// winsize.c tcgetwinsize is plain ioctl(fd, TIOCGWINSZ, &win); the
+/// get_new_window_size caller only trusts ws_row > 0 && ws_col > 0,
+/// so a zero dimension is None here rather than a size the callers
+/// would have to re-filter (rubash#3330: the unix stub returned None
+/// unconditionally, so every COLUMNS-unset consumer fell back to 80).
+#[cfg(not(windows))]
+fn unix_console_size_of_fd(fd: libc::c_int) -> Option<(i32, i32)> {
+    // SAFETY: ioctl TIOCGWINSZ writes a plain winsize struct; the
+    // fd is borrowed, never owned or closed here.
+    unsafe {
+        let mut win: libc::winsize = std::mem::zeroed();
+        if libc::ioctl(fd, libc::TIOCGWINSZ, &mut win) != 0 {
+            return None;
+        }
+        if win.ws_row > 0 && win.ws_col > 0 {
+            Some((i32::from(win.ws_row), i32::from(win.ws_col)))
+        } else {
+            None
+        }
+    }
+}
+
+/// Unix analog of the controlling-terminal winsize query
+/// (winsize.c:97 input_tty -> tcgetwinsize): the process console,
+/// found via /dev/tty (GNU's shell_tty — the fd jobs.c opens on the
+/// controlling terminal at startup, falling back to stderr) so it
+/// works even when stdin/stdout/stderr are all redirected, with the
+/// std fds as fallbacks (stderr first, GNU's input_tty fallback).
 #[cfg(not(windows))]
 pub(crate) fn process_console_size() -> Option<(i32, i32)> {
+    // SAFETY: plain open/close of the terminal device; the fd is
+    // closed before returning. Opening /dev/tty never acquires a
+    // controlling terminal (only a by-path open of the tty device
+    // does that — see acquire_controlling_terminal); without one
+    // the open fails and we fall through to the std fds.
+    unsafe {
+        let dev_tty = b"/dev/tty\0";
+        let fd = libc::open(
+            dev_tty.as_ptr() as *const libc::c_char,
+            libc::O_RDONLY | libc::O_NONBLOCK,
+        );
+        if fd >= 0 {
+            let size = unix_console_size_of_fd(fd);
+            libc::close(fd);
+            if size.is_some() {
+                return size;
+            }
+        }
+    }
+    // GNU's input_tty fallback is stderr; stdin/stdout follow so a
+    // session whose stderr is redirected but whose stdin or stdout
+    // is still a tty reports its size.
+    for fd in [
+        libc::STDERR_FILENO,
+        libc::STDIN_FILENO,
+        libc::STDOUT_FILENO,
+    ] {
+        if let Some(size) = unix_console_size_of_fd(fd) {
+            return Some(size);
+        }
+    }
     None
 }
 
@@ -5529,9 +5590,14 @@ fn stdin_console_size() -> Option<(i32, i32)> {
     windows_console_size_of(std::io::stdin().as_raw_handle() as *mut _)
 }
 
+/// Size of the console on STDIN itself (readline's rl_instream winsize:
+/// lib/readline/terminal.c _rl_get_screen_size ioctls the tty fd).
+/// Same TIOCGWINSZ query as the process console above; the unix stub
+/// used to return None, so the screen-size bind never saw a stdin
+/// terminal (rubash#3330).
 #[cfg(not(windows))]
 fn stdin_console_size() -> Option<(i32, i32)> {
-    None
+    unix_console_size_of_fd(libc::STDIN_FILENO)
 }
 
 /// variables.c:1039 sh_set_lines_and_columns: bind LINES then COLUMNS as
