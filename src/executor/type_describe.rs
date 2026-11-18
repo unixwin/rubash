@@ -1,5 +1,39 @@
 use super::*;
 
+/// rubash#3372 face 3: write one describe line from byte parts plus a
+/// trailing newline. Describe lines carry the name (and, for files, the
+/// resolved path) — both may name a raw byte (0x9C), which a `writeln!`
+/// of the folded string would re-encode as UTF-8 (C2 9C) where GNU
+/// prints the byte itself (builtins/type.def describe_command prints
+/// the name and the find_user_command hit verbatim).
+fn write_describe_line<W: std::io::Write>(stdout: &mut W, parts: &[&[u8]]) -> std::io::Result<()> {
+    for part in parts {
+        stdout.write_all(part)?;
+    }
+    stdout.write_all(b"\n")
+}
+
+/// rubash#3372 face 3: the byte spelling of a describe display string
+/// (the resolved path, or the name itself for slash-bearing names).
+/// The display is built from folded strings, so its trailing component
+/// is the folded name: when the display ends with it, the dir prefix
+/// keeps its UTF-8 bytes and the name takes its pre-fold byte spelling
+/// (raw byte, not UTF-8 re-encoding). A display that does not end with
+/// the name (no name component to re-spell) keeps its bytes as-is.
+/// The dir prefix is exact unless the PATH element itself carried
+/// transport — that residual keeps the folded display.
+fn describe_display_bytes(display: &str, folded_name: &str, name_bytes: &[u8]) -> Vec<u8> {
+    if display == folded_name {
+        return name_bytes.to_vec();
+    }
+    if let Some(dir) = display.strip_suffix(folded_name) {
+        let mut out = dir.as_bytes().to_vec();
+        out.extend_from_slice(name_bytes);
+        return out;
+    }
+    display.as_bytes().to_vec()
+}
+
 impl Executor {
     // rubash#289d: the raw-stdout `describe_name` (println! describe) was
     // removed with its only caller — describes must go through
@@ -20,6 +54,13 @@ impl Executor {
         // The described name is looked up and reported as a name:
         // fold a stored E400 pair to the raw char once, here, so the
         // table consults and every report line agree (rubash#3076).
+        // rubash#3372 face 3: the name's byte spelling, from the
+        // pre-fold word — a raw byte 0x9C prints as the byte itself,
+        // a genuine U+009C as UTF-8 (transport_name_spelling_bytes
+        // keeps each char's provenance; with no transport it is the
+        // folded name's UTF-8 bytes, i.e. today's output).
+        let name_bytes =
+            crate::executor::substitution_metadata::transport_name_spelling_bytes(name);
         let folded_name = crate::executor::substitution_metadata::fold_literal_char_escapes(name);
         let name = folded_name.as_str();
         if !force_path {
@@ -27,11 +68,20 @@ impl Executor {
                 if let Some(alias) = self.shell_state.aliases.get(name) {
                     match mode {
                         TypeDescribeMode::Verbose => {
-                            writeln!(stdout, "{name} is aliased to `{}'", alias.value)?;
+                            write_describe_line(
+                                stdout,
+                                &[
+                                    &name_bytes,
+                                    b" is aliased to `",
+                                    alias.value.as_bytes(),
+                                    b"'",
+                                ],
+                            )?;
                         }
-                        TypeDescribeMode::Reusable => {
-                            writeln!(stdout, "alias {name}='{}'", alias.value)?
-                        }
+                        TypeDescribeMode::Reusable => write_describe_line(
+                            stdout,
+                            &[b"alias ", &name_bytes, b"='", alias.value.as_bytes(), b"'"],
+                        )?,
                         TypeDescribeMode::TypeOnly => writeln!(stdout, "alias")?,
                         TypeDescribeMode::PathOnly => {}
                     }
@@ -43,8 +93,10 @@ impl Executor {
             // before functions, then functions, then other builtins.
             if is_shell_keyword(name) {
                 match mode {
-                    TypeDescribeMode::Verbose => writeln!(stdout, "{name} is a shell keyword")?,
-                    TypeDescribeMode::Reusable => writeln!(stdout, "{name}")?,
+                    TypeDescribeMode::Verbose => {
+                        write_describe_line(stdout, &[&name_bytes, b" is a shell keyword"])?
+                    }
+                    TypeDescribeMode::Reusable => write_describe_line(stdout, &[&name_bytes])?,
                     TypeDescribeMode::TypeOnly => writeln!(stdout, "keyword")?,
                     TypeDescribeMode::PathOnly => {}
                 }
@@ -57,9 +109,9 @@ impl Executor {
             {
                 match mode {
                     TypeDescribeMode::Verbose => {
-                        writeln!(stdout, "{name} is a special shell builtin")?
+                        write_describe_line(stdout, &[&name_bytes, b" is a special shell builtin"])?
                     }
-                    TypeDescribeMode::Reusable => writeln!(stdout, "{name}")?,
+                    TypeDescribeMode::Reusable => write_describe_line(stdout, &[&name_bytes])?,
                     TypeDescribeMode::TypeOnly => writeln!(stdout, "builtin")?,
                     TypeDescribeMode::PathOnly => {}
                 }
@@ -70,9 +122,13 @@ impl Executor {
                 if let Some(body) = self.shell_state.functions.get(name) {
                     match mode {
                         TypeDescribeMode::Verbose => {
+                            // rubash#3372 face 3 residual: the function
+                            // definition prints through the AST text
+                            // (still folded); only the bare-name lines
+                            // below take the byte spelling.
                             self.write_function_description(name, &body.commands, stdout)?
                         }
-                        TypeDescribeMode::Reusable => writeln!(stdout, "{name}")?,
+                        TypeDescribeMode::Reusable => write_describe_line(stdout, &[&name_bytes])?,
                         TypeDescribeMode::TypeOnly => writeln!(stdout, "function")?,
                         TypeDescribeMode::PathOnly => {}
                     }
@@ -82,8 +138,10 @@ impl Executor {
 
             if self.is_enabled_shell_builtin_name(name) {
                 match mode {
-                    TypeDescribeMode::Verbose => writeln!(stdout, "{name} is a shell builtin")?,
-                    TypeDescribeMode::Reusable => writeln!(stdout, "{name}")?,
+                    TypeDescribeMode::Verbose => {
+                        write_describe_line(stdout, &[&name_bytes, b" is a shell builtin"])?
+                    }
+                    TypeDescribeMode::Reusable => write_describe_line(stdout, &[&name_bytes])?,
                     TypeDescribeMode::TypeOnly => writeln!(stdout, "builtin")?,
                     TypeDescribeMode::PathOnly => {}
                 }
@@ -108,18 +166,25 @@ impl Executor {
             // stays the execution answer; only the display spelling is the
             // argument itself. A3-R58B.
             let display: &str = if name.contains('/') { name } else { &path };
+            // rubash#3372 face 3: the display's byte spelling — the
+            // resolved path prints its raw bytes, not the folded
+            // string's UTF-8 re-encoding.
+            let display_bytes = describe_display_bytes(display, name, &name_bytes);
             match mode {
                 TypeDescribeMode::Verbose => {
                     if crate::builtins::hash::phash_search(&self.shell_state.env_vars, name)
                         .is_some()
                     {
-                        writeln!(stdout, "{name} is hashed ({path})")?;
+                        write_describe_line(
+                            stdout,
+                            &[&name_bytes, b" is hashed (", &display_bytes, b")"],
+                        )?;
                     } else {
-                        writeln!(stdout, "{name} is {display}")?;
+                        write_describe_line(stdout, &[&name_bytes, b" is ", &display_bytes])?;
                     }
                 }
                 TypeDescribeMode::Reusable | TypeDescribeMode::PathOnly => {
-                    writeln!(stdout, "{display}")?
+                    write_describe_line(stdout, &[&display_bytes])?
                 }
                 TypeDescribeMode::TypeOnly => writeln!(stdout, "file")?,
             }
@@ -141,6 +206,9 @@ impl Executor {
         W: Write,
     {
         // Folded like describe_name_with_io (rubash#3076).
+        // rubash#3372 face 3: the name's byte spelling (see above).
+        let name_bytes =
+            crate::executor::substitution_metadata::transport_name_spelling_bytes(name);
         let folded_name = crate::executor::substitution_metadata::fold_literal_char_escapes(name);
         let name = folded_name.as_str();
         let mut found = false;
@@ -155,11 +223,20 @@ impl Executor {
                 if let Some(alias) = self.shell_state.aliases.get(name) {
                     match mode {
                         TypeDescribeMode::Verbose => {
-                            writeln!(stdout, "{name} is aliased to `{}'", alias.value)?;
+                            write_describe_line(
+                                stdout,
+                                &[
+                                    &name_bytes,
+                                    b" is aliased to `",
+                                    alias.value.as_bytes(),
+                                    b"'",
+                                ],
+                            )?;
                         }
-                        TypeDescribeMode::Reusable => {
-                            writeln!(stdout, "alias {name}='{}'", alias.value)?
-                        }
+                        TypeDescribeMode::Reusable => write_describe_line(
+                            stdout,
+                            &[b"alias ", &name_bytes, b"='", alias.value.as_bytes(), b"'"],
+                        )?,
                         TypeDescribeMode::TypeOnly => writeln!(stdout, "alias")?,
                         TypeDescribeMode::PathOnly => {}
                     }
@@ -174,8 +251,10 @@ impl Executor {
             let mut skip_builtin = false;
             if is_shell_keyword(name) {
                 match mode {
-                    TypeDescribeMode::Verbose => writeln!(stdout, "{name} is a shell keyword")?,
-                    TypeDescribeMode::Reusable => writeln!(stdout, "{name}")?,
+                    TypeDescribeMode::Verbose => {
+                        write_describe_line(stdout, &[&name_bytes, b" is a shell keyword"])?
+                    }
+                    TypeDescribeMode::Reusable => write_describe_line(stdout, &[&name_bytes])?,
                     TypeDescribeMode::TypeOnly => writeln!(stdout, "keyword")?,
                     TypeDescribeMode::PathOnly => {}
                 }
@@ -188,9 +267,9 @@ impl Executor {
             {
                 match mode {
                     TypeDescribeMode::Verbose => {
-                        writeln!(stdout, "{name} is a special shell builtin")?
+                        write_describe_line(stdout, &[&name_bytes, b" is a special shell builtin"])?
                     }
-                    TypeDescribeMode::Reusable => writeln!(stdout, "{name}")?,
+                    TypeDescribeMode::Reusable => write_describe_line(stdout, &[&name_bytes])?,
                     TypeDescribeMode::TypeOnly => writeln!(stdout, "builtin")?,
                     TypeDescribeMode::PathOnly => {}
                 }
@@ -202,9 +281,13 @@ impl Executor {
                 if let Some(body) = self.shell_state.functions.get(name) {
                     match mode {
                         TypeDescribeMode::Verbose => {
+                            // rubash#3372 face 3 residual: the function
+                            // definition prints through the AST text
+                            // (still folded); only the bare-name lines
+                            // below take the byte spelling.
                             self.write_function_description(name, &body.commands, stdout)?
                         }
-                        TypeDescribeMode::Reusable => writeln!(stdout, "{name}")?,
+                        TypeDescribeMode::Reusable => write_describe_line(stdout, &[&name_bytes])?,
                         TypeDescribeMode::TypeOnly => writeln!(stdout, "function")?,
                         TypeDescribeMode::PathOnly => {}
                     }
@@ -214,8 +297,10 @@ impl Executor {
 
             if !skip_builtin && self.is_enabled_shell_builtin_name(name) {
                 match mode {
-                    TypeDescribeMode::Verbose => writeln!(stdout, "{name} is a shell builtin")?,
-                    TypeDescribeMode::Reusable => writeln!(stdout, "{name}")?,
+                    TypeDescribeMode::Verbose => {
+                        write_describe_line(stdout, &[&name_bytes, b" is a shell builtin"])?
+                    }
+                    TypeDescribeMode::Reusable => write_describe_line(stdout, &[&name_bytes])?,
                     TypeDescribeMode::TypeOnly => writeln!(stdout, "builtin")?,
                     TypeDescribeMode::PathOnly => {}
                 }
@@ -238,6 +323,10 @@ impl Executor {
             // Same verbatim rule as describe_name_with_io (A3-R58B):
             // slash-bearing names display as given, not absolutized.
             let display: &str = if name.contains('/') { name } else { &path };
+            // rubash#3372 face 3: the display's byte spelling — the
+            // resolved path prints its raw bytes, not the folded
+            // string's UTF-8 re-encoding.
+            let display_bytes = describe_display_bytes(display, name, &name_bytes);
             match mode {
                 TypeDescribeMode::Verbose => {
                     // GNU type.def: the `is hashed (...)` wording lives only
@@ -245,10 +334,10 @@ impl Executor {
                     // never reaches (`all == 0 || CDESC_FORCE_PATH` guard, and
                     // -P clears CDESC_SHORTDESC). `type -a` always prints the
                     // plain `name is path` form.
-                    writeln!(stdout, "{name} is {display}")?;
+                    write_describe_line(stdout, &[&name_bytes, b" is ", &display_bytes])?;
                 }
                 TypeDescribeMode::Reusable | TypeDescribeMode::PathOnly => {
-                    writeln!(stdout, "{display}")?
+                    write_describe_line(stdout, &[&display_bytes])?
                 }
                 TypeDescribeMode::TypeOnly => writeln!(stdout, "file")?,
             }

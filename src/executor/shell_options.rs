@@ -2732,10 +2732,17 @@ impl Executor {
         // standing in for access(2).
         #[cfg(any(unix, windows))]
         {
-            let path = self.session_path(shell_path_to_windows(
-                &self.redirect_output_path_target(target),
-                &self.shell_state.env_vars,
-            ));
+            let output_target = self.redirect_output_path_target(target);
+            // rubash#3372: the FIFO stat resolves the node's own
+            // recorded transport spelling, like the create open below
+            // (create_redirect_output_for) — a same-string sibling
+            // must not steer this entry onto the wrong file.
+            let path = self.session_path(match redirect {
+                Some(redirect) => {
+                    self.redirect_target_filesystem_path_for(redirect, &output_target)
+                }
+                None => shell_path_to_windows(&output_target, &self.shell_state.env_vars),
+            });
             if redirect_path_is_fifo(&path) {
                 if let Some(error) = redirect_fifo_access_error(&path, true) {
                     return Err(crate::posix_errors::path_error(target, error));
@@ -5288,10 +5295,11 @@ pub(in crate::executor) fn output_fifo_validation_via_anchor(
 /// performs the one real open GNU performs.
 pub(in crate::executor) fn probe_output_redirect(
     executor: &Executor,
+    redirect: Option<&crate::parser::Redirect>,
     target: &str,
     clobber: bool,
 ) -> std::io::Result<()> {
-    probe_output_redirect_file(executor, target, clobber).map(|_| ())
+    probe_output_redirect_file(executor, redirect, target, clobber).map(|_| ())
 }
 
 /// rubash#3828: File-returning twin of [`probe_output_redirect`].
@@ -5306,8 +5314,15 @@ pub(in crate::executor) fn probe_output_redirect(
 /// synthetic /proc): those opens are stand-ins or sinks the bind
 /// must NOT adopt as the fd — the probe still runs for its error
 /// surfacing, and the bind re-opens the class as today.
+///
+/// `redirect` is the node being probed: with it, the FIFO stat, the
+/// anchor validation and the create open resolve the node's own
+/// recorded transport spelling instead of the folded-string record
+/// (rubash#3372 — the same rule the append twin
+/// [`probe_output_redirect_append_file`] already follows).
 pub(in crate::executor) fn probe_output_redirect_file(
     executor: &Executor,
+    redirect: Option<&crate::parser::Redirect>,
     target: &str,
     clobber: bool,
 ) -> std::io::Result<Option<std::fs::File>> {
@@ -5325,10 +5340,17 @@ pub(in crate::executor) fn probe_output_redirect_file(
     }
     #[cfg(any(unix, windows))]
     {
-        let path = executor.session_path(shell_path_to_windows(
-            &executor.redirect_output_path_target(target),
-            &executor.shell_state.env_vars,
-        ));
+        let output_target = executor.redirect_output_path_target(target);
+        // rubash#3372: the FIFO stat resolves the node's own recorded
+        // transport spelling, like the create open below
+        // (create_redirect_output_for) — a same-string sibling must
+        // not steer this entry onto the wrong file.
+        let path = executor.session_path(match redirect {
+            Some(redirect) => {
+                executor.redirect_target_filesystem_path_for(redirect, &output_target)
+            }
+            None => shell_path_to_windows(&output_target, &executor.shell_state.env_vars),
+        });
         if redirect_path_is_fifo(&path) {
             if let Some(error) = redirect_fifo_access_error(&path, true) {
                 return Err(crate::posix_errors::path_error(target, error));
@@ -5342,7 +5364,7 @@ pub(in crate::executor) fn probe_output_redirect_file(
     // verdict is the anchor faccessat, never an open (rubash#1820).
     // Some(Ok) lifts to Ok(None): a confirmed FIFO keeps no File, the
     // bind performs the one real open (rubash#1820 rendezvous).
-    if let Some(verdict) = output_fifo_validation_via_anchor(executor, None, target) {
+    if let Some(verdict) = output_fifo_validation_via_anchor(executor, redirect, target) {
         return verdict.map(|_| None);
     }
     if !matches!(
@@ -5353,10 +5375,12 @@ pub(in crate::executor) fn probe_output_redirect_file(
         // (a 0444-class synthetic /proc still refuses EACCES here)
         // but keep no File — the bind re-opens the class itself.
         return executor
-            .create_redirect_output(target, clobber)
+            .create_redirect_output_for(redirect, target, clobber)
             .map(|_| None);
     }
-    executor.create_redirect_output(target, clobber).map(Some)
+    executor
+        .create_redirect_output_for(redirect, target, clobber)
+        .map(Some)
 }
 
 /// rubash#3828: Append-arm twin of [`probe_output_redirect_file`]
@@ -5397,7 +5421,7 @@ pub(in crate::executor) fn probe_output_redirect_append_file(
     // rubash#3286: same deleted-cwd miss as probe_output_redirect —
     // the anchor faccessat is the probe's verdict here too. Some(Ok)
     // lifts to Ok(None): a confirmed FIFO keeps no File (rubash#1820).
-    if let Some(verdict) = output_fifo_validation_via_anchor(executor, None, target) {
+    if let Some(verdict) = output_fifo_validation_via_anchor(executor, redirect, target) {
         return verdict.map(|_| None);
     }
     if !matches!(

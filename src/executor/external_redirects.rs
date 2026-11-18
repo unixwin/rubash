@@ -187,10 +187,7 @@ impl Executor {
         cmd: &CommandNode,
         process: &mut Command,
         preopened: Option<
-            &mut std::collections::HashMap<
-                usize,
-                std::rc::Rc<crate::executor::fd_table::FileFd>,
-            >,
+            &mut std::collections::HashMap<usize, std::rc::Rc<crate::executor::fd_table::FileFd>>,
         >,
     ) -> Result<(), ExecuteError> {
         self.apply_external_stdin_redirect(cmd, process)?;
@@ -491,10 +488,7 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
         mut preopened: Option<
-            &mut std::collections::HashMap<
-                usize,
-                std::rc::Rc<crate::executor::fd_table::FileFd>,
-            >,
+            &mut std::collections::HashMap<usize, std::rc::Rc<crate::executor::fd_table::FileFd>>,
         >,
     ) -> Result<Option<ExternalStdioPlan>, ExecuteError> {
         use crate::parser::RedirectKind;
@@ -728,7 +722,8 @@ impl Executor {
                         preopened.as_deref_mut(),
                         &target,
                         redirect,
-                    )? else {
+                    )?
+                    else {
                         return Ok(None);
                     };
                     let stderr = file.try_clone().ok().map(ExternalStdioSlot::Handle);
@@ -803,7 +798,8 @@ impl Executor {
                             preopened.as_deref_mut(),
                             word,
                             redirect,
-                        )? else {
+                        )?
+                        else {
                             return Ok(None);
                         };
                         let stderr = file.try_clone().ok().map(ExternalStdioSlot::Handle);
@@ -915,7 +911,8 @@ impl Executor {
                         preopened.as_deref_mut(),
                         &target,
                         redirect,
-                    )? else {
+                    )?
+                    else {
                         return Ok(None);
                     };
                     let slot = ExternalStdioSlot::Handle(file);
@@ -1039,10 +1036,7 @@ impl Executor {
         &self,
         position: usize,
         mut preopened: Option<
-            &mut std::collections::HashMap<
-                usize,
-                std::rc::Rc<crate::executor::fd_table::FileFd>,
-            >,
+            &mut std::collections::HashMap<usize, std::rc::Rc<crate::executor::fd_table::FileFd>>,
         >,
         target: &str,
         redirect: &Redirect,
@@ -1201,7 +1195,13 @@ impl Executor {
             if redirected {
                 return Ok(());
             }
-            self.apply_external_stdout_target(cmd, process, &target, redirect.clobber)?;
+            self.apply_external_stdout_target(
+                cmd,
+                process,
+                &target,
+                redirect.clobber,
+                Some(redirect),
+            )?;
             redirected = true;
         }
 
@@ -1342,12 +1342,18 @@ impl Executor {
         Ok(true)
     }
 
+    /// rubash#3372: `redirect` is the node being applied — the create
+    /// arm below resolves its byte spelling through the node's own
+    /// record, never the folded-string record a sibling redirect may
+    /// own (e.g. `true >"$b" 2>"$a"` created the raw-byte file for
+    /// the genuine leg).
     fn apply_external_stdout_target(
         &mut self,
         cmd: &CommandNode,
         process: &mut Command,
         target: &str,
         clobber: bool,
+        redirect: Option<&crate::parser::Redirect>,
     ) -> Result<(), ExecuteError> {
         if is_closed_redirect_target(target) {
             process.stdout(Stdio::null());
@@ -1377,7 +1383,7 @@ impl Executor {
         } else if self.has_output_fd_target(target) {
             process.stdout(Stdio::from(self.open_output_fd_append(target)?));
         } else if redirect_target_fd(target).is_none() {
-            let file = self.create_redirect_output(target, clobber)?;
+            let file = self.create_redirect_output_for(redirect, target, clobber)?;
             process.stdout(Stdio::from(file));
         }
         Ok(())

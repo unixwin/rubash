@@ -426,6 +426,25 @@ pub(crate) fn anchor_at_session_cwd(
     candidate
 }
 
+/// G-02 file-operand resolution for the builtins that open a user-named
+/// file in-process — `bind -f` and its `$include` reads (builtins/
+/// bind.def:274 rl_read_init_file; lib/readline/bind.c:1502
+/// parser_include) and the history file faces `-a/-n/-r/-w`
+/// (builtins/history.def:273,295-316): translate the spelling, then
+/// anchor a relative result at the session cwd — GNU's single cwd IS
+/// the session cwd here, so a relative operand names a file in the
+/// directory `cd` moved to, not the process cwd (rubash#3090). The
+/// empty operand passes through untranslated and unanchored so its
+/// open keeps GNU's ENOENT shape instead of resolving to the cwd
+/// directory itself. Diagnostics keep the as-typed spelling; only
+/// opens use this form.
+pub(crate) fn anchored_file_operand(name: &str, env_vars: &HashMap<String, String>) -> PathBuf {
+    if name.is_empty() {
+        return PathBuf::from(name);
+    }
+    anchor_at_session_cwd(shell_path_to_windows(name, env_vars), env_vars)
+}
+
 pub(crate) fn command_lookup_fingerprint(env_vars: &HashMap<String, String>) -> String {
     const ENV_KEYS: &[&str] = &[
         "PATH",
@@ -1625,11 +1644,12 @@ pub(crate) fn drop_exe_probe_suffix(name: &str, display: String) -> String {
 /// to the resolved program ([`exec_name_for_program`]). Every route
 /// below resolves `program` from `name` under `env_vars` and births
 /// the child in the session cwd, which is what a relative join
-/// resolves against. The exec builtin is the one deliberate
-/// exception: exec.def:151 resolves through search_for_command but
-/// exec.def:172 then rebinds the target with `full_pathname` before
-/// shell_execve (exec.def:231), so its filename is the anchored
-/// absolute path and builtins/exec.rs stays off this funnel.
+/// resolves against. The exec builtin takes this funnel's name one
+/// step further: exec.def:151 resolves through search_for_command, and
+/// exec.def:172 then rebinds that word with `full_pathname` before
+/// shell_execve (exec.def:231), so its filename is the funnel's word
+/// made absolute against the cwd with one leading `./` removed
+/// (builtins/exec.rs full_pathname, rubash#3316).
 #[cfg(unix)]
 pub(crate) fn spawn_exec_name(
     name: &str,
@@ -2085,8 +2105,8 @@ pub fn external_command_for_named_program(
 /// funnel, [`spawn_exec_name`] (rubash#2442): every spawn route that
 /// resolves its program from a typed word passes one — plain
 /// foreground, pipeline stages, command substitution, the `env`
-/// wrapper. The exec builtin is the documented exception (see
-/// [`spawn_exec_name`]).
+/// wrapper. The exec builtin passes the funnel's name rebound by
+/// full_pathname (see [`spawn_exec_name`]).
 pub fn external_command_for_named_program_with_exec_name(
     program: &Path,
     command_name: Option<&str>,

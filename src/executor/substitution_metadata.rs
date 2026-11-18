@@ -1410,6 +1410,30 @@ fn skip_nested_dollar_paren_in_span(chars: &[(usize, char)], start: usize) -> Op
             cursor += 2;
             continue;
         }
+        // ANSI-C `$'...'` inside the nested body: `\'` is an escaped quote,
+        // not the close (parse.y:5476-5480 -> parse_matched_pair
+        // P_ALLOWESC); the plain `'` toggle below would end the region
+        // early at `\'` and a following `)` would close the span.
+        if !single
+            && !double
+            && ch == '$'
+            && chars.get(cursor + 1).is_some_and(|(_, next)| *next == '\'')
+        {
+            cursor += 2;
+            let mut ansi_escaped = false;
+            while cursor < chars.len() {
+                let c = chars[cursor].1;
+                cursor += 1;
+                if ansi_escaped {
+                    ansi_escaped = false;
+                } else if c == '\\' {
+                    ansi_escaped = true;
+                } else if c == '\'' {
+                    break;
+                }
+            }
+            continue;
+        }
         if ch == '\'' && !double {
             single = !single;
             cursor += 1;

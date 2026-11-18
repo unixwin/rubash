@@ -2,57 +2,34 @@
 # Enforce rustfmt on every commit (owner directive 2026-09-26: fmt must be a
 # commit hook). Fails the commit when any Rust source is not formatted.
 #
-# `cargo fmt --check` enumerates every workspace target; with ~700 test
-# targets the spawn command line exceeds the Windows limit and cargo dies
-# with "os error 206". When cargo fmt cannot run to completion (nonzero exit
-# with no "Diff in" diagnostics), fall back to `rustfmt --edition 2021
-# --check` on the .rs files staged in this commit only. The commit passes
-# only when every check that ran came back clean.
-
-if ! command -v cargo >/dev/null 2>&1; then
-    echo "pre-commit: cargo not found; skipping rustfmt check" >&2
-    exit 0
-fi
-
-if fmt_out=$(cargo fmt --check 2>&1); then
-    exit 0
-fi
-
-# cargo fmt failed: real formatting diffs are still a hard block; only an
-# operational failure (no "Diff in" lines, e.g. Windows os error 206 spawn
-# limit) may use the staged-file fallback.
-if printf '%s\n' "$fmt_out" | grep -q 'Diff in '; then
-    echo "pre-commit: rustfmt check failed. Run 'cargo fmt' and re-stage." >&2
-    printf '%s\n' "$fmt_out" | head -20 >&2
+# `cargo fmt --check` is equivalent but overflows the Windows
+# CreateProcess command-line limit on this workspace (~1.5k target roots,
+# os error 206), so the gate runs scripts/check-rustfmt.py instead: same
+# workspace-member coverage via cargo metadata, batched rustfmt --check.
+# The gate fails closed: missing git/python/cargo/rustfmt or any diff
+# blocks the commit; there is no bypass.
+repo_root=$(git rev-parse --show-toplevel) || {
+    echo "pre-commit: cannot resolve repository root" >&2
+    exit 1
+}
+# Prefer python3, then python. A candidate must actually run Python 3:
+# on Windows a python3.exe Store-alias stub can sit on PATH and exit
+# nonzero on every invocation, which must not be mistaken for a working
+# interpreter (and must not silently skip the gate).
+py=""
+for cand in python3 python; do
+    if command -v "$cand" >/dev/null 2>&1 \
+        && "$cand" -c 'import sys; sys.exit(0 if sys.version_info[0] >= 3 else 1)' >/dev/null 2>&1; then
+        py=$cand
+        break
+    fi
+done
+if [ -z "$py" ]; then
+    echo "pre-commit: no working python3/python found; rustfmt check cannot run" >&2
     exit 1
 fi
-
-echo "pre-commit: cargo fmt could not run; falling back to staged-file rustfmt check" >&2
-printf '%s\n' "$fmt_out" | head -3 >&2
-
-if ! command -v rustfmt >/dev/null 2>&1; then
-    echo "pre-commit: rustfmt not found either; skipping rustfmt check" >&2
-    exit 0
-fi
-
-files=$(git diff --cached --name-only --diff-filter=ACMR | grep '\.rs$')
-if [ -z "$files" ]; then
-    exit 0
-fi
-
-fail=0
-while IFS= read -r f; do
-    [ -f "$f" ] || continue
-    if ! rustfmt --edition 2021 --check "$f" >/dev/null 2>&1; then
-        echo "pre-commit: unformatted: $f" >&2
-        fail=1
-    fi
-done <<EOF
-$files
-EOF
-
-if [ "$fail" -ne 0 ]; then
-    echo "pre-commit: rustfmt check failed. Run 'rustfmt --edition 2021 <file>' and re-stage." >&2
+if ! "$py" "$repo_root/scripts/check-rustfmt.py" --repo-root "$repo_root"; then
+    echo "pre-commit: rustfmt check failed; fix formatting and re-stage." >&2
     exit 1
 fi
 exit 0

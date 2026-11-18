@@ -1174,7 +1174,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                 return TokenAction::Continue;
             }
 
-            if command_is_empty(&state.current_cmd)
+            if command_is_pending_pipeline_prefix(state)
                 && matches!(
                     token.value.as_str(),
                     "then" | "do" | "else" | "elif" | "fi" | "done" | "esac"
@@ -1200,10 +1200,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                 return TokenAction::Continue;
             }
 
-            if token.value == "}"
-                && (command_is_empty(&state.current_cmd)
-                    || command_is_pending_inversion(&state.current_cmd))
-            {
+            if token.value == "}" && command_is_pending_pipeline_prefix(state) {
                 // GNU parse.y: `}' is a reserved word, and at command position
                 // with no open brace group it is a fatal syntax error. That
                 // holds behind a pending `!' too: a lone `}' is never a valid
@@ -1741,6 +1738,41 @@ fn time_prefix_word_count(command: &CommandNode) -> usize {
         start += scan.next;
     }
     start
+}
+
+/// Whether `state.current_cmd` has not yet started a command — it is
+/// either empty or holds only `pipeline_command` prefixes (`!` negation
+/// and/or `time` `timespec` heads with their `-p`/`--`/`!` operands,
+/// provided `time` did not follow a pipe).
+///
+/// In GNU `parse.y`, `pipeline_command` derives `BANG pipeline_command`,
+/// `timespec pipeline_command`, or `pipeline`, so a reserved word
+/// (`then`, `do`, `else`, `elif`, `fi`, `done`, `esac`, `}`) immediately
+/// following `!` or `time` is still in reserved-word position and is a
+/// syntax error rather than a command name (rubash#3648, rubash#3833).
+fn command_is_pending_pipeline_prefix(state: &ParseState) -> bool {
+    let cmd = &state.current_cmd;
+    if command_is_empty(cmd) || command_is_pending_inversion(cmd) {
+        return true;
+    }
+    let prefix_count = time_prefix_word_count(cmd);
+    if prefix_count == 0 || prefix_count != cmd.words.len() {
+        return false;
+    }
+    // GNU parse.y:3286 `time_command_acceptable`: `time` after `|` is an
+    // ordinary command word, not a `timespec` prefix.
+    if state
+        .ast
+        .commands
+        .last()
+        .is_some_and(|last| last.pipe.is_some())
+    {
+        return false;
+    }
+    let mut bare = cmd.clone();
+    bare.inverted = false;
+    bare.words.clear();
+    command_is_empty(&bare)
 }
 
 /// Emit the GNU `syntax error near unexpected token `('` parse error for a

@@ -220,6 +220,34 @@ pub(super) fn filesystem_path_for_display(
     shell_path_to_windows(dir, env_vars)
 }
 
+/// rubash#3372: the filesystem path for a cd operand that may carry
+/// raw-byte transport. The operand is folded before this point, so a
+/// raw byte 0x9C and a genuine U+009C reach here as the same folded
+/// string — and `shell_path_to_windows` would open the UTF-8 spelling
+/// (C2 9C) for both, where GNU's change_to_directory (builtins/cd.def,
+/// chdir on the verbatim bytes) enters the raw-byte directory. When
+/// the pre-fold word carried transport, `byte_spelling` holds its exact
+/// bytes (`transport_name_spelling_bytes`, computed before the fold —
+/// the same pre-fold spelling the redirect faces record); on unix those
+/// bytes ARE the path (the redirect faces' `transport_spelling_path`
+/// rule: no mapping is applied to a recorded byte spelling). Without
+/// transport the folded road is unchanged, so a genuine non-ASCII name
+/// keeps its UTF-8 bytes. Off unix the folded string is already the
+/// WTF-8 spelling, so the spelling is ignored there.
+pub(super) fn cd_filesystem_path(
+    byte_spelling: Option<&[u8]>,
+    folded: &str,
+    env_vars: &HashMap<String, String>,
+) -> PathBuf {
+    #[cfg(unix)]
+    if let Some(spelling) = byte_spelling {
+        use std::os::unix::ffi::OsStrExt;
+        return PathBuf::from(std::ffi::OsStr::from_bytes(spelling));
+    }
+    let _ = byte_spelling;
+    filesystem_path_for_display(folded, env_vars)
+}
+
 pub(super) fn set_shell_env(env_vars: &mut VarTable, name: &str, value: String) {
     // Gated like every other mirror (#916): PWD/OLDPWD are always special,
     // so behavior is unchanged, but future callers inherit the gate.

@@ -1414,8 +1414,17 @@ impl Executor {
                 // entries are not pre-created either (a truncating
                 // create would eat the file's prior content — the
                 // body's own append open creates it instead).
+                // rubash#3372: the node form — the pre-create is a
+                // truncating open, so a genuine leg must not read a
+                // transport sibling's string record (e.g. an earlier
+                // `>>"$a"` expansion would make `2>"$b"` truncate
+                // the raw-byte file instead of creating the UTF-8 one).
                 if !redirect.append && redirect_target_fd(&target).is_none() {
-                    self.create_redirect_output_prepared(&target, redirect.clobber)?;
+                    self.create_redirect_output_prepared_for(
+                        Some(redirect),
+                        &target,
+                        redirect.clobber,
+                    )?;
                 }
                 let mut append_redirect = redirect.clone();
                 append_redirect.target = target;
@@ -1482,11 +1491,16 @@ impl Executor {
                 last_stderr_leg = Some(append_redirect);
             } else {
                 let target = self.expand_redirect_target(redirect);
+                // rubash#3372: the node form (see the fd-1 leg above).
                 if !redirect.append
                     && redirect_target_fd(&target).is_none()
                     && !is_null_device(&target)
                 {
-                    self.create_redirect_output_prepared(&target, redirect.clobber)?;
+                    self.create_redirect_output_prepared_for(
+                        Some(redirect),
+                        &target,
+                        redirect.clobber,
+                    )?;
                 }
                 let mut append_redirect = redirect.clone();
                 append_redirect.target = target;

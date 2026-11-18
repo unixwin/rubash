@@ -55,6 +55,28 @@ pub(in crate::executor) struct ExternalFdDelivery {
     pub(in crate::executor) pins: FdPinPlan,
 }
 
+/// rubash#3286: how an exec spawn stamps the child's cwd. The exec
+/// faces build their Command inside builtins/exec.rs
+/// (external_exec_process), outside the Executor's stamp_spawn_cwd
+/// reach, so the stamp decision rides ChildFdSetup as data and the
+/// builder replays it. Mirrors stamp_spawn_cwd's three outcomes:
+/// `Path` is `current_dir(cwd)`; `AnchorFd` is the pre_exec fchdir
+/// onto the session anchor (the child is born in the dead inode,
+/// exactly what GNU's inherited cwd is); `Unstamped` leaves the
+/// child on the process cwd — stamp_spawn_cwd's documented fallback
+/// for a dead cwd no anchor names, strictly better than a
+/// guaranteed-ENOENT `current_dir` on the dead spelling.
+#[derive(Clone, Copy, Default)]
+pub(crate) enum ChildCwdStamp {
+    #[default]
+    Path,
+    /// The session anchor's raw fd. Only ever constructed on Unix
+    /// (Executor::spawn_cwd_stamp gates it); replayed as a pre_exec
+    /// fchdir by external_exec_process.
+    AnchorFd(i32),
+    Unstamped,
+}
+
 /// rubash#3311/#3313: the child-side descriptor setup the exec
 /// builtin's spawn replays onto the Command it builds
 /// (builtins/exec.rs external_exec_process). GNU exec_builtin
@@ -66,12 +88,15 @@ pub(in crate::executor) struct ExternalFdDelivery {
 /// children replay it at startup, init.rs); `pins` is that delivery's
 /// unix pin plan; `close_fds` are std slots the image must start with
 /// closed (inherit + pre_exec close: a null device would read EOF or
-/// absorb writes the GNU image sees fail EBADF).
+/// absorb writes the GNU image sees fail EBADF). `cwd_stamp` is the
+/// rubash#3286 cwd decision external_exec_process replays instead of
+/// its unconditional `current_dir(cwd)`.
 #[derive(Clone, Default)]
 pub(crate) struct ChildFdSetup {
     env: Vec<(std::ffi::OsString, Option<std::ffi::OsString>)>,
     pins: FdPinPlan,
     close_fds: Vec<u32>,
+    cwd_stamp: ChildCwdStamp,
 }
 
 impl ChildFdSetup {
@@ -79,12 +104,19 @@ impl ChildFdSetup {
         env: Vec<(std::ffi::OsString, Option<std::ffi::OsString>)>,
         pins: FdPinPlan,
         close_fds: Vec<u32>,
+        cwd_stamp: ChildCwdStamp,
     ) -> Self {
         Self {
             env,
             pins,
             close_fds,
+            cwd_stamp,
         }
+    }
+
+    /// The cwd stamp the exec spawn replays (see ChildCwdStamp).
+    pub(crate) fn cwd_stamp(&self) -> ChildCwdStamp {
+        self.cwd_stamp
     }
 
     /// Replay the setup onto a fully composed child Command (after
@@ -2640,6 +2672,34 @@ impl Executor {
         }
     }
 
+    /// rubash#3286: stamp_spawn_cwd's decision as data, for the exec
+    /// spawn faces — their Command is built inside builtins/exec.rs
+    /// (external_exec_process) where the anchor cannot be borrowed,
+    /// so the stamp rides ChildFdSetup and the builder replays it.
+    /// Same three outcomes as the Command-face stamp: a resolving cwd
+    /// keeps `current_dir`; a dead cwd the anchor names becomes the
+    /// pre_exec fchdir onto the anchor fd; a dead cwd no anchor names
+    /// stays unstamped (the process-cwd fallback stamp_spawn_cwd
+    /// documents — strictly better than a guaranteed-ENOENT
+    /// `current_dir` on the dead spelling).
+    pub(in crate::executor) fn spawn_cwd_stamp(&self) -> ChildCwdStamp {
+        let cwd = self.shell_state.cwd.clone();
+        if self.session_cwd_path_resolves(&cwd) {
+            return ChildCwdStamp::Path;
+        }
+        #[cfg(unix)]
+        {
+            match self.session_cwd_anchor_fd() {
+                Some(fd) => ChildCwdStamp::AnchorFd(fd),
+                None => ChildCwdStamp::Unstamped,
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            ChildCwdStamp::Unstamped
+        }
+    }
+
     /// rubash#3198: make the ShellState cwd anchor name `cwd` if it
     /// still resolves to a directory; returns whether `cwd` resolves.
     /// A directory that was deleted and RECREATED at the same path is
@@ -3475,10 +3535,7 @@ impl Executor {
         process: &mut Command,
         stage_stdio: Option<&StageStdioContext>,
         preopened: Option<
-            &mut std::collections::HashMap<
-                usize,
-                std::rc::Rc<crate::executor::fd_table::FileFd>,
-            >,
+            &mut std::collections::HashMap<usize, std::rc::Rc<crate::executor::fd_table::FileFd>>,
         >,
     ) -> Vec<crate::fd::HANDLE> {
         let delivery = self.collect_external_fd_delivery(cmd, process, stage_stdio, preopened);
@@ -5008,18 +5065,14 @@ impl Executor {
         // them instead of re-opening by path. None when no preflight
         // ran (the `env` leg, the async spawn paths).
         preopened: Option<
-            &mut std::collections::HashMap<
-                usize,
-                std::rc::Rc<crate::executor::fd_table::FileFd>,
-            >,
+            &mut std::collections::HashMap<usize, std::rc::Rc<crate::executor::fd_table::FileFd>>,
         >,
     ) -> Result<(), ExecuteError> {
         // rubash#2255: the fd delivery (ambient table stamps, the
         // command's own numbered redirects, the unix pin
         // registration) is shared with the sequential pipeline stage
         // spawner — see apply_external_fd_delivery.
-        let parent_side_dups =
-            self.apply_external_fd_delivery(cmd, &mut process, None, preopened);
+        let parent_side_dups = self.apply_external_fd_delivery(cmd, &mut process, None, preopened);
         // rubash#2398: the job-control channel (see job_control_wait)
         // claims a plain interactive foreground spawn end to end —
         // the child leads its own process group (pre_exec below), the

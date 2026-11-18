@@ -286,11 +286,11 @@ fn copy_dollar_paren_body(
                 token_boundary = false;
             }
             '$' if chars.peek().copied() == Some('\'') => {
-                // ANSI-C `$'...'` (parse.y: special dollar-quote form): its
-                // body is literal text where `\'` is an escaped quote, so a
-                // `'` after a backslash must NOT close the region — the
-                // plain single-quote arm would end it early and a following
-                // `)` would then count against the body.
+                // ANSI-C `$'...'` (parse.y:5476-5480 read_token_word ->
+                // parse_matched_pair P_ALLOWESC): `\'` is an escaped
+                // quote, not the close; a `)` inside is body text. The
+                // plain `'` arm would end the region at `\'` and let
+                // the following `)` close the substitution.
                 chars.next();
                 current.push('\'');
                 let mut ansi_c_escaped = false;

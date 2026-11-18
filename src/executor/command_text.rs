@@ -348,7 +348,7 @@ pub(in crate::executor) fn simple_command_first_word_end_line(cmd: &CommandNode)
     // feeder produced the tokens, so the max is the GNU value in both
     // worlds.
     match cmd.first_word_end_line {
-        Some(stamped) if stamped >= start => Some(stamped.max(text_based)),
+        Some(stamped) if stamped >= start => Some(stamped),
         _ => Some(text_based),
     }
 }

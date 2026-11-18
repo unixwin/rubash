@@ -234,21 +234,31 @@ pub(crate) fn expand_aliases_in_source(
 /// shell_getc without the bump — those newlines are line separators to
 /// the parser but not line advances for diagnostics. The lexer skips
 /// them when stamping tokens. Newlines the `$(`/`${ ' body pre-pass
-/// (expand_comsub_alias_bodies) introduces are NOT tracked yet: comsub
-/// bodies re-lex at runtime with their own line base, a separate
-/// accounting.
+/// (`expand_comsub_alias_bodies_marked`) introduces are tracked both in
+/// the outer mark set and per comsub body (`expand_aliases_in_source_marked_with_comsubs`,
+/// rubash#3838).
 pub(crate) fn expand_aliases_in_source_marked(
     source: &str,
     lookup: &AliasLookup<'_>,
     posix: bool,
 ) -> (String, Vec<usize>) {
-    let source = expand_comsub_alias_bodies(source, lookup, posix);
+    let (expanded, marks, _) = expand_aliases_in_source_marked_with_comsubs(source, lookup, posix);
+    (expanded, marks)
+}
+
+/// `expand_aliases_in_source_marked` plus `(body, byte_marks)` pairs
+/// for every `$(...)` / `${ ... }` / `${| ... }` body whose pre-pass
+/// alias expansion introduced newlines (rubash#3838).
+pub(crate) fn expand_aliases_in_source_marked_with_comsubs(
+    source: &str,
+    lookup: &AliasLookup<'_>,
+    posix: bool,
+) -> (String, Vec<usize>, Vec<(String, Vec<usize>)>) {
+    let (source, mut expansion_newlines, comsub_records) =
+        expand_comsub_alias_bodies_marked(source, lookup, posix);
     let source = source.as_str();
     let mut buf: Vec<char> = source.chars().collect();
     let mut pos = 0usize;
-    // Char offsets (in `buf`) of newlines that arrived inside spliced
-    // alias text — see the doc above for why they must not count.
-    let mut expansion_newlines: Vec<usize> = Vec::new();
     // Live parse-time extglob gate (shopt.def:640 `extglob_flag' ->
     // reset_parser parse.y:3502 `extended_glob'). Sampled once per pass:
     // the grouped driver runs the pre-pass per command group, after the
@@ -717,18 +727,9 @@ pub(crate) fn expand_aliases_in_source_marked(
     }
     // Convert the char-offset marks into byte offsets of the output
     // string (sorted by construction order of the walk below).
-    expansion_newlines.sort_unstable();
-    let mut marked = Vec::with_capacity(expansion_newlines.len());
-    let mut next_mark = 0usize;
-    let mut byte = 0usize;
-    for (index, ch) in buf.iter().enumerate() {
-        if next_mark < expansion_newlines.len() && expansion_newlines[next_mark] == index {
-            marked.push(byte);
-            next_mark += 1;
-        }
-        byte += ch.len_utf8();
-    }
-    (buf.iter().collect(), marked)
+    let out: String = buf.into_iter().collect();
+    let marked = char_offsets_to_byte_offsets(&out, &expansion_newlines);
+    (out, marked, comsub_records)
 }
 
 /// push_string (parse.y:2055): replace the just-scanned word at `ws..end`
@@ -937,19 +938,25 @@ fn skip_backtick(buf: &[char], mut pos: usize) -> usize {
 /// can move the close paren (`case` protects a mid-body `)`, and an alias
 /// can contribute the closing `)` itself: `short='echo ok 8 )'`).
 /// `'` bodies and `\` escapes hide `$(`; `"` and `` ` `` interiors do not.
-fn expand_comsub_alias_bodies(source: &str, lookup: &AliasLookup<'_>, posix: bool) -> String {
+fn expand_comsub_alias_bodies_marked(
+    source: &str,
+    lookup: &AliasLookup<'_>,
+    posix: bool,
+) -> (String, Vec<usize>, Vec<(String, Vec<usize>)>) {
     if !source.contains("$(")
         && !source.contains("${ ")
         && !source.contains("${\t")
         && !source.contains("${\n")
         && !source.contains("${|")
     {
-        return source.to_string();
+        return (source.to_string(), Vec::new(), Vec::new());
     }
     let mut chars: Vec<char> = source.chars().collect();
     let mut pos = 0usize;
     let mut in_double = false;
     let mut changed = false;
+    let mut comsub_char_marks: Vec<usize> = Vec::new();
+    let mut comsub_body_records: Vec<(String, Vec<usize>)> = Vec::new();
     // Whether the next character begins a new token (shell_getc position,
     // parse.y:3631): `#' only starts a comment at token start — after the
     // input start, a blank, a newline, or an operator. A `#' reached there
@@ -1001,6 +1008,8 @@ fn expand_comsub_alias_bodies(source: &str, lookup: &AliasLookup<'_>, posix: boo
                     lookup,
                     posix,
                     &mut changed,
+                    &mut comsub_char_marks,
+                    &mut comsub_body_records,
                     |chars, open| crate::lexer::skip_parenthesized_unit_corrected(chars, open),
                 );
                 at_word_start = false;
@@ -1023,6 +1032,8 @@ fn expand_comsub_alias_bodies(source: &str, lookup: &AliasLookup<'_>, posix: boo
                     lookup,
                     posix,
                     &mut changed,
+                    &mut comsub_char_marks,
+                    &mut comsub_body_records,
                     skip_funsub_body,
                 );
                 at_word_start = false;
@@ -1033,11 +1044,54 @@ fn expand_comsub_alias_bodies(source: &str, lookup: &AliasLookup<'_>, posix: boo
             }
         }
     }
-    if changed {
+    let out = if changed {
         chars.into_iter().collect()
     } else {
         source.to_string()
+    };
+    (out, comsub_char_marks, comsub_body_records)
+}
+
+fn byte_offsets_to_char_offsets(text: &str, byte_offsets: &[usize]) -> Vec<usize> {
+    if byte_offsets.is_empty() {
+        return Vec::new();
     }
+    let mut char_offsets = Vec::with_capacity(byte_offsets.len());
+    let mut next = 0usize;
+    let mut char_idx = 0usize;
+    for (byte_idx, _) in text.char_indices() {
+        while next < byte_offsets.len() && byte_offsets[next] < byte_idx {
+            next += 1;
+        }
+        if next < byte_offsets.len() && byte_offsets[next] == byte_idx {
+            char_offsets.push(char_idx);
+            next += 1;
+        }
+        char_idx += 1;
+    }
+    char_offsets
+}
+
+fn char_offsets_to_byte_offsets(text: &str, char_offsets: &[usize]) -> Vec<usize> {
+    if char_offsets.is_empty() {
+        return Vec::new();
+    }
+    let mut sorted = char_offsets.to_vec();
+    sorted.sort_unstable();
+    let mut byte_offsets = Vec::with_capacity(sorted.len());
+    let mut next = 0usize;
+    let mut byte = 0usize;
+    for (idx, ch) in text.chars().enumerate() {
+        while next < sorted.len() && sorted[next] < idx {
+            next += 1;
+        }
+        if next < sorted.len() && sorted[next] == idx {
+            byte_offsets.push(byte);
+            next += 1;
+        }
+        byte += ch.len_utf8();
+    }
+    byte_offsets
 }
 
 /// Shared body expansion for `$(` and `${ `: expand the body in ONE pass —
@@ -1050,21 +1104,28 @@ fn expand_comsub_alias_bodies(source: &str, lookup: &AliasLookup<'_>, posix: boo
 /// stays. The loop is bounded so an unclosed body cannot spin.
 /// `extent(chars, open)` returns the index just past the closer, like
 /// skip_parenthesized_unit_corrected.
+#[allow(clippy::too_many_arguments)]
 fn splice_substitution_body(
     chars: &mut Vec<char>,
     pos: usize,
     lookup: &AliasLookup<'_>,
     posix: bool,
     changed: &mut bool,
+    comsub_char_marks: &mut Vec<usize>,
+    comsub_body_records: &mut Vec<(String, Vec<usize>)>,
     extent: fn(&[char], usize) -> Option<usize>,
 ) -> usize {
     let open = pos + 1;
+    let is_funsub = chars.get(open) == Some(&'{');
     let body_end = extent(chars, open)
         .unwrap_or(chars.len() + 1)
         .saturating_sub(1)
         .min(chars.len());
     let body: String = chars[open + 1..body_end].iter().collect();
-    let expanded = expand_aliases_in_source(&body, lookup, posix);
+    let (expanded, body_byte_marks, nested_records) =
+        expand_aliases_in_source_marked_with_comsubs(&body, lookup, posix);
+    comsub_body_records.extend(nested_records);
+    let mut local_char_marks = byte_offsets_to_char_offsets(&expanded, &body_byte_marks);
     if expanded != body {
         chars.splice(open + 1..body_end, expanded.chars());
         *changed = true;
@@ -1080,7 +1141,12 @@ fn splice_substitution_body(
             break;
         }
         let tail: String = chars[tail_start..new_end].iter().collect();
-        let tail_expanded = expand_aliases_in_source(&tail, lookup, posix);
+        let (tail_expanded, tail_byte_marks, tail_nested) =
+            expand_aliases_in_source_marked_with_comsubs(&tail, lookup, posix);
+        comsub_body_records.extend(tail_nested);
+        for c in byte_offsets_to_char_offsets(&tail_expanded, &tail_byte_marks) {
+            local_char_marks.push(consumed + c);
+        }
         if tail_expanded == tail {
             break;
         }
@@ -1089,6 +1155,60 @@ fn splice_substitution_body(
         consumed += tail_expanded.chars().count();
     }
     let end = extent(chars, open).unwrap_or(chars.len() + 1);
+    let final_body_end = end.saturating_sub(1).min(chars.len());
+    if !local_char_marks.is_empty() {
+        for &c in &local_char_marks {
+            comsub_char_marks.push(open + 1 + c);
+        }
+        let full_body: String = chars[open + 1..final_body_end].iter().collect();
+        let full_byte_marks = char_offsets_to_byte_offsets(&full_body, &local_char_marks);
+        if !full_byte_marks.is_empty() {
+            if is_funsub {
+                // function_substitute receives the body with the single
+                // leading introducer (` `, `\t`, `\n`, `|`) stripped
+                // (expand_word.rs / extract_funsub_body).
+                if full_body
+                    .as_bytes()
+                    .first()
+                    .is_some_and(|b| matches!(b, b' ' | b'\t' | b'\n' | b'|'))
+                {
+                    let no_intro_marks: Vec<usize> = full_byte_marks
+                        .iter()
+                        .copied()
+                        .filter(|&m| m >= 1)
+                        .map(|m| m - 1)
+                        .collect();
+                    if !no_intro_marks.is_empty() {
+                        comsub_body_records.push((full_body[1..].to_string(), no_intro_marks));
+                    }
+                }
+            }
+            // Execution callers (`expand_command_substitution_*`) trim
+            // leading/trailing whitespace (and strip leading `|` for
+            // valsub), so record the trimmed form too.
+            let stripped = if is_funsub {
+                full_body.strip_prefix('|').unwrap_or(&full_body)
+            } else {
+                &full_body
+            };
+            let lead_strip = full_body.len() - stripped.len();
+            let trimmed = stripped.trim();
+            let lead_trim = stripped.len() - stripped.trim_start().len();
+            let total_lead = lead_strip + lead_trim;
+            if total_lead > 0 || trimmed.len() != full_body.len() {
+                let trimmed_marks: Vec<usize> = full_byte_marks
+                    .iter()
+                    .copied()
+                    .filter(|&m| m >= total_lead && m < total_lead + trimmed.len())
+                    .map(|m| m - total_lead)
+                    .collect();
+                if !trimmed_marks.is_empty() {
+                    comsub_body_records.push((trimmed.to_string(), trimmed_marks));
+                }
+            }
+            comsub_body_records.push((full_body, full_byte_marks));
+        }
+    }
     end.max(pos + 2).min(chars.len())
 }
 
@@ -1314,7 +1434,9 @@ fn skip_dollar_brace(buf: &[char], mut pos: usize) -> usize {
         match buf[pos] {
             '\\' => pos = (pos + 2).min(buf.len()),
             '\'' => pos = skip_single_quote(buf, pos),
-            '$' if buf.get(pos + 1) == Some(&'\'') => pos = skip_ansi_quote(buf, pos + 2),
+            '$' if buf.get(pos + 1) == Some(&'\'') => {
+                pos = skip_ansi_quote(buf, pos + 2);
+            }
             '"' => pos = skip_double_quote(buf, pos),
             // A nested `$(...)` inside `${...}` is a command list of its
             // own: its `#` comments and heredoc bodies are opaque, so a
@@ -1352,6 +1474,9 @@ fn match_dparen(buf: &[char], mut pos: usize) -> Option<usize> {
             '$' if buf.get(pos + 1) == Some(&'\'') => pos = skip_ansi_quote(buf, pos + 2),
             '"' => pos = skip_double_quote(buf, pos),
             '`' => pos = skip_backtick(buf, pos),
+            '$' if buf.get(pos + 1) == Some(&'\'') => {
+                pos = skip_ansi_quote(buf, pos + 2);
+            }
             '(' => {
                 depth += 1;
                 pos += 1;
@@ -1752,12 +1877,16 @@ impl<'a> ComsubAliasScanner<'a> {
                     }
                     COMSUB_EXTENT_MISS.with(|flag| flag.set(false));
                     let mut changed = false;
+                    let mut dummy_marks = Vec::new();
+                    let mut dummy_records = Vec::new();
                     self.pos = splice_substitution_body(
                         &mut self.chars,
                         pos,
                         self.lookup,
                         self.posix,
                         &mut changed,
+                        &mut dummy_marks,
+                        &mut dummy_records,
                         extent_paren_tracked,
                     );
                     self.at_word_start = false;
@@ -1781,12 +1910,16 @@ impl<'a> ComsubAliasScanner<'a> {
                     }
                     COMSUB_EXTENT_MISS.with(|flag| flag.set(false));
                     let mut changed = false;
+                    let mut dummy_marks = Vec::new();
+                    let mut dummy_records = Vec::new();
                     self.pos = splice_substitution_body(
                         &mut self.chars,
                         pos,
                         self.lookup,
                         self.posix,
                         &mut changed,
+                        &mut dummy_marks,
+                        &mut dummy_records,
                         extent_funsub_tracked,
                     );
                     self.at_word_start = false;

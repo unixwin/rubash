@@ -172,11 +172,21 @@ impl Executor {
     /// rubash#3828: hand a walk-opened File to the bind walk through
     /// `pending_preopened_redirects`, keyed by the entry's
     /// `cmd.redirects` position.
-    fn retain_preopened_file(&self, position: usize, target: &str, file: std::fs::File) {
-        let path = self.session_path(crate::executor::path::shell_path_to_windows(
-            &self.redirect_output_path_target(target),
-            &self.shell_state.env_vars,
-        ));
+    fn retain_preopened_file(
+        &self,
+        position: usize,
+        redirect: Option<&crate::parser::Redirect>,
+        target: &str,
+        file: std::fs::File,
+    ) {
+        let output_target = self.redirect_output_path_target(target);
+        let path = self.session_path(match redirect {
+            Some(redirect) => self.redirect_target_filesystem_path_for(redirect, &output_target),
+            None => crate::executor::path::shell_path_to_windows(
+                &output_target,
+                &self.shell_state.env_vars,
+            ),
+        });
         let file_fd = crate::executor::fd_table::FileFd::from_file(file, path.into());
         self.store_pending_preopened(position, target, file_fd);
     }
@@ -269,10 +279,10 @@ impl Executor {
                     )
                     && !crate::special_paths::is_net_redirect_target(&target)
                 {
-                    let path = self.session_path(crate::executor::path::shell_path_to_windows(
-                        &self.redirect_output_path_target(&target),
-                        &self.shell_state.env_vars,
-                    ));
+                    let output_target = self.redirect_output_path_target(&target);
+                    let path = self.session_path(
+                        self.redirect_target_filesystem_path_for(redirect, &output_target),
+                    );
                     if !path.exists() {
                         tracked.push(path);
                     }
@@ -317,6 +327,7 @@ impl Executor {
                     // position (rubash#3828).
                     match crate::executor::shell_options::probe_output_redirect_file(
                         self,
+                        Some(redirect),
                         &target,
                         redirect.clobber,
                     ) {
@@ -325,7 +336,7 @@ impl Executor {
                                 positions.insert(position);
                             }
                             if retain_opened {
-                                self.retain_preopened_file(position, &target, file);
+                                self.retain_preopened_file(position, Some(redirect), &target, file);
                             }
                             Ok(())
                         }
@@ -350,7 +361,7 @@ impl Executor {
                                 positions.insert(position);
                             }
                             if retain_opened {
-                                self.retain_preopened_file(position, &target, file);
+                                self.retain_preopened_file(position, Some(redirect), &target, file);
                             }
                             Ok(())
                         }
@@ -415,7 +426,7 @@ impl Executor {
                                         positions.insert(position);
                                     }
                                     if retain_opened {
-                                        self.retain_preopened_file(position, &target, file);
+                                        self.retain_preopened_file(position, None, &target, file);
                                     }
                                 }
                                 Ok(())
@@ -1124,11 +1135,15 @@ impl Executor {
                         // (redir.c:832-838): open once, bind both fds to
                         // the same open file description.
                         let path = target.strip_prefix('&').unwrap_or(&target);
+                        // rubash#3372: `>&word`'s recorded spelling is
+                        // the word's bytes (the stored `&` is operator
+                        // syntax — see note_redirect_target_transport),
+                        // so the node resolves the same filename the
+                        // setup probe's create_redirect_output_for did.
                         let file = FileFd::open_write(
-                            self.session_path(shell_path_to_windows(
-                                path,
-                                &self.shell_state.env_vars,
-                            )),
+                            self.session_path(
+                                self.redirect_target_filesystem_path_for(redirect, path),
+                            ),
                             redirect.append,
                             false,
                         )
@@ -1193,11 +1208,14 @@ impl Executor {
                             redirect.kind,
                             RedirectKind::Append | RedirectKind::CombinedAppend
                         );
+                    // rubash#3372: resolve the node's recorded
+                    // transport spelling like the setup probe did —
+                    // the folded string would name the genuine-char
+                    // sibling of a raw-byte target.
                     let file = FileFd::open_write(
-                        self.session_path(shell_path_to_windows(
-                            &target,
-                            &self.shell_state.env_vars,
-                        )),
+                        self.session_path(
+                            self.redirect_target_filesystem_path_for(redirect, &target),
+                        ),
                         append,
                         false,
                     )

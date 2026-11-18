@@ -1362,7 +1362,12 @@ impl Executor {
 
         let mut executor = Self {
             shell_state: ShellState {
-                variables: VariableStore::from_environment(&env_vars),
+                // rubash#3108: bind from the table with its attribute
+                // provenance, not as a raw environment — the table is
+                // already seeded with the shell's own variables, and
+                // only the genuinely imported entries are exported
+                // (variables.c:511-518).
+                variables: VariableStore::from_var_table(&env_vars),
                 env_vars,
                 // G-02: a root session is born in the process cwd (the
                 // host's directory at Executor::new, exactly what GNU's
@@ -1455,6 +1460,7 @@ impl Executor {
                 local_attr_scopes: Vec::new(),
                 local_typed_scopes: Vec::new(),
                 expanding_aliases: Vec::new(),
+                comsub_alias_newlines: std::collections::HashMap::new(),
                 loop_depth: 0,
                 inherited_loop_depth: 0,
                 subshell_saved_loop_depth: 0,

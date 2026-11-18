@@ -2450,6 +2450,9 @@ impl Executor {
                     // keeps executing the list.
                     self.report_io_error_routed(command, &error)?;
                 }
+                Err(ExecuteError::ExitCode(code)) => {
+                    handle_exit_code!(code, command)
+                }
                 Err(ExecuteError::Return(code)) if subshell_state.is_some() => {
                     // GNU: `return N` inside a `( )` subshell ends the child
                     // with status N (return.def:57-76 return_builtin — the

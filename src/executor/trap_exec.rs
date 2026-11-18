@@ -750,8 +750,45 @@ impl Executor {
         }
         // G-02 session-cwd anchor (rubash#1887): see set_fd_readwrite_file.
         let path = self.session_path(self.redirect_target_filesystem_path(&target));
-        let file = FileFd::open_write(path, append, false)
-            .map_err(|e| crate::posix_errors::path_error(&target, e))?;
+        // rubash#3286: the bind's one real open (GNU redir.c:725
+        // redir_open) goes through the anchor for a relative operand
+        // in a deleted cwd — the joined path above is dead there, so
+        // the plain open dies ENOENT before any reader can pair.
+        // The flags mirror FileFd::open_write below (O_TRUNC for `>`,
+        // O_APPEND for `>>`); for an existing FIFO this IS the
+        // rendezvous open. The `>` probe already validated through
+        // probe_output_redirect_file — for a FIFO it classifies by
+        // anchor faccessat and keeps no File, so this is the one real
+        // open (rubash#1820); the `>>` face has no probe in this
+        // walk, so this is its only open. Routing through
+        // create_redirect_output instead would re-run the noclobber
+        // O_EXCL create the probe already consumed.
+        let mut anchor_file: Option<std::rc::Rc<FileFd>> = None;
+        #[cfg(unix)]
+        {
+            let fs_operand = self.redirect_target_filesystem_path(&target);
+            if fs_operand.is_relative() {
+                let flags = libc::O_WRONLY
+                    | libc::O_CREAT
+                    | if append {
+                        libc::O_APPEND
+                    } else {
+                        libc::O_TRUNC
+                    };
+                if let Some(result) = self.open_via_cwd_anchor(&fs_operand, flags, 0o666) {
+                    anchor_file = Some(
+                        result
+                            .map(|file| FileFd::from_file(file, path.clone()))
+                            .map_err(|e| crate::posix_errors::path_error(&target, e))?,
+                    );
+                }
+            }
+        }
+        let file = match anchor_file {
+            Some(file) => file,
+            None => FileFd::open_write(path, append, false)
+                .map_err(|e| crate::posix_errors::path_error(&target, e))?,
+        };
         self.fd_table
             .open_output(fd, FdWriteEndpoint::File(file), dynamic);
         self.shell_state.env_vars.remove(&fd_closed_key(fd));
@@ -4708,8 +4745,13 @@ impl Executor {
         if cfg!(unix) && self.exec_stdin_closed() {
             close_fds.push(0);
         }
+        // rubash#3286: the exec faces' Command is built inside
+        // builtins/exec.rs where stamp_spawn_cwd cannot reach — the
+        // cwd stamp rides the setup so external_exec_process replays
+        // the same three outcomes (path / anchor fchdir / unstamped).
+        let cwd_stamp = self.spawn_cwd_stamp();
         (
-            crate::executor::ChildFdSetup::new(env, delivery.pins, close_fds),
+            crate::executor::ChildFdSetup::new(env, delivery.pins, close_fds, cwd_stamp),
             delivery.parent_side_dups,
         )
     }
@@ -4734,9 +4776,16 @@ impl Executor {
             return Ok(file);
         }
         if append {
-            return Ok(open_redirect_append(&self.session_path(
-                self.redirect_target_filesystem_path_for(redirect, target),
-            ))?);
+            // rubash#3286: the append open is a classified open, not
+            // a raw mapped-path open — the raw open_redirect_append
+            // bypassed the registry (rubash#1964) and the cwd anchor,
+            // so an append to an existing FIFO from a deleted cwd died
+            // ENOENT at the dead string path instead of rendezvousing
+            // through the anchor (open_append_target_for's Filesystem
+            // arm opens via the anchor; GNU redir.c:725 redir_open).
+            // The redirect-aware form resolves the node's own recorded
+            // transport spelling (rubash#3372).
+            return Ok(self.open_append_target_for(Some(redirect), target)?);
         }
         Ok(self.create_redirect_output_for(Some(redirect), target, redirect.clobber)?)
     }
@@ -6115,6 +6164,7 @@ impl Executor {
                             if !is_null_device(&target) {
                                 crate::executor::shell_options::probe_output_redirect(
                                     self,
+                                    Some(redirect),
                                     &target,
                                     redirect.clobber,
                                 )?;
@@ -6320,6 +6370,7 @@ impl Executor {
                         let probed = if !is_null_device(&path) {
                             crate::executor::shell_options::probe_output_redirect_file(
                                 self,
+                                Some(redirect),
                                 &path,
                                 redirect.clobber,
                             )?
@@ -6328,15 +6379,10 @@ impl Executor {
                         };
                         self.flush_persistent_output_process_substitution(1)?;
                         match probed {
-                            Some(file) => self.set_fd_output_file_from_file(
-                                1,
-                                path.clone(),
-                                false,
-                                file,
-                            )?,
-                            None => {
-                                self.set_fd_output_file(1, path.clone(), false, false)?
+                            Some(file) => {
+                                self.set_fd_output_file_from_file(1, path.clone(), false, file)?
                             }
+                            None => self.set_fd_output_file(1, path.clone(), false, false)?,
                         }
                         self.flush_persistent_output_process_substitution(2)?;
                         self.share_fd_output_file(1, 2, &path, false);
@@ -6405,6 +6451,7 @@ impl Executor {
                     let probed = if !is_null_device(&target) && !append {
                         crate::executor::shell_options::probe_output_redirect_file(
                             self,
+                            Some(redirect),
                             &target,
                             redirect.clobber,
                         )?
@@ -6416,15 +6463,10 @@ impl Executor {
                     // substitution's deferred body (rubash#1336).
                     self.flush_persistent_output_process_substitution(fd)?;
                     match probed {
-                        Some(file) => self.set_fd_output_file_from_file(
-                            fd,
-                            target.clone(),
-                            fd >= 10,
-                            file,
-                        )?,
-                        None => {
-                            self.set_fd_output_file(fd, target.clone(), fd >= 10, append)?
+                        Some(file) => {
+                            self.set_fd_output_file_from_file(fd, target.clone(), fd >= 10, file)?
                         }
+                        None => self.set_fd_output_file(fd, target.clone(), fd >= 10, append)?,
                     }
                     if matches!(
                         redirect.kind,
@@ -6474,6 +6516,7 @@ impl Executor {
                         let probed = if !is_null_device(&path) {
                             crate::executor::shell_options::probe_output_redirect_file(
                                 self,
+                                Some(redirect),
                                 &path,
                                 redirect.clobber,
                             )?
@@ -6482,15 +6525,10 @@ impl Executor {
                         };
                         self.flush_persistent_output_process_substitution(1)?;
                         match probed {
-                            Some(file) => self.set_fd_output_file_from_file(
-                                1,
-                                path.clone(),
-                                false,
-                                file,
-                            )?,
-                            None => {
-                                self.set_fd_output_file(1, path.clone(), false, false)?
+                            Some(file) => {
+                                self.set_fd_output_file_from_file(1, path.clone(), false, file)?
                             }
+                            None => self.set_fd_output_file(1, path.clone(), false, false)?,
                         }
                         self.flush_persistent_output_process_substitution(2)?;
                         self.share_fd_output_file(1, 2, &path, false);
@@ -9389,6 +9427,7 @@ impl Executor {
                 let probed = if redirect.kind != crate::parser::RedirectKind::Append {
                     crate::executor::shell_options::probe_output_redirect_file(
                         self,
+                        Some(redirect),
                         &target,
                         redirect.clobber,
                     )?

@@ -834,6 +834,37 @@ impl Executor {
         views
     }
 
+    /// The function half of the assignment-form listing
+    /// (print_all_shell_variables' print_func_list, builtins/set.def:
+    /// 518-527): every function in the table, rendered with the
+    /// listing form of the ast_print port (the name=NULL arm of
+    /// named_function_string — no `function ` fallback — plus the
+    /// definition metadata `declare -f` carries: body kind and
+    /// definition redirects), for print_shell_variables to print after
+    /// the variables when not in POSIX mode (rubash#3487).
+    pub(in crate::executor) fn function_set_views(
+        &self,
+    ) -> Vec<crate::builtins::set::FunctionSetView> {
+        self.shell_state
+            .functions
+            .iter()
+            .map(|(name, body)| {
+                let info = self.shell_state.function_def_infos.get(name);
+                let text = crate::parser::ast_print::multiline_function_listing_text(
+                    name,
+                    &body.commands,
+                    info.and_then(|info| info.body_kind),
+                    info.map(|info| info.def_redirects.as_slice())
+                        .unwrap_or(&[]),
+                );
+                crate::builtins::set::FunctionSetView {
+                    name: name.clone(),
+                    text,
+                }
+            })
+            .collect()
+    }
+
     /// The LISTING form of a dynamic variable's declaration view
     /// (rubash#2973): GNU enumeration renders the variable's CELL,
     /// and for the getter-backed dynamics the cell holds only what a
@@ -1530,6 +1561,35 @@ impl Executor {
             view.push(bottom.len().to_string());
         }
         view
+    }
+
+    /// GNU `init_bash_argv` (variables.c:5640-5650) for the `shopt -s
+    /// extdebug` trigger (builtins/shopt.def:618-626
+    /// `shopt_set_debug_mode`): enabling extdebug latches the
+    /// BASH_ARGV/BASH_ARGC bottom frame from the positional parameters
+    /// current at enable time (`save_bash_argv`/`push_args`,
+    /// variables.c:5652-5690), and the latch
+    /// (`bash_argv_initialized`) is never cleared by `shopt -u
+    /// extdebug`, so the frame stays visible inside later function
+    /// calls even with the option off again (rubash#2634). Unlike the
+    /// read-time materialization in `bash_arg_bottom_frame`, this runs
+    /// at any function depth — GNU's enable path has no
+    /// `variable_context == 0` guard (that guard lives only in the
+    /// `get_bashargcv` getter, variables.c:1656-1670), so an enable
+    /// inside a function latches that call's arguments and the frame
+    /// survives the return (oracle: `f(){ shopt -s extdebug; }; f a b`
+    /// leaves a top-level `BASH_ARGC=([0]="2")`).
+    pub(in crate::executor) fn init_bash_argv(&self) {
+        if self.shell_state.bash_arg_bottom.borrow().is_none() {
+            *self.shell_state.bash_arg_bottom.borrow_mut() = Some(
+                self.shell_state
+                    .positional_window()
+                    .iter()
+                    .rev()
+                    .cloned()
+                    .collect(),
+            );
+        }
     }
 
     /// The installed BASH_ARGV bottom frame, or None while the arg
