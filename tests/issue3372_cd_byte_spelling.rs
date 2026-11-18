@@ -30,8 +30,9 @@
 //! route before merge.
 #![cfg(unix)]
 
+use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 const BIN: &str = env!("CARGO_BIN_EXE_rubash");
@@ -45,10 +46,21 @@ fn scratch(tag: &str) -> PathBuf {
 
 /// Run `body` (with `$a`/`$b` bound) inside a fresh work dir; return the
 /// sorted (dir name bytes, sorted (file, contents) inside) listing.
-fn dir_listing(tag: &str, body: &str, prelude: &str) -> Vec<(Vec<u8>, Vec<(Vec<u8>, String)>)> {
+/// `dirs` are the byte-named directories the case needs, created here
+/// because an external `mkdir "$a"` would receive the folded argv
+/// (external process spellings are a separate face, not this pin's).
+fn dir_listing(
+    tag: &str,
+    body: &str,
+    prelude: &str,
+    dirs: &[&[u8]],
+) -> Vec<(Vec<u8>, Vec<(Vec<u8>, String)>)> {
     let dir = scratch(tag);
     let work = dir.join("work");
     std::fs::create_dir_all(&work).expect("work dir");
+    for name in dirs {
+        std::fs::create_dir(work.join(OsStr::from_bytes(name))).expect("fixture dir");
+    }
     let script = dir.join("probe.sh");
     std::fs::write(&script, format!("cd \"$1\" || exit 1\n{prelude}\n{body}\n"))
         .expect("write script");
@@ -100,12 +112,17 @@ fn marker(name: &[u8], contents: &str) -> (Vec<u8>, Vec<(Vec<u8>, String)>) {
 const PRELUDE_PLAIN: &str = "a=\"$(printf 'x\\234')\"\nb=x$'\\u009c'";
 const PRELUDE_MIXED: &str = "a=\"é$(printf '\\234')\"\nb=\"éx\"$'\\u009c'";
 
-const BODY: &str = "mkdir \"$a\" \"$b\"\ncd \"$a\" || exit 99\nprintf 'RAW-MARKER' > marker\ncd ..\ncd \"$b\" || exit 98\nprintf 'UTF-MARKER' > marker\ncd ..";
+const BODY: &str = "cd \"$a\" || exit 99\nprintf 'RAW-MARKER' > marker\ncd ..\ncd \"$b\" || exit 98\nprintf 'UTF-MARKER' > marker\ncd ..";
 
 #[test]
 fn issue3372_cd_enters_raw_byte_directory() {
     assert_eq!(
-        dir_listing("cd1", BODY, PRELUDE_PLAIN),
+        dir_listing(
+            "cd1",
+            BODY,
+            PRELUDE_PLAIN,
+            &[&[0x78, 0x9C], &[0x78, 0xC2, 0x9C]],
+        ),
         vec![
             marker(&[0x78, 0x9C], "RAW-MARKER"),
             marker(&[0x78, 0xC2, 0x9C], "UTF-MARKER"),
@@ -116,10 +133,15 @@ fn issue3372_cd_enters_raw_byte_directory() {
 #[test]
 fn issue3372_cd_enters_mixed_raw_byte_directory() {
     assert_eq!(
-        dir_listing("cd2", BODY, PRELUDE_MIXED),
+        dir_listing(
+            "cd2",
+            BODY,
+            PRELUDE_MIXED,
+            &[&[0xC3, 0xA9, 0x9C], &[0xC3, 0xA9, 0x78, 0xC2, 0x9C]],
+        ),
         vec![
-            marker(&[0xC3, 0xA9, 0x9C], "RAW-MARKER"),
             marker(&[0xC3, 0xA9, 0x78, 0xC2, 0x9C], "UTF-MARKER"),
+            marker(&[0xC3, 0xA9, 0x9C], "RAW-MARKER"),
         ]
     );
 }

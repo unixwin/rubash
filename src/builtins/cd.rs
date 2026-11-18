@@ -52,6 +52,14 @@ struct Target {
     path: PathBuf,
     display: Option<PathBuf>,
     print: PrintPath,
+    /// rubash#3372: the operand carried pre-fold byte transport, so
+    /// `path` is the raw-byte spelling (unix; `cd_filesystem_path`
+    /// ignores the spelling off unix). The logical-mode probe must
+    /// join THAT onto the logical base — GNU change_to_directory's
+    /// make_absolute hands chdir the operand's verbatim bytes —
+    /// not the folded display's UTF-8 re-encoding, which names the
+    /// genuine-char sibling.
+    byte_spelling: bool,
 }
 
 /// Execute `cd` with arguments after the command name.
@@ -391,6 +399,18 @@ where
         },
         Mode::Logical => {
             let logical_dest_display = logical_destination_display(&old_logical, target_display);
+            // rubash#3372: a byte-spelling operand probes the spelling
+            // joined onto the logical base — the same operand bytes
+            // GNU's make_absolute hands chdir — not the folded
+            // display's UTF-8 re-encoding, which names the
+            // genuine-char sibling directory.
+            #[cfg(unix)]
+            let logical_probe_path = if target.byte_spelling {
+                paths::logical_destination(&old_logical, &target.path)
+            } else {
+                filesystem_path_for_display(&logical_dest_display, env_vars)
+            };
+            #[cfg(not(unix))]
             let logical_probe_path = filesystem_path_for_display(&logical_dest_display, env_vars);
             // The textual destination is only sh_canonpath's result
             // when canon itself succeeds, and canon carries an
@@ -731,6 +751,7 @@ where
                     path: cd_filesystem_path(home_spelling.as_deref(), &home, env_vars),
                     display: Some(PathBuf::from(home)),
                     print: PrintPath::Never,
+                    byte_spelling: home_spelling.is_some(),
                 }))
             }
             // GNU builtins/cd.def:316-322: the operand-less refusal is
@@ -744,6 +765,7 @@ where
                 path: cwd.to_path_buf(),
                 display: None,
                 print: PrintPath::Never,
+                byte_spelling: false,
             })),
             None => {
                 writeln!(stderr, "{}cd: HOME not set", diagnostic_prefix(env_vars))?;
@@ -763,6 +785,7 @@ where
                     path: cd_filesystem_path(old_pwd_spelling.as_deref(), &old_pwd, env_vars),
                     display: Some(PathBuf::from(old_pwd)),
                     print: PrintPath::Always,
+                    byte_spelling: old_pwd_spelling.is_some(),
                 }))
             }
             None => {
@@ -796,6 +819,7 @@ where
                 path: cd_filesystem_path(dir_spelling.as_deref(), &dir, env_vars),
                 display: Some(PathBuf::from(dir)),
                 print: PrintPath::Never,
+                byte_spelling: dir_spelling.is_some(),
             }))
         }
     }
@@ -949,6 +973,7 @@ fn resolve_cdpath(
                     },
                     display: Some(display),
                     path: candidate,
+                    byte_spelling: target.byte_spelling,
                 }),
                 attempted,
             );
@@ -989,6 +1014,7 @@ pub(crate) fn resolve_search_operand(
         path: filesystem_path_for_display(operand, env_vars),
         display: Some(PathBuf::from(operand)),
         print: PrintPath::Never,
+        byte_spelling: false,
     };
     if let (Some(found), _) = resolve_cdpath(&target, env_vars, cwd) {
         return Some(SearchResolution::CdPath {
@@ -1055,6 +1081,7 @@ fn resolve_cdable_vars(
         path: cd_filesystem_path(value_spelling.as_deref(), &value, env_vars),
         display: Some(PathBuf::from(value)),
         print: PrintPath::Always,
+        byte_spelling: value_spelling.is_some(),
     })
 }
 

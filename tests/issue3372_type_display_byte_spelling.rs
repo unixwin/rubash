@@ -25,7 +25,9 @@
 //! route before merge.
 #![cfg(unix)]
 
+use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -42,17 +44,25 @@ fn scratch(tag: &str) -> PathBuf {
 }
 
 /// Run the type probe inside a fresh work dir; return the raw stdout
-/// bytes.
+/// bytes. The fixture executables are created here rather than by the
+/// script: an external `printf >`/`chmod` would receive the folded
+/// argv and could not address the raw-byte spelling (external process
+/// spellings are a separate face, not this pin's).
 fn stdout_of(tag: &str) -> (Vec<u8>, PathBuf) {
     let dir = scratch(tag);
     let work = dir.join("work");
     std::fs::create_dir_all(&work).expect("work dir");
+    for name in [RAW, GENUINE] {
+        let path = work.join(OsStr::from_bytes(name));
+        std::fs::write(&path, b"#!/bin/sh\necho x\n").expect("fixture file");
+        let mut perms = std::fs::metadata(&path).expect("meta").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).expect("fixture chmod");
+    }
     let script = dir.join("probe.sh");
     std::fs::write(
         &script,
-        "cd \"$1\" || exit 1\na=\"$(printf 'x\\234')\"\nb=x$'\\u009c'\n\
-         printf '#!/bin/sh\\necho RAW\\n' > \"$a\"; chmod +x \"$a\"\n\
-         printf '#!/bin/sh\\necho UTF\\n' > \"$b\"; chmod +x \"$b\"\n\
+        "a=\"$(printf 'x\\234')\"\nb=x$'\\u009c'\n\
          PATH=\"$1:$PATH\"\n\
          type \"$a\"\ntype \"$b\"\ntype -p \"$a\"\ntype -p \"$b\"\n\
          command -v \"$a\"\ncommand -v \"$b\"\ntype -a \"$a\"\ntype -a \"$b\"\n",

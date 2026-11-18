@@ -96,3 +96,20 @@ fn issue3372_external_stdout_fd1_genuine_fd2_raw() {
 fn issue3372_external_stdout_fd1_raw_fd2_genuine() {
     assert_eq!(listing("ext2", "true >\"$a\" 2>\"$b\""), both("", ""));
 }
+
+#[test]
+fn issue3372_dupe_output_word_byte_spelling() {
+    // `>&word` with a non-numeric word is r_err_and_out (GNU
+    // redir.c:832-838): ONE open of `word` shared by fds 1 and 2.
+    // The `&` the parser stores in the target is operator syntax
+    // (parser/redirections.rs redirect_target), never filename
+    // content, so the node's recorded transport spelling must drop
+    // it — verbatim use opened a literal `&name` file.
+    assert_eq!(
+        listing("ext3", "echo RAW >&\"$a\"\necho UTF >&\"$b\""),
+        vec![
+            (vec![0x78, 0x9C], "RAW\n".to_string()),
+            (vec![0x78, 0xC2, 0x9C], "UTF\n".to_string()),
+        ]
+    );
+}
