@@ -831,7 +831,7 @@ impl Executor {
                                     element,
                                     protect_results || protect_data,
                                 );
-                                if ifs_is_null && !no_split {
+                                if in_double || (ifs_is_null && !no_split) {
                                     std::borrow::Cow::Owned(
                                         crate::executor::embedded_mutations::mark_alternate_whitespace(&element),
                                     )
@@ -848,7 +848,7 @@ impl Executor {
                         // word list, so the sentinel is emitted for both
                         // producers — but never on the assignment-RHS path,
                         // which does not split at all.
-                        if ifs_is_null && !assign_rhs && !no_split {
+                        if ifs_is_null && !assign_rhs && !no_split && !in_double {
                             output.push(crate::executor::markers::SPLIT_ON_SPACES_SENTINEL);
                         }
                         output.push_str(&value);

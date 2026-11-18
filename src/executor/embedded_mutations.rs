@@ -1287,6 +1287,12 @@ impl Executor {
                     // compound tag for the storage pass, independent of IFS.
                     let no_split =
                         super::expand_braced_replacement::NO_SPLIT_DOLLAR_STAR.with(|f| f.get());
+                    let quoted_at = in_double
+                        || matches!(
+                            context,
+                            SubstitutionQuoteContext::DoubleQuoted
+                                | SubstitutionQuoteContext::HereDocument
+                        );
                     let ifs_is_null = self
                         .shell_state
                         .env_vars
@@ -1301,7 +1307,7 @@ impl Executor {
                                 element,
                                 protect_rhs_data || protect_expansion_results,
                             );
-                            if (ifs_is_null && !no_split) || preserve_quotes {
+                            if quoted_at || (ifs_is_null && !no_split) || preserve_quotes {
                                 std::borrow::Cow::Owned(mark_expansion_whitespace(
                                     &element,
                                     preserve_quotes,
@@ -1317,7 +1323,7 @@ impl Executor {
                     // produced under a set-null IFS, independent of later
                     // mid-word IFS binds. Never on the assignment-RHS or
                     // quoted paths — those never split.
-                    if ifs_is_null && !assign_rhs && !no_split && !preserve_quotes {
+                    if ifs_is_null && !assign_rhs && !no_split && !preserve_quotes && !quoted_at {
                         output.push(crate::executor::markers::SPLIT_ON_SPACES_SENTINEL);
                     }
                     output.push_str(&value);
