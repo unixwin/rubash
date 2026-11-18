@@ -211,7 +211,8 @@ pub(super) fn quote_declare_value(value: &str) -> String {
     // marker zone) so the exactly-once decode yields the visible
     // chars; the CTLESC/DATA decoding display_text already did stays
     // in force because those chars are outside the marker zone.
-    let transport = crate::executor::substitution_metadata::escape_marker_zone_chars_for_display(&visible);
+    let transport =
+        crate::executor::substitution_metadata::escape_marker_zone_chars_for_display(&visible);
     if gnu_ansic_shouldquote(&transport) {
         return gnu_ansic_quote(&transport);
     }
@@ -238,7 +239,8 @@ pub(super) fn quote_array_element_value(value: &str) -> String {
     // rubash#3921: re-spell as transport text before the byte-view
     // quoters (see quote_declare_value) — a lone U+E000 in the visible
     // text is user data and must not be re-folded into a byte.
-    let transport = crate::executor::substitution_metadata::escape_marker_zone_chars_for_display(&visible);
+    let transport =
+        crate::executor::substitution_metadata::escape_marker_zone_chars_for_display(&visible);
     if gnu_ansic_shouldquote(&transport) {
         return gnu_ansic_quote(&transport);
     }
@@ -392,7 +394,8 @@ fn quote_declare_display_value(value: &str) -> String {
     // rubash#3921: re-spell as transport text before the byte-view
     // quoters (see quote_declare_value) — a lone U+E000 in the visible
     // text is user data and must not be re-folded into a byte.
-    let transport = crate::executor::substitution_metadata::escape_marker_zone_chars_for_display(&visible);
+    let transport =
+        crate::executor::substitution_metadata::escape_marker_zone_chars_for_display(&visible);
     if gnu_ansic_shouldquote(&transport) {
         return gnu_ansic_quote(&transport);
     }
