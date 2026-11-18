@@ -1793,6 +1793,11 @@ impl Executor {
                 Some(&self.shell_state.random_state),
                 Some(&left_dynamic),
                 true,
+                // GNU cond_expand_word (execute_cmd.c:4024) word-expands
+                // the operand before arithcomp's evalexp, so an empty
+                // subscript expansion is the empty-bracket token
+                // (rubash#3252).
+                true,
                 Some(&self.shell_state.variables),
             )
         }) else {
@@ -1821,6 +1826,9 @@ impl Executor {
                 &mut self.shell_state.env_vars,
                 Some(&self.shell_state.random_state),
                 Some(&right_dynamic),
+                true,
+                // Same expand-entry law as the left operand above
+                // (rubash#3252).
                 true,
                 Some(&self.shell_state.variables),
             )
