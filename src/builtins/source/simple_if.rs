@@ -280,7 +280,12 @@ fn test_if_condition_true(executor: &Executor, words: &[String]) -> Result<bool,
     for word in &words[2..] {
         args.push(executor.expand_word(word));
     }
-    let status = crate::builtins::test::execute(&args, true, executor.env_vars_table())?;
+    let status = crate::builtins::test::execute(
+        &args,
+        true,
+        executor.env_vars_table(),
+        executor.positional_len(),
+    )?;
     Ok(status == 0)
 }
 

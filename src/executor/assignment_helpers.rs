@@ -201,10 +201,13 @@ pub(in crate::executor) fn append_assoc_value(
                     if integer {
                         // GNU bind_assoc_variable: an integer append adds the
                         // two expressions arithmetically (wheat[foo bar]+=7
-                        // with wheat[foo bar]=eval(flix)=9 stores 16).
-                        *entry_value = (eval_conditional_arith_value(entry_value, env_vars)
-                            .unwrap_or(0)
-                            + eval_conditional_arith_value(&rhs, env_vars).unwrap_or(0))
+                        // with wheat[foo bar]=eval(flix)=9 stores 16). The
+                        // sum is intmax_t (variables.c:2936-2946), so it
+                        // wraps at INT64_MAX (rubash#3782).
+                        *entry_value = crate::executor::arithmetic::intmax_append_sum(
+                            eval_conditional_arith_value(entry_value, env_vars).unwrap_or(0),
+                            eval_conditional_arith_value(&rhs, env_vars).unwrap_or(0),
+                        )
                         .to_string();
                     } else {
                         // GNU make_variable_value ASS_APPEND case branch
@@ -460,8 +463,12 @@ pub(in crate::executor) fn append_assoc_scalar_append_value(
     let value = unquote_storage_value(value);
     if let Some((_, entry_value)) = entries.iter_mut().rev().find(|(key, _)| key == "0") {
         if integer {
-            *entry_value = (eval_conditional_arith_value(entry_value, env_vars).unwrap_or(0)
-                + eval_conditional_arith_value(&value, env_vars).unwrap_or(0))
+            // The sum is intmax_t (variables.c:2936-2946), so it wraps at
+            // INT64_MAX (rubash#3782).
+            *entry_value = crate::executor::arithmetic::intmax_append_sum(
+                eval_conditional_arith_value(entry_value, env_vars).unwrap_or(0),
+                eval_conditional_arith_value(&value, env_vars).unwrap_or(0),
+            )
             .to_string();
         } else {
             *entry_value = convert(append_scalar_value(entry_value, &value));

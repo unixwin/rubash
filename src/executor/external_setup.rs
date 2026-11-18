@@ -910,6 +910,30 @@ impl Executor {
         }
     }
 
+    /// rubash#3792: a duplicate of fd `fd`'s write endpoint for the
+    /// `<&N` dup arm, when the fd carries no read endpoint (a
+    /// write-only descriptor, `exec 3>f`). GNU dup2 (redir.c:1193)
+    /// dups any open descriptor regardless of access mode, so the
+    /// child inherits the write-only description and its own reads
+    /// fail EBADF. Returns None when the fd has no write endpoint
+    /// either (truly absent/closed — the caller's EBADF stands) or
+    /// when the write endpoint is symbolic (no handle to dup).
+    fn dup_write_only_fd_for_stdin(&self, fd: u32) -> Option<crate::fd::HANDLE> {
+        match self.fd_table.write_endpoint(fd) {
+            Some(FdWriteEndpoint::File(file_fd)) => {
+                crate::fd::duplicate_handle(file_fd.handle).ok()
+            }
+            Some(FdWriteEndpoint::CoprocStdin { fd: file_fd, .. }) => {
+                crate::fd::duplicate_handle_inheritable(file_fd.handle).ok()
+            }
+            Some(endpoint @ (FdWriteEndpoint::Stdout | FdWriteEndpoint::Stderr)) => {
+                let (handle, _) = endpoint.standard_backing()?;
+                crate::fd::duplicate_handle_inheritable(handle).ok()
+            }
+            _ => None,
+        }
+    }
+
     pub(in crate::executor) fn apply_external_stdin_redirect(
         &mut self,
         cmd: &CommandNode,
@@ -1074,6 +1098,29 @@ impl Executor {
                             if let Some(file_fd) = self.own_numbered_input_binding(cmd, fd, &target)
                             {
                                 let dup = crate::fd::duplicate_handle(file_fd.handle)?;
+                                process.stdin(Stdio::from(crate::fd::handle_to_file(dup)));
+                                return Ok(());
+                            }
+                            // rubash#3792: no READ endpoint, but the
+                            // descriptor may still be open write-only
+                            // (`exec 3>f`). GNU's dup2 (redir.c:1193)
+                            // takes no access-mode argument — it dups
+                            // ANY open descriptor onto the redirector,
+                            // and the access-mode failure surfaces
+                            // later, in the child's own read (EBADF).
+                            // The read-endpoint match above must not
+                            // turn that into a redirection failure:
+                            // dup the write endpoint's own handle into
+                            // the child's stdin, so the child inherits
+                            // the write-only description and reports
+                            // the failure itself, with its own
+                            // diagnostic and exit status. Only
+                            // handle-backed write endpoints can cross
+                            // (a symbolic one — process substitution,
+                            // /dev/full, a pipe channel — has no
+                            // descriptor to dup and keeps the EBADF
+                            // below; see REPORT).
+                            if let Some(dup) = self.dup_write_only_fd_for_stdin(fd) {
                                 process.stdin(Stdio::from(crate::fd::handle_to_file(dup)));
                                 return Ok(());
                             }
@@ -2393,6 +2440,17 @@ impl Executor {
         if super::shell_options::redirect_path_is_fifo(&session_target) {
             return ProcsubPlanCapture::Declined;
         }
+        // rubash#3286: the joined-path check above misses from a
+        // deleted cwd — a FIFO there declines the capture the same way
+        // (the capture open would otherwise block the planner on the
+        // rendezvous, rubash#1820).
+        #[cfg(unix)]
+        {
+            let fs_operand = self.redirect_target_filesystem_path(target);
+            if fs_operand.is_relative() && self.anchor_operand_is_fifo(&fs_operand) == Some(true) {
+                return ProcsubPlanCapture::Declined;
+            }
+        }
         match mode {
             ProcsubPlanMode::Read => match FileFd::open_read(session_target) {
                 Ok(file) => ProcsubPlanCapture::Captured(file),
@@ -2664,12 +2722,32 @@ impl Executor {
     /// twin: it carries the same plan through the `__RUBASH_FD_*`
     /// env channel instead. Returns the pre-bind snapshot for
     /// `restore_procsub_spawn_plan_fd`. A disposition that cannot be
-    /// materialized (an unopenable carrier, a failed dup) leaves
-    /// the fd untouched — the ambient behavior, not a spawn failure.
-    fn bind_procsub_spawn_plan_fd(&mut self, fd: u32, disposition: &ProcsubSpawnFd) -> PlanFdSave {
+    /// materialized (an unopenable carrier, a failed dup of the NEW
+    /// endpoint) leaves the fd untouched — the ambient behavior, not
+    /// a spawn failure. (A failed dup of the SAVED entry is different:
+    /// see the #3732 note below — it fails the bind.)
+    ///
+    /// rubash#3732 (same hazard as #3706): the pre-bind snapshot
+    /// is a kernel dup (`FdTable::saved_entry`), never a bare Rc
+    /// clone — every bind arm below retires the displaced descriptor
+    /// (`FdTable::close` retires both arms; `set_fd_input_file` /
+    /// `open_output` retire the arm they replace, rubash#3213), so
+    /// a cloned save would restore a dead entry and the next spawn's
+    /// pin pass would dup2 whatever recycled that kernel number.
+    /// GNU's undo save IS that kernel dup (`fcntl (fd, F_DUPFD,
+    /// SHELL_FD_BASE)`, redir.c:965/1082/1144; compound groups run
+    /// `do_redirections (..., RX_ACTIVE|RX_UNDOABLE)`,
+    /// execute_cmd.c:854). A dup failure fails the bind (GNU
+    /// REDIRECTION_ERROR) before anything is mutated, so the caller
+    /// can unwind the bindings already made.
+    fn bind_procsub_spawn_plan_fd(
+        &mut self,
+        fd: u32,
+        disposition: &ProcsubSpawnFd,
+    ) -> Result<PlanFdSave, ExecuteError> {
         let saved = PlanFdSave {
             fd,
-            entry: self.fd_table.entries.get(&fd).cloned(),
+            entry: self.fd_table.saved_entry(fd)?,
             alias_generation: self.fd_table.stdout_alias_generation.get(&fd).cloned(),
             fd_stdin: self.shell_state.env_vars.get(&fd_stdin_key(fd)).cloned(),
             fd_stdin_offset: self
@@ -2701,19 +2779,50 @@ impl Executor {
                     .insert(fd_closed_key(fd), "1".to_string());
             }
             ProcsubSpawnFd::File { read, write } => {
-                if let Some(file) = read {
-                    self.set_fd_input_file(fd, file.clone(), false);
-                }
-                if let Some(file) = write {
-                    self.fd_table
-                        .open_output(fd, FdWriteEndpoint::File(file.clone()), false);
-                    self.shell_state.env_vars.remove(&fd_closed_key(fd));
-                    self.shell_state
-                        .env_vars
-                        .insert(fd_output_key(fd), file.path.to_string_lossy().into_owned());
-                    self.shell_state
-                        .env_vars
-                        .remove(&fd_output_process_substitution_key(fd));
+                // rubash#3655: when both arms are present they are
+                // ONE description — a single open_readwrite install,
+                // not an input bind followed by an output bind (the
+                // second would retire the first). Either arm alone
+                // keeps its single-direction install.
+                match (read, write) {
+                    (Some(read), Some(write)) => {
+                        self.fd_table.open_readwrite(
+                            fd,
+                            // rubash#3655 fix: the enclosing match binds
+                            // by reference (match ergonomics), so both
+                            // arms need `.clone()` — the write side had
+                            // it, the read side did not (E0308, CI run
+                            // 43824819839).
+                            FdReadEndpoint::File(read.clone()),
+                            FdWriteEndpoint::File(write.clone()),
+                            false,
+                        );
+                        self.shell_state.env_vars.remove(&fd_closed_key(fd));
+                        self.shell_state.env_vars.remove(&fd_stdin_key(fd));
+                        self.shell_state.env_vars.remove(&fd_stdin_offset_key(fd));
+                        self.shell_state.env_vars.remove(&fd_dynamic_input_key(fd));
+                        self.shell_state
+                            .env_vars
+                            .insert(fd_output_key(fd), write.path.to_string_lossy().into_owned());
+                        self.shell_state
+                            .env_vars
+                            .remove(&fd_output_process_substitution_key(fd));
+                    }
+                    (Some(file), None) => {
+                        self.set_fd_input_file(fd, file.clone(), false);
+                    }
+                    (None, Some(file)) => {
+                        self.fd_table
+                            .open_output(fd, FdWriteEndpoint::File(file.clone()), false);
+                        self.shell_state.env_vars.remove(&fd_closed_key(fd));
+                        self.shell_state
+                            .env_vars
+                            .insert(fd_output_key(fd), file.path.to_string_lossy().into_owned());
+                        self.shell_state
+                            .env_vars
+                            .remove(&fd_output_process_substitution_key(fd));
+                    }
+                    (None, None) => {}
                 }
             }
             ProcsubSpawnFd::TruncatedFile(file) => {
@@ -2784,7 +2893,7 @@ impl Executor {
                 }
             }
         }
-        saved
+        Ok(saved)
     }
 
     fn restore_procsub_spawn_plan_fd(&mut self, saved: PlanFdSave) {
@@ -2844,21 +2953,33 @@ impl Executor {
     /// from the map inherit the ambient table — the in-process
     /// consumer already sees it, unlike a spawned child, which
     /// needs the ambient fds transported (see the #2212 loop in
-    /// `spawn_output_process_substitution_child`).
+    /// `spawn_output_process_substitution_child`). A dup failure
+    /// while saving one fd's pre-bind snapshot (rubash#3732) fails
+    /// the whole run before `run` starts — the bindings already made
+    /// are restored in reverse first, the same unwind a redirect
+    /// apply failure performs (GNU `undo_partial_redirects`).
     pub(in crate::executor) fn with_procsub_spawn_plan<T>(
         &mut self,
         plan: &ProcsubSpawnPlan,
         run: impl FnOnce(&mut Self) -> T,
-    ) -> T {
+    ) -> Result<T, ExecuteError> {
         let mut saved = Vec::new();
         for (fd, disposition) in &plan.fds {
-            saved.push(self.bind_procsub_spawn_plan_fd(*fd, disposition));
+            match self.bind_procsub_spawn_plan_fd(*fd, disposition) {
+                Ok(save) => saved.push(save),
+                Err(error) => {
+                    for save in saved.into_iter().rev() {
+                        self.restore_procsub_spawn_plan_fd(save);
+                    }
+                    return Err(error);
+                }
+            }
         }
         let result = run(self);
         for save in saved.into_iter().rev() {
             self.restore_procsub_spawn_plan_fd(save);
         }
-        result
+        Ok(result)
     }
 
     fn materialize_standalone_process_substitution_word(
@@ -3822,6 +3943,15 @@ impl Executor {
         // source; the line-offset seed below compensates for it.
         let prelude_newlines = source.matches('\n').count();
         source.push_str(body);
+        // rubash#3300: mint the respawn proof FIRST, before any
+        // carrier dup is created (the spawn-fds loop below takes the
+        // lowest free fds; the mint's F_DUPFD_CLOEXEC >= 100 can never
+        // collide with them). A mint failure is fail-open (None):
+        // the spawn proceeds without proof keys, i.e. today's
+        // behavior.
+        #[cfg(unix)]
+        let respawn_proof =
+            crate::fd::mint_respawn_proof(&crate::builtins::kill::new_background_wrapper_nonce());
         // Same environment transport as the `cmd &` respawn
         // (compound_exec.rs execute_background_ast_command): the process env
         // merged with the shell's env_vars, `__RUBASH_*` keys crossing only
@@ -3859,6 +3989,17 @@ impl Executor {
             super::RESPAWN_SPAWNER_PID_KEY.to_string(),
             super::spawner_stamp_value(),
         );
+        // rubash#3300: the per-spawn proof pair (fd number + nonce).
+        // Per-spawn, never forwarded — NOT in FORK_TRANSPORT_KEYS /
+        // rubash_spawn_inherited_state.
+        #[cfg(unix)]
+        if let Some((proof_fd, proof_nonce)) = &respawn_proof {
+            env_map.insert(
+                super::RESPAWN_PROOF_FD_KEY.to_string(),
+                proof_fd.to_string(),
+            );
+            env_map.insert(super::RESPAWN_PROOF_KEY.to_string(), proof_nonce.clone());
+        }
         // rubash#2032: process_substitute's consumer is a forked child
         // (subst.c:6362), so it inherits the parent's positional
         // parameters (POSITIONAL_PARAMS_TRANSPORT).
@@ -4139,6 +4280,16 @@ impl Executor {
         // expansion-time table, which is what the stamped handle
         // carries. Declaring the delivery mode is the fix: the
         // #2521 key already means "delivered at stamped number".
+        // rubash#3300: the parent's proof copy closes with the other
+        // parent-side dups right after the spawn attempt (the loop
+        // below runs on both the Ok and the Err path). No pre_exec
+        // closure here: the mint already cleared CLOEXEC, and plain
+        // Command::spawn inherits a non-CLOEXEC fd at its own number
+        // (probe-verified on rustc 1.99.1 std).
+        #[cfg(unix)]
+        if let Some((proof_fd, _)) = respawn_proof {
+            parent_side_dups.push(proof_fd);
+        }
         env_map.insert(
             super::FD_DELIVERY_AT_STAMPED_KEY.to_string(),
             "1".to_string(),

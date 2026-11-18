@@ -276,6 +276,9 @@ impl SessionHistory {
 
     /// bashhist.c check_history_control + history_should_ignore, then
     /// add_history with HISTSIZE stifling. Returns true when recorded.
+    /// `comment_char_armed` is readline's history_comment_char latch
+    /// (rubash#3392): only an add made while it is armed takes a real
+    /// `#<epoch>` stamp; an unarmed add carries the empty stamp.
     /// There is deliberately NO emptiness check here: GNU's
     /// check_add_history (bashhist.c:789-807) has none — emptiness
     /// filtering lives at the line-recording call sites
@@ -289,6 +292,7 @@ impl SessionHistory {
         histcontrol: &str,
         histignore: &str,
         histsize: Option<usize>,
+        comment_char_armed: bool,
     ) -> bool {
         if history_should_ignore(line, histignore, self.entries.last().map(String::as_str)) {
             return false;
@@ -327,10 +331,20 @@ impl SessionHistory {
             self.timestamps = kept_ts;
         }
         self.entries.push(line.to_string());
-        // readline/history.c:322-333 hist_inittime: every add_history stores
-        // "#<unix-seconds>" on the entry regardless of whether timestamps are
-        // later written to the file.
-        self.timestamps.push(Self::now_stamp());
+        // readline/history.c:259-273 hist_inittime: every add_history
+        // stores a stamp, but the stamp's first char IS
+        // history_comment_char — `'\0'` while no HISTTIMEFORMAT bind
+        // has armed it, i.e. the empty string in this model. An entry
+        // added before the first bind therefore carries no stamp: it
+        // renders `??` and takes no `#<epoch>` line on -a/-w
+        // (rubash#3392). The latch is sticky — a later unset does not
+        // disarm it — so the caller passes the live armed state, not
+        // the current HISTTIMEFORMAT existence.
+        self.timestamps.push(if comment_char_armed {
+            Self::now_stamp()
+        } else {
+            String::new()
+        });
         self.stifle(histsize);
         self.lines_this_session += 1;
         true

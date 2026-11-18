@@ -1161,6 +1161,37 @@ impl Executor {
                 return Ok(file);
             }
         }
+        // rubash#3792: the #1963 alias fallback moved here from the
+        // stream serve below — it belongs to the ALIAS shape only.
+        // The stream serve is the `<&N` dup model (see its docs): a
+        // dup serves the descriptor's own description, and a
+        // write-only description's reads fail EBADF — it must never
+        // re-open the descriptor's path for reading. The alias open
+        // keeps its old answer: a file binding re-opens its path
+        // (tried above; the retry here only re-reports the failure
+        // for an unlinked target), any other open descriptor reads
+        // EOF off the null device, and a descriptor with no endpoint
+        // at all keeps the EBADF answer.
+        if self.fd_table.read_endpoint(fd).is_none() {
+            match self.fd_table.write_endpoint(fd) {
+                Some(FdWriteEndpoint::File(file)) => {
+                    return File::open(&file.path)
+                        .map_err(|e| crate::posix_errors::path_error(target, e));
+                }
+                Some(_) => {
+                    return File::open(shell_path_to_windows(
+                        "/dev/null",
+                        &self.shell_state.env_vars,
+                    ));
+                }
+                None => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!("{target}: Bad file descriptor"),
+                    ));
+                }
+            }
+        }
         self.open_fd_read_endpoint_stream(fd, target)
     }
 
@@ -1225,30 +1256,22 @@ impl Executor {
                 super::inherited_stdin::duplicate_process_stdin()
             }
             _ => {
-                // rubash#1963: no read endpoint, but the descriptor
-                // may be open write-only (`exec 63>f; : < /dev/fd/63`).
-                // GNU's /dev/fd open is a fresh open of the
-                // descriptor's TARGET, judged against the target
-                // file's mode, not the descriptor's: a file binding
-                // reopens its path (its stored path is the native
-                // form it was opened from), and any other open
-                // descriptor's read-open succeeds against the null
-                // device (reads see EOF — the stdio write ends'
-                // content contract is the dev-operand face's
-                // documented decline). Only a descriptor with no
-                // endpoint at all keeps the EBADF answer.
-                match self.fd_table.write_endpoint(fd) {
-                    Some(FdWriteEndpoint::File(file)) => File::open(&file.path)
-                        .map_err(|e| crate::posix_errors::path_error(target, e)),
-                    Some(_) => File::open(shell_path_to_windows(
-                        "/dev/null",
-                        &self.shell_state.env_vars,
-                    )),
-                    None => Err(io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!("{target}: Bad file descriptor"),
-                    )),
-                }
+                // rubash#3792: no read endpoint — the descriptor is
+                // closed, or open write-only. This serve is the `<&N`
+                // dup model (see the fn docs): it hands the consumer
+                // the descriptor's OWN description, and a write-only
+                // description's reads fail EBADF exactly as GNU's
+                // dup2'd child reads do (redir.c:1193). The #1963
+                // alias re-open (a fresh open of the descriptor's
+                // target path) used to live here and served a dup of
+                // a write-only fd with the file's content — the
+                // emulated-cat face of #3792. It now lives in
+                // open_fd_read_endpoint above, the alias dispatch,
+                // where it belongs; a dup never passes through it.
+                Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("{target}: Bad file descriptor"),
+                ))
             }
         }
     }
@@ -2614,30 +2637,28 @@ impl Executor {
                 .open(path)
                 .map_err(|e| crate::posix_errors::path_error(&target, e));
         }
-        // rubash#3268: the plain create is a shell-process redirect
-        // open — same anchor rule as the input face for a relative
-        // operand. An existing FIFO target is classified out through
-        // the anchor's fstatat and keeps the plain open: the probe
-        // faces classify FIFOs by joined-path metadata, which a dead
-        // cwd defeats, and an anchor O_WRONLY open in a probe would
-        // consume the bind's rendezvous (rubash#1820).
+        // rubash#3268/#3286: the plain create is a shell-process
+        // redirect open — same anchor rule as the input face for a
+        // relative operand. This is the BIND open (GNU's single open,
+        // redir.c do_redirection_internal): an existing FIFO takes
+        // the anchor O_WRONLY openat here, blocking for the reader
+        // exactly like GNU's open — O_TRUNC is a no-op on a fifo.
+        // The FIFO carve-out lives only in the PROBE faces
+        // (probe_output_redirect, the prepared phase, the #1868
+        // validation walk), which classify through the anchor's
+        // fstatat and validate by faccessat instead of opening
+        // (rubash#1820: a probe open would consume the bind's
+        // rendezvous).
         #[cfg(unix)]
         {
             let fs_operand = fs_path.clone();
             if fs_operand.is_relative() {
-                let is_fifo = matches!(
-                    self.fstatat_via_cwd_anchor(&fs_operand),
-                    Some(Ok(stat)) if (u32::from(stat.st_mode) & u32::from(libc::S_IFMT))
-                        == u32::from(libc::S_IFIFO)
-                );
-                if !is_fifo {
-                    if let Some(result) = self.open_via_cwd_anchor(
-                        &fs_operand,
-                        libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC,
-                        0o666,
-                    ) {
-                        return result.map_err(|e| crate::posix_errors::path_error(&target, e));
-                    }
+                if let Some(result) = self.open_via_cwd_anchor(
+                    &fs_operand,
+                    libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC,
+                    0o666,
+                ) {
+                    return result.map_err(|e| crate::posix_errors::path_error(&target, e));
                 }
             }
         }
@@ -2669,18 +2690,36 @@ impl Executor {
         target: &str,
         clobber: bool,
     ) -> io::Result<File> {
+        match self.create_redirect_output_prepared_open_for(redirect, target, clobber)? {
+            Some(file) => Ok(file),
+            // The carve-out stand-ins are all inert — every caller of
+            // this wrapper drops the File — so one platform null file
+            // serves them all.
+            None => Self::inert_prepared_stand_in(),
+        }
+    }
+
+    /// rubash#3828: the retained twin of
+    /// [`Self::create_redirect_output_prepared_for`] — same carve-outs
+    /// and the same single create, but answers `Some(File)` with the
+    /// REAL opened file so a prepare-phase caller can carry it into
+    /// the bind walk (`pending_preopened_redirects`) instead of the
+    /// bind re-opening the path. `None` marks the net/FIFO carve-outs,
+    /// whose bind performs GNU's single open itself.
+    pub(in crate::executor) fn create_redirect_output_prepared_open_for(
+        &self,
+        redirect: Option<&crate::parser::Redirect>,
+        target: &str,
+        clobber: bool,
+    ) -> io::Result<Option<File>> {
         // rubash#1967: on a net target the prepare phase's connect is
         // the same phantom as the FIFO's prepare open below — dropped
         // unused while the bind phase connects again. Validate by
-        // resolution; the bind performs GNU's single open. Every
-        // caller drops the returned File, so the stand-in is inert.
+        // resolution; the bind performs GNU's single open.
         if crate::special_paths::is_net_redirect_target(target) {
             self.validate_net_redirect_target(target)
                 .map_err(|e| crate::posix_errors::path_error(target, e))?;
-            return File::open(shell_path_to_windows(
-                "/dev/null",
-                &self.shell_state.env_vars,
-            ));
+            return Ok(None);
         }
         // rubash#1820: on a FIFO the prepare phase's create is a
         // semantic no-op (O_TRUNC/O_CREAT do nothing to a fifo) whose
@@ -2688,10 +2727,9 @@ impl Executor {
         // (open_compound_output_redirects) then waits for in vain.
         // Skip the physical open — the bind performs GNU's single
         // open — after the same write-access validation the create's
-        // failure would have surfaced. Every caller drops the returned
-        // File, so the null-device stand-in is inert. rubash#1903: a
-        // WinuxCmd marker is a FIFO for this rule on Windows, with the
-        // marker probe standing in for access(2).
+        // failure would have surfaced. rubash#1903: a WinuxCmd marker
+        // is a FIFO for this rule on Windows, with the marker probe
+        // standing in for access(2).
         #[cfg(any(unix, windows))]
         {
             let path = self.session_path(shell_path_to_windows(
@@ -2702,15 +2740,19 @@ impl Executor {
                 if let Some(error) = redirect_fifo_access_error(&path, true) {
                     return Err(crate::posix_errors::path_error(target, error));
                 }
-                #[cfg(windows)]
-                {
-                    return File::open("NUL");
-                }
-                #[cfg(not(windows))]
-                {
-                    return File::open("/dev/null");
-                }
+                return Ok(None);
             }
+        }
+        // rubash#3286: the joined-path FIFO check above misses
+        // from a deleted cwd (the joined spelling is dead by
+        // construction) — the anchor faccessat stands in for the
+        // joined-path access check; the bind performs GNU's single
+        // open.
+        if let Some(verdict) = crate::executor::shell_options::output_fifo_validation_via_anchor(
+            self, redirect, target,
+        ) {
+            verdict.map_err(|e| crate::posix_errors::path_error(target, e))?;
+            return Ok(None);
         }
         let file = self.create_redirect_output_for(redirect, target, clobber)?;
         if !clobber
@@ -2720,7 +2762,21 @@ impl Executor {
                 .borrow_mut()
                 .insert(target.to_string());
         }
-        Ok(file)
+        Ok(Some(file))
+    }
+
+    /// The inert File the prepared-phase carve-outs (net / FIFO)
+    /// substitute for a real open — every caller drops it, so one
+    /// platform null device serves all of them.
+    fn inert_prepared_stand_in() -> io::Result<File> {
+        #[cfg(windows)]
+        {
+            File::open("NUL")
+        }
+        #[cfg(not(windows))]
+        {
+            File::open("/dev/null")
+        }
     }
 
     /// Consume a prepare-phase noclobber record (rubash#1025): true when
@@ -2728,6 +2784,69 @@ impl Executor {
     /// phase, so the bind phase must not run the O_EXCL open again.
     pub(in crate::executor) fn take_noclobber_prepared_target(&self, target: &str) -> bool {
         self.noclobber_prepared_targets.borrow_mut().remove(target)
+    }
+
+    /// rubash#3828: record the File an earlier redirect walk already
+    /// opened for `cmd.redirects[position]` so the bind walk adopts it
+    /// instead of opening the path a second time (GNU do_redirections
+    /// opens each entry once — redir.c do_redirection_internal /
+    /// redir_open). `target` is the walk's expanded target word; a
+    /// consumer adopts only on an exact match.
+    pub(in crate::executor) fn store_pending_preopened(
+        &self,
+        position: usize,
+        target: &str,
+        file_fd: std::rc::Rc<crate::executor::fd_table::FileFd>,
+    ) {
+        self.pending_preopened_redirects
+            .borrow_mut()
+            .insert(position, (target.to_string(), file_fd));
+    }
+
+    /// rubash#3828: carry a compound prepare phase's opened File into
+    /// `pending_preopened_redirects` for the bind walk
+    /// (`open_compound_output_redirects_in`), keyed by the mirror
+    /// redirect's `cmd.redirects` position. Plain filesystem targets
+    /// only — the carve-out classes keep their own bind opens.
+    pub(in crate::executor) fn retain_prepared_output_file(
+        &self,
+        cmd: &crate::parser::CommandNode,
+        redirect: &crate::parser::Redirect,
+        target: &str,
+        file: std::fs::File,
+    ) {
+        if !matches!(
+            crate::special_paths::classify_special_path(target),
+            crate::special_paths::SpecialPathClass::Filesystem
+        ) {
+            return;
+        }
+        let path = self.session_path(shell_path_to_windows(
+            &self.redirect_output_path_target(target),
+            &self.shell_state.env_vars,
+        ));
+        let file_fd = crate::executor::fd_table::FileFd::from_file(file, path.into());
+        let position = self.redirect_list_position(cmd, redirect);
+        self.store_pending_preopened(position, target, file_fd);
+    }
+
+    /// Consume a pending preopened handle for `position` when its
+    /// recorded target matches `target` exactly. A mismatch drops the
+    /// stale entry and reports None, so a leftover from an earlier
+    /// command can never bind the wrong file.
+    pub(in crate::executor) fn take_pending_preopened(
+        &self,
+        position: usize,
+        target: &str,
+    ) -> Option<std::rc::Rc<crate::executor::fd_table::FileFd>> {
+        match self
+            .pending_preopened_redirects
+            .borrow_mut()
+            .remove(&position)
+        {
+            Some((recorded, file_fd)) if recorded == target => Some(file_fd),
+            _ => None,
+        }
     }
 
     pub(in crate::executor) fn redirect_output_path_target(&self, target: &str) -> String {
@@ -2824,7 +2943,25 @@ impl Executor {
     /// spellings reach the mapped append open. Errors are raw:
     /// callers apply posix_errors::path_error.
     pub(in crate::executor) fn open_append_target(&self, target: &str) -> io::Result<File> {
+        self.open_append_target_for(None, target)
+    }
+
+    /// [`Self::open_append_target`] with the redirect node: the
+    /// filesystem spelling resolves through the node's own recorded
+    /// transport spelling, never a string-keyed record another redirect
+    /// folded to the same string may own — the create funnel's rule
+    /// (`create_redirect_output_for`, rubash#3218) on the append face
+    /// (rubash#3372).
+    pub(in crate::executor) fn open_append_target_for(
+        &self,
+        redirect: Option<&crate::parser::Redirect>,
+        target: &str,
+    ) -> io::Result<File> {
         use crate::special_paths::SpecialPathClass;
+        let fs_path = |target: &str| match redirect {
+            Some(redirect) => self.redirect_target_filesystem_path_for(redirect, target),
+            None => self.redirect_target_filesystem_path(target),
+        };
         match crate::special_paths::classify_special_path(target) {
             SpecialPathClass::NetRedirect => self.open_net_redirect_raw(target),
             SpecialPathClass::NullDevice => {
@@ -2881,7 +3018,7 @@ impl Executor {
                     Ok(file) => Ok(file),
                     Err(error) if error.kind() == io::ErrorKind::Unsupported => {
                         crate::executor::execution_misc::open_redirect_append(
-                            &self.session_path(self.redirect_target_filesystem_path(target)),
+                            &self.session_path(fs_path(target)),
                         )
                     }
                     Err(error) => Err(error),
@@ -2895,7 +3032,7 @@ impl Executor {
                     )),
                     Some(true) => Self::synthetic_proc_write_sink(true),
                     None => crate::executor::execution_misc::open_redirect_append(
-                        &self.session_path(self.redirect_target_filesystem_path(target)),
+                        &self.session_path(fs_path(target)),
                     ),
                 }
             }
@@ -2918,33 +3055,28 @@ impl Executor {
                 }
             }
             SpecialPathClass::Filesystem => {
-                // rubash#3268: the append open is a shell-process
+                // rubash#3268/#3286: the append open is a shell-process
                 // redirect open — same anchor rule as the input and
-                // create faces for a relative operand, with the same
-                // FIFO classification carve-out as the create face.
+                // create faces for a relative operand. This is the BIND
+                // open (see the create face above): an existing FIFO
+                // takes the anchor O_WRONLY|O_APPEND openat here and
+                // blocks for the reader like GNU's open; the probe
+                // faces classify FIFOs by faccessat instead.
                 #[cfg(unix)]
                 {
-                    let fs_operand = self.redirect_target_filesystem_path(target);
+                    let fs_operand = fs_path(target);
                     if fs_operand.is_relative() {
-                        let is_fifo = matches!(
-                            self.fstatat_via_cwd_anchor(&fs_operand),
-                            Some(Ok(stat))
-                                if (u32::from(stat.st_mode) & u32::from(libc::S_IFMT))
-                                    == u32::from(libc::S_IFIFO)
-                        );
-                        if !is_fifo {
-                            if let Some(result) = self.open_via_cwd_anchor(
-                                &fs_operand,
-                                libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND,
-                                0o666,
-                            ) {
-                                return result;
-                            }
+                        if let Some(result) = self.open_via_cwd_anchor(
+                            &fs_operand,
+                            libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND,
+                            0o666,
+                        ) {
+                            return result;
                         }
                     }
                 }
                 crate::executor::execution_misc::open_redirect_append(
-                    &self.session_path(self.redirect_target_filesystem_path(target)),
+                    &self.session_path(fs_path(target)),
                 )
             }
         }
@@ -3936,6 +4068,37 @@ impl Executor {
             && !self.fd_table.is_closed(0)
             && !matches!(self.fd_table.read_endpoint(0), Some(FdReadEndpoint::File(_)))
             && self.function_stdin_remaining().is_some()
+    }
+
+    /// rubash#3792: the fd-0 winner is a `<&N` dup (the `&N` spelling —
+    /// the `/dev/fd/N` path spelling is an alias OPEN, #1963, and stays
+    /// on the open serve) of a descriptor that is open WRITE-only: no
+    /// read endpoint, but a live write endpoint (`exec 3>f`). GNU's
+    /// dup2 (redir.c:1193 do_redirection_internal) hands the consumer
+    /// that write-only description itself, so the consumer's own reads
+    /// fail EBADF and the consumer reports it. A text serve cannot
+    /// model the description — stdin_string_for_command's dup arm
+    /// declines it by design (#2101: the caller's descriptor path must
+    /// surface the failure) — so a caller that can only consume text
+    /// must stand down for a descriptor path whenever this returns
+    /// Some. Returns the dup's source fd.
+    pub(in crate::executor) fn fd0_write_only_dup_source(&self, cmd: &CommandNode) -> Option<u32> {
+        let redirect = fd0_stdin_redirect_winner_redirect(cmd)?;
+        if !matches!(redirect.kind, crate::parser::RedirectKind::DuplicateInput) {
+            return None;
+        }
+        let target = self.expand_redirect_target(redirect);
+        if !target.starts_with('&') {
+            return None;
+        }
+        let (source, _) = super::execution_misc::redirect_target_fd_and_move(&target)?;
+        if self.fd_table.read_endpoint(source).is_some() {
+            return None;
+        }
+        if self.fd_table.write_endpoint(source).is_some() {
+            return Some(source);
+        }
+        None
     }
 
     pub(in crate::executor) fn stdin_string_for_command(
@@ -5042,7 +5205,12 @@ pub(in crate::executor) fn probe_input_redirect_gate(
         }
         return Ok(());
     }
-    std::fs::File::open(path).map(|_| ())
+    // rubash#3777: the bind ladder opens a directory target with the
+    // FILE_FLAG_BACKUP_SEMANTICS retry (open_redirect_input_file) so
+    // the read itself can fail with EISDIR (read.def:911); the gate
+    // must validate with the same opener, or every directory redirect
+    // dies here with EACCES before the builtin ever runs.
+    open_redirect_input_file(path).map(|_| ())
 }
 
 /// access(2) validation for a FIFO redirect target whose real open is
@@ -5076,6 +5244,43 @@ pub(in crate::executor) fn redirect_fifo_access_error(
     crate::winuxcmd_fifo::marker_access_error(path, write)
 }
 
+/// rubash#3286: anchor-backed FIFO validation for an output
+/// redirect target, shared by the probe faces whose joined-path FIFO
+/// check misses from a deleted cwd (probe_output_redirect and its
+/// append twin, the compound prepared phase, the #1868 validation
+/// walk). Some(verdict) only when the anchor applies and the operand
+/// is an existing FIFO — the verdict is the anchor faccessat(W_OK),
+/// which proves existence and write access without taking an fd, so
+/// no rendezvous pairing is consumed (rubash#1820). None otherwise
+/// (anchor N/A, missing target, non-FIFO, absolute operand), so the
+/// caller falls through to its joined-path / plain-open path. The
+/// verdict already carries the `<target>: <strerror>` path_error
+/// shape. Available on all platforms; off Unix it is always None.
+pub(in crate::executor) fn output_fifo_validation_via_anchor(
+    executor: &Executor,
+    redirect: Option<&crate::parser::Redirect>,
+    target: &str,
+) -> Option<std::io::Result<()>> {
+    #[cfg(unix)]
+    {
+        let fs_operand = match redirect {
+            Some(redirect) => executor.redirect_target_filesystem_path_for(redirect, target),
+            None => executor.redirect_target_filesystem_path(target),
+        };
+        if !fs_operand.is_relative() {
+            return None;
+        }
+        return executor
+            .output_fifo_probe_via_anchor(&fs_operand)
+            .map(|verdict| verdict.map_err(|e| crate::posix_errors::path_error(target, e)));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (executor, redirect, target);
+        None
+    }
+}
+
 /// The setup walk's output probe (create/truncate side effect plus
 /// error surfacing) with the rubash#1820 FIFO carve-out: on a FIFO the
 /// create is a no-op whose blocking open consumes the bind open's
@@ -5086,6 +5291,26 @@ pub(in crate::executor) fn probe_output_redirect(
     target: &str,
     clobber: bool,
 ) -> std::io::Result<()> {
+    probe_output_redirect_file(executor, target, clobber).map(|_| ())
+}
+
+/// rubash#3828: File-returning twin of [`probe_output_redirect`].
+/// Returns the probe's open for plain filesystem targets — the caller
+/// keeps it as the entry's one open instead of re-opening at bind
+/// time (GNU opens each redirect target exactly once per entry,
+/// redir.c do_redirection_internal / redir_open; a target created
+/// with a mode lacking owner-write — umask masking 0200 — fails a
+/// second open with EACCES although the kernel-level single open
+/// succeeds). Returns None for the FIFO/net carve-outs and for every
+/// other special class (null / zero / full / random / fd-alias /
+/// synthetic /proc): those opens are stand-ins or sinks the bind
+/// must NOT adopt as the fd — the probe still runs for its error
+/// surfacing, and the bind re-opens the class as today.
+pub(in crate::executor) fn probe_output_redirect_file(
+    executor: &Executor,
+    target: &str,
+    clobber: bool,
+) -> std::io::Result<Option<std::fs::File>> {
     // rubash#1967: a net target's probe must not connect — the probe
     // connection is dropped unwritten while the bind's own open
     // connects again, so the peer sees two connections where GNU's
@@ -5093,9 +5318,10 @@ pub(in crate::executor) fn probe_output_redirect(
     // Validate by resolution; the one real open performs the
     // connect and surfaces a refusal with the same diagnostic.
     if crate::special_paths::is_net_redirect_target(target) {
-        return executor
+        executor
             .validate_net_redirect_target(target)
-            .map_err(|e| crate::posix_errors::path_error(target, e));
+            .map_err(|e| crate::posix_errors::path_error(target, e))?;
+        return Ok(None);
     }
     #[cfg(any(unix, windows))]
     {
@@ -5107,44 +5333,85 @@ pub(in crate::executor) fn probe_output_redirect(
             if let Some(error) = redirect_fifo_access_error(&path, true) {
                 return Err(crate::posix_errors::path_error(target, error));
             }
-            return Ok(());
+            return Ok(None);
         }
     }
-    executor.create_redirect_output(target, clobber).map(|_| ())
+    // rubash#3286: the joined-path FIFO check above misses from a
+    // deleted cwd (the joined spelling is dead by construction) —
+    // when the anchor applies and names an existing FIFO, the probe's
+    // verdict is the anchor faccessat, never an open (rubash#1820).
+    // Some(Ok) lifts to Ok(None): a confirmed FIFO keeps no File, the
+    // bind performs the one real open (rubash#1820 rendezvous).
+    if let Some(verdict) = output_fifo_validation_via_anchor(executor, None, target) {
+        return verdict.map(|_| None);
+    }
+    if !matches!(
+        crate::special_paths::classify_special_path(target),
+        crate::special_paths::SpecialPathClass::Filesystem
+    ) {
+        // Special class: run the create for its error surfacing
+        // (a 0444-class synthetic /proc still refuses EACCES here)
+        // but keep no File — the bind re-opens the class itself.
+        return executor
+            .create_redirect_output(target, clobber)
+            .map(|_| None);
+    }
+    executor.create_redirect_output(target, clobber).map(Some)
 }
 
-/// Append-arm twin of [`probe_output_redirect`]. The open itself
-/// classifies through the registry (Executor::open_append_target,
-/// rubash#1964): the probe IS an append open, so it must succeed and
-/// fail for exactly the shapes the bind's open does — a net target
-/// connects, a synthetic /proc entry answers by write class, a
-/// closed fd alias fails ENOENT.
-pub(in crate::executor) fn probe_output_redirect_append(
+/// rubash#3828: Append-arm twin of [`probe_output_redirect_file`]
+/// — same contract: Some(File) only for plain filesystem targets;
+/// None for the FIFO/net carve-outs and every other special class
+/// (the probe still runs for its error surfacing; the bind
+/// re-opens the class as today). The open classifies through the
+/// registry (Executor::open_append_target, rubash#1964).
+///
+/// `redirect` is the node being probed: with it, both opens (the FIFO
+/// stat and the append open) resolve the node's own recorded transport
+/// spelling instead of the plain string funnel (rubash#3372).
+pub(in crate::executor) fn probe_output_redirect_append_file(
     executor: &Executor,
+    redirect: Option<&crate::parser::Redirect>,
     target: &str,
-) -> std::io::Result<()> {
+) -> std::io::Result<Option<std::fs::File>> {
     // rubash#1967: net arm of the same carve-out as probe_output_redirect.
     if crate::special_paths::is_net_redirect_target(target) {
-        return executor
+        executor
             .validate_net_redirect_target(target)
-            .map_err(|e| crate::posix_errors::path_error(target, e));
+            .map_err(|e| crate::posix_errors::path_error(target, e))?;
+        return Ok(None);
     }
     #[cfg(any(unix, windows))]
     {
-        let path = executor.session_path(shell_path_to_windows(
-            target,
-            &executor.shell_state.env_vars,
-        ));
+        let path = executor.session_path(match redirect {
+            Some(redirect) => executor.redirect_target_filesystem_path_for(redirect, target),
+            None => shell_path_to_windows(target, &executor.shell_state.env_vars),
+        });
         if redirect_path_is_fifo(&path) {
             if let Some(error) = redirect_fifo_access_error(&path, true) {
                 return Err(crate::posix_errors::path_error(target, error));
             }
-            return Ok(());
+            return Ok(None);
         }
     }
+    // rubash#3286: same deleted-cwd miss as probe_output_redirect —
+    // the anchor faccessat is the probe's verdict here too. Some(Ok)
+    // lifts to Ok(None): a confirmed FIFO keeps no File (rubash#1820).
+    if let Some(verdict) = output_fifo_validation_via_anchor(executor, None, target) {
+        return verdict.map(|_| None);
+    }
+    if !matches!(
+        crate::special_paths::classify_special_path(target),
+        crate::special_paths::SpecialPathClass::Filesystem
+    ) {
+        return executor
+            .open_append_target_for(redirect, target)
+            .map(|_| None)
+            .map_err(|e| crate::posix_errors::path_error(target, e));
+    }
     executor
-        .open_append_target(target)
-        .map(|_| ())
+        .open_append_target_for(redirect, target)
+        .map(Some)
         .map_err(|e| crate::posix_errors::path_error(target, e))
 }
 

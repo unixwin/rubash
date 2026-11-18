@@ -4,11 +4,18 @@ use crate::executor::markers::DATA_DOLLAR;
 /// GNU sh_modcase CASE_CAPITALIZE (lib/sh/casemod.c, driven from
 /// make_variable_value at variables.c:2975): the first character is
 /// uppercased and the REST of the string is lowercased — the att_capcase
-/// conversion applied on every bind (casemod.tests:99-103).
+/// conversion applied on every bind (casemod.tests:99-103). Both halves
+/// are per-character SIMPLE mappings (rubash#3790): Rust's full
+/// `str::to_uppercase`/`to_lowercase` would map `ﬀ` to `FF` and `İ` to
+/// `i` + U+0307, where GNU's towupper/towlower leave `ﬀ` alone and
+/// lowercase `İ` to plain `i`.
 pub(in crate::executor) fn capitalize_value(value: &str) -> String {
     let mut chars = value.chars();
     match chars.next() {
-        Some(first) => first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase(),
+        Some(first) => {
+            crate::locale::simple_case_upper(first).to_string()
+                + &crate::locale::simple_lowercase(chars.as_str())
+        }
         None => value.to_string(),
     }
 }
@@ -17,16 +24,20 @@ pub(in crate::executor) fn capitalize_value(value: &str) -> String {
 /// value being stored (variables.c:2970-2986): at most one of
 /// att_uppercase / att_lowercase / att_capitalize can be in effect, in
 /// that precedence. Shared by the scalar assignment funnel and the
-/// per-element array write paths (rubash#1618/#1619).
+/// per-element array write paths (rubash#1618/#1619). The conversion is
+/// GNU sh_modcase's per-character SIMPLE mapping (lib/sh/casemod.c
+/// towupper/towlower, locale-aware: no non-ASCII conversion in a
+/// single-byte locale) — never Rust's full `str::to_uppercase` /
+/// `str::to_lowercase` (rubash#3790).
 pub(in crate::executor) fn apply_case_attributes(
     env_vars: &crate::shell::var_table::VarTable,
     name: &str,
     value: String,
 ) -> String {
     if is_marked_var(env_vars, UPPERCASE_VARS, name) {
-        value.to_uppercase()
+        crate::locale::simple_uppercase(&value)
     } else if is_marked_var(env_vars, LOWERCASE_VARS, name) {
-        value.to_lowercase()
+        crate::locale::simple_lowercase(&value)
     } else if is_marked_var(env_vars, CAPCASE_VARS, name) {
         capitalize_value(&value)
     } else {
@@ -308,8 +319,12 @@ impl Executor {
                     .find_map(|(key, entry)| (key == "0").then_some(entry.clone()))
                     .unwrap_or_default();
                 let element = if append && integer {
-                    (self.eval_integer_assignment_value(&existing)
-                        + self.eval_integer_assignment_value(&value))
+                    // The sum is intmax_t (variables.c:2936-2946), so it
+                    // wraps at INT64_MAX (rubash#3782).
+                    crate::executor::arithmetic::intmax_append_sum(
+                        self.eval_integer_assignment_value(&existing),
+                        self.eval_integer_assignment_value(&value),
+                    )
                     .to_string()
                 } else if append {
                     format!("{existing}{value}")
@@ -338,8 +353,12 @@ impl Executor {
                 let mut entries = super::arrays::indexed_array_entries(&saved);
                 let existing = entries.get(&0).cloned().unwrap_or_default();
                 let element = if append && integer {
-                    (self.eval_integer_assignment_value(&existing)
-                        + self.eval_integer_assignment_value(&value))
+                    // The sum is intmax_t (variables.c:2936-2946), so it
+                    // wraps at INT64_MAX (rubash#3782).
+                    crate::executor::arithmetic::intmax_append_sum(
+                        self.eval_integer_assignment_value(&existing),
+                        self.eval_integer_assignment_value(&value),
+                    )
                     .to_string()
                 } else if append {
                     format!("{existing}{value}")

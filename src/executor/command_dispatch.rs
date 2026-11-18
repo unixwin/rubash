@@ -1149,9 +1149,9 @@ impl Executor {
                     }
                 }
             } else if saved_attrs.uppercase {
-                window_value.to_uppercase()
+                crate::locale::simple_uppercase(&window_value)
             } else {
-                window_value.to_lowercase()
+                crate::locale::simple_lowercase(&window_value)
             };
             let current_attrs = capture_var_attrs(&self.shell_state.env_vars, name);
             let mut merged_attrs = *saved_attrs;

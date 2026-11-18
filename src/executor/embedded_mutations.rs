@@ -90,6 +90,14 @@ impl Executor {
     /// them after its final unescape pass (rubash#218 — `v=${1-U}` with
     /// `\\` data collapsed the pair). Source-word escapes still resolve
     /// exactly as before; only expansion-result data is protected.
+    ///
+    /// rubash#3663: the literal DATA_BACKSLASH carrier the lexer emitted
+    /// for a source `\\` is deferred the same way (rubash#3088 pattern):
+    /// restoring it in the walker tail handed the assignment path's final
+    /// `unescape_remaining_shell_escapes` pass a raw `\` it folded as
+    /// source escape syntax, so `x=a\\*e` stored `a*e`. The caller
+    /// (`expand_assignment_value_inner`) restores the carrier after its
+    /// unescape pass.
     pub(in crate::executor) fn expand_embedded_parameters_assignment_rhs_mut(
         &mut self,
         word: &str,
@@ -104,7 +112,7 @@ impl Executor {
             false,
             false,
             false,
-            false,
+            true,
         )
     }
 
@@ -265,12 +273,26 @@ impl Executor {
         // (expand_heredoc_body_mut). decode_word_position_carriers alone
         // restores only the quote/dollar carriers, so `<<<"$(<file)"`
         // staged the file's backslashes as raw 0x15 bytes (rubash#1842).
-        let decoded = crate::executor::markers::restore_bare_sentinels(
-            &crate::executor::markers::decode_word_position_carriers(&expanded),
-            &[
-                (crate::executor::markers::DATA_BACKSLASH, "\\"),
-                (crate::executor::markers::PROTECTED_BACKSLASH, "\\"),
-            ],
+        // rubash#3650: the sibling heredoc boundary decodes the
+        // command-substitution payload (U+E319 + hex + `;`) here
+        // (expand_heredoc_body_mut); the here-string boundary never did,
+        // so a comsub byte the walker re-protected (0x01/0x02/0x05/0x10/0x12
+        // — the protect set outside the assignment-carrier set) leaked into
+        // the stdin body as transport text and `read`/`mapfile` stored it
+        // verbatim, comparing unequal under `[` (whose operands decode the
+        // payload). Decode AFTER the carrier restores, like the heredoc: a
+        // decoded byte may equal a carrier codepoint (e.g. 0x15) and must
+        // not be claimed by the restores. Typed U+E319 data stays safe:
+        // the ANSI-C entry E400-escapes it and this decoder skips
+        // E400-escaped sentinels (rubash#840).
+        let decoded = crate::executor::execution_misc::decode_command_substitution_payload(
+            &crate::executor::markers::restore_bare_sentinels(
+                &crate::executor::markers::decode_word_position_carriers(&expanded),
+                &[
+                    (crate::executor::markers::DATA_BACKSLASH, "\\"),
+                    (crate::executor::markers::PROTECTED_BACKSLASH, "\\"),
+                ],
+            ),
         );
         crate::executor::execution_misc::decode_stdin_body_enq(&decoded)
     }
@@ -1128,6 +1150,26 @@ impl Executor {
                     // opens the window here. The heredoc route reaches the
                     // typed funnel's unclosed-body pre-check through this
                     // dispatch (context HereDocument).
+                    //
+                    // rubash#3816: the scanned body can carry bare DATA_*
+                    // carriers produced upstream (prepare_unquoted_heredoc_expansion
+                    // turns `\``/`\$` into DATA_BACKTICK/DATA_DOLLAR so the
+                    // walker scan does not read them as syntax). The whole-word
+                    // backtick entry restores those carriers before the re-parse
+                    // (decode_backtick_substitution_source); this embedded arm
+                    // must do the same. Without the restore the re-parse's
+                    // dequote tags a bare carrier byte as a literal source byte
+                    // (lexer tagging, #3816), and the argv materialization
+                    // restore (which only handles bare carriers) misses it —
+                    // a literal backtick then leaks as raw 0x1a (heredoc test).
+                    // The walker's scan above already consumed `\` escapes, so
+                    // only the carrier restores apply here (no
+                    // decode_old_style_backtick_source re-pass).
+                    let source = source
+                        .replace(crate::executor::markers::DATA_BACKTICK, "`")
+                        .replace(crate::executor::markers::CTLESC, "")
+                        .replace(crate::executor::markers::DATA_DOLLAR, "$")
+                        .replace(crate::executor::markers::PROTECTED_BACKSLASH, "\\");
                     let saved_backtick_context = self.backtick_body_diagnostic.replace(true);
                     let substitution_output =
                         self.expand_command_substitution_mut_typed_with_context(&source, context);
@@ -1185,6 +1227,10 @@ impl Executor {
                 continue;
             }
 
+            // Mirror of the &self walker: QUOTED_EXPANSION_SITE before a
+            // `${}` fragment means the lexer saw it inside quotes — GNU's
+            // `quoted` bit for the fragment dispatch (rubash#3581).
+            let fragment_site_quoted = quoted_site;
             if quoted_site {
                 quoted_span_start = Some(output.len());
                 quoted_site = false;
@@ -1429,11 +1475,18 @@ impl Executor {
                             if let Some(start) = frag_start {
                                 self.apply_fragment_assignment_in_order(&name, word, start);
                             }
+                            let fragment_context = if (fragment_site_quoted || in_double)
+                                && matches!(context, SubstitutionQuoteContext::Unquoted)
+                            {
+                                SubstitutionQuoteContext::DoubleQuoted
+                            } else {
+                                context
+                            };
                             let value =
                                 self.expand_with_parameter_env(saved_parameter_state, |executor| {
                                     executor.expand_word_mut_with_context(
                                         &format!("${{{name}}}"),
-                                        context,
+                                        fragment_context,
                                     )
                                 });
                             let value = protect_rhs_value(
@@ -1463,11 +1516,18 @@ impl Executor {
                             if let Some(start) = frag_start {
                                 self.apply_fragment_assignment_in_order(&name, word, start);
                             }
+                            let fragment_context = if (fragment_site_quoted || in_double)
+                                && matches!(context, SubstitutionQuoteContext::Unquoted)
+                            {
+                                SubstitutionQuoteContext::DoubleQuoted
+                            } else {
+                                context
+                            };
                             let value =
                                 self.expand_with_parameter_env(saved_parameter_state, |executor| {
                                     executor.expand_word_mut_with_context(
                                         &format!("${{{name}}}"),
-                                        context,
+                                        fragment_context,
                                     )
                                 });
                             let value = protect_rhs_value(
@@ -1498,11 +1558,29 @@ impl Executor {
                         if let Some(start) = frag_start {
                             self.apply_fragment_assignment_in_order(&name, word, start);
                         }
+                        // rubash#3581: a `${}` fragment inside a `"..."`
+                        // span (walker's own in_double, or the lexer's
+                        // QUOTED_EXPANSION_SITE marker) is double-quoted
+                        // context for the fragment dispatch — without it a
+                        // quoted `"${a[*]#...}"` would read the removal
+                        // gate's silent branch as if unquoted.
+                        let fragment_context = if (fragment_site_quoted || in_double)
+                            && matches!(context, SubstitutionQuoteContext::Unquoted)
+                        {
+                            SubstitutionQuoteContext::DoubleQuoted
+                        } else {
+                            context
+                        };
                         let value =
                             self.expand_with_parameter_env(saved_parameter_state, |executor| {
                                 // Propagate the outer quote context so a
                                 // double-quoted "${v:-~}" keeps its quoted
                                 // default-word semantics (no tilde expansion).
+                                // rubash#281: resolve the fragment without
+                                // re-entering the whole pipeline (GNU
+                                // subst.c:11229 expand_word_internal is a
+                                // single pass; its `${` arm runs
+                                // parameter_brace_expand inline).
                                 // GNU param_expand passes `quoted` down to
                                 // parameter_brace_expand_word
                                 // (subst.c:7840-7860): when this fragment
@@ -1512,13 +1590,6 @@ impl Executor {
                                 // looking `<(`/`>(` inside it literal
                                 // (subst.c:11369 — the procsub cases skip
                                 // double-quoted text, `"${v:-<( )}"`).
-                                let fragment_context = if (in_double || quoted_span_start.is_some())
-                                    && matches!(context, SubstitutionQuoteContext::Unquoted)
-                                {
-                                    SubstitutionQuoteContext::DoubleQuoted
-                                } else {
-                                    context
-                                };
                                 executor.expand_braced_parameter_fragment_in_word(
                                     &name,
                                     fragment_context,
@@ -1702,16 +1773,24 @@ impl Executor {
                         // the command while the script continues (braces.tests
                         // "${a+'$('\'}"). parser_error (error.c:300) uses
                         // yy_input_name()=="command substitution" and the
-                        // inherited line_number (evalstring.c push_stream(0))
-                        // — the current command line plus the newlines the
-                        // comsub text consumed.
+                        // inherited line_number — command_substitute re-parses
+                        // the extracted body through parse_and_execute
+                        // (subst.c:7413) with no SEVAL_RESETLINE, so the base
+                        // is the script's line_number at expansion minus one
+                        // (evalstring.c:345 line_number--); the body's own
+                        // lines plus its EOF read then push it to
+                        // current + body_lines + 1. Measured on GNU 5.3.20:
+                        // "${a+'$('\'}" at line N reports N+2 for a one-line
+                        // body, N+3 for a two-line body (rubash#3605 class B,
+                        // run-braces).
                         let eof_line = self
                             .shell_state
                             .env_vars
                             .get("__RUBASH_CURRENT_LINE")
                             .and_then(|line| line.parse::<usize>().ok())
                             .unwrap_or(1)
-                            + source.lines().count().saturating_sub(1);
+                            + source.lines().count()
+                            + 1;
                         eprintln!(
                             "{}unexpected EOF while looking for matching `)'",
                             self.comsub_eof_error_diagnostic(eof_line)
@@ -2020,9 +2099,11 @@ impl Executor {
                                 // tagging keeps decoded quotes from closing
                                 // the synthetic span.
                                 output.push('\'');
-                                output.push_str(&crate::lexer::escape_decoded_ansi_c_quotes(
-                                    &decoded,
-                                ));
+                                output.push_str(
+                                    &crate::lexer::escape_decoded_ansi_c_quotes_unprotected(
+                                        &decoded,
+                                    ),
+                                );
                                 output.push('\'');
                             } else {
                                 // Tag decoded quotes with E010/E011 markers so
@@ -2155,12 +2236,24 @@ impl Executor {
         let mut closed = false;
         let mut term = true;
         let mut paren_depth = 0usize;
+        // Shell_getc token-boundary state for `#` comment recognition
+        // (parse.y:3631-3645): true at the body start and after a blank,
+        // newline, or operator (`;` `&` `|` `(` `)` `<` `>`); false inside
+        // a word. `term` above answers a different question (is `}` a
+        // group closer here) — after `echo hi ` it is false while a `#`
+        // still comments — so the comment arm needs its own state, the
+        // same split as extract_funsub_body_tail's `at_word_start`
+        // (command_substitution.rs, rubash#3823). Without it an apostrophe
+        // inside a comment (`# don't`) opened a phantom single-quote that
+        // swallowed the closing `}`.
+        let mut at_word_start = true;
         // `while let` (not `for ... in chars.by_ref()`): the lone-`}` check
         // needs chars.peek() while the loop owns the iterator.
         while let Some(source_ch) = chars.next() {
             if escaped {
                 source.push(source_ch);
                 escaped = false;
+                at_word_start = false;
                 continue;
             }
             if source_ch == '\\' && !single {
@@ -2169,6 +2262,7 @@ impl Executor {
                 if !double {
                     term = false;
                 }
+                at_word_start = false;
                 continue;
             }
             if single {
@@ -2185,6 +2279,23 @@ impl Executor {
                 source.push(source_ch);
                 continue;
             }
+            // parse.y:3631 shell_getc: `#` at a token start discards to
+            // EOL; a quote character inside the comment is inert. The
+            // comment is pushed verbatim into the body (the re-parse in
+            // expand_current_shell_command_substitution is the real
+            // parser, which recognizes it); only the extent scan must not
+            // quote-track through it. The newline itself is left for the
+            // next iteration's separator arm, which restores command
+            // position.
+            if source_ch == '#' && at_word_start {
+                source.push(source_ch);
+                while chars.peek().is_some_and(|&next| next != '\n') {
+                    if let Some(c) = chars.next() {
+                        source.push(c);
+                    }
+                }
+                continue;
+            }
             let mut word_text = false;
             match source_ch {
                 '$' => {
@@ -2196,24 +2307,35 @@ impl Executor {
                     source.push(source_ch);
                     super::command_substitution::consume_nested_dollar_unit(chars, &mut source);
                     term = false;
+                    at_word_start = false;
                     continue;
                 }
                 '\'' => {
                     single = true;
                     term = false;
+                    at_word_start = false;
                 }
                 '"' => {
                     double = true;
                     term = false;
+                    at_word_start = false;
                 }
                 '(' => {
                     paren_depth += 1;
                     term = false;
+                    at_word_start = true;
                 }
                 ')' if paren_depth > 0 => {
                     paren_depth -= 1;
                     // A closed outermost `( ... )` is a complete command.
                     term = paren_depth == 0;
+                    at_word_start = true;
+                }
+                // A bare `)` (no open subshell) is a metacharacter, not
+                // word text: the next token starts after it.
+                ')' => {
+                    term = false;
+                    at_word_start = true;
                 }
                 '{' if term && paren_depth == 0 => {
                     depth += 1;
@@ -2232,17 +2354,72 @@ impl Executor {
                         // separator.
                         depth -= 1;
                         term = true;
+                        at_word_start = true;
                     } else {
                         closed = true;
                         break;
                     }
                 }
-                ';' | '&' | '|' | '\n' if paren_depth == 0 => term = true,
-                ' ' | '\t' | '\r' => {}
+                // Heredoc bodies are raw lines (make_cmd.c:512): a `}` or
+                // a quote character inside the body must not move this
+                // scan (rubash#3823 h2/h3). A second `<` starts the
+                // heredoc (the helper copies the header and body lines
+                // verbatim); a third `<` makes `<<<`, a herestring with
+                // no body to skip, and stays for the next iteration's
+                // plain `<` arm.
+                '<' if chars.peek() == Some(&'<') => {
+                    source.push(source_ch);
+                    if let Some(second) = chars.next() {
+                        source.push(second);
+                    }
+                    if chars.peek() == Some(&'<') {
+                        // `<<<` herestring: mid-operator, not a token start.
+                        at_word_start = false;
+                        term = false;
+                        continue;
+                    }
+                    super::command_substitution::push_funsub_heredoc(chars, &mut source);
+                    // A heredoc terminator ends on its own line, so the
+                    // next character begins a fresh token — and, at funsub
+                    // level, a `}` there is the body's closer. `term`
+                    // stays false inside a subshell (an inner group's `}`
+                    // must not read as this funsub's closer), mirroring
+                    // extract_funsub_body_tail (#3823).
+                    at_word_start = true;
+                    if paren_depth == 0 {
+                        term = true;
+                    }
+                    continue;
+                }
+                // A redirection operator ends the previous word: the
+                // target word starts here, so a `#` there comments
+                // (parse.y:3631; `echo >#f` is a comment in GNU, #2033).
+                // `term` is untouched — a `}` right after `>` is the
+                // redirect's target word, not this body's closer.
+                '<' | '>' => {
+                    term = false;
+                    at_word_start = true;
+                }
+                ';' | '&' | '|' | '\n' => {
+                    // A separator is a token boundary at any depth (`#`
+                    // after `;` comments even inside `( ... )`), but it
+                    // restores command position only at funsub level —
+                    // `term` stays false inside a subshell (an inner
+                    // group's `}` must not read as this funsub's closer),
+                    // mirroring extract_funsub_body_tail (#3823).
+                    if paren_depth == 0 {
+                        term = true;
+                    }
+                    at_word_start = true;
+                }
+                ' ' | '\t' | '\r' => {
+                    at_word_start = true;
+                }
                 _ => word_text = true,
             }
             if word_text {
                 term = false;
+                at_word_start = false;
             }
             source.push(source_ch);
         }
@@ -2748,7 +2925,7 @@ impl Executor {
         // boundary; GNU has it for free from fork() (subst.c:7143
         // command_substitute -> the child's do_redirections die with the
         // child).
-        let saved_fd_table = self.fd_table.clone();
+        let saved_fd_table = self.fd_table.saved_table();
         // The body is fresh parser input whose alias expansion GNU applies
         // at its read (subst.c:7143 parse_and_execute); it already ran at
         // stream level in comsub_body_alias_splice above, so mark the inner
@@ -3007,7 +3184,7 @@ impl Executor {
         // with the child, so snapshot the whole table here: an
         // `exec 2>/dev/null` inside the function must not silence the
         // caller's stderr after the substitution returns.
-        let saved_fd_table = self.fd_table.clone();
+        let saved_fd_table = self.fd_table.saved_table();
         let saved_fd1 = self.fd_table.entries.insert(
             1,
             crate::executor::fd_table::FdEntry {
@@ -3942,6 +4119,9 @@ pub(in crate::executor) fn collect_command_substitution_source_ex(
                     closed = true;
                     break;
                 }
+                source.push(source_ch);
+            }
+            ')' if !single && !double => {
                 source.push(source_ch);
             }
             _ => source.push(source_ch),

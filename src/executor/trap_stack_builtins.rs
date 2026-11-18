@@ -150,7 +150,10 @@ impl Executor {
         // reject gate's Input probe and the setup walk), so this
         // pass owns exactly the registry classes those passes skip:
         // net targets (probed through the classified ladder — the
-        // probe's netopen is the command's one open), fd aliases
+        // probe's netopen is the command's one open when no bind ran;
+        // when the funnel's bind already connected the entry,
+        // buffered_builtin_input_redirect_error skips it, rubash#3798),
+        // fd aliases
         // (judged against the fd table, no drain), and synthetic
         // /proc targets (served by their ladder). A failure routes
         // its diagnostic through the command's fd-2 binding, drops
@@ -278,6 +281,28 @@ impl Executor {
                 continue;
             }
             let write = redirect.kind == RedirectKind::ReadWrite;
+            // rubash#3798: a net `<>` entry the funnel's bind already
+            // connected (its fd is in dispatch_net_bound_fds) must not
+            // be re-probed here — the bind performed this entry's one
+            // open (GNU redir.c do_redirections opens each entry
+            // once, r_input_output included), and the probe's
+            // classified open would connect a SECOND socket and drop
+            // it (the #1950 hazard the input probe already avoids).
+            // A refused connect was already adjudicated by the bind,
+            // so skipping loses no failure verdict. The skip is
+            // net-only: synthetic /proc and link entries have no
+            // bind, so their probe still runs.
+            if write
+                && matches!(
+                    crate::special_paths::classify_special_path(&target),
+                    crate::special_paths::SpecialPathClass::NetRedirect
+                )
+                && self
+                    .dispatch_net_bound_fds
+                    .contains(&redirect.fd.unwrap_or(0))
+            {
+                continue;
+            }
             let result = match crate::special_paths::classify_special_path(&target) {
                 crate::special_paths::SpecialPathClass::NetRedirect
                 | crate::special_paths::SpecialPathClass::SyntheticProc
@@ -541,13 +566,32 @@ impl Executor {
         // value, the make_absolute base falls back to the physical
         // spelling (a symlinked pushd entry binds "$R/a/real/."
         // instead of "$R/link/."). -n moves nothing and dirs never
-        // moves, so both updates are gated on an actual move; the
-        // bound PWD is the logical value, exactly as cd's bindpwd
-        // binds it.
-        let moved = status == 0 && self.shell_state.cwd != cwd_before;
+        // moves, so the update is gated on an actual move.
+        //
+        // rubash#3421: the gate is the MOVE, not the status, and the
+        // value is the move's logical spelling, not the env PWD.
+        // GNU updates tcwd in change_to_directory (builtins/cd.def
+        // :600-619) before bindpwd runs, so a readonly-bind failure
+        // (status 1, chdir standing) still leaves tcwd at the new
+        // directory — and bindpwd reads that value, it does not
+        // rewrite it. The env PWD is stale exactly then (the bind
+        // never landed), so reading it would keep the stale value;
+        // the stack carrier's element 0 is the move's logical
+        // spelling on every move path (Dir/rotation/swap/popd-top:
+        // pushd.rs saves it even on its bind-failure early
+        // returns), so it is the value tcwd must follow. With the
+        // stale value, a later `cd .` probed "$D/." (which
+        // canonicalizes) instead of "$D/a/." (which does not), so the
+        // deleted-dot arm never fired and the getcwd diagnostic was
+        // lost; `pwd -L` likewise read the stale spelling.
+        let moved = self.shell_state.cwd != cwd_before;
         if moved {
-            if let Some(pwd) = self.shell_state.env_vars.get("PWD").cloned() {
-                self.shell_state.logical_cwd = Some(pwd);
+            let logical = crate::builtins::pushd::load_stack_carrier(&self.shell_state.env_vars)
+                .into_iter()
+                .next()
+                .or_else(|| self.shell_state.env_vars.get("PWD").cloned());
+            if let Some(logical) = logical {
+                self.shell_state.logical_cwd = Some(logical);
             }
         }
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;

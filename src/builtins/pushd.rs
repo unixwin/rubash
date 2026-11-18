@@ -246,7 +246,22 @@ where
                     let new_pwd = stack[0].clone();
                     // G-02: change_to_temp's chdir moves the session
                     // cwd field; it stands even if bindpwd fails.
-                    *cwd = physical_cwd_for(&new_pwd, env_vars, cwd);
+                    // rubash#3788: GNU's change_to_temp runs
+                    // cd_to_string, so a new top without the search
+                    // bit fails with cd_builtin's verdict (rc 1, the
+                    // list stays swapped, no dirs print) instead of
+                    // moving.
+                    match probe_stack_dir(&new_pwd, env_vars, cwd) {
+                        Ok(physical) => *cwd = physical,
+                        Err(error) => {
+                            diag.free(format_args!(
+                                "{new_pwd}: {}",
+                                crate::posix_errors::message(&error)
+                            ));
+                            save_stack(env_vars, &stack);
+                            return Ok(EXECUTION_FAILURE);
+                        }
+                    }
                     if bindpwd_write(env_vars, &old_pwd, &new_pwd, diag) {
                         save_stack(env_vars, &stack);
                         return Ok(EXECUTION_FAILURE);
@@ -304,7 +319,22 @@ where
                     let new_pwd = stack[0].clone();
                     // G-02: the rotation's chdir moves the session cwd
                     // field; it stands even if bindpwd fails.
-                    *cwd = physical_cwd_for(&new_pwd, env_vars, cwd);
+                    // rubash#3788: GNU's change_to_temp runs
+                    // cd_to_string, so a new top without the search
+                    // bit fails with cd_builtin's verdict (rc 1, the
+                    // list stays rotated, no dirs print) instead of
+                    // moving.
+                    match probe_stack_dir(&new_pwd, env_vars, cwd) {
+                        Ok(physical) => *cwd = physical,
+                        Err(error) => {
+                            diag.free(format_args!(
+                                "{new_pwd}: {}",
+                                crate::posix_errors::message(&error)
+                            ));
+                            save_stack(env_vars, &stack);
+                            return Ok(EXECUTION_FAILURE);
+                        }
+                    }
                     if bindpwd_write(env_vars, &old_pwd, &new_pwd, diag) {
                         save_stack(env_vars, &stack);
                         return Ok(EXECUTION_FAILURE);
@@ -700,6 +730,38 @@ enum PopdChdir {
     Bridged,
 }
 
+/// Probe a stack word the way the swap/rotation chdir would (GNU
+/// pushd.def change_to_temp -> cd_to_string -> cd_builtin): map to
+/// the native form, join the session cwd for relative words, and run
+/// cd's probe (canonicalize + directory + search permission).
+/// rubash#3788: the swap/rotation arms moved the session cwd field
+/// unconditionally through physical_cwd_for — a stack entry that had
+/// lost its search bit since being pushed still "moved" with rc 0,
+/// while GNU's cd_to_string refuses it with EACCES.
+fn probe_stack_dir(
+    word: &str,
+    env_vars: &std::collections::HashMap<String, String>,
+    cwd: &Path,
+) -> io::Result<PathBuf> {
+    // cd.rs's Windows-host bridge, same predicate and match list as
+    // logical_dir_exists / popd_chdir: on an unconfigured host the
+    // POSIX system names have no physical directory, so the move
+    // stands on the logical spelling without a probe.
+    if cfg!(windows)
+        && !crate::executor::path::shell_root_configured(env_vars)
+        && matches!(word, "/" | "/bin" | "/etc" | "/tmp" | "/usr")
+    {
+        return Ok(physical_cwd_for(word, env_vars, cwd));
+    }
+    let native = crate::executor::path::shell_path_to_windows(word, env_vars);
+    let joined = if native.is_absolute() {
+        native
+    } else {
+        cwd.join(native)
+    };
+    crate::executor::path::probe_directory_for_chdir(&joined)
+}
+
 /// G-02: the physical session-cwd value for a stack directory word
 /// (the logical display form the stack and $PWD carry): map to the
 /// native form, join the session cwd for relative words, canonicalize
@@ -716,20 +778,6 @@ fn physical_cwd_for(
         cwd.join(native)
     };
     crate::executor::path::canonicalize_native(&joined).unwrap_or(joined)
-}
-
-/// The error chdir would have reported for a target that exists but
-/// is not a directory (ENOTDIR / ERROR_DIRECTORY), in a form
-/// `posix_errors::message` renders as "Not a directory".
-fn not_a_directory_error() -> io::Error {
-    #[cfg(windows)]
-    {
-        io::Error::from_raw_os_error(267)
-    }
-    #[cfg(not(windows))]
-    {
-        io::Error::from_raw_os_error(20)
-    }
 }
 
 /// The top-of-stack popd chdir, GNU cd_to_string (pushd.def:559-572): a
@@ -767,11 +815,10 @@ fn popd_chdir(
     } else {
         cwd.join(&native)
     };
-    let probed = match crate::executor::path::canonicalize_native(&joined) {
-        Ok(path) if path.is_dir() => Ok(path),
-        Ok(_) => Err(not_a_directory_error()),
-        Err(error) => Err(error),
-    };
+    // rubash#3788: the probe is the chdir verdict itself — see
+    // executor::path::probe_directory_for_chdir. A stack word without
+    // the search bit fails GNU's cd_to_string with EACCES.
+    let probed = crate::executor::path::probe_directory_for_chdir(&joined);
     if let Err(error) = probed {
         // cd.def:427: builtin_error("%s: %s", dirname, strerror(e)) reports
         // the stored word, not the Windows-mapped path.

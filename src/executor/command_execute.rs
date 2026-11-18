@@ -127,7 +127,25 @@ impl Executor {
         // stdin_redir whether fd 0 is among them; the flag is sticky for the
         // structure's whole dynamic extent and eval.c:181 resets it per
         // reader command. Async `cmd &` consults it (execute_cmd.c:2837).
-        if command_is_shell_control_structure(cmd) && !cmd.redirects.is_empty() {
+        // rubash#3605: a PIPELINE ELEMENT's own redirects never reach this
+        // check in GNU — the element's execute_in_subshell consumed them in
+        // do_redirections before re-dispatching (:1759-1764), so
+        // command->redirects is NULL at :826 and the element child's
+        // `|=pipe` verdict (execute_cmd.c:4570) survives: a pipe-fed
+        // `for … done | cat` body keeps flag=1 even with the element's own
+        // `< file` redirects. element_pipe_stdin stands in for that
+        // consumption; consume it here (only a shell-control-structure
+        // node — a `( )` element's marker must reach its own :1733 assign
+        // in execute_subshell_command_with_redirects).
+        let element_pipe_stdin = if command_is_shell_control_structure(cmd) {
+            self.shell_state.element_pipe_stdin.replace(false)
+        } else {
+            false
+        };
+        if command_is_shell_control_structure(cmd)
+            && !cmd.redirects.is_empty()
+            && !element_pipe_stdin
+        {
             self.shell_state
                 .stdin_redir
                 .set(cmd.redirects.iter().any(redirect_updates_stdin_redir));
@@ -359,7 +377,23 @@ impl Executor {
         let mut expanded = if cmd.arithmetic_command.is_some() {
             cmd.clone()
         } else {
-            match self.expand_command_words(cmd) {
+            // rubash#3605: GNU raises comsub_ignore_return around
+            // expand_words when the command carries CMD_IGNORE_RETURN
+            // (execute_cmd.c:4616; the flag arrives via :655-656 or the
+            // :917 ignore_return||invert arm), so command substitutions
+            // spawned by this expansion stamp CMD_IGNORE_RETURN on
+            // every body command (builtins/evalstring.c:496). Only the
+            // command-word expansion raises it — redirect expansion is
+            // outside the bracket (verified: `! cat < <(set -e; false;
+            // echo x)` stays empty under 5.3.20).
+            if self.suppress_errexit > 0 {
+                self.comsub_ignore_return += 1;
+            }
+            let expansion_result = self.expand_command_words(cmd);
+            if self.comsub_ignore_return > 0 {
+                self.comsub_ignore_return -= 1;
+            }
+            match expansion_result {
                 Ok(expanded) => expanded,
                 // GNU expr.c expr_streval: an unbound variable under `set -u`
                 // raises FORCE_EOF from ANY expansion position — the word
@@ -407,9 +441,18 @@ impl Executor {
             self.exit_code = code;
             return Err(ExecuteError::ExitCode(code));
         }
-        if self.last_command_substitution_status.get() == Some(2)
-            && self.last_command_substitution_parse_error.get()
-        {
+        // rubash#3756: the verdict is the LATCH, not the per-substitution
+        // status slot — a later substitution in the same word list
+        // overwrites `last_command_substitution_status' with its own
+        // child exit (the documented left-to-right `$?' overlay), which
+        // used to mask a fatal `$(' body error and let the command run
+        // (`echo $(case x in a|) $(echo ok)' printed `ok'). GNU's body
+        // grammar failure is read-time and fatal for the enclosing
+        // command (parse.y:4451 parse_comsub -> DISCARD), so the latch
+        // alone decides; `status == Some(2)' is implied — every latch
+        // site sets it (report_comsub_body_error_if_any,
+        // function_substitute, the heredoc-overflow arm).
+        if self.last_command_substitution_parse_error.get() {
             // A BACKTICK body's parse error killed only the substituted
             // child (GNU subst.c string_locale -> parse_and_execute: the
             // child reports `command substitution: line N: ...' at its own
@@ -514,7 +557,20 @@ impl Executor {
                 } else {
                     None
                 };
-                return self.execute_empty_words_command(cmd, vanished_status);
+                // rubash#2761: GNU's words==0 check
+                // (execute_cmd.c:4626-4640) runs on the EXPANDED word
+                // list, which is empty here — but `cmd` still carries
+                // the raw words, and the null-command path decides
+                // on them (the heredoc fork classifier reads the
+                // effective word). Hand it the node as GNU sees it:
+                // wordless, so `$EMPTY 3<<EOF` classifies under
+                // execute_null_command's force-fork rule (no fd-0
+                // redirect -> the body expands in the shell and
+                // `:=` persists) instead of as an external
+                // command's forked expansion.
+                let mut vanished_cmd = cmd.clone();
+                vanished_cmd.words.clear();
+                return self.execute_empty_words_command(&vanished_cmd, vanished_status);
             }
             if let Some(status) = self.last_command_substitution_status.get() {
                 self.exit_code = status;
@@ -2039,7 +2095,7 @@ impl Executor {
     /// order). A fatal word-expansion arithmetic failure in a bare command
     /// (e.g. bare `$((1/0))` with no other words) abandons the rest of the
     /// current command list (GNU Bash 5.2.37 evidence).
-    fn abort_on_expansion_errors(&mut self) -> Result<(), ExecuteError> {
+    pub(in crate::executor) fn abort_on_expansion_errors(&mut self) -> Result<(), ExecuteError> {
         if self.shell_state.arithmetic_expansion_error.get() {
             self.shell_state.arithmetic_expansion_error.set(false);
             let was_fatal = self.shell_state.arithmetic_fatal_error.replace(false);
@@ -2123,6 +2179,10 @@ impl Executor {
             return Err(ExecuteError::ExpansionFailure(1));
         }
         if self.shell_state.parameter_bad_substitution.replace(false) {
+            // rubash#3499: consuming the verdict spends the print
+            // budget with it, so the next command reports its own
+            // failure.
+            self.shell_state.bad_substitution_reported.set(false);
             if self.posix_mode_enabled()
                 && !self.invocation_interactive()
                 && crate::builtins::shopt::compatibility_level(&self.shell_state.env_vars) > 43
@@ -2245,6 +2305,12 @@ impl Executor {
         let arithmetic_error = self.shell_state.arithmetic_expansion_error.get();
         let arithmetic_fatal = self.shell_state.arithmetic_fatal_error.get();
         let arithmetic_nounset = self.shell_state.arithmetic_nounset_error.get();
+        // rubash#3581: same crossing for the `bad substitution` latch —
+        // GNU's do_redirections runs in the child too, and a parameter
+        // error inside a heredoc body (`"${a[*]#${-y}}"`) is an
+        // expand_word_error the parent must observe to abandon the
+        // command (execute_cmd.c:5522 -> redir.c do_redirections).
+        let parameter_bad_substitution = self.shell_state.parameter_bad_substitution.get();
         self.restore_flat_subshell(saved_state);
         self.shell_state
             .arithmetic_expansion_error
@@ -2255,6 +2321,9 @@ impl Executor {
         self.shell_state
             .arithmetic_nounset_error
             .set(arithmetic_nounset);
+        self.shell_state
+            .parameter_bad_substitution
+            .set(parameter_bad_substitution);
         self.exit_code = saved_exit_code;
         self.last_command_substitution_status
             .set(saved_substitution_status);
@@ -2273,7 +2342,10 @@ impl Executor {
     /// expanded in the main shell (or no funsub exited): a main-shell
     /// latch stays on `current_shell_substitution_exit` for the caller
     /// to consume as a shell abort.
-    fn preexpand_command_stdin(&mut self, cmd: &mut CommandNode) -> Option<i32> {
+    pub(in crate::executor) fn preexpand_command_stdin(
+        &mut self,
+        cmd: &mut CommandNode,
+    ) -> Option<i32> {
         // rubash#2681: for a command GNU forks, the bodies expand in
         // the child — run the whole pre-expansion (every body of the
         // command, in redirect order, so later bodies still see

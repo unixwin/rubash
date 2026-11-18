@@ -1,4 +1,4 @@
-use super::types::{FUNCTION_STDIN_OFFSET, INHERIT_PROCESS_STDIN};
+use super::types::{FUNCTION_STDIN, FUNCTION_STDIN_OFFSET, INHERIT_PROCESS_STDIN};
 use super::*;
 use crate::executor::markers::STORAGE_WORD_PREFIX;
 
@@ -181,7 +181,15 @@ impl Executor {
             if let Some(redirect) = &cmd.redirect_in {
                 if redirect.fd.unwrap_or(0) == 0 {
                     let target = self.expand_redirect_target(redirect);
-                    if !target.starts_with("<(") && !is_closed_redirect_target(&target) {
+                    // rubash#3660: an fd-alias spelling names a
+                    // descriptor in the shell's fd table, never a
+                    // filesystem path (see mapfile_record_source) —
+                    // skip the raw file slurp so the string ladder
+                    // below serves the alias from the table.
+                    if super::execution_misc::dev_stdio_redirect_fd(&target).is_none()
+                        && !target.starts_with("<(")
+                        && !is_closed_redirect_target(&target)
+                    {
                         // niubash#177: same operand resolution as
                         // open_input_redirect — a virtual-root input
                         // operand may exist only under its `.exe` spelling.
@@ -577,8 +585,7 @@ impl Executor {
         read_fd: Option<u32>,
         stderr: &[u8],
     ) -> Result<Option<i32>, ExecuteError> {
-        let Some(mut source) = self.mapfile_record_source(cmd, read_fd, delimiter, trim_newline)
-        else {
+        let Some(mut source) = self.mapfile_record_source(cmd, read_fd, true) else {
             return Ok(None);
         };
         let start = origin.unwrap_or(0);
@@ -629,7 +636,21 @@ impl Executor {
                 // (zsyncfd, mapfile.def:195) — a callback reading the
                 // same fd must see exactly the unconsumed bytes.
                 self.mapfile_source_sync(&mut source);
-                self.execute_mapfile_callback(callback, target, &record, cmd)?;
+                // rubash#3660: the callback runs in-process on the
+                // builtin's input descriptor (mapfile.def:108-131),
+                // so bind the record source's own stream to that
+                // descriptor for the invocation — a callback `read`
+                // then consumes the shared stream, interleaved with
+                // the driver's records, instead of the shell's
+                // ambient stdin.
+                let input_fd = read_fd.unwrap_or(0);
+                let share = source.begin_callback_share(self, input_fd);
+                let callback_result = self.execute_mapfile_callback(callback, target, &record, cmd);
+                source.end_callback_share(self, input_fd, share);
+                if let Err(error) = callback_result {
+                    source.unstage_mirror(self);
+                    return Err(error);
+                }
                 // A3-F4: GNU mapfile.def:142-218 re-looks-up the array
                 // after run_callback ("Bad things can happen if the
                 // callback modifies ENTRY... so we look it up again
@@ -652,6 +673,7 @@ impl Executor {
             self.bind_mapfile_element_live(name, &entries, target, &record, previous_max);
         }
         self.mapfile_source_sync(&mut source);
+        source.unstage_mirror(self);
         // Canonical final render: byte-identical to the shape the
         // slurp path stores for the same input.
         self.shell_state
@@ -712,25 +734,74 @@ impl Executor {
         }
     }
 
-    /// One fd's record source: real handles pull incrementally;
-    /// text / process-substitution endpoints are already materialized,
-    /// so they are drained whole (as the slurp path drains them) and
-    /// pre-split — the callbacks still fire between records.
-    fn mapfile_endpoint_source(
+    /// Install `endpoint` as the read arm of `fd` for one mapfile
+    /// callback invocation, returning what end_callback_share needs
+    /// to restore (rubash#3660). The entry is written directly, not
+    /// through open_input: open_input retires the outgoing endpoint,
+    /// which would close a saved FileFd the restore must hand back
+    /// live. The saved entry's write arm stays in place — only the
+    /// read face is rebound to the mapfile stream.
+    fn bind_mapfile_callback_stream(
         &mut self,
         fd: u32,
-        delimiter: Option<u8>,
-        trim_newline: bool,
-    ) -> Option<MapfileRecordSource> {
+        endpoint: FdReadEndpoint,
+    ) -> MapfileCallbackShare {
+        let saved = self.fd_table.entries.get(&fd).cloned();
+        let entry = crate::executor::fd_table::FdEntry {
+            read: Some(endpoint),
+            write: saved.as_ref().and_then(|entry| entry.write.clone()),
+            closed: false,
+            dynamic: saved.as_ref().is_some_and(|entry| entry.dynamic),
+        };
+        self.fd_table.entries.insert(fd, entry);
+        MapfileCallbackShare::Bound { saved }
+    }
+
+    /// Restore the entry bind_mapfile_callback_stream saved (or the
+    /// entry's absence) once a callback invocation ends.
+    fn unbind_mapfile_callback_stream(
+        &mut self,
+        fd: u32,
+        saved: Option<crate::executor::fd_table::FdEntry>,
+    ) {
+        match saved {
+            Some(entry) => {
+                self.fd_table.entries.insert(fd, entry);
+            }
+            None => {
+                self.fd_table.entries.remove(&fd);
+            }
+        }
+    }
+
+    /// One fd's record source: real handles pull incrementally;
+    /// text / process-substitution endpoints are already materialized.
+    /// On a numbered descriptor the source SHARES the endpoint's own
+    /// cell, so a callback reading that descriptor interleaves with
+    /// the driver (rubash#3660); on fd 0 the endpoint is drained whole
+    /// (as the slurp path drains it) into a record stream — mirrored
+    /// for the callback driver — and the callbacks still fire between
+    /// records.
+    fn mapfile_endpoint_source(&mut self, fd: u32, mirror: bool) -> Option<MapfileRecordSource> {
         let endpoint = self.fd_table.read_endpoint(fd)?;
-        if matches!(
-            endpoint,
-            FdReadEndpoint::Text(_) | FdReadEndpoint::ProcessSubstitution(_)
-        ) {
-            let bytes = self.fd_table.read_all_bytes(fd)?;
-            let text = String::from_utf8(bytes)
-                .unwrap_or_else(|error| String::from_utf8_lossy(&error.into_bytes()).into_owned());
-            return Some(MapfileRecordSource::values(text, delimiter, trim_newline));
+        match &endpoint {
+            FdReadEndpoint::Text(stream) | FdReadEndpoint::ProcessSubstitution(stream)
+                if fd != 0 =>
+            {
+                return Some(MapfileRecordSource::values_shared(stream.clone()));
+            }
+            FdReadEndpoint::Text(_) | FdReadEndpoint::ProcessSubstitution(_) => {
+                let bytes = self.fd_table.read_all_bytes(fd)?;
+                let text = String::from_utf8(bytes).unwrap_or_else(|error| {
+                    String::from_utf8_lossy(&error.into_bytes()).into_owned()
+                });
+                return Some(if mirror {
+                    MapfileRecordSource::values_mirrored(text, self)
+                } else {
+                    MapfileRecordSource::values(text)
+                });
+            }
+            _ => {}
         }
         MapfileRecordSource::from_endpoint(&endpoint)
     }
@@ -740,31 +811,46 @@ impl Executor {
     /// real fds/files incremental (MapfileRecordPuller) instead of
     /// slurping them: only the already-materialized sources (command
     /// redirects staged for another fd, command string input, text /
-    /// process-substitution endpoints) are drained and pre-split, and
-    /// even those fire their callbacks between records.
+    /// process-substitution endpoints) are drained into a record
+    /// stream, and even those fire their callbacks between records.
     pub(in crate::executor) fn mapfile_record_source(
         &mut self,
         cmd: &CommandNode,
         read_fd: Option<u32>,
-        delimiter: Option<u8>,
-        trim_newline: bool,
+        for_callback: bool,
     ) -> Option<MapfileRecordSource> {
         if let Some(fd) = read_fd.filter(|fd| *fd != 0) {
             let staged_redirect = cmd.redirects.iter().any(|redirect| redirect.fd == Some(fd));
             if !staged_redirect {
-                if let Some(source) = self.mapfile_endpoint_source(fd, delimiter, trim_newline) {
+                if let Some(source) = self.mapfile_endpoint_source(fd, false) {
                     return Some(source);
                 }
             }
             return self
                 .mapfile_input_for_command(cmd, read_fd)
-                .map(|input| MapfileRecordSource::values(input, delimiter, trim_newline));
+                .map(MapfileRecordSource::values);
         }
         // fd 0 domain, in mapfile_input_for_command's order.
         if let Some(redirect) = &cmd.redirect_in {
             if redirect.fd.unwrap_or(0) == 0 {
                 let target = self.expand_redirect_target(redirect);
-                if !target.starts_with("<(") && !is_closed_redirect_target(&target) {
+                // rubash#3660: an fd-alias spelling (/dev/fd/N,
+                // /dev/stdin, /proc/self/fd/N) names a descriptor in
+                // the shell's own fd table — GNU's open of the magic
+                // link serves THAT descriptor's stream (redir.c
+                // do_redirections). Opening the spelling as a plain
+                // filesystem path instead reads whatever real
+                // descriptor the process happens to hold at that
+                // number, a different stream whenever the table and
+                // the OS disagree (an exec-bound procsub pipe left at
+                // a high real fd, say). Resolve through the table
+                // endpoint; with no endpoint there, fall through to
+                // the string ladder, which owns the alias arms.
+                if let Some(alias_fd) = super::execution_misc::dev_stdio_redirect_fd(&target) {
+                    if let Some(source) = self.mapfile_endpoint_source(alias_fd, for_callback) {
+                        return Some(source);
+                    }
+                } else if !target.starts_with("<(") && !is_closed_redirect_target(&target) {
                     let path = self.session_path(crate::executor::path::windows_operand_file_path(
                         shell_path_to_windows(&target, &self.shell_state.env_vars),
                         &self.shell_state.env_vars,
@@ -772,12 +858,13 @@ impl Executor {
                     if let Ok(mut file) = std::fs::File::open(&path) {
                         let origin = std::io::Seek::stream_position(&mut file).unwrap_or(0);
                         return Some(MapfileRecordSource::Pull(MapfileRecordPuller {
-                            source: MapfilePullSource::File(file),
+                            source: MapfilePullSource::File { file, path },
                             buffer: Vec::new(),
                             eof: false,
                             taken: 0,
                             rewind: Some(origin),
                             next_fill_offset: 0,
+                            home_endpoint: None,
                         }));
                     }
                     // Open failed: fall through — the string chain
@@ -802,7 +889,7 @@ impl Executor {
                 Some(FdReadEndpoint::File(_) | FdReadEndpoint::CoprocStdout { .. })
             )
         {
-            if let Some(source) = self.mapfile_endpoint_source(0, delimiter, trim_newline) {
+            if let Some(source) = self.mapfile_endpoint_source(0, for_callback) {
                 return Some(source);
             }
         }
@@ -834,10 +921,14 @@ impl Executor {
             }
         }
         if let Some(input) = self.stdin_string_for_command_mut(cmd) {
-            return Some(MapfileRecordSource::values(input, delimiter, trim_newline));
+            return Some(if for_callback {
+                MapfileRecordSource::values_mirrored(input, self)
+            } else {
+                MapfileRecordSource::values(input)
+            });
         }
         if self.fd_table.is_open_for_read(0) {
-            if let Some(source) = self.mapfile_endpoint_source(0, delimiter, trim_newline) {
+            if let Some(source) = self.mapfile_endpoint_source(0, for_callback) {
                 return Some(source);
             }
         }
@@ -855,6 +946,7 @@ impl Executor {
                 taken: 0,
                 rewind: None,
                 next_fill_offset: 0,
+                home_endpoint: None,
             }));
         }
         None
@@ -881,17 +973,158 @@ fn mapfile_single_quote(value: &str) -> String {
 
 /// Record stream for the callback form of mapfile (rubash#1586).
 pub(in crate::executor) enum MapfileRecordSource {
-    /// Already-materialized input, pre-split in the shell-text domain.
-    Values(std::vec::IntoIter<String>),
+    /// Already-materialized input as a shared raw-byte stream: the
+    /// driver extracts records from the same (data, offset) cell a
+    /// callback's reads of the input descriptor serve, so the two
+    /// consumers share ONE cursor exactly like GNU's single fd
+    /// (builtins/mapfile.def:195-197 zsyncfd before run_callback;
+    /// lib/sh/zread.c:294 — rubash#3660). Records are extracted in
+    /// the raw-byte domain with the same scan split_mapfile_input's
+    /// general path performs over the decoded bytes, so the values
+    /// are identical to the pre-split form this replaces.
+    Values {
+        stream: Rc<RefCell<crate::executor::fd_table::TextInput>>,
+        /// For an fd-0 text source consumed with callbacks: the
+        /// stream is ALSO staged as the FUNCTION_STDIN mirror, the
+        /// store every nested command's stdin is carved from (with
+        /// the consumption folded back at function exit,
+        /// function_calls.rs) — the driver extracts from the byte
+        /// copy and the share protocol translates the cursor between
+        /// the two domains at each callback boundary (rubash#3660).
+        mirror: Option<MapfileMirrorSync>,
+    },
     /// Incremental pull in the raw-byte domain.
     Pull(MapfileRecordPuller),
 }
 
+/// The staged-mirror half of an fd-0 Values source (rubash#3660):
+/// the input text as staged in FUNCTION_STDIN, the byte→text offset
+/// map between the driver's decoded-byte cursor and the mirror's
+/// text cursor, and the mirror pair the staging displaced (restored
+/// when the driver finishes).
+pub(in crate::executor) struct MapfileMirrorSync {
+    text: String,
+    byte_to_text: Vec<usize>,
+    saved_stdin: Option<String>,
+    saved_offset: Option<String>,
+    /// The fd-0 entry the staging displaced (restored at unstage):
+    /// the staged mirror IS fd 0's binding for the driver's duration
+    /// (the bind_command_fd0_input mirror branch's discipline,
+    /// rubash#2170) — an ambient endpoint left in place would govern
+    /// the callback's readers instead of the mapfile stream.
+    saved_fd0_entry: Option<crate::executor::fd_table::FdEntry>,
+}
+
 impl MapfileRecordSource {
-    fn values(input: String, delimiter: Option<u8>, trim_newline: bool) -> Self {
-        MapfileRecordSource::Values(
-            split_mapfile_input(&input, delimiter, trim_newline).into_iter(),
-        )
+    fn values(input: String) -> Self {
+        MapfileRecordSource::Values {
+            stream: Rc::new(RefCell::new(
+                crate::executor::fd_table::TextInput::from_data(
+                    crate::executor::substitution_metadata::shell_text_to_raw_bytes(&input),
+                ),
+            )),
+            mirror: None,
+        }
+    }
+
+    /// A record stream over an already-shared text endpoint cell
+    /// (a `-u` descriptor's materialized stream): extraction advances
+    /// the endpoint's own cursor, so a callback reading that
+    /// descriptor serves the same stream (rubash#3660).
+    fn values_shared(stream: Rc<RefCell<crate::executor::fd_table::TextInput>>) -> Self {
+        MapfileRecordSource::Values {
+            stream,
+            mirror: None,
+        }
+    }
+
+    /// An fd-0 text source for the callback driver: stage the input
+    /// as the FUNCTION_STDIN mirror (saving the displaced pair for
+    /// unstage_mirror) so a callback's reads are carved from — and
+    /// folded back into — the one cursor the driver itself consumes,
+    /// the same discipline loop input follows (rubash#3660). When
+    /// the carrier round-trip is not exact for this text, the offset
+    /// map could lie, so fall back to the unstaged stream.
+    fn values_mirrored(input: String, executor: &mut Executor) -> Self {
+        let decoded = crate::executor::substitution_metadata::shell_text_to_raw_bytes(&input);
+        if crate::executor::substitution_metadata::bytes_to_shell_text(&decoded) != input {
+            return Self::values(input);
+        }
+        // The encode is byte-local, so prefix lengths accumulate:
+        // byte_to_text[b] is the staged-text length of the first b
+        // decoded bytes.
+        let mut byte_to_text = Vec::with_capacity(decoded.len() + 1);
+        let mut text_len = 0usize;
+        byte_to_text.push(0);
+        for byte in &decoded {
+            text_len += crate::executor::substitution_metadata::bytes_to_shell_text(
+                std::slice::from_ref(byte),
+            )
+            .len();
+            byte_to_text.push(text_len);
+        }
+        let saved_stdin = executor
+            .shell_state
+            .env_vars
+            .insert(FUNCTION_STDIN.to_string(), input.clone());
+        let saved_offset = executor
+            .shell_state
+            .env_vars
+            .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
+        let saved_fd0_entry = executor.fd_table.entries.remove(&0);
+        MapfileRecordSource::Values {
+            stream: Rc::new(RefCell::new(
+                crate::executor::fd_table::TextInput::from_data(decoded),
+            )),
+            mirror: Some(MapfileMirrorSync {
+                text: input,
+                byte_to_text,
+                saved_stdin,
+                saved_offset,
+                saved_fd0_entry,
+            }),
+        }
+    }
+
+    /// Restore the FUNCTION_STDIN pair values_mirrored displaced.
+    /// Called on every exit of the callback driver once a source
+    /// exists; a no-op for unstaged sources.
+    fn unstage_mirror(&mut self, executor: &mut Executor) {
+        if let MapfileRecordSource::Values {
+            mirror: Some(sync), ..
+        } = self
+        {
+            match &sync.saved_stdin {
+                Some(value) => {
+                    executor
+                        .shell_state
+                        .env_vars
+                        .insert(FUNCTION_STDIN.to_string(), value.clone());
+                }
+                None => {
+                    executor.shell_state.env_vars.remove(FUNCTION_STDIN);
+                }
+            }
+            match &sync.saved_offset {
+                Some(value) => {
+                    executor
+                        .shell_state
+                        .env_vars
+                        .insert(FUNCTION_STDIN_OFFSET.to_string(), value.clone());
+                }
+                None => {
+                    executor.shell_state.env_vars.remove(FUNCTION_STDIN_OFFSET);
+                }
+            }
+            match &sync.saved_fd0_entry {
+                Some(entry) => {
+                    executor.fd_table.entries.insert(0, entry.clone());
+                }
+                None => {
+                    executor.fd_table.entries.remove(&0);
+                }
+            }
+        }
     }
 
     /// Incremental pull over the staged FUNCTION_STDIN mirror
@@ -910,6 +1143,7 @@ impl MapfileRecordSource {
             taken: 0,
             rewind: None,
             next_fill_offset: 0,
+            home_endpoint: None,
         })
     }
 
@@ -945,6 +1179,7 @@ impl MapfileRecordSource {
                     taken: 0,
                     rewind,
                     next_fill_offset: 0,
+                    home_endpoint: Some(endpoint.clone()),
                 }))
             }
             FdReadEndpoint::CoprocStdout { fd: file, .. } => {
@@ -958,6 +1193,7 @@ impl MapfileRecordSource {
                     taken: 0,
                     rewind: None,
                     next_fill_offset: 0,
+                    home_endpoint: Some(endpoint.clone()),
                 }))
             }
             FdReadEndpoint::Text(_) | FdReadEndpoint::ProcessSubstitution(_) => {
@@ -973,6 +1209,7 @@ impl MapfileRecordSource {
                     taken: 0,
                     rewind: None,
                     next_fill_offset: 0,
+                    home_endpoint: Some(endpoint.clone()),
                 }))
             }
             // rubash#1937: a directory endpoint has no record
@@ -987,7 +1224,34 @@ impl MapfileRecordSource {
         trim_newline: bool,
     ) -> Option<String> {
         match self {
-            MapfileRecordSource::Values(values) => values.next(),
+            MapfileRecordSource::Values { stream, .. } => {
+                // The puller's scan over the shared stream: one
+                // record from the cursor, delimiter consumed, the
+                // cursor left just past it — the same segmentation
+                // split_mapfile_input performs (its trailing partial
+                // segment is the cursor-to-EOF record here).
+                let (record, next_offset) = {
+                    let stream = stream.borrow();
+                    let data = stream.data();
+                    let start = stream.offset();
+                    if start >= data.len() {
+                        return None;
+                    }
+                    let rest = &data[start..];
+                    match rest.iter().position(|byte| *byte == delimiter) {
+                        Some(pos) => {
+                            let mut raw = rest[..=pos].to_vec();
+                            if trim_newline || delimiter == 0 {
+                                raw.pop();
+                            }
+                            (finish_mapfile_record(raw, delimiter), start + pos + 1)
+                        }
+                        None => (finish_mapfile_record(rest.to_vec(), delimiter), data.len()),
+                    }
+                };
+                stream.borrow_mut().set_offset(next_offset);
+                Some(record)
+            }
             MapfileRecordSource::Pull(puller) => puller.next_record(delimiter, trim_newline),
         }
     }
@@ -997,6 +1261,112 @@ impl MapfileRecordSource {
             puller.sync_offset();
         }
     }
+
+    /// Bind this source's stream to the mapfile input descriptor for
+    /// one callback invocation (rubash#3660): GNU runs the callback
+    /// in-process with the builtin's own input fd (builtins/
+    /// mapfile.def:108-131 run_callback → evalstring), so a callback
+    /// `read` consumes the very stream mapfile is pulling records
+    /// from, interleaved record by record. Materialized sources bind
+    /// their shared (data, offset) cell as the descriptor's text
+    /// endpoint; a path-opened file binds a dup of its handle (the
+    /// dup shares the open file description, so both readers move
+    /// one offset); handle and inherited-stdin sources already
+    /// resolve through the descriptor's own endpoint and need no
+    /// binding. The caller must pair every call with
+    /// end_callback_share, on error paths too.
+    fn begin_callback_share(
+        &mut self,
+        executor: &mut Executor,
+        input_fd: u32,
+    ) -> MapfileCallbackShare {
+        match self {
+            MapfileRecordSource::Values {
+                stream,
+                mirror: Some(sync),
+            } => {
+                // The mirror is the share: point its cursor at the
+                // driver's consumed boundary, and the callback's
+                // reads carve from there (function_call_stdin) with
+                // the consumption folded back at function exit —
+                // end_callback_share translates the folded cursor
+                // back into the byte domain. No endpoint is bound:
+                // an fd-0 text endpoint would make the carve gate
+                // decline and snapshot instead (rubash#3660).
+                let byte_cursor = stream.borrow().offset();
+                let text_cursor = sync
+                    .byte_to_text
+                    .get(byte_cursor)
+                    .copied()
+                    .unwrap_or(sync.text.len());
+                executor
+                    .shell_state
+                    .env_vars
+                    .insert(FUNCTION_STDIN_OFFSET.to_string(), text_cursor.to_string());
+                MapfileCallbackShare::Unbound
+            }
+            MapfileRecordSource::Values {
+                stream,
+                mirror: None,
+            } => executor
+                .bind_mapfile_callback_stream(input_fd, FdReadEndpoint::Text(stream.clone())),
+            MapfileRecordSource::Pull(puller) => puller.begin_callback_share(executor, input_fd),
+        }
+    }
+
+    /// Undo begin_callback_share and fold any bytes the callback
+    /// consumed through the shared descriptor back into the puller's
+    /// bookkeeping, so the driver's next record continues exactly
+    /// where the callback stopped (GNU: one fd, one offset).
+    fn end_callback_share(
+        &mut self,
+        executor: &mut Executor,
+        input_fd: u32,
+        share: MapfileCallbackShare,
+    ) {
+        if let MapfileCallbackShare::Bound { saved } = share {
+            executor.unbind_mapfile_callback_stream(input_fd, saved);
+        }
+        if let MapfileRecordSource::Values {
+            stream,
+            mirror: Some(sync),
+        } = self
+        {
+            // Fold the mirror cursor the callback left behind back
+            // into the driver's byte cursor (rubash#3660).
+            let text_cursor = executor
+                .shell_state
+                .env_vars
+                .get(FUNCTION_STDIN_OFFSET)
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(0)
+                .min(sync.text.len());
+            let mut end = text_cursor;
+            while end > 0 && !sync.text.is_char_boundary(end) {
+                end -= 1;
+            }
+            let byte_cursor =
+                crate::executor::substitution_metadata::shell_text_to_raw_bytes(&sync.text[..end])
+                    .len();
+            stream.borrow_mut().set_offset(byte_cursor);
+        }
+        if let MapfileRecordSource::Pull(puller) = self {
+            puller.resync_after_callback();
+            puller.fold_staged_callback_consumption(executor);
+        }
+    }
+}
+
+/// What begin_callback_share installed on the input descriptor, to
+/// be restored by end_callback_share (rubash#3660).
+pub(in crate::executor) enum MapfileCallbackShare {
+    /// Nothing installed: the source already resolves through the
+    /// descriptor's own endpoint (handle / inherited-stdin sources).
+    Unbound,
+    /// An endpoint was installed over the descriptor's saved entry.
+    Bound {
+        saved: Option<crate::executor::fd_table::FdEntry>,
+    },
 }
 
 enum MapfilePullSource {
@@ -1017,8 +1387,13 @@ enum MapfilePullSource {
         pos: usize,
         origin: u64,
     },
-    /// A plain file opened by path for the `< file` form.
-    File(std::fs::File),
+    /// A plain file opened by path for the `< file` form. The path
+    /// is kept so a callback share can bind a dup of the handle into
+    /// the fd table (FileFd carries the path for its read face).
+    File {
+        file: std::fs::File,
+        path: std::path::PathBuf,
+    },
     /// The process's inherited stdin (byte-wise, like a pipe).
     InheritedStdin,
 }
@@ -1036,6 +1411,14 @@ pub(in crate::executor) struct MapfileRecordPuller {
     taken: u64,
     rewind: Option<u64>,
     next_fill_offset: u64,
+    /// The fd-table endpoint this puller was built from, when it was
+    /// built from one (rubash#3660): a callback share installs it at
+    /// the mapfile input descriptor — which is not always the
+    /// descriptor the endpoint lives on (an fd-alias redirect target
+    /// resolves to the aliased descriptor's endpoint while the
+    /// callback reads the builtin's own input fd) — so the callback
+    /// and the driver serve the one underlying stream.
+    home_endpoint: Option<FdReadEndpoint>,
 }
 
 impl MapfileRecordPuller {
@@ -1073,7 +1456,7 @@ impl MapfileRecordPuller {
                     }
                 }
             }
-            MapfilePullSource::File(file) => {
+            MapfilePullSource::File { file, .. } => {
                 let mut buf = [0u8; 8192];
                 match std::io::Read::read(file, &mut buf) {
                     Ok(n) if n > 0 => buf[..n].to_vec(),
@@ -1113,26 +1496,143 @@ impl MapfileRecordPuller {
 
     /// Move a seekable source's shared offset back to the consumed
     /// boundary (origin + taken). No-op for pipes/stdin, whose reads
-    /// never over-consume.
+    /// never over-consume. The seek is unconditional (zsyncfd,
+    /// mapfile.def:195): once a callback may have read through a dup
+    /// of the handle, an empty buffer no longer proves the shared
+    /// position already sits at the boundary — the last sync may
+    /// predate records the buffer alone supplied (rubash#3660).
     fn sync_offset(&mut self) {
         let Some(origin) = self.rewind else {
             return;
         };
-        if self.buffer.is_empty() {
-            return;
+        self.seek_source(origin + self.taken);
+        self.next_fill_offset = self.taken;
+    }
+
+    /// The source's current OS-level position, when it has one.
+    fn source_position(&mut self) -> Option<u64> {
+        match &mut self.source {
+            MapfilePullSource::Handle { handle, .. } => crate::fd::file_position(*handle).ok(),
+            MapfilePullSource::File { file, .. } => std::io::Seek::stream_position(file).ok(),
+            MapfilePullSource::StagedText { .. } | MapfilePullSource::InheritedStdin => None,
         }
-        let target = origin + self.taken;
+    }
+
+    fn seek_source(&mut self, position: u64) {
         match &mut self.source {
             MapfilePullSource::Handle { handle, .. } => {
-                let _ = crate::fd::seek_absolute(*handle, target);
+                let _ = crate::fd::seek_absolute(*handle, position);
             }
-            MapfilePullSource::File(file) => {
-                let _ = std::io::Seek::seek(file, std::io::SeekFrom::Start(target));
+            MapfilePullSource::File { file, .. } => {
+                let _ = std::io::Seek::seek(file, std::io::SeekFrom::Start(position));
             }
             MapfilePullSource::InheritedStdin => {}
             MapfilePullSource::StagedText { .. } => {}
         }
+    }
+
+    /// Bind this pull source to the input descriptor for one
+    /// callback invocation (rubash#3660). A puller built from an
+    /// fd-table endpoint rebinds that endpoint (see home_endpoint).
+    /// A path-opened file is private to the puller, so bind a dup of
+    /// its handle: the dup shares the open file description (one
+    /// offset for both readers), and dropping the endpoint at unbind
+    /// closes only the dup. Inherited stdin is the process stream —
+    /// shared by construction.
+    fn begin_callback_share(
+        &mut self,
+        executor: &mut Executor,
+        input_fd: u32,
+    ) -> MapfileCallbackShare {
+        // A puller built from an fd-table endpoint serves the stream
+        // that endpoint names; bind that endpoint at the input
+        // descriptor for the callback — the same stream, reached
+        // through the descriptor the callback reads (rubash#3660).
+        if let Some(endpoint) = &self.home_endpoint {
+            return executor.bind_mapfile_callback_stream(input_fd, endpoint.clone());
+        }
+        match &self.source {
+            MapfilePullSource::File { file, path } => match file.try_clone() {
+                Ok(dup) => executor.bind_mapfile_callback_stream(
+                    input_fd,
+                    FdReadEndpoint::File(crate::executor::fd_table::FileFd::from_file(
+                        dup,
+                        path.clone(),
+                    )),
+                ),
+                Err(_) => MapfileCallbackShare::Unbound,
+            },
+            // A staged-text puller needs no endpoint bind: the share
+            // IS the FUNCTION_STDIN mirror mapfile_source_sync just
+            // published `origin + taken` into — the callback's fd-0
+            // reads carve that mirror through function_call_stdin
+            // (function_calls.rs), and end_callback_share folds the
+            // advanced offset back into `taken` (rubash#3660 ×
+            // rubash#2779).
+            MapfilePullSource::Handle { .. }
+            | MapfilePullSource::StagedText { .. }
+            | MapfilePullSource::InheritedStdin => MapfileCallbackShare::Unbound,
+        }
+    }
+
+    /// Fold bytes the callback consumed through the shared
+    /// descriptor back into the puller's bookkeeping (rubash#3660).
+    /// The descriptor's position beyond the driver's logical cursor
+    /// (origin + taken) is what the callback read: those bytes leave
+    /// the buffered prefix first, then count as taken, and the
+    /// source is re-aligned so the next fill continues exactly
+    /// behind them. Unseekable sources never moved a shared offset,
+    /// so there is nothing to fold.
+    fn resync_after_callback(&mut self) {
+        let Some(origin) = self.rewind else {
+            return;
+        };
+        let Some(position) = self.source_position() else {
+            return;
+        };
+        let logical = origin + self.taken;
+        if position <= logical {
+            return;
+        }
+        let consumed = position - logical;
+        let from_buffer = (consumed as usize).min(self.buffer.len());
+        self.buffer.drain(..from_buffer);
+        self.taken += consumed;
+        self.seek_source(origin + self.taken);
         self.next_fill_offset = self.taken;
+    }
+
+    /// Fold the FUNCTION_STDIN_OFFSET advancement a callback left
+    /// behind back into a staged-text puller's bookkeeping
+    /// (rubash#3660 × rubash#2779). For a StagedText source the share
+    /// is the FUNCTION_STDIN mirror itself: mapfile_source_sync
+    /// published `origin + taken` before the callback ran, the call's
+    /// function_call_stdin carve advanced the offset by however much
+    /// the callback read, and those bytes leave the buffered prefix
+    /// exactly like a handle's shared-offset advance — one fd, one
+    /// cursor (builtins/mapfile.def:195-197 zsyncfd). No-op for every
+    /// other source kind.
+    fn fold_staged_callback_consumption(&mut self, executor: &Executor) {
+        let MapfilePullSource::StagedText { origin, .. } = &self.source else {
+            return;
+        };
+        let published = *origin + self.taken;
+        let current = executor
+            .shell_state
+            .env_vars
+            .get(FUNCTION_STDIN_OFFSET)
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(published);
+        if current <= published {
+            return;
+        }
+        // The staged fill materialized the whole unread tail, so the
+        // consumed prefix always sits at the buffer's head; the min
+        // only guards a cursor that somehow ran past it.
+        let consumed = (current - published) as usize;
+        let drained = consumed.min(self.buffer.len());
+        self.buffer.drain(..drained);
+        self.taken += drained as u64;
     }
 }
 

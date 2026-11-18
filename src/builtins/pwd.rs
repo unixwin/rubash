@@ -241,8 +241,42 @@ where
         // established it, and the one uncanonicalized form GNU stores
         // (the canon-failed `cd .` make_absolute form) prints verbatim
         // too.
+        // rubash#3575: GNU's POSIX arm (builtins/cd.def pwd_builtin,
+        // cd.def:485-495 in bash 5.2.21): after computing `directory`,
+        //   (posixly_correct && same_file (".", tcwd, ...) == 0)
+        //     -> resetpwd ("pwd")
+        // same_file (general.c:673-692) stats "." and tcwd and compares
+        // (dev, ino); either stat failing (a deleted cwd) or a mismatch
+        // trips it. The re-derivation is the getcwd gate: a deleted cwd
+        // fails it — the diagnostic prints, the face fails, and the
+        // `true` below poisons the cache exactly like resetpwd's
+        // FREE+NULL, so the failure outlives a later `set +o posix`,
+        // and a subshell's trip cannot spare the parent (each call
+        // re-checks). A resolvable cwd falls through to the physical
+        // display below, skipping the $PWD-derived spellings — GNU
+        // prints the getcwd result, not $PWD. The Windows bridge state
+        // is exempt: the bridged name has no physical directory by
+        // design, so its stat comparison would spuriously trip (the
+        // marker arm below owns it). Physical mode needs no such arm:
+        // its canonicalize gate already fails a deleted cwd the same way.
+        let posixly_correct = crate::builtins::set::shell_option_enabled(env_vars, "posix");
+        let mut posix_rederived = false;
         if let Some(tcwd) = logical_cwd {
-            if logical_value_names_cwd(tcwd, &physical, env_vars) {
+            if posixly_correct
+                && !env_vars.contains_key("__RUBASH_PHYSICAL_PWD")
+                && !same_file(cwd, tcwd, env_vars)
+            {
+                if let Err(error) = cwd.canonicalize() {
+                    writeln!(
+                        stderr,
+                        "pwd: error retrieving current directory: getcwd: \
+                         cannot access parent directories: {}",
+                        crate::posix_errors::message(&error)
+                    )?;
+                    return Ok((None, true));
+                }
+                posix_rederived = true;
+            } else if logical_value_names_cwd(tcwd, &physical, env_vars) {
                 return Ok((Some(tcwd.replace('\\', "/")), false));
             }
         }
@@ -273,8 +307,12 @@ where
         // canonicalized by sh_canonpath when it was established, so a
         // valid-but-non-canonical $PWD spelling (`/.`, trailing `/`,
         // `/../` components) never reaches the output (rubash#2797).
-        if let Some(logical) = logical_pwd_if_current(&physical, env_vars) {
-            return Ok((Some(canonical_logical_spelling(&logical)), false));
+        // rubash#3575: after a POSIX re-derivation the printed spelling
+        // is the getcwd result, never a $PWD-derived one (see above).
+        if !posix_rederived {
+            if let Some(logical) = logical_pwd_if_current(&physical, env_vars) {
+                return Ok((Some(canonical_logical_spelling(&logical)), false));
+            }
         }
         // rubash#3349: the poisoned state — logical_cwd is None
         // because a failed physical resolution went through resetpwd
@@ -438,6 +476,43 @@ pub(crate) fn logical_value_names_cwd(
     canonical_logical_spelling(value) == canonical_logical_spelling(&shell_display_path(cwd))
 }
 
+/// GNU general.c:673-692 `same_file`: stat both paths (following
+/// symlinks) and compare identity — (dev, ino) on Unix, canonicalized
+/// path equality elsewhere (`windows_by_handle` is still unstable,
+/// E0658); either stat failing (a deleted
+/// cwd) or a mismatch returns false. The "." side is the session
+/// cwd field (`cwd`), the getcwd truth (G-02); the tcwd side goes
+/// through the same shell-path translation `logical_value_names_cwd`
+/// uses, so a symlinked spelling still compares equal to the
+/// directory it names (rubash#3575).
+fn same_file(cwd: &Path, tcwd: &str, env_vars: &HashMap<String, String>) -> bool {
+    let value_fs = crate::executor::path::shell_path_to_windows(tcwd, env_vars);
+    let Ok(current) = std::fs::metadata(cwd) else {
+        return false;
+    };
+    let Ok(value) = std::fs::metadata(&value_fs) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        current.dev() == value.dev() && current.ino() == value.ino()
+    }
+    #[cfg(not(unix))]
+    {
+        // `windows_by_handle` (volume serial / file index) is still
+        // unstable (E0658), so compare canonicalized paths instead —
+        // the same judgment hash.rs's `same_file` uses, close enough
+        // for a directory-identity test (directories cannot be
+        // hardlinked).
+        let _ = (&current, &value);
+        match (cwd.canonicalize(), value_fs.canonicalize()) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
 /// The startup adoption of an inherited $PWD (variables.c:907
 /// set_pwd): when the imported value is absolute and names the
 /// current directory, the shell's logical cwd is its sh_canonpath
@@ -473,6 +548,30 @@ mod tests {
             String::from_utf8(stdout).unwrap(),
             String::from_utf8(stderr).unwrap(),
         )
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn same_file_compares_device_and_inode() {
+        // rubash#3575: the POSIX arm's judgment — the same directory
+        // (even spelled through a symlink) is true; a different
+        // directory or any unstatable side is false.
+        let base = env::temp_dir().join(format!("rubash-pwd-samefile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("a")).unwrap();
+        std::fs::create_dir_all(base.join("b")).unwrap();
+        let env_vars = HashMap::new();
+        let a = base.join("a").to_string_lossy().into_owned();
+        let b = base.join("b").to_string_lossy().into_owned();
+        let gone = base.join("gone").to_string_lossy().into_owned();
+        assert!(same_file(base.join("a").as_path(), &a, &env_vars));
+        assert!(!same_file(base.join("a").as_path(), &b, &env_vars));
+        assert!(!same_file(base.join("a").as_path(), &gone, &env_vars));
+        assert!(!same_file(base.join("gone").as_path(), &a, &env_vars));
+        std::os::unix::fs::symlink("a", base.join("link")).unwrap();
+        let link = base.join("link").to_string_lossy().into_owned();
+        assert!(same_file(base.join("a").as_path(), &link, &env_vars));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

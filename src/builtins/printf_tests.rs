@@ -563,4 +563,39 @@ mod numeric_validation_704 {
         assert!(stderr.contains("printf: 5 : invalid number"));
         assert_eq!(env_vars.get("V"), Some(&"5\n".to_string()));
     }
+
+    #[test]
+    fn inline_precision_overflow_errors_like_libc_eoverflow() {
+        // GNU printf.def PF() hands `%.<digits>s' to the C library,
+        // whose printf(3) parses the digit run into an int field; on
+        // glibc a run outside i32 range fails the whole directive with
+        // EOVERFLOW — WSL GNU bash 5.3.20 prints `printf: Value too
+        // large for defined data type', emits no output, and exits 1,
+        // the same verdict as an overflowing inline *width*
+        // (rubash#3605). BSD/Darwin libc wraps the precision digits
+        // mod 2^32 instead, but that model is not the project oracle
+        // and is deliberately not ported.
+        for args in [
+            &["%.9223372036854775825s\n", "XY"][..],
+            &["%.9223372036854775825d\n", "5"][..],
+            &["%.4294967295s\n", "XY"][..],
+            &["%.2147483648s\n", "XY"][..],
+        ] {
+            let (status, stdout, stderr, _) = run(args);
+            assert_eq!(status, EXECUTION_FAILURE);
+            assert!(stdout.is_empty());
+            assert!(stderr.contains("Value too large"));
+        }
+    }
+
+    #[test]
+    fn inline_width_overflow_still_errors_like_libc_eoverflow() {
+        // An inline field *width* digit run outside i32 fails the
+        // whole directive with EOVERFLOW on the glibc oracle, same as
+        // precision (rubash#3605).
+        let (status, stdout, stderr, _) = run(&["%4294967295s\n", "XY"]);
+        assert_eq!(status, EXECUTION_FAILURE);
+        assert!(stdout.is_empty());
+        assert!(stderr.contains("Value too large"));
+    }
 }

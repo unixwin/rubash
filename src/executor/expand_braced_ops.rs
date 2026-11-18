@@ -96,7 +96,32 @@ impl Executor {
             }
         }
         if let Some((var_name, word)) = split_once_outside_subscript(name, '?') {
-            if !var_name.is_empty() {
+            // `${!?-d}`: outside posix mode `!` + `?` is an indirect
+            // source, not the `$!` parameter under `?` — the operator
+            // split on the FOLLOWING `-`/`=`/`+`/`:` owns that form
+            // (subst.c:9920 want_indir with VALID_INDIR_PARAM `?`,
+            // subst.c:122). The `!` parameter's own `?` operator only
+            // survives in posix mode (`${!?msg}` -> `!: msg`).
+            let bang_indirect_question = var_name == "!" && !self.posix_mode_enabled();
+            // `${!??v}`: the first `?` is the indirect SOURCE ($?,
+            // subst.c:9920 want_indir / subst.c:122 VALID_INDIR_PARAM),
+            // so the error operator is the NEXT `?` and the subject is
+            // the two-character `!?`. The value is what
+            // `${!?}` already produces — `$?` text names `$0`
+            // (parameter_brace_find_indir, subst.c:7839-7881).
+            let (var_name, word) = if bang_indirect_question {
+                match name
+                    .strip_prefix("!?")
+                    .and_then(|tail| tail.strip_prefix('?'))
+                {
+                    Some(word) => ("!?", word),
+                    None => (var_name, word),
+                }
+            } else {
+                (var_name, word)
+            };
+            let bang_indirect_question = var_name == "!";
+            if !var_name.is_empty() && !bang_indirect_question {
                 return Some(
                     self.parameter_operator_value(var_name)
                         .map(|value| shell_safe_value(&value))
