@@ -435,6 +435,13 @@ impl ShellInvocation {
             if !executor.set_shopt_option(name, *enabled) {
                 return Err(format!("{name}: invalid shell option name"));
             }
+            // rubash#3909: startup arming of extdebug sets
+            // bash_argv_initialized before any positional binding
+            // (shell.c:576 run_shopt_alist) — see
+            // mark_bash_argv_initialized.
+            if name.as_str() == "extdebug" && *enabled {
+                executor.mark_bash_argv_initialized();
+            }
         }
         if let Some(recreate) = self.list_shopt_options {
             // rubash#780: the `-o` sibling. The `-O`/`+O` pairs parsed
@@ -471,6 +478,9 @@ impl ShellInvocation {
         // this meaning in place.
         if self.debug {
             executor.set_shopt_option("extdebug", true);
+            // rubash#3909: startup arming — see
+            // mark_bash_argv_initialized.
+            executor.mark_bash_argv_initialized();
         }
         if self.debugger {
             // GNU shell.c:257: --debugger sets debugging_mode only; the
@@ -561,6 +571,12 @@ impl ShellInvocation {
                     })
                     .collect(),
             );
+            // rubash#3909: bind_args latch (shell.c:1504-1529) —
+            // inside the guard on purpose: the #2032 respawn-seed
+            // case (empty invocation params, non-empty executor
+            // window) binds nothing here, so the inherited seed
+            // window must not be latched.
+            executor.latch_bash_argv_after_startup_bind();
         }
         Ok(())
     }

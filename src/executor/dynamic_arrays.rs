@@ -1580,6 +1580,19 @@ impl Executor {
     /// survives the return (oracle: `f(){ shopt -s extdebug; }; f a b`
     /// leaves a top-level `BASH_ARGC=([0]="2")`).
     pub(in crate::executor) fn init_bash_argv(&self) {
+        // rubash#3909: GNU init_bash_argv (variables.c:5640-5650) is a
+        // no-op once bash_argv_initialized is set — the flag, not the
+        // frame, is the initialization record. Without this guard a
+        // runtime `shopt -s extdebug` after startup arming would latch
+        // an empty frame and the shell would show ([0]="0") where GNU
+        // shows () (oracle: `-O extdebug -c 'shopt -u extdebug; shopt
+        // -s extdebug; f(){ declare -p BASH_ARGC; }; f a'` -> ([0]="1")
+        // with no bottom frame). The flag is set here whenever the init
+        // actually runs, even when the frame is already installed.
+        if self.shell_state.bash_argv_initialized.get() {
+            return;
+        }
+        self.shell_state.bash_argv_initialized.set(true);
         if self.shell_state.bash_arg_bottom.borrow().is_none() {
             *self.shell_state.bash_arg_bottom.borrow_mut() = Some(
                 self.shell_state
@@ -1590,6 +1603,61 @@ impl Executor {
                     .collect(),
             );
         }
+    }
+
+    /// rubash#3909: the startup arming marker for `bash_argv_initialized`
+    /// (variables.c:5640-5650). Called by the startup extdebug arming
+    /// sites — `-O extdebug` / `--debug` in main.rs, the shopt_flags and
+    /// `--debug` arms in invocation.rs, `Session::set` in api/views.rs —
+    /// which all run before any positional binding, mirroring GNU's
+    /// run_shopt_alist (shell.c:576): at that point the arrays do not
+    /// exist yet, so GNU's init sets the flag without pushing a frame.
+    /// It deliberately does NOT live in `set_shopt_option`: that funnel
+    /// also serves the runtime `shopt -s extdebug` builtin, whose hook
+    /// (option_builtins.rs, rubash#3427) calls `init_bash_argv` right
+    /// after — a flag set inside the setter would make that init a
+    /// no-op and the runtime enable would never latch its frame
+    /// (rubash#2634 `seed_on_off_in_function` would go () instead of
+    /// ([0]="0")). The flag is never cleared.
+    pub fn mark_bash_argv_initialized(&self) {
+        self.shell_state.bash_argv_initialized.set(true);
+    }
+
+    /// rubash#3909: GNU `bind_args` (shell.c:1504-1529), the startup
+    /// latch. Called immediately after each startup positional binding
+    /// (main.rs `-c` / `-s` / script-file arms, invocation.rs respawn
+    /// arm): when extdebug is currently on and the bound window is
+    /// non-empty, install the window (reversed) as the BASH_ARGV
+    /// bottom frame and set `bash_argv_initialized`, exactly as
+    /// bind_args does (`if (args) { remember_args (...); if
+    /// (debugging_mode) { push_args (...); bash_argv_initialized = 1;
+    /// } }`). The empty-window early return is the `if (args)` gate:
+    /// with no args there is nothing to push and the flag alone (set
+    /// by the arming site) records the initialization, so a later
+    /// top-level read shows () instead of synthesizing ([0]="0").
+    /// Must NOT be called from the shared `set_positional_params`
+    /// (its other callers — the `set` builtin, function calls,
+    /// `source` args — rebind mid-flight) and must NOT be called
+    /// before the binding (the window would be unbound).
+    pub fn latch_bash_argv_after_startup_bind(&self) {
+        if self.shell_state.bash_arg_bottom.borrow().is_some() {
+            return;
+        }
+        if !crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "extdebug") {
+            return;
+        }
+        if self.shell_state.positional_window().is_empty() {
+            return;
+        }
+        *self.shell_state.bash_arg_bottom.borrow_mut() = Some(
+            self.shell_state
+                .positional_window()
+                .iter()
+                .rev()
+                .cloned()
+                .collect(),
+        );
+        self.shell_state.bash_argv_initialized.set(true);
     }
 
     /// The installed BASH_ARGV bottom frame, or None while the arg
@@ -1604,6 +1672,19 @@ impl Executor {
     fn bash_arg_bottom_frame(&self) -> Option<Vec<String>> {
         if let Some(bottom) = self.shell_state.bash_arg_bottom.borrow().as_ref() {
             return Some(bottom.clone());
+        }
+        // rubash#3909: the third state. When bash_argv_initialized is
+        // set but no frame was installed (startup extdebug with no
+        // args, or a runtime re-enable after startup arming), the
+        // arrays are initialized-but-empty: GNU's get_bashargcv
+        // (variables.c:1656-1670) initializes only when the flag is
+        // clear, so a top-level read shows () and must NOT synthesize
+        // a ([0]="0") frame from the live window. The flag is never
+        // cleared, so this guard also blocks synthesis after a later
+        // `set --` rebind (oracle: `-O extdebug -c 'shopt -u extdebug;
+        // set -- p q; declare -p BASH_ARGC'` -> ()).
+        if self.shell_state.bash_argv_initialized.get() {
+            return None;
         }
         if self.shell_state.function_depth > 0 {
             return None;

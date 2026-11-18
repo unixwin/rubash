@@ -288,6 +288,16 @@ pub(in crate::executor) const FORK_LINENO_TRANSPORT: &str = "__RUBASH_FORK_BASH_
 pub(in crate::executor) const FORK_ARGV_TRANSPORT: &str = "__RUBASH_FORK_BASH_ARGV";
 pub(in crate::executor) const FORK_ARGC_TRANSPORT: &str = "__RUBASH_FORK_BASH_ARGC";
 pub(in crate::executor) const FORK_ARGV_BOTTOM_TRANSPORT: &str = "__RUBASH_FORK_ARGV_BOTTOM";
+/// rubash#3909: the `bash_argv_initialized` flag (variables.c:5640-5650)
+/// rides the fork transport next to the bottom frame it qualifies.
+/// Presence with value "1" is the bit (the FORK_IN_FUNCTION
+/// convention): the spawner stamps it exactly when the flag is set, so
+/// a respawn child of a flag-set/bottom-None parent does not wrongly
+/// synthesize a ([0]="0") frame from its live window at its first
+/// top-level read. A child whose parent never armed extdebug gets no
+/// entry and is born with the flag clear, exactly as the parent was.
+pub(in crate::executor) const FORK_BASH_ARGV_INITIALIZED_TRANSPORT: &str =
+    "__RUBASH_FORK_BASH_ARGV_INITIALIZED";
 pub(in crate::executor) const FORK_IN_FUNCTION_TRANSPORT: &str = "__RUBASH_FORK_IN_FUNCTION";
 pub(in crate::executor) const FORK_MAIN_FRAME_TRANSPORT: &str = "__RUBASH_FORK_MAIN_FRAME";
 pub(in crate::executor) const FORK_PIPESTATUS_TRANSPORT: &str = "__RUBASH_FORK_PIPESTATUS";
@@ -321,13 +331,14 @@ pub(in crate::executor) const FORK_ROOT_SPANS_TRANSPORT: &str = "__RUBASH_FORK_R
 pub(in crate::executor) const FORK_LOGIN_SHELL_TRANSPORT: &str = "__RUBASH_FORK_LOGIN_SHELL";
 
 /// Every FORK_* transport key, for the child's unconditional strip.
-pub(in crate::executor) const FORK_TRANSPORT_KEYS: [&str; 12] = [
+pub(in crate::executor) const FORK_TRANSPORT_KEYS: [&str; 13] = [
     FORK_FUNCNAME_TRANSPORT,
     FORK_SOURCE_TRANSPORT,
     FORK_LINENO_TRANSPORT,
     FORK_ARGV_TRANSPORT,
     FORK_ARGC_TRANSPORT,
     FORK_ARGV_BOTTOM_TRANSPORT,
+    FORK_BASH_ARGV_INITIALIZED_TRANSPORT,
     FORK_IN_FUNCTION_TRANSPORT,
     FORK_MAIN_FRAME_TRANSPORT,
     FORK_PIPESTATUS_TRANSPORT,
@@ -396,6 +407,16 @@ impl Executor {
             entries.push((
                 FORK_ARGV_BOTTOM_TRANSPORT.to_string(),
                 format_indexed_array_values(bottom),
+            ));
+        }
+        // rubash#3909: the flag rides with the frame it qualifies —
+        // stamped exactly when set (the FORK_IN_FUNCTION convention),
+        // so a respawn child of a flag-set/bottom-None parent keeps
+        // the initialized-but-empty state instead of synthesizing.
+        if self.shell_state.bash_argv_initialized.get() {
+            entries.push((
+                FORK_BASH_ARGV_INITIALIZED_TRANSPORT.to_string(),
+                "1".to_string(),
             ));
         }
         if self.shell_state.function_depth > 0 || inherited.is_some_and(|frames| frames.in_function)

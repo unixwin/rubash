@@ -921,6 +921,17 @@ fn run_args(
                         );
                         return 2;
                     }
+                    // rubash#3909: startup arming of extdebug sets
+                    // bash_argv_initialized (variables.c:5640-5650)
+                    // before any positional binding — GNU's
+                    // run_shopt_alist (shell.c:576) arms the mode while
+                    // the arrays do not exist yet, so the flag is set
+                    // without pushing a frame. See
+                    // mark_bash_argv_initialized for why this lives at
+                    // the arming sites, not inside set_shopt_option.
+                    if option == "extdebug" && args[index] == "-O" {
+                        executor.mark_bash_argv_initialized();
+                    }
                     if option == "expand_aliases" {
                         alias_expansion_override = Some(args[index] == "-O");
                     }
@@ -1011,6 +1022,14 @@ fn run_args(
                         // and keeps the raw spelling.
                         executor.set_env("BASH_ARGV0", &entry_encode_argv_value(command_name));
                         executor.set_positional_params(entry_encode_argv(&args[index + 2..]));
+                        // rubash#3909: GNU bind_args (shell.c:1504-1529)
+                        // latches the bottom frame right after the
+                        // binding when extdebug is on; inside the
+                        // `Some(command_name)` arm on purpose — a
+                        // respawn child's `-c source` carries no $0
+                        // operand, no binding happens there, and the
+                        // inherited seed window must not be latched.
+                        executor.latch_bash_argv_after_startup_bind();
                     } else if executor.get_env("__RUBASH_SCRIPT_NAME").is_none() {
                         // GNU error.c:88-120 get_name_for_error: a `-c`
                         // string's BASH_SOURCE[0] is empty, so diagnostics
@@ -1138,6 +1157,9 @@ fn run_args(
     if read_from_stdin {
         // rubash#3105: `-s` positionals are raw argv words.
         executor.set_positional_params(entry_encode_argv(&std::mem::take(&mut stdin_positionals)));
+        // rubash#3909: bind_args latch (shell.c:1504-1529) — see the
+        // `-c` arm above.
+        executor.latch_bash_argv_after_startup_bind();
         return run_stdin_script_with_init(
             executor,
             init_file.as_deref(),
@@ -1414,6 +1436,8 @@ fn parse_long_options(
             // debugger builds on; that work upgrades this meaning in place).
             "debug" => {
                 executor.set_shopt_option("extdebug", true);
+                // rubash#3909: startup arming — see the -O arm above.
+                executor.mark_bash_argv_initialized();
             }
             // GNU shell.c:257: --debugger sets debugging_mode; the bashdb
             // starter runs at startup (start_debugger, shell.c:764/:795).
@@ -1878,6 +1902,9 @@ fn run_script_file_with_init(
     executor.inherit_process_stdin();
     // rubash#3105: script-file positionals are raw argv words.
     executor.set_positional_params(entry_encode_argv(args));
+    // rubash#3909: bind_args latch (shell.c:1504-1529) — see the `-c`
+    // arm above.
+    executor.latch_bash_argv_after_startup_bind();
     // shell.c:722 run_startup_files precedes the rcfile/script body
     // (rubash#487): `bash -l script` reads the profile chain first.
     // shell.c:795: start_debugger gates scripts too, before any body
