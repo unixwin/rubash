@@ -210,6 +210,26 @@ fn copy_dollar_paren_body(
             '\'' => copy_quoted_word_part(current, chars, '\''),
             '"' => copy_quoted_word_part(current, chars, '"'),
             '`' => copy_backtick_word_part(current, chars),
+            '$' if chars.peek().copied() == Some('\'') => {
+                // ANSI-C `$'...'` (parse.y:5476-5480 read_token_word ->
+                // parse_matched_pair P_ALLOWESC): `\'` is an escaped
+                // quote, not the close; a `)` inside is body text. The
+                // plain `'` arm would end the region at `\'` and let
+                // the following `)` close the substitution.
+                chars.next();
+                current.push('\'');
+                let mut ansi_escaped = false;
+                while let Some(ansi_ch) = chars.next() {
+                    current.push(ansi_ch);
+                    if ansi_escaped {
+                        ansi_escaped = false;
+                    } else if ansi_ch == '\\' {
+                        ansi_escaped = true;
+                    } else if ansi_ch == '\'' {
+                        break;
+                    }
+                }
+            }
             '$' if chars.peek().copied() == Some('(') => {
                 chars.next();
                 current.push('(');

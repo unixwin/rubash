@@ -2466,12 +2466,15 @@ pub(in crate::executor) fn parse_error_source_display(source: &str) -> String {
 
 fn unterminated_extglob(raw: &str) -> bool {
     let chars = raw.chars().collect::<Vec<_>>();
-    let mut extglob_depth = 0usize;
     let mut quote = None;
     let mut index = 0;
     while index < chars.len() {
         let ch = chars[index];
         if let Some(active) = quote {
+            if ch == '\\' && active == '"' {
+                index += 2;
+                continue;
+            }
             if ch == active {
                 quote = None;
             }
@@ -2487,18 +2490,31 @@ fn unterminated_extglob(raw: &str) -> bool {
             index += 1;
             continue;
         }
-        if matches!(ch, '@' | '*' | '+' | '?' | '!') && chars.get(index + 1) == Some(&'(') {
-            extglob_depth += 1;
-            index += 2;
+        if ch == '`' {
+            index += 1;
+            while index < chars.len() {
+                if chars[index] == '\\' {
+                    index += 2;
+                    continue;
+                }
+                if chars[index] == '`' {
+                    index += 1;
+                    break;
+                }
+                index += 1;
+            }
             continue;
         }
-        if ch == ')' && extglob_depth > 0 {
-            extglob_depth -= 1;
+        if matches!(ch, '@' | '*' | '+' | '?' | '!') && chars.get(index + 1) == Some(&'(') {
+            match crate::lexer::skip_extglob_group_chars(&chars, index + 1) {
+                Some(end) => {
+                    index = end;
+                    continue;
+                }
+                None => return true,
+            }
         }
         index += 1;
-    }
-    if extglob_depth > 0 {
-        return true;
     }
     false
 }

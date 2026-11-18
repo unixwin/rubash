@@ -2461,7 +2461,8 @@ impl Executor {
             .and_then(|line| line.parse::<usize>().ok())
             .filter(|line| *line > 0)
             .unwrap_or(1);
-        let alias_spliced = self.comsub_body_alias_splice_extracted(source);
+        let (alias_spliced, comsub_marks, nested_comsubs) =
+            self.comsub_body_alias_splice_extracted_marked(source);
         // GNU's parse_and_execute reads the backtick body as a LINE — the
         // body is newline-terminated at its parse (subst.c string_locale),
         // so a 1-line unterminated `case x in` body reports its EOF on the
@@ -2483,11 +2484,12 @@ impl Executor {
         } else {
             &alias_spliced
         };
-        let tokens = crate::lexer::tokenize_comsub_body(
+        let tokens = crate::lexer::tokenize_comsub_body_marked(
             source,
             self.posix_mode_enabled(),
             body_start_line,
             true,
+            &comsub_marks,
         );
         let mut commands = crate::parser::parse(&tokens);
         super::command_substitution::normalize_comsub_body_statement_lines(&mut commands, &tokens);
@@ -2859,7 +2861,8 @@ impl Executor {
             .and_then(|line| line.parse::<usize>().ok())
             .filter(|line| *line > 0)
             .unwrap_or(1);
-        let alias_spliced = self.comsub_body_alias_splice_extracted(source);
+        let (alias_spliced, comsub_marks, nested_comsubs) =
+            self.comsub_body_alias_splice_extracted_marked(source);
         // GNU's parse_and_execute reads the backtick body as a LINE — the
         // body is newline-terminated at its parse (subst.c string_locale),
         // so a 1-line unterminated `case x in` body reports its EOF on the
@@ -2881,11 +2884,12 @@ impl Executor {
         } else {
             &alias_spliced
         };
-        let tokens = crate::lexer::tokenize_comsub_body(
+        let tokens = crate::lexer::tokenize_comsub_body_marked(
             source,
             self.posix_mode_enabled(),
             body_start_line,
             true,
+            &comsub_marks,
         );
         // GNU parses the body as its own input (subst.c parse_and_execute)
         // and echoes the offending line verbatim (parse.y print_offending_line
@@ -2937,6 +2941,10 @@ impl Executor {
         // stream level in comsub_body_alias_splice above, so mark the inner
         // execution streamed — saved_state rolls the marker back below.
         self.mark_alias_streamed();
+        if !nested_comsubs.is_empty() {
+            self.shell_state
+                .record_comsub_alias_newlines(nested_comsubs);
+        }
         self.shell_state
             .subshell_depth
             .set(saved_state.subshell_depth.get() + 1);

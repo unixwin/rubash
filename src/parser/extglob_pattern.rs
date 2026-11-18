@@ -309,6 +309,13 @@ fn skip_dollar_paren(chars: &[char], start: usize) -> Option<usize> {
     let mut depth = 1usize;
     let mut single = false;
     let mut double = false;
+    // A backquote group is its own quote state (parse.y:3877
+    // parse_matched_pair's grouping branch does not parse constructs
+    // inside a backquote body, so a quote inside it is ordinary text):
+    // track it like `skip_compound_subscript_span` does, so an unbalanced
+    // `"` inside `` `...` `` cannot leak into the paren count (rubash#3435:
+    // `@(ax|$(echo `echo "q`)ay)` must still parse as an extglob group).
+    let mut in_backtick = false;
     let mut escaped = false;
     while index < chars.len() {
         let ch = chars[index];
@@ -323,10 +330,11 @@ fn skip_dollar_paren(chars: &[char], start: usize) -> Option<usize> {
             continue;
         }
         match ch {
-            '\'' if !double => single = !single,
-            '"' if !single => double = !double,
-            '(' if !single && !double => depth += 1,
-            ')' if !single && !double => {
+            '\'' if !double && !in_backtick => single = !single,
+            '"' if !single && !in_backtick => double = !double,
+            '`' if !single => in_backtick = !in_backtick,
+            '(' if !single && !double && !in_backtick => depth += 1,
+            ')' if !single && !double && !in_backtick => {
                 depth = depth.saturating_sub(1);
                 if depth == 0 {
                     return Some(index + 1);

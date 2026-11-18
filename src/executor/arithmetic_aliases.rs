@@ -744,10 +744,20 @@ impl Executor {
     /// word expanders are suppressed for the parsed result via
     /// __RUBASH_ALIAS_STREAMED so nothing expands a second time.
     pub(in crate::executor) fn comsub_body_alias_splice(&self, source: &str) -> String {
+        self.comsub_body_alias_splice_marked(source).0
+    }
+
+    /// `comsub_body_alias_splice` plus expansion-introduced newline byte
+    /// offsets for the spliced body and any nested comsub bodies
+    /// (rubash#3838).
+    pub(in crate::executor) fn comsub_body_alias_splice_marked(
+        &self,
+        source: &str,
+    ) -> (String, Vec<usize>, Vec<(String, Vec<usize>)>) {
         if !(self.alias_expansion_enabled() || self.posix_mode_enabled())
             || self.shell_state.aliases.is_empty()
         {
-            return source.to_string();
+            return (source.to_string(), Vec::new(), Vec::new());
         }
         let lookup = |word: &str| {
             self.shell_state
@@ -759,7 +769,7 @@ impl Executor {
         // reader runs with expand_aliases = posixly_correct — when that is
         // the live leg, read_token_word's posix reserved-word-first order
         // (parse.y:5751-5769) applies to the body too (rubash#414).
-        crate::lexer::expand_aliases_in_source(
+        crate::lexer::expand_aliases_in_source_marked_with_comsubs(
             source,
             &lookup as &crate::lexer::AliasLookup<'_>,
             self.posix_mode_enabled(),
@@ -774,12 +784,29 @@ impl Executor {
     /// strings and trap actions are fresh input streams — their callers
     /// use `comsub_body_alias_splice` directly.
     pub(in crate::executor) fn comsub_body_alias_splice_extracted(&self, source: &str) -> String {
+        self.comsub_body_alias_splice_extracted_marked(source).0
+    }
+
+    /// `comsub_body_alias_splice_extracted` plus expansion-introduced
+    /// newline byte offsets (looked up from the pre-pass map when
+    /// already streamed, or computed live for unstreamed/backtick
+    /// bodies, rubash#3838).
+    pub(in crate::executor) fn comsub_body_alias_splice_extracted_marked(
+        &self,
+        source: &str,
+    ) -> (String, Vec<usize>, Vec<(String, Vec<usize>)>) {
         // The stream-level pass splices `$(` bodies only (its walkers skip
         // backquote units), so a backquote body is still unexpanded.
         if self.alias_streamed() && !self.backtick_body_diagnostic.get() {
-            source.to_string()
+            let marks = self
+                .shell_state
+                .comsub_alias_newlines
+                .get(source)
+                .cloned()
+                .unwrap_or_default();
+            (source.to_string(), marks, Vec::new())
         } else {
-            self.comsub_body_alias_splice(source)
+            self.comsub_body_alias_splice_marked(source)
         }
     }
 

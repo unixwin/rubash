@@ -260,6 +260,11 @@ pub struct ShellState {
     pub(crate) history_comment_char_armed: bool,
     /// alias.c aliases.
     pub(crate) aliases: HashMap<String, Alias>,
+    /// Non-counting newline byte offsets for pre-expanded `$(...)` /
+    /// `${ ... }` comsub bodies (rubash#3838): the pre-pass expands
+    /// comsub bodies at parse time, so runtime `tokenize_comsub_body`
+    /// needs to know which `\n`s were introduced by alias expansion.
+    pub(crate) comsub_alias_newlines: HashMap<String, Vec<usize>>,
     /// variables.c shell_functions.
     pub(crate) functions: HashMap<String, FunctionBody>,
     /// Redirect words parsed at function definition time, applied at call.
@@ -958,6 +963,13 @@ impl InteriorSnapshot {
 }
 
 impl ShellState {
+    pub(crate) fn record_comsub_alias_newlines(&mut self, records: Vec<(String, Vec<usize>)>) {
+        for (body, marks) in records {
+            if !marks.is_empty() {
+                self.comsub_alias_newlines.insert(body, marks);
+            }
+        }
+    }
     /// Live positional window (`shift`-visible `$1..$#`): the storage tail
     /// starting at `positional_offset`. GNU keeps the whole `list` and
     /// moves `loptend` (bash variables.c); every reader must go through
@@ -1109,6 +1121,7 @@ impl Clone for ShellState {
             forced_interactive: self.forced_interactive,
             history_comment_char_armed: self.history_comment_char_armed,
             aliases: self.aliases.clone(),
+            comsub_alias_newlines: self.comsub_alias_newlines.clone(),
             functions: self.functions.clone(),
             function_definition_redirects: self.function_definition_redirects.clone(),
             function_def_infos: self.function_def_infos.clone(),

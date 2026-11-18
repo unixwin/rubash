@@ -180,6 +180,20 @@ fn dollar_command_substitution(
     // substitution ends early at `$(w` — GNU parse_comsub instead lets
     // the nested substitution's own reader consume its `)`.
     let mut nested_case_subst = 0usize;
+    // rubash#3306: paren depth opened INSIDE a case context while the
+    // pattern region is disarmed (clause body, or the `case … in`
+    // preamble). GNU's `)` is the substitution's shell_eof_token only
+    // at body paren depth zero (parse.y:4519-4521); `(b)`/`((…))`
+    // groups in the body own their own `)` first, exactly like the
+    // pattern-paren tracker above owns pattern parens.
+    let mut case_body_paren_depth = 0usize;
+    // rubash#3306: a `;;`/`;&`/`;;&` seen while the pattern region is
+    // still armed is fatal in GNU's grammar — a clause terminator is
+    // only legal after a clause BODY (region disarmed). Once seen the
+    // case can never complete, so the next top-level `)` closes the
+    // substitution for the body parser's verdict no matter what the
+    // pattern bookkeeping makes of it (`$(case x in a;; echo hi)`).
+    let mut case_clause_terminator_in_pattern = false;
     // rubash#3834: previous significant unquoted char fed to the case
     // word machine — the `esac` pattern-text witness (parse.y:3181/3183,
     // `last_read_token == '|' or '('`), arm-for-arm with the skip.rs /
@@ -326,6 +340,7 @@ fn dollar_command_substitution(
         let content_before = case_pattern_content;
         let stage_before = case_in_stage;
         let word_before = word.clone();
+        let sig_before = prev_sig;
         // rubash#2789: note the `in` completion (see the declaration
         // above); the latch itself is applied after the region
         // bookkeeping at the bottom of the loop, so the disarm-clear
@@ -365,7 +380,19 @@ fn dollar_command_substitution(
                         case_in_completed_empty = false;
                     }
                 }
-                ';' => {}
+                ';' => {
+                    // rubash#3306: `;;`/`;&`/`;;&` while the pattern
+                    // region is armed is a clause terminator in pattern
+                    // position — fatal in GNU's grammar (the terminator
+                    // is only legal after a clause body). Latch it: the
+                    // case can never complete, so the next top-level `)`
+                    // closes the substitution for the body verdict.
+                    if case_pattern_paren_depth == 0
+                        && matches!(chars.get(index + 1), Some(';') | Some('&'))
+                    {
+                        case_clause_terminator_in_pattern = true;
+                    }
+                }
                 c if c.is_whitespace() => {}
                 _ => {
                     case_pattern_content = true;
@@ -430,6 +457,35 @@ fn dollar_command_substitution(
                 || case_in_completed_empty)
         {
             let text = chars[start..=index].iter().collect();
+            // rubash#3306: an empty-pattern `()` fire keeps the `)` in
+            // the body source — `case x in ()` parses to the NEAR `)'`
+            // marker GNU's body parser raises on the empty pattern
+            // (the `)` IS the token that offends), where the excluded
+            // form `case x in (` reports a newline offender instead.
+            let source: String = if region_before && !content_before && sig_before == Some('(') {
+                chars[start + 2..=index].iter().collect()
+            } else {
+                chars[start + 2..index].iter().collect()
+            };
+            return Some((
+                command_substitution_node(text, source, false, false, false),
+                index + 1,
+            ));
+        }
+        // rubash#3306: a `)` that GNU's parser takes as the
+        // substitution's shell_eof_token also arrives with the pattern
+        // region disarmed — in a clause body or the `case … in`
+        // preamble — and inside a case already doomed by a
+        // pattern-position clause terminator. Body parens own their
+        // `)` first (case_body_paren_depth); the truncated body
+        // reaches the body parser, whose verdict the read-time screen
+        // reports (parse.y:4519-4521, 6858-6865), instead of the
+        // extractor scanning off the end of the word.
+        if case_close_candidate
+            && case_body_paren_depth == 0
+            && (!region_before || case_clause_terminator_in_pattern)
+        {
+            let text = chars[start..=index].iter().collect();
             let source = chars[start + 2..index].iter().collect();
             return Some((
                 command_substitution_node(text, source, false, false, false),
@@ -440,6 +496,9 @@ fn dollar_command_substitution(
             '\'' if !double => single = !single,
             '"' if !single => double = !double,
             '(' if !single && !double && case_depth == 0 => depth += 1,
+            '(' if !single && !double && case_depth > 0 && !region_before => {
+                case_body_paren_depth += 1;
+            }
             ')' if !single && !double && case_depth == 0 => {
                 depth = depth.saturating_sub(1);
                 if depth == 0 {
@@ -450,6 +509,9 @@ fn dollar_command_substitution(
                         index + 1,
                     ));
                 }
+            }
+            ')' if !single && !double && case_depth > 0 && !region_before => {
+                case_body_paren_depth = case_body_paren_depth.saturating_sub(1);
             }
             _ => {}
         }
