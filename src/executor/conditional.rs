@@ -1173,10 +1173,10 @@ impl Executor {
 
     pub(super) fn conditional_regex_match(&mut self, left: &str, right: &str) -> bool {
         // Both operands are byte strings in GNU (sh_regmatch regexec's the
-        // expanded text); decode the comsub payload spelling on the subject
+        // expanded text); decode both transport spellings on the subject
         // side too, symmetric with the pattern decode inside
-        // compile_conditional_regex.
-        let left = crate::executor::execution_misc::decode_command_substitution_payload(left);
+        // compile_conditional_regex (rubash#3545).
+        let left = decode_regex_operand(left);
         let right = restore_numeric_decimal_regex_escapes(right);
         let Ok(regex) = self.compile_conditional_regex(&right) else {
             return false;
@@ -1304,7 +1304,7 @@ impl Executor {
         let left_exp = self.expand_conditional_word(left);
         let right_exp = self.expand_conditional_word(right);
         let right_f = restore_numeric_decimal_regex_escapes(&right_exp);
-        let left = crate::executor::execution_misc::decode_command_substitution_payload(&left_exp);
+        let left = decode_regex_operand(&left_exp);
         let right = right_f;
         // GNU xtrace prints arg2 as cond_expand_word returned it —
         // expanded but not yet glob-quoted (execute_cmd.c:4074).
@@ -1343,9 +1343,7 @@ impl Executor {
         if self.regex_operands_nounset_fatal(left, right) {
             return 1;
         }
-        let left = crate::executor::execution_misc::decode_command_substitution_payload(
-            &self.expand_conditional_word(left),
-        );
+        let left = decode_regex_operand(&self.expand_conditional_word(left));
         let right = self.quote_aware_regex_rhs(right, metadata);
         let right = restore_numeric_decimal_regex_escapes(&right);
         self.xtrace_conditional_term("=~", &left, Some(&right));
@@ -1430,7 +1428,12 @@ impl Executor {
         // byte 0x01 (execute_cmd.c:4137 sh_regmatch regcomps the expanded
         // operand). rubash#729 widened the protected byte set, so this
         // decode boundary is what keeps the sentinel out of regcomp.
-        let pattern = crate::executor::execution_misc::decode_command_substitution_payload(pattern);
+        // rubash#3545: the same boundary must also fold the U+E000
+        // raw-byte pairs, or a carrier byte the quoted path already
+        // decoded to a raw byte never matches a pair-encoded subject —
+        // decode_regex_operand covers both spellings, symmetric with
+        // the subject decode at the three match entry points.
+        let pattern = decode_regex_operand(pattern);
         // In a UTF-8 locale the bracket classes expand to Unicode
         // tables (glibc regcomp resolves them through wctype); in byte
         // mode they pass through to the regex crate's ASCII classes,
@@ -2236,6 +2239,31 @@ impl CompiledConditionalRegex {
 /// (rubash#1061) and is gone with it.
 fn conditional_regex_byte_mode() -> bool {
     !crate::locale::is_utf8()
+}
+
+/// Regex-boundary decode (rubash#3545): GNU sh_regmatch receives the
+/// expanded operands as raw bytes (execute_cmd.c:4096, via
+/// execute_cmd.c:4068 cond_expand_word mode 2 and subst.c:4114
+/// QGLOB_REGEXP). Rubash transport pair-encodes carrier bytes (0x0c,
+/// 0x11, 0x13, 0x14..=0x1f) as U+E000 raw-byte pairs, and
+/// decode_command_substitution_payload only restores the U+E319 comsub
+/// sentinel — so a pattern the quoted path had already decoded to raw
+/// bytes (regex_rhs_marked_chars via shell_text_to_raw_bytes) never
+/// matched a pair-encoded subject, while the unquoted path only
+/// matched by accident of both sides staying encoded. Decode both
+/// spellings — sentinel first (it can only yield U+0000..=U+00FF, so
+/// it can never mint a pair introducer), then the raw-byte pairs —
+/// so pattern and subject meet as the same raw bytes, the same
+/// normalization the #729 glob side already applies. Non-UTF-8 bytes
+/// ride as byte-chars (U+0000..=U+00FF), which keep pattern and
+/// subject in the same spelling in both regex modes.
+fn decode_regex_operand(value: &str) -> String {
+    let decoded = crate::executor::execution_misc::decode_command_substitution_payload(value);
+    if crate::executor::markers::contains_decodable_transport(&decoded) {
+        crate::executor::substitution_metadata::decode_raw_byte_markers_to_byte_chars(&decoded)
+    } else {
+        decoded
+    }
 }
 
 /// Convert one byte-mode capture into rubash's storage spelling: valid
