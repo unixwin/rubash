@@ -124,10 +124,20 @@ mod unix_faces {
     /// Unix faces for the Windows-only path syntax: `\` is an ordinary
     /// filename byte and `D:/x` is a relative path there, so neither the
     /// backslash fold nor the `X:/` drive check may fire off Windows.
+    ///
+    /// Fixture note (#3316 reopen): the carrier must not be a copy of
+    /// `/bin/echo` — on hosts where it is a multicall coreutils binary,
+    /// exec'ing the copy under a non-applet name (`back\slash`) fails
+    /// inside the multicall dispatcher (`coreutils: unknown program`),
+    /// and the same failure reproduces under GNU bash and direct exec.
+    /// A shebang script printing its argument instead tests the exec
+    /// face itself on every host.
     #[test]
     fn exec_literal_backslash_filename_runs_verbatim_on_unix() {
         let root = scratch("literal-backslash");
-        fs::copy("/bin/echo", root.join("back\\slash")).expect("copy /bin/echo");
+        let target = root.join("back\\slash");
+        fs::write(&target, "#!/bin/sh\nprintf '%s\\n' \"$1\"\n").expect("write backslash script");
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).expect("chmod +x");
         let (stdout, stderr) = run(&root, "exec './back\\slash' literal-ok\n");
         assert_eq!(stdout, "literal-ok\n", "stderr: {stderr}");
         assert!(stderr.is_empty(), "stderr: {stderr}");
