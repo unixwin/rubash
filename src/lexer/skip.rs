@@ -1990,7 +1990,7 @@ pub(crate) fn skip_backtick_corrected(chars: &[char], mut index: usize) -> Optio
 /// scanned span, and whether the unit closed. Quote/escape/nesting handling
 /// is the walk's top-level `${` arm below (GNU parse.y:3877
 /// parse_matched_pair ('{', '}', P_FIRSTCLOSE|P_DOLBRACE)).
-fn skip_braced_unit_scan(chars: &[char], open: usize) -> (usize, usize, bool) {
+pub(crate) fn skip_braced_unit_scan(chars: &[char], open: usize) -> (usize, usize, bool) {
     let mut depth = 1usize;
     let mut scan = open + 1;
     let mut newlines = 0usize;
@@ -3419,6 +3419,45 @@ fn unclosed_array_subscript_walk(
                         quote_line = scan_line;
                         scan += 1;
                     }
+                    // parse.y:4140-4141: inside the P_ARRAYSUB matched pair a
+                    // `$(`/`${` after `$` (LEX_WASDOL) takes the
+                    // parse_dollar_word route — the inner construct has its
+                    // own scan, so a `]` inside it never closes the
+                    // subscript, and an EOF inside it produces the INNER
+                    // construct's diagnostic (`v[a=$(x` reports `)' at the
+                    // EOF line, not `]' at the `[` line; `v[a=$(x])z` keeps
+                    // its `]' because the comsub is balanced). A closed unit
+                    // is skipped atomically; an unclosed one defers the
+                    // verdict to the generic close-char scan which names the
+                    // innermost pending construct.
+                    '$' if chars.get(scan + 1) == Some(&'(') => {
+                        match skip_parenthesized_unit_corrected(&chars, scan + 1) {
+                            Some(end) => {
+                                scan_line +=
+                                    chars[scan..end].iter().filter(|c| **c == '\n').count();
+                                scan = end;
+                                continue;
+                            }
+                            None => return None,
+                        }
+                    }
+                    '$' if chars.get(scan + 1) == Some(&'{') => {
+                        let (end, newlines, closed) = skip_braced_unit_scan(&chars, scan + 1);
+                        if closed {
+                            scan_line += newlines;
+                            scan = end;
+                            continue;
+                        }
+                        return None;
+                    }
+                    '`' => match skip_backtick_corrected(&chars, scan) {
+                        Some(end) => {
+                            scan_line += chars[scan..end].iter().filter(|c| **c == '\n').count();
+                            scan = end;
+                            continue;
+                        }
+                        None => return None,
+                    },
                     '[' => depth += 1,
                     ']' => {
                         depth -= 1;
