@@ -2,6 +2,16 @@
 # A hung test fails fast and BY NAME instead of eating the 30-minute job:
 # slow tests log after 30s, hard-fail at 90s (cli_tests spawns shells that
 # read stdin; a hang there is a bug to name, not a timeout to nurse).
-slow-timeout = "30s"
-timeout-source = "profile"
-termination-timeout = "10s"
+# unixwin/niubash#955: the previous keys (timeout-source,
+# termination-timeout) were unknown to nextest and silently ignored —
+# no hard kill existed. terminate-after is the real knob.
+slow-timeout = { period = "30s", terminate-after = 3, grace-period = "10s" }
+
+# enable_dynamic_loading's tests all write/read the same fixture path
+# (target/enable-dynamic-fixture/rubash_dynprobe.so): under the default
+# parallel schedule a sibling test's compile or load step meets the .so
+# mid-write and reports "invalid ELF header". Serial run: 10/10 pass.
+# Give the binary every test thread so its tests execute alone.
+[[profile.ci.overrides]]
+filter = 'binary_id(rubash::enable_dynamic_loading)'
+threads-required = "num-test-threads"

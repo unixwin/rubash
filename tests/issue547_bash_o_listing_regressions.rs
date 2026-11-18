@@ -70,10 +70,15 @@ fn dash_o_matches_set_dash_o_byte_for_byte() {
 fn dash_o_with_a_bad_name_still_fails() {
     // The list form covers only the MISSING-argument case; a named
     // non-option keeps GNU's `bash: line 0: bash: badname: invalid option
-    // name`, exit 2.
+    // name`, exit 2 — with the invocation name in both slots (rubash#3254:
+    // GNU prints argv[0] verbatim, and the harness invokes by full path).
     let (stdout, stderr, rc) = run(&["-o", "badname"]);
+    let bin = env!("CARGO_BIN_EXE_rubash");
     assert_eq!(stdout, "");
-    assert_eq!(stderr, "bash: line 0: bash: badname: invalid option name\n");
+    assert_eq!(
+        stderr,
+        format!("{bin}: line 0: {bin}: badname: invalid option name\n")
+    );
     assert_eq!(rc, Some(2));
 }
 

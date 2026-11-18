@@ -98,5 +98,8 @@ fn ansi_c_escaped_quote_inside_comsub_runs() {
 fn unclosed_quote_after_comsub_exits_one() {
     let (_stdout, stderr, code) = run_file("echo $(echo $'a')b'\n", "stray_quote");
     assert_eq!(code, 1, "{stderr:?}");
-    assert!(stderr.contains("unexpected EOF while looking for matching `''"), "{stderr:?}");
+    assert!(
+        stderr.contains("unexpected EOF while looking for matching `''"),
+        "{stderr:?}"
+    );
 }

@@ -3846,6 +3846,23 @@ fn skip_parenthesized_unit_corrected_ex(chars: &[char], open: usize) -> Option<(
     // unit for the body parser instead of reading as case syntax
     // (GNU parse_comsub, parse.y:4451).
     let mut case_pattern_seen = false;
+    // rubash#3307: per-pattern content bookkeeping — mirror of the
+    // gate/parser arm's locals in dollar_command_substitution
+    // (#3303): whether the armed pattern region has seen pattern
+    // content since the current list was armed (reset at `|` and at
+    // a freshly armed region), the pattern-paren nesting depth, and
+    // whether a pattern-list opener is still available.
+    let mut case_pattern_content = false;
+    let mut case_pattern_paren_depth = 0usize;
+    let mut case_pattern_opener_available = true;
+    let mut case_pattern_region_seen = false;
+    // rubash#3307: opener parens still awaiting their closer. The unit
+    // scan carries no delimiter stack, so a `(` that takes the opener
+    // branch owns the next `)` the way the gate's pushed `(` delimiter
+    // does (`(a|)` stays held, exactly as the gate leaves it). Unlike
+    // the paren depth it is never reset by a `|` or by a region re-arm,
+    // only consumed by a `)`.
+    let mut case_pattern_opener_depth = 0usize;
     // GNU read_token (parse.y:3630-3643): `#` introduces a comment only at
     // a token boundary — after whitespace, a separator (`;&|()<>`), or at
     // the start. `word.is_empty()` alone is wrong: `$`, quotes and other
@@ -3930,6 +3947,12 @@ fn skip_parenthesized_unit_corrected_ex(chars: &[char], open: usize) -> Option<(
         } else {
             (&[], usize::MAX)
         };
+        // rubash#3307: pre-update snapshots for the close arm's
+        // reclassification predicate (mirror of the gate's snapshot idiom
+        // in unclosed_input_close_char_posix).
+        let region_before = case_pattern_region;
+        let content_before = case_pattern_content;
+        let opener_depth_before = case_pattern_opener_depth;
         update_command_substitution_case_depth_corrected_ex(
             ch,
             false,
@@ -3943,6 +3966,58 @@ fn skip_parenthesized_unit_corrected_ex(chars: &[char], open: usize) -> Option<(
             &mut undecided,
             &mut case_pattern_region,
         );
+        // rubash#3307: per-pattern content bookkeeping (mirror of the
+        // gate/parser arm's advance in dollar_command_substitution): a
+        // freshly armed region starts empty; `|` starts a fresh pattern;
+        // a pattern-list opener consumes the opener without setting
+        // content; any other char in the region is pattern content. The
+        // `)` arms consume a pending paren/opener instead of setting
+        // content, so the close arm below judges by the snapshots above.
+        if case_pattern_region {
+            if !case_pattern_region_seen {
+                case_pattern_content = false;
+                case_pattern_paren_depth = 0;
+                case_pattern_opener_available = true;
+                case_pattern_region_seen = true;
+            }
+        } else {
+            case_pattern_region_seen = false;
+        }
+        if case_depth > 0 && region_before {
+            match ch {
+                '(' => {
+                    if case_pattern_paren_depth == 0
+                        && !case_pattern_content
+                        && case_pattern_opener_available
+                    {
+                        case_pattern_opener_available = false;
+                        case_pattern_opener_depth += 1;
+                    } else {
+                        case_pattern_paren_depth += 1;
+                        case_pattern_content = true;
+                    }
+                }
+                '|' if case_pattern_paren_depth == 0 => {
+                    case_pattern_content = false;
+                    case_pattern_opener_available = true;
+                }
+                ')' if case_pattern_paren_depth > 0 => {
+                    case_pattern_paren_depth -= 1;
+                }
+                ')' if case_pattern_opener_depth > 0 => {
+                    case_pattern_opener_depth -= 1;
+                }
+                '&' => {
+                    // `;&` is a clause terminator, not pattern content.
+                    if chars.get(index.wrapping_sub(1)) != Some(&';') {
+                        case_pattern_content = true;
+                    }
+                }
+                ';' => {}
+                ch if ch.is_whitespace() => {}
+                _ => case_pattern_content = true,
+            }
+        }
         // rubash#2784 pattern-content witness (mirror of the oracle's
         // advance in skip.rs).
         if case_depth == 0 {
@@ -4040,9 +4115,14 @@ fn skip_parenthesized_unit_corrected_ex(chars: &[char], open: usize) -> Option<(
             '(' if case_depth == 0 => depth += 1,
             // rubash#2784: a `)` while a case preamble is unfinished
             // closes this unit (mirror of the skip.rs oracle arm).
-            ')' if case_depth == 0
+            // rubash#3307: or while the armed pattern region has no
+            // content yet (the gate's reclassification predicate); a
+            // pending opener owns the `)` instead.
+            ')' if (case_depth == 0
                 || matches!(case_in_stage, 1 | 2)
-                || (case_in_stage == 3 && !case_pattern_seen) =>
+                || (case_in_stage == 3 && !case_pattern_seen)
+                || (region_before && !content_before))
+                && opener_depth_before == 0 =>
             {
                 depth = depth.saturating_sub(1);
                 if depth == 0 {

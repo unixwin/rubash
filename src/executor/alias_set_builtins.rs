@@ -267,7 +267,16 @@ impl Executor {
             let histsize = crate::history::SessionHistory::size_limit(self.get_env("HISTSIZE"));
             let mut shell = session.borrow_mut();
             shell.histfile_loaded = true;
-            let _ = shell.load_file_with_arming(&resolved.to_string_lossy(), histsize, write_ts);
+            // sv_histtimefmt's comment-char arming is sticky (rubash#3535):
+            // a HISTTIMEFORMAT bound and unset earlier in the session
+            // still arms this load's timestamp recognition.
+            let comment_armed = self.shell_state.history_comment_char_armed || write_ts;
+            let _ = shell.load_file_with_arming(
+                &resolved.to_string_lossy(),
+                histsize,
+                write_ts,
+                comment_armed,
+            );
         }
     }
 
@@ -298,11 +307,14 @@ impl Executor {
         };
         let histsize = crate::history::SessionHistory::size_limit(self.get_env("HISTSIZE"));
         // The load reads with the caller's current comment-char arming
-        // (rubash#1669), like any other history file read.
+        // (rubash#1669), like any other history file read — including
+        // the sticky arming an earlier HISTTIMEFORMAT bind left behind
+        // (rubash#3535).
         let timestamps_armed = self.get_env("HISTTIMEFORMAT").is_some();
+        let comment_armed = self.shell_state.history_comment_char_armed || timestamps_armed;
         let mut shell = session.borrow_mut();
         shell.histfile_loaded = true;
-        let _ = shell.load_file_with_arming(&path, histsize, timestamps_armed);
+        let _ = shell.load_file_with_arming(&path, histsize, timestamps_armed, comment_armed);
     }
 
     /// flags.c:257: a `set -m`/`set +m` write routes through
