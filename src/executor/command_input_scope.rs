@@ -1981,6 +1981,7 @@ impl Executor {
                         | crate::parser::RedirectKind::CombinedAppend => {
                             crate::executor::shell_options::probe_output_redirect(
                                 self,
+                                Some(redirect),
                                 &target,
                                 redirect.clobber,
                             )?;
@@ -2104,6 +2105,7 @@ impl Executor {
                             // (rubash#1868).
                             match crate::executor::shell_options::probe_output_redirect_file(
                                 self,
+                                Some(redirect),
                                 path,
                                 redirect.clobber,
                             )? {
@@ -2155,6 +2157,7 @@ impl Executor {
                     {
                         crate::executor::shell_options::probe_output_redirect_file(
                             self,
+                            Some(redirect),
                             &target,
                             redirect.clobber,
                         )?
@@ -2320,6 +2323,7 @@ impl Executor {
                     {
                         crate::executor::shell_options::probe_output_redirect_file(
                             self,
+                            Some(redirect),
                             &target,
                             redirect.clobber,
                         )?

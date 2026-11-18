@@ -2447,6 +2447,13 @@ impl Executor {
         let mut pass = 0u32;
         let mut fail: Option<(u32, Vec<u8>)> = None;
         let mut fail_emitted = false;
+        // rubash#3851: the stream fds a write call actually reached.
+        // This route only invokes write_to_fd for fds a chunk carried,
+        // so a builtin whose log holds no fd-1/fd-2 payload (`printf ""`
+        // leaves only pass-boundary marks) would never perform the
+        // rubash#1868 empty-stream pairing open and a FIFO reader
+        // hangs; the unwritten-fd pass below restores it.
+        let mut written_fds = std::collections::HashSet::new();
         // write_to_fd swallows a Closed target with Ok — the verdict
         // must come from the resolved target itself.
         let fd1_closed = state
@@ -2458,6 +2465,7 @@ impl Executor {
                 if let Some((fail_pass, text)) = &fail {
                     if pass > *fail_pass && !fail_emitted {
                         let _ = state.write_to_fd(self, 2, text);
+                        written_fds.insert(2);
                         fail_emitted = true;
                     }
                 }
@@ -2494,6 +2502,7 @@ impl Executor {
                     }
                     continue;
                 }
+                written_fds.insert(1);
                 match state.write_to_fd(self, 1, bytes) {
                     Ok(()) => {}
                     Err(error) if is_closed_output_error(&error) => {
@@ -2539,11 +2548,31 @@ impl Executor {
                 }
                 continue;
             }
+            written_fds.insert(u32::from(*fd));
             self.write_state_output_or_diagnostic(cmd, &state, u32::from(*fd), bytes)?;
         }
         if let Some((_, text)) = &fail {
             if !fail_emitted {
                 let _ = state.write_to_fd(self, 2, text);
+                written_fds.insert(2);
+            }
+        }
+        // rubash#3851: GNU redir.c do_redirections (redir.c:237) opens
+        // every redirect entry before the builtin runs — output or not
+        // (the r_output_direction / r_appending_to arm,
+        // do_redirection_internal redir.c:918-919 -> redir_open
+        // redir.c:725). The ordered walk access-probes FIFO and net
+        // targets instead, leaving the single pairing open to the
+        // flush (rubash#1868 / rubash#1967); the pair route reaches it
+        // through write_state_output_or_diagnostic's unconditional
+        // per-fd call, but this route only writes the fds a chunk
+        // carried. A stream fd no chunk wrote still owes its pairing
+        // open — `printf "" > fifo` blocks for a reader like GNU — so
+        // run the empty-stream arm for each unwritten stream fd; for
+        // every non-FIFO/non-net target that arm is a no-op.
+        for fd in [1u32, 2] {
+            if !written_fds.contains(&fd) {
+                self.write_state_output_or_diagnostic(cmd, &state, fd, &[])?;
             }
         }
         Ok(true)

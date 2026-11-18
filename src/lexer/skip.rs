@@ -48,6 +48,17 @@ impl<'a> Lexer<'a> {
         // the paren depth it is never reset by a `|` or by a region re-arm,
         // only consumed by a `)`.
         let mut case_pattern_opener_depth = 0usize;
+        // rubash#3306: paren depth opened inside a case context while
+        // the pattern region is disarmed (clause body or `case … in`
+        // preamble) — GNU's `)` is the substitution's shell_eof_token
+        // only at body paren depth zero (parse.y:4519-4521).
+        let mut case_body_paren_depth = 0usize;
+        // rubash#3306: a `;;`/`;&`/`;;&` seen while the pattern region
+        // is armed is fatal in GNU's grammar — the clause terminator
+        // is only legal after a clause BODY. Once seen the case can
+        // never complete, so the next top-level `)` closes the
+        // substitution for the body parser's verdict.
+        let mut case_clause_terminator_in_pattern = false;
         // rubash#380: the last significant unquoted char fed to the case
         // word machine — the previous-token witness for the `esac`
         // pattern-text rule (parse.y:3181/3183).
@@ -162,7 +173,14 @@ impl<'a> Lexer<'a> {
                             case_pattern_content = true;
                         }
                     }
-                    ';' => {}
+                    ';' => {
+                        // rubash#3306: `;;`/`;&`/`;;&` while the pattern
+                        // region is armed is a clause terminator in
+                        // pattern position — fatal in GNU's grammar.
+                        if case_pattern_paren_depth == 0 && matches!(next, Some(';') | Some('&')) {
+                            case_clause_terminator_in_pattern = true;
+                        }
+                    }
                     c if c.is_whitespace() => {}
                     _ => case_pattern_content = true,
                 }
@@ -192,16 +210,30 @@ impl<'a> Lexer<'a> {
                 // rubash#3307: or while the armed pattern region has
                 // no content yet (the gate's reclassification
                 // predicate); a pending opener owns the `)` instead.
+                // rubash#3306: or at body paren depth zero with the
+                // pattern region disarmed (a clause body or the
+                // `case … in` preamble — GNU's shell_eof_token,
+                // parse.y:4519-4521), or inside a case already doomed
+                // by a pattern-position clause terminator.
                 ')' if (case_depth == 0
                     || matches!(case_in_stage, 1 | 2)
                     || (case_in_stage == 3 && !case_pattern_seen)
-                    || (region_before && !content_before))
+                    || (region_before && !content_before)
+                    || (case_depth > 0
+                        && case_body_paren_depth == 0
+                        && (!region_before || case_clause_terminator_in_pattern)))
                     && opener_depth_before == 0 =>
                 {
                     depth -= 1;
                     if depth == 0 {
                         break;
                     }
+                }
+                '(' if case_depth > 0 && !region_before => {
+                    case_body_paren_depth += 1;
+                }
+                ')' if case_depth > 0 && !region_before => {
+                    case_body_paren_depth = case_body_paren_depth.saturating_sub(1);
                 }
                 '$' if self.peek() == Some('\'') => {
                     self.advance();
@@ -1958,7 +1990,7 @@ pub(crate) fn skip_backtick_corrected(chars: &[char], mut index: usize) -> Optio
 /// scanned span, and whether the unit closed. Quote/escape/nesting handling
 /// is the walk's top-level `${` arm below (GNU parse.y:3877
 /// parse_matched_pair ('{', '}', P_FIRSTCLOSE|P_DOLBRACE)).
-fn skip_braced_unit_scan(chars: &[char], open: usize) -> (usize, usize, bool) {
+pub(crate) fn skip_braced_unit_scan(chars: &[char], open: usize) -> (usize, usize, bool) {
     let mut depth = 1usize;
     let mut scan = open + 1;
     let mut newlines = 0usize;
@@ -2071,6 +2103,17 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
     // the paren depth it is never reset by a `|` or by a region re-arm,
     // only consumed by a `)`.
     let mut case_pattern_opener_depth = 0usize;
+    // rubash#3306: paren depth opened inside a case context while the
+    // pattern region is disarmed (clause body or `case … in`
+    // preamble) — GNU's `)` is the substitution's shell_eof_token
+    // only at body paren depth zero (parse.y:4519-4521).
+    let mut case_body_paren_depth = 0usize;
+    // rubash#3306: a `;;`/`;&`/`;;&` seen while the pattern region
+    // is armed is fatal in GNU's grammar — the clause terminator
+    // is only legal after a clause BODY. Once seen the case can
+    // never complete, so the next top-level `)` closes the
+    // substitution for the body parser's verdict.
+    let mut case_clause_terminator_in_pattern = false;
     // rubash#380: previous significant unquoted char fed to the case
     // word machine (the `esac` previous-token witness,
     // parse.y:3181/3183).
@@ -2228,7 +2271,14 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
                         case_pattern_content = true;
                     }
                 }
-                ';' => {}
+                ';' => {
+                    // rubash#3306: `;;`/`;&`/`;;&` while the pattern
+                    // region is armed is a clause terminator in
+                    // pattern position — fatal in GNU's grammar.
+                    if case_pattern_paren_depth == 0 && matches!(next, Some(';') | Some('&')) {
+                        case_clause_terminator_in_pattern = true;
+                    }
+                }
                 ch if ch.is_whitespace() => {}
                 _ => case_pattern_content = true,
             }
@@ -2328,16 +2378,30 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
             // rubash#3307: or while the armed pattern region has no
             // content yet (the gate's reclassification predicate); a
             // pending opener owns the `)` instead.
+            // rubash#3306: or at body paren depth zero with the
+            // pattern region disarmed (a clause body or the
+            // `case … in` preamble — GNU's shell_eof_token,
+            // parse.y:4519-4521), or inside a case already doomed
+            // by a pattern-position clause terminator.
             ')' if (case_depth == 0
                 || matches!(case_in_stage, 1 | 2)
                 || (case_in_stage == 3 && !case_pattern_seen)
-                || (region_before && !content_before))
+                || (region_before && !content_before)
+                || (case_depth > 0
+                    && case_body_paren_depth == 0
+                    && (!region_before || case_clause_terminator_in_pattern)))
                 && opener_depth_before == 0 =>
             {
                 depth = depth.saturating_sub(1);
                 if depth == 0 {
                     return Some(index + 1);
                 }
+            }
+            '(' if case_depth > 0 && !region_before => {
+                case_body_paren_depth += 1;
+            }
+            ')' if case_depth > 0 && !region_before => {
+                case_body_paren_depth = case_body_paren_depth.saturating_sub(1);
             }
             _ => {}
         }
@@ -3355,6 +3419,45 @@ fn unclosed_array_subscript_walk(
                         quote_line = scan_line;
                         scan += 1;
                     }
+                    // parse.y:4140-4141: inside the P_ARRAYSUB matched pair a
+                    // `$(`/`${` after `$` (LEX_WASDOL) takes the
+                    // parse_dollar_word route — the inner construct has its
+                    // own scan, so a `]` inside it never closes the
+                    // subscript, and an EOF inside it produces the INNER
+                    // construct's diagnostic (`v[a=$(x` reports `)' at the
+                    // EOF line, not `]' at the `[` line; `v[a=$(x])z` keeps
+                    // its `]' because the comsub is balanced). A closed unit
+                    // is skipped atomically; an unclosed one defers the
+                    // verdict to the generic close-char scan which names the
+                    // innermost pending construct.
+                    '$' if chars.get(scan + 1) == Some(&'(') => {
+                        match skip_parenthesized_unit_corrected(&chars, scan + 1) {
+                            Some(end) => {
+                                scan_line +=
+                                    chars[scan..end].iter().filter(|c| **c == '\n').count();
+                                scan = end;
+                                continue;
+                            }
+                            None => return None,
+                        }
+                    }
+                    '$' if chars.get(scan + 1) == Some(&'{') => {
+                        let (end, newlines, closed) = skip_braced_unit_scan(&chars, scan + 1);
+                        if closed {
+                            scan_line += newlines;
+                            scan = end;
+                            continue;
+                        }
+                        return None;
+                    }
+                    '`' => match skip_backtick_corrected(&chars, scan) {
+                        Some(end) => {
+                            scan_line += chars[scan..end].iter().filter(|c| **c == '\n').count();
+                            scan = end;
+                            continue;
+                        }
+                        None => return None,
+                    },
                     '[' => depth += 1,
                     ']' => {
                         depth -= 1;
@@ -4393,10 +4496,42 @@ fn main_level_paren_token_name(chars: &[char], idx: usize) -> String {
     }
 }
 
+/// Skip a `parse_matched_pair` expansion unit (`\`...``, `$(...)`, `$((...))`,
+/// `${...}`, `$[...]`) at `index` inside an extglob group body.
+/// Returns `None` if `chars[index]` does not open such a unit, `Some(Some(end))`
+/// when the unit closes at `end`, or `Some(None)` if the unit is unclosed.
+fn skip_extglob_unit(chars: &[char], index: usize) -> Option<Option<usize>> {
+    match chars[index] {
+        '`' => Some(skip_backtick_corrected(chars, index)),
+        '$' => match chars.get(index + 1) {
+            Some('(') => {
+                if chars.get(index + 2) == Some(&'(')
+                    && super::dollar_double_paren_is_arithmetic(
+                        &chars[index + 1..].iter().collect::<String>(),
+                    )
+                {
+                    Some(skip_arith_substitution_corrected(chars, index + 3))
+                } else {
+                    Some(skip_parenthesized_unit_corrected(chars, index + 1))
+                }
+            }
+            Some('{') => {
+                let (end, _, closed) = skip_braced_unit_scan(chars, index + 1);
+                Some(closed.then_some(end))
+            }
+            Some('[') => Some(dollar_word_group_len(chars, index + 1, '[', ']')),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Quote/backslash-aware balanced-paren scan for an extglob pattern group
 /// body (GNU parse_matched_pair, parse.y:3877: quotes nest, backslash
-/// escapes, nested `(`/`)` count). `open` is the index of the `(`; returns
-/// the index past its matching `)` or `None` when EOF is reached first.
+/// escapes, nested `(`/`)` count, and `` `...` `` / `$(...)` / `${...}` /
+/// `$[...]` are scanned as their own matched-pair units). `open` is the index
+/// of the `(`; returns the index past its matching `)` or `None` when EOF is
+/// reached first.
 pub(crate) fn skip_extglob_group_chars(chars: &[char], open: usize) -> Option<usize> {
     let mut depth = 1usize;
     let mut index = open + 1;
@@ -4422,8 +4557,15 @@ pub(crate) fn skip_extglob_group_chars(chars: &[char], open: usize) -> Option<us
                 escaped = true;
             } else if c == '"' {
                 double = false;
+            } else if let Some(unit) = skip_extglob_unit(chars, index) {
+                index = unit?;
+                continue;
             }
             index += 1;
+            continue;
+        }
+        if let Some(unit) = skip_extglob_unit(chars, index) {
+            index = unit?;
             continue;
         }
         match c {
@@ -5356,10 +5498,26 @@ pub(crate) fn dollar_word_group_len(
     let mut single = false;
     let mut double = false;
     let mut escaped = false;
+    // rubash#3859: `$'...'` is ANSI-C quoting (parse.y
+    // read_token_word's dollar-quote arm -> parse_matched_pair
+    // P_ALLOWESC): `\'` is an escaped quote, so without this region a
+    // `'` after a backslash closes the plain single-quote state early
+    // and the `close_ch` after it ends the group
+    // (`$(echo $'a\')b')` truncated at `')`).
+    let mut ansi_single = false;
     while index < chars.len() {
         let ch = chars[index];
         if escaped {
             escaped = false;
+            index += 1;
+            continue;
+        }
+        if ansi_single {
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '\'' {
+                ansi_single = false;
+            }
             index += 1;
             continue;
         }
@@ -5380,6 +5538,10 @@ pub(crate) fn dollar_word_group_len(
             continue;
         }
         match ch {
+            '$' if chars.get(index + 1) == Some(&'\'') => {
+                ansi_single = true;
+                index += 1;
+            }
             '\\' => escaped = true,
             '\'' => single = true,
             '"' => double = true,

@@ -18,7 +18,7 @@ use crate::executor::{ExecuteError, Executor};
 use crate::history::SessionHistory;
 use crate::history_expand::{HistChars, HistCtx};
 use crate::lexer::{
-    expand_aliases_in_source_marked, tokenize, tokenize_with_initial_posix,
+    expand_aliases_in_source_marked_with_comsubs, tokenize, tokenize_with_initial_posix,
     tokenize_with_initial_posix_marked, AliasLookup, Token, TokenKind,
 };
 use crate::parser::CommandNode;
@@ -429,21 +429,15 @@ pub fn script_uses_runtime_parse_gates(contents: &str) -> bool {
 /// (parse.y:5751-5769): posix keeps reserved words as keywords, default
 /// mode lets an alias replace them (rubash#414).
 pub(crate) fn expand_group_aliases(executor: &Executor, source: &str) -> String {
-    expand_group_aliases_marked(executor, source).0
+    expand_group_aliases_inner(executor, source).0
 }
 
-/// `expand_group_aliases` plus the byte offsets of newlines the
-/// expansion itself introduced — GNU consumes pushed alias text through
-/// shell_getc without the yy_readline_get line_number bump
-/// (parse.y:2504), so those newlines must not advance the token line
-/// stamps (rubash#3605 run-nquote: `alias foo=$'echo foo\\n\\nquux\\n'`
-/// + `foo` on line N reports `quux` at line N, not N+2).
-pub(crate) fn expand_group_aliases_marked(
+fn expand_group_aliases_inner(
     executor: &Executor,
     source: &str,
-) -> (String, Vec<usize>) {
+) -> (String, Vec<usize>, Vec<(String, Vec<usize>)>) {
     if !executor.alias_expansion_enabled() || executor.shell_state.aliases.is_empty() {
-        return (source.to_string(), Vec::new());
+        return (source.to_string(), Vec::new(), Vec::new());
     }
     let posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
     let lookup = move |word: &str| {
@@ -456,7 +450,28 @@ pub(crate) fn expand_group_aliases_marked(
             )
         })
     };
-    expand_aliases_in_source_marked(source, &lookup as &AliasLookup<'_>, posix)
+    expand_aliases_in_source_marked_with_comsubs(source, &lookup as &AliasLookup<'_>, posix)
+}
+
+/// `expand_group_aliases` plus the byte offsets of newlines the
+/// expansion itself introduced — GNU consumes pushed alias text through
+/// shell_getc without the yy_readline_get line_number bump
+/// (parse.y:2504), so those newlines must not advance the token line
+/// stamps (rubash#3605 run-nquote: `alias foo=$'echo foo\\n\\nquux\\n'`
+/// + `foo` on line N reports `quux` at line N, not N+2).
+/// Also records per-comsub-body expansion newline marks on `executor`
+/// (rubash#3838).
+pub(crate) fn expand_group_aliases_marked(
+    executor: &mut Executor,
+    source: &str,
+) -> (String, Vec<usize>) {
+    let (expanded, marks, comsub_records) = expand_group_aliases_inner(executor, source);
+    if !comsub_records.is_empty() {
+        executor
+            .shell_state
+            .record_comsub_alias_newlines(comsub_records);
+    }
+    (expanded, marks)
 }
 
 /// shell.c run_pending_command style driver for scripts with history on:
@@ -2603,6 +2618,19 @@ fn advance_quote_state(state: Option<char>, text: &str) -> Option<char> {
             }
             _ => match c {
                 '\\' => i += 1,
+                '$' if chars.get(i + 1) == Some(&'\'') => {
+                    // ANSI-C `$'...'`: escape-aware close scan
+                    // (parse.y:5476-5480 — `\'` inside is an escaped
+                    // quote, not the terminator).
+                    i += 2;
+                    while i < chars.len() {
+                        match chars[i] {
+                            '\\' => i += 2,
+                            '\'' => break,
+                            _ => i += 1,
+                        }
+                    }
+                }
                 '\'' | '"' | '`' => state = Some(c),
                 '#' if i == 0 || matches!(chars[i - 1], ' ' | '\t' | ';' | '\n') => break,
                 _ => {}
@@ -3709,7 +3737,11 @@ pub(crate) fn run_source_pre_lexed_with_line_offset(
 /// (quotes, `${`, `$(`, array lists, `[` subscripts) are read-time
 /// matched-pair verdicts the tokenizer does not model and are never
 /// overridden here.
-fn command_paren_verdict_disproved_by_parser(input: &str, parse_posix: bool) -> bool {
+fn command_paren_verdict_disproved_by_parser(
+    executor: &Executor,
+    input: &str,
+    parse_posix: bool,
+) -> bool {
     let Some(unclosed) = crate::lexer::unclosed_input_close_char_posix(input, parse_posix) else {
         return false;
     };
@@ -3758,6 +3790,19 @@ fn command_paren_verdict_disproved_by_parser(input: &str, parse_posix: bool) -> 
         // `expected `)'` sequence), so yield the route exactly then.
         // Any other marker family present (subshell, compound
         // assignment, ...) keeps the route's diagnostic.
+        // rubash#3306: a clean parse whose only error lives inside a
+        // command-substitution body (the markers sit on the
+        // substitution node, invisible to the tree predicates) also
+        // disproves the verdict — GNU died on the body token at the
+        // `)` (parse.y:4549-4555 parse_comsub) and the read-time
+        // screen prints it. Every other !command_position verdict
+        // keeps the route's diagnostic (unclosed compassign EOF,
+        // stray-paren families, ...).
+        if !ast.commands.iter().any(command_tree_has_parse_error)
+            && executor.comsub_body_error_pending(&ast.commands)
+        {
+            return true;
+        }
         return ast.commands.iter().any(command_tree_has_cond_marker)
             && !ast
                 .commands
@@ -3915,7 +3960,11 @@ fn command_tree_has_hard_token_error(command: &CommandNode) -> bool {
 /// gathering; GNU reports it when the compound completes). Anything
 /// else — clean parses, pure EOF shortfalls, unterminated quotes or
 /// substitutions (which carry no marker) — is genuinely incomplete.
-fn interactive_pending_is_hard_syntax_error(input: &str, parse_posix: bool) -> bool {
+fn interactive_pending_is_hard_syntax_error(
+    executor: &Executor,
+    input: &str,
+    parse_posix: bool,
+) -> bool {
     let tokens = tokenize_with_initial_posix(input, parse_posix);
     if crate::lexer::heredoc_overflow_line().is_some() {
         return false;
@@ -3930,6 +3979,17 @@ fn interactive_pending_is_hard_syntax_error(input: &str, parse_posix: bool) -> b
         },
     );
     if ast.commands.iter().any(command_tree_has_near_marker) {
+        return true;
+    }
+    // rubash#3306: a command substitution whose extracted body already
+    // carries a hard parse error is wrong at the `)` that closed it —
+    // GNU's parse_comsub yyparse dies on the body token while reading
+    // (parse.y:4549-4555, 6858-6865), it does not wait for more input.
+    // The tree predicates cannot see the body's markers (they live on
+    // the comsub node, not in the tree), so ask the body walker
+    // directly; a body that merely ran out stays "incomplete" exactly
+    // like an unclosed `(`.
+    if executor.comsub_body_error_pending(&ast.commands) {
         return true;
     }
     ast.commands.iter().any(command_tree_has_hard_token_error)
@@ -4566,7 +4626,7 @@ fn run_source_impl_inner_body(
         && !interactive
         && crate::lexer::has_unclosed_input_syntax_posix(input, parse_posix)
         && !input.contains("<<")
-        && !command_paren_verdict_disproved_by_parser(input, parse_posix);
+        && !command_paren_verdict_disproved_by_parser(executor, input, parse_posix);
     if unclosed_route || (extglob_eof_line.is_some() && !input.contains("<<")) {
         // GNU parse.y:5635-5643 read_token_word + parse_matched_pair
         // (parse.y:3906-3912): an unclosed array subscript `[` reports
@@ -5945,7 +6005,7 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
             // run below reports the error and the reader moves on).
             let group_complete = pending_heredocs.is_empty()
                 && (!stdin_source_needs_more_posix(&pending, stdin_posix)
-                    || interactive_pending_is_hard_syntax_error(&pending, stdin_posix));
+                    || interactive_pending_is_hard_syntax_error(executor, &pending, stdin_posix));
             if group_complete {
                 // rubash#2849: a group was just accepted for
                 // execution — the read that produced it has returned,

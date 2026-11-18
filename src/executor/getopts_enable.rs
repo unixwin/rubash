@@ -117,7 +117,14 @@ impl Executor {
             offset += 1;
         }
 
-        let Some(spec_index) = optspec.find(option) else {
+        // GNU lib/sh/getopt.c sh_getopt: ':' is never a valid option letter
+        // even when it appears in optspec (e.g. `::a`, `a:`, `:a:`).
+        let spec_index = if option == ':' {
+            None
+        } else {
+            optspec.find(option)
+        };
+        let Some(spec_index) = spec_index else {
             // getopts.def G_INVALID_OPT: the OPTIND bind (line 243)
             // precedes every outcome branch; bind name "?" next (invalid
             // identifiers report here and fail the call), then either
@@ -136,18 +143,7 @@ impl Executor {
                 let _ = writeln!(stderr, "{}", self.getopts_invalid_option_diagnostic(option));
             }
             self.set_optind(optind, stderr);
-            if silent {
-                let status = self.getopts_bind_name(&variable, "?", stderr);
-                if !self.take_getopts_optind_arith_fatal() {
-                    self.getopts_bind_optarg_checked(&option.to_string(), stderr);
-                }
-                return status;
-            }
-            let status = self.getopts_bind_name(&variable, "?", stderr);
-            if !self.take_getopts_optind_arith_fatal() {
-                self.getopts_unbind_optarg();
-            }
-            return status;
+            return self.getopts_finish_question_binds(&variable, silent.then_some(option), stderr);
         };
 
         let requires_arg = optspec[spec_index + option.len_utf8()..].starts_with(':');
@@ -210,6 +206,17 @@ impl Executor {
             self.shell_state
                 .env_vars
                 .insert("__RUBASH_GETOPTS_OFFSET".to_string(), offset.to_string());
+            if option == '?' {
+                // GNU builtins/getopts.def dogetopts: sh_getopt returns '?'
+                // for a declared '?' option too, so dogetopts enters the
+                // ret == '?' branch (silent sets OPTARG="?", noisy unbinds
+                // OPTARG) without emitting an illegal-option diagnostic.
+                return self.getopts_finish_question_binds(
+                    &variable,
+                    silent.then_some('?'),
+                    stderr,
+                );
+            }
             self.getopts_bind_optarg_checked(&argument, stderr);
             return self.getopts_bind_name(&variable, &option.to_string(), stderr);
         }
@@ -218,6 +225,9 @@ impl Executor {
         self.shell_state
             .env_vars
             .insert("__RUBASH_GETOPTS_OFFSET".to_string(), offset.to_string());
+        if option == '?' {
+            return self.getopts_finish_question_binds(&variable, silent.then_some('?'), stderr);
+        }
         // getopts.def:301: the valid-option path binds OPTARG
         // unconditionally — with sh_optarg == NULL for a no-argument
         // option, i.e. bound with no value, NOT unbound (rubash#2970).
@@ -225,6 +235,26 @@ impl Executor {
         // G_INVALID_OPT / G_ARG_MISSING paths above.
         self.getopts_bind_optarg_null(stderr);
         self.getopts_bind_name(&variable, &option.to_string(), stderr)
+    }
+
+    fn getopts_finish_question_binds<W>(
+        &mut self,
+        variable: &str,
+        optarg_char: Option<char>,
+        stderr: &mut W,
+    ) -> i32
+    where
+        W: Write,
+    {
+        let status = self.getopts_bind_name(variable, "?", stderr);
+        if !self.take_getopts_optind_arith_fatal() {
+            if let Some(ch) = optarg_char {
+                self.getopts_bind_optarg_checked(&ch.to_string(), stderr);
+            } else {
+                self.getopts_unbind_optarg();
+            }
+        }
+        status
     }
 
     pub(in crate::executor) fn getopts_invalid_option_diagnostic(&self, option: char) -> String {

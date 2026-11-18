@@ -257,6 +257,7 @@ pub(crate) use execution_misc::RandomGen;
 // own spawn faces (rubash#3148).
 use execution_misc::*;
 pub(crate) use external_inner::spawn_error_diagnostic;
+pub(crate) use external_inner::ChildCwdStamp;
 pub(crate) use external_inner::ChildFdSetup;
 // Shared with builtins::exec (rubash#3401 face 3): the simulated-exec
 // waits route through the executor's draining wait; the function lives

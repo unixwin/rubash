@@ -1688,7 +1688,13 @@ pub(crate) fn quotes_residuals_advance(
         // committed fall-through lets the body's `"`/`'` bytes toggle the
         // outer quote state, but a longer buffer closes the unit and jumps
         // its body wholesale.
-        if ch == '`' && !state.single && !state.double {
+        // rubash#3435: a backquote group is active inside double quotes
+        // too (GNU parse.y:3877 parse_matched_pair's dquote branch
+        // recurses into backquotes; the `$(` arm above already skips its
+        // unit inside double quotes). With the `!double` gate an
+        // unbalanced `"` inside `` `...` `` toggled the outer state and
+        // the whole input was misread as an unclosed quote.
+        if ch == '`' && !state.single {
             if let Some(end) = skip_backtick_unit(chars, index) {
                 index = end;
                 state.comment_start = false;
@@ -2803,6 +2809,25 @@ fn skip_parenthesized_unit_ex(chars: &[char], open: usize) -> Option<(usize, boo
             }
         }
         match ch {
+            // ANSI-C `$'...'` (parse.y:5476-5480 → parse_matched_pair
+            // P_ALLOWESC): `\'` inside is an escaped quote, not the close —
+            // a plain `'` toggle truncates `$(...$'a\')b'...)` at `')`.
+            '$' if chars.get(index + 1) == Some(&'\'') => {
+                index += 2;
+                while index < chars.len() {
+                    if chars[index] == '\\' {
+                        index += 2;
+                        continue;
+                    }
+                    if chars[index] == '\'' {
+                        index += 1;
+                        break;
+                    }
+                    index += 1;
+                }
+                token_boundary = false;
+                continue;
+            }
             '\'' => single = true,
             '"' => double = true,
             '(' if case_depth == 0 => depth += 1,
@@ -4752,6 +4777,7 @@ pub(crate) fn subscript_residuals_advance(
             let mut scan = index + 1;
             let mut q_single = false;
             let mut q_double = false;
+            let mut q_ansi = false;
             let mut q_escaped = false;
             while scan < chars.len() {
                 let c = chars[scan];
@@ -4760,9 +4786,10 @@ pub(crate) fn subscript_residuals_advance(
                     scan += 1;
                     continue;
                 }
-                if q_single {
+                if q_single || q_ansi {
                     if c == '\'' {
                         q_single = false;
+                        q_ansi = false;
                     }
                     scan += 1;
                     continue;
@@ -4780,6 +4807,55 @@ pub(crate) fn subscript_residuals_advance(
                     '\\' => q_escaped = true,
                     '\'' => q_single = true,
                     '"' => q_double = true,
+                    '$' if chars.get(scan + 1) == Some(&'\'') => {
+                        q_ansi = true;
+                        scan += 1;
+                    }
+                    // parse.y:4140-4141 (mirror of the skip.rs oracle arm):
+                    // inside the P_ARRAYSUB pair a `$(`/`${` takes the
+                    // parse_dollar_word route — it is scanned as its own
+                    // unit, so a `]` inside never closes the subscript and
+                    // an EOF inside belongs to the INNER construct (the
+                    // generic close-char path names it); only a balanced
+                    // unit is skipped atomically.
+                    '$' if chars.get(scan + 1) == Some(&'(') => {
+                        match super::skip::skip_parenthesized_unit_corrected(&chars, scan + 1) {
+                            Some(end) => {
+                                scan = end;
+                                continue;
+                            }
+                            None => {
+                                return Some(park.take().unwrap_or(SubscriptResidualPark {
+                                    pos: index,
+                                    snapshot,
+                                }));
+                            }
+                        }
+                    }
+                    '$' if chars.get(scan + 1) == Some(&'{') => {
+                        let (end, _nl, closed) =
+                            super::skip::skip_braced_unit_scan(&chars, scan + 1);
+                        if closed {
+                            scan = end;
+                            continue;
+                        }
+                        return Some(park.take().unwrap_or(SubscriptResidualPark {
+                            pos: index,
+                            snapshot,
+                        }));
+                    }
+                    '`' => match super::skip::skip_backtick_corrected(&chars, scan) {
+                        Some(end) => {
+                            scan = end;
+                            continue;
+                        }
+                        None => {
+                            return Some(park.take().unwrap_or(SubscriptResidualPark {
+                                pos: index,
+                                snapshot,
+                            }));
+                        }
+                    },
                     '[' => depth += 1,
                     ']' => {
                         depth -= 1;

@@ -143,6 +143,7 @@ fn run_set_builtin(
         &mut diag,
         stdout,
         &crate::shell::var_table::TempenvListingUnderlay::new(),
+        &[],
     )
     .unwrap();
     diag.flush_with(|| Prolog {
