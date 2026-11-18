@@ -2737,7 +2737,7 @@ impl Executor {
                 }
             };
             if !fresh {
-                if let Ok(dir) = std::fs::File::open(cwd) {
+                if let Ok(dir) = std::fs::File::open(cwd).map(crate::fd::move_file_to_high_fd) {
                     *self.shell_state.cwd_anchor.borrow_mut() =
                         Some(crate::shell::state::CwdAnchor {
                             path: cwd.to_path_buf(),

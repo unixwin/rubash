@@ -392,6 +392,91 @@ pub fn dup_adopted_fd(fd: u32) -> Option<HANDLE> {
     }
 }
 
+/// GNU general.h:257 HIGH_FD_MAX and general.c:702-733
+/// `move_to_high_fd(fd, check_new=1, maxfd=-1)`: the ceiling a
+/// persistent internal descriptor is moved below — the descriptor
+/// table size capped at 256 (20 when the query fails). bash spends
+/// this on exactly the class the cwd anchor belongs to: fds that must
+/// outlive the shell's own bookkeeping but must not collide with the
+/// low numbers user redirections walk (script fd shell.c:1700,
+/// coproc parent pipe subst.c:6392, saved stdout subst.c:7037).
+pub(crate) const HIGH_FD_MAX: i32 = 256;
+
+/// The scan ceiling of `move_to_high_fd` with maxfd=-1: the live
+/// descriptor-table size (`sysconf(_SC_OPEN_MAX)`, the
+/// getdtablesize(2) equivalent bash's compat layer resolves to),
+/// with 20 substituted when the query fails and capped at
+/// HIGH_FD_MAX — general.c:705-713.
+fn high_fd_ceiling() -> i32 {
+    let n = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) };
+    if n <= 0 {
+        20
+    } else {
+        n.min(HIGH_FD_MAX as libc::c_long) as i32
+    }
+}
+
+/// rubash#3640: GNU general.c:702 `move_to_high_fd` (check_new=1,
+/// maxfd=-1). The session cwd anchor (`ShellState::cwd_anchor`) holds
+/// a directory descriptor open for the session's whole residence in
+/// its cwd so a later deletion still leaves spawns and in-process
+/// opens a live inode to land on (rubash#3198/#3268). Opened plainly,
+/// that descriptor took the lowest free OS fd — 3 in every ordinary
+/// session — shifting the whole user fd space up one kernel
+/// descriptor: `exec 3>file` put the file on OS fd 4 while fd 3 still
+/// read as the cwd in /proc/$$/fd (the #3432 namespace shift this
+/// removes at the root). GNU keeps its own persistent internals out
+/// of the low range with move_to_high_fd; the anchor now takes the
+/// same treatment.
+///
+/// Scans DOWN from ceiling-1 to 4 for the first free descriptor
+/// (general.c:715-719 `for (nfds--; ...; nfds--)`), dup2's `fd` onto
+/// it, closes the original, and returns the new number. dup2 clears
+/// FD_CLOEXEC on the target, so the close-on-exec bit the caller's
+/// open set is re-armed — internal fds must not leak raw into
+/// exec'd children (the anchor is only ever spent pre-exec:
+/// stamp_spawn_cwd/spawn_cwd_stamp fchdir in pre_exec,
+/// fd::spawn_whitelisted's cwd_anchor_fd likewise). When no slot in
+/// (3, ceiling) is free, or the dup fails, `fd` is returned
+/// unchanged — GNU's own fallback (general.c:730-733).
+pub fn move_to_high_fd(fd: HANDLE) -> HANDLE {
+    if fd < 0 {
+        return fd;
+    }
+    let ceiling = high_fd_ceiling();
+    for target in (4..ceiling).rev() {
+        // F_GETFD < 0 means the slot is free (EBADF) — the same probe
+        // GNU's check_new loop runs. `fd` itself is open, so it never
+        // passes this test and can never be dup2'd onto itself.
+        if unsafe { libc::fcntl(target, libc::F_GETFD, 0) } >= 0 {
+            continue;
+        }
+        if unsafe { libc::dup2(fd, target) } < 0 {
+            return fd;
+        }
+        let flags = unsafe { libc::fcntl(target, libc::F_GETFD) };
+        unsafe {
+            libc::fcntl(target, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+            libc::close(fd);
+        }
+        return target;
+    }
+    fd
+}
+
+/// `move_to_high_fd` for an owned `File`: the returned File owns the
+/// relocated descriptor (or the original one when no high slot was
+/// free). Used by the cwd-anchor opens so `CwdAnchor::dir` keeps a
+/// plain `Arc<File>` while its kernel fd sits above the user range.
+pub fn move_file_to_high_fd(file: std::fs::File) -> std::fs::File {
+    use std::os::fd::IntoRawFd;
+    let fd = file.into_raw_fd();
+    // SAFETY: move_to_high_fd either returns `fd` itself (still owned
+    // by nobody — into_raw_fd released it) or a fresh dup2 target it
+    // now owns; from_raw_fd re-adopts exactly one live descriptor.
+    unsafe { std::fs::File::from_raw_fd(move_to_high_fd(fd)) }
+}
+
 fn set_inheritable(fd: HANDLE, on: bool) -> std::io::Result<()> {
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
     if flags < 0 {
