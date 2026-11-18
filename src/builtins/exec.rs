@@ -478,19 +478,17 @@ where
             // cwd directory and misclassifies it as EX_NOEXEC (126)
             // (rubash#3317). Non-empty words keep the #2661 probe
             // unchanged (`exec .`, `exec somedir` stay 126).
-            let is_dir = !command.is_empty()
-                && {
-                    let as_written =
-                        crate::executor::path::shell_path_to_windows(command, env_vars);
-                    let as_written = if as_written.is_absolute() {
-                        as_written
-                    } else {
-                        cwd.join(&as_written)
-                    };
-                    std::fs::metadata(&as_written)
-                        .map(|metadata| metadata.is_dir())
-                        .unwrap_or(false)
+            let is_dir = !command.is_empty() && {
+                let as_written = crate::executor::path::shell_path_to_windows(command, env_vars);
+                let as_written = if as_written.is_absolute() {
+                    as_written
+                } else {
+                    cwd.join(&as_written)
                 };
+                std::fs::metadata(&as_written)
+                    .map(|metadata| metadata.is_dir())
+                    .unwrap_or(false)
+            };
             if is_dir {
                 writeln!(
                     stderr,

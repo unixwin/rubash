@@ -90,14 +90,19 @@ fn exec_empty_in_function_is_not_found_127() {
     let root = scratch("fn");
     let out = run(&root, "f() { exec \"\"; }\nf\n");
     assert_eq!(out.stdout, "");
-    assert_eq!(out.stderr, "case.sh: line 2: exec: : not found\n");
+    // GNU attributes a function-body error to the definition line
+    // (line 1), not the call line — verified against bash 5.3.9.
+    assert_eq!(out.stderr, "case.sh: line 1: exec: : not found\n");
     assert_eq!(out.rc, 127);
 }
 
 #[test]
 fn exec_empty_with_execfail_continues_with_127() {
     let root = scratch("execfail");
-    let out = run(&root, "shopt -s execfail\nexec \"\"\necho \"after rc=$?\"\n");
+    let out = run(
+        &root,
+        "shopt -s execfail\nexec \"\"\necho \"after rc=$?\"\n",
+    );
     assert_eq!(out.stdout, "after rc=127\n");
     assert_eq!(out.stderr, "case.sh: line 2: exec: : not found\n");
     assert_eq!(out.rc, 0);
