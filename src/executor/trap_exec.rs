@@ -155,6 +155,165 @@ pub(crate) fn shift_trap_action_lines(commands: &mut [CommandNode], delta: i64) 
     }
 }
 
+/// rubash#3641 (GNU trap.c:496 signal traps / trap.c:1071 exit trap /
+/// trap.c:1196-1200 _run_trap_internal DEBUG/ERR/RETURN ->
+/// builtins/evalstring.c:315 parse_and_execute): every trap action is
+/// fresh parser input that GNU's reader loop consumes ONE COMPLETE
+/// UNIT AT A TIME — `parse_command()` per iteration, executing each
+/// finished unit before reading on (evalstring.c:355-470). An unclosed
+/// quote is an end-of-input verdict the lexer folds into word text
+/// BEFORE the parser sees it, so the re-parse above carries no
+/// `__RUBASH_PARSE_ERROR*` marker and the malformed unit would
+/// silently execute (`trap "echo 'ab" EXIT` printed `ab`).
+///
+/// Returns `Some((prefix, close, report_line, word_pair))` when the
+/// just-parsed action (`commands`, marker-free by the caller's gate)
+/// still has an unclosed matched pair per the continuation scanner:
+/// `prefix` is the action text GNU's loop would already have executed
+/// (possibly empty), `close`/`report_line`/`word_pair` describe the
+/// diagnostic the failed unit owes. `line_base` maps action-relative
+/// lines onto the numbering the site's tokens carry: 1 for the
+/// SEVAL_RESETLINE runners (EXIT/signals parse the action at line 1),
+/// the call/failed line for the anchored runners (DEBUG/RETURN/ERR —
+/// trap.c:1196 omits SEVAL_RESETLINE for them, evalstring.c:333-337).
+/// The posix flag is false everywhere: every trap re-parse tokenizes
+/// non-posix (`tokenize` or `tokenize_with_initial_posix_and_line(..,
+/// false, ..)`), so the scanner must read the same mode.
+fn trap_action_unclosed_eof(
+    action: &str,
+    commands: &[CommandNode],
+    line_base: usize,
+) -> Option<(String, char, usize, bool)> {
+    // Parser-owned failures keep their own diagnostics: a HARD parse
+    // error (`echo )`, a bad `case` arm) is hit at its token's position
+    // before the reader ever reaches EOF inside the pair
+    // (parse.y:6833-6917 report_syntax_error), and a command-position
+    // `(`/`{`/`((` construct carries special "from `X' command"
+    // wording the generic matched-pair report cannot reproduce — both
+    // stay with the `__RUBASH_PARSE_ERROR*` arms. End-of-input markers
+    // do NOT block: an unclosed keyword compound only reports at clean
+    // EOF, which the pair's own EOF inside it beats (parse.y:6883-6901
+    // checks shell_eof_token before compoundcmd_top — the c12 shape:
+    // `if true; then` above an unclosed quote reports the quote).
+    if commands
+        .iter()
+        .any(|command| crate::script_driver::command_tree_has_hard_parse_error(command))
+    {
+        return None;
+    }
+    let unclosed = crate::lexer::unclosed_input_close_char_posix(action, false)?;
+    if unclosed.command {
+        return None;
+    }
+    let prefix = trap_action_eof_prefix(action, &unclosed);
+    // parse.y:3912 reports a word-internal matched pair's OPEN line;
+    // the yyerror site (parse.y:6890-6901) reports the EOF line for the
+    // command-position `)' hunt — same split script_driver's unclosed
+    // route applies, shifted into the site's line numbering.
+    let selected = if unclosed.report_open {
+        unclosed.open_line
+    } else {
+        unclosed.eof_line
+    };
+    // script_driver's unclosed route splits the EOF family the same
+    // way for the status: a word-internal pair dies inside
+    // read_token_word at EXECUTION_FAILURE=1, the command-position
+    // `$(` hunt exits EX_BADUSAGE=2 (parse.y:489-490).
+    let word_pair = !unclosed.command && (unclosed.close != ')' || unclosed.report_open);
+    Some((prefix, unclosed.close, line_base + selected - 1, word_pair))
+}
+
+/// The action text GNU's parse_and_execute reader loop would already
+/// have executed before the unit carrying `unclosed`'s construct: every
+/// complete line before the OUTERMOST pending construct's line
+/// (script_driver's #551-C5 cut — GNU's failed parse starts at the
+/// outermost opener, so text inside the failed group never runs),
+/// further retreated past keyword compounds the cut leaves open
+/// (rubash#1589: `if true; then` above the quote line is itself
+/// unclosed, so the compound — not its header — is the failed command)
+/// and past trailing operators (`echo ok &&` is one incomplete unit —
+/// GNU's `inputunit: simple_list simple_list_terminator` does not
+/// terminate it at the newline, so nothing on it runs).
+fn trap_action_eof_prefix(action: &str, unclosed: &crate::lexer::UnclosedInput) -> String {
+    let mut keep = unclosed.outermost_line.saturating_sub(1);
+    loop {
+        let prefix = action.lines().take(keep).collect::<Vec<_>>().join("\n");
+        if prefix.trim().is_empty() {
+            return String::new();
+        }
+        if let Some(open) = crate::script_driver::unclosed_compound_open_line(&prefix) {
+            keep = open.saturating_sub(1);
+            continue;
+        }
+        if trap_action_prefix_incomplete(&prefix) {
+            keep = keep.saturating_sub(1);
+            continue;
+        }
+        return prefix;
+    }
+}
+
+/// Whether `prefix` still parses as an incomplete unit — an
+/// end-of-input verdict anywhere in its tree (`echo ok &&`, `echo ok |`,
+/// an unclosed `[[`). The retreat loop drops the last line and retries;
+/// hard token errors cannot appear here (the full action parsed
+/// marker-free, and the prefix is a prefix of it).
+fn trap_action_prefix_incomplete(prefix: &str) -> bool {
+    let tokens = crate::lexer::tokenize(prefix);
+    let ast =
+        crate::parser::parse_with_options(&tokens, crate::parser::ParseLoopOptions::default());
+    ast.commands
+        .iter()
+        .any(|command| crate::script_driver::command_tree_has_eof_parse_error(command))
+}
+
+/// Emit the deferred unclosed-pair diagnostic for a trap action whose
+/// complete prefix just executed, and leave the action's status where
+/// GNU's parse_and_execute put it (evalstring.c:578-586 breaks the
+/// reader loop with `last_result = EX_BADUSAGE`; report_syntax_error /
+/// the word-read EOF set `last_command_exit_value` — parse.y:489-490,
+/// 6916 — which `_run_trap_internal` returns as trap_exit_value,
+/// trap.c:1196-1200). Called only when the prefix ran to completion:
+/// an unwind out of a prefix command (`exit`, `return`, break) means
+/// GNU's loop never reached the failed unit, so nothing is reported.
+///
+/// The diagnostic goes through the fd-2 endpoint like every other
+/// parse diagnostic (parser_error writes stderr, error.c:300-316) and
+/// is recorded for contract runs. Under live errexit GNU's
+/// parser_error exit_shell(2)s right after the report (error.c:324-327)
+/// — `errexit_active_at_diagnostic` marks that and the result is
+/// rewritten to the ExitCode the sites' `parser_error_errexited` arms
+/// already propagate; otherwise the status is the EOF family's:
+/// word-internal pairs die inside read_token_word at
+/// EXECUTION_FAILURE=1, the command-position `$(` hunt at
+/// EX_BADUSAGE=2 (script_driver's unclosed route).
+fn finish_trap_action_eof(
+    executor: &mut Executor,
+    diag: Option<(char, usize, bool)>,
+    result: &mut Result<(), ExecuteError>,
+) {
+    let Some((close, report_line, word_pair)) = diag else {
+        return;
+    };
+    if !result.is_ok() {
+        return;
+    }
+    let message = format!("unexpected EOF while looking for matching `{close}'");
+    executor.write_diagnostic_fd2(
+        format!(
+            "{}{message}\n",
+            executor.parser_error_prefix_for_line(report_line)
+        )
+        .as_bytes(),
+    );
+    executor.record_run_diagnostic(message, Some(report_line));
+    if executor.errexit_active_at_diagnostic() {
+        *result = Err(ExecuteError::ExitCode(2));
+    } else {
+        executor.exit_code = if word_pair { 1 } else { 2 };
+    }
+}
+
 /// The stderr destination for an `exec` spawn's diagnostics — and, on
 /// the execute_with_io arms, for the child's own piped stderr
 /// (rubash#2395). GNU has exactly one fd 2: execute_cmd.c:4244/4268
@@ -1772,6 +1931,24 @@ impl Executor {
                 ..Default::default()
             },
         );
+        // rubash#3641: an unclosed matched pair the lexer folded into
+        // word text leaves this re-parse marker-free — run only the
+        // complete prefix GNU's parse_and_execute loop would have
+        // executed, then report the failed unit's EOF diagnostic.
+        let mut trap_eof_diag = None;
+        if let Some((prefix, close, report_line, word_pair)) =
+            trap_action_unclosed_eof(&action, &ast.commands, 1)
+        {
+            let tokens = crate::lexer::tokenize(&prefix);
+            ast = crate::parser::parse_with_options(
+                &tokens,
+                crate::parser::ParseLoopOptions {
+                    source_text: Some(prefix.as_str().into()),
+                    ..Default::default()
+                },
+            );
+            trap_eof_diag = Some((close, report_line, word_pair));
+        }
         if let Some(redirect_cmd) = redirect_cmd {
             self.apply_inherited_command_output_redirects(redirect_cmd, &mut ast)?;
         }
@@ -1811,7 +1988,8 @@ impl Executor {
         // bit's only job is the BASH_COMMAND freeze, which
         // run_debug_trap consults (exit_trap_running below).
         let saved_exit_trap_running = std::mem::replace(&mut self.exit_trap_running, true);
-        let result = self.with_xtrace_indirection(|executor| executor.execute_ast(&ast));
+        let mut result = self.with_xtrace_indirection(|executor| executor.execute_ast(&ast));
+        finish_trap_action_eof(self, trap_eof_diag, &mut result);
         self.exit_trap_running = saved_exit_trap_running;
         self.resume_alias_streamed(saved_alias_streamed);
         *self.shell_state.debug_trap_command.borrow_mut() = saved_trap_command;
@@ -2003,7 +2181,7 @@ impl Executor {
             "__RUBASH_TRAP_CONTEXT".to_string(),
             "debug trap".to_string(),
         );
-        let (mut ast, ast_base) = {
+        let (mut ast, mut ast_base) = {
             let taken = self.debug_trap_action_cache.borrow_mut().take();
             match taken {
                 Some((key, cached_ast, base)) if key == action => (cached_ast, base),
@@ -2023,6 +2201,25 @@ impl Executor {
                 }
             }
         };
+        // rubash#3641: an unclosed matched pair the lexer folded into
+        // word text leaves this re-parse marker-free — run only the
+        // complete prefix GNU's parse_and_execute loop would have
+        // executed, then report the failed unit's EOF diagnostic.
+        let mut trap_eof_diag = None;
+        if let Some((prefix, close, report_line, word_pair)) =
+            trap_action_unclosed_eof(&action, &ast.commands, call_line.unwrap_or(1))
+        {
+            let tokens = crate::lexer::tokenize(&prefix);
+            ast = crate::parser::parse_with_options(
+                &tokens,
+                crate::parser::ParseLoopOptions {
+                    source_text: Some(prefix.as_str().into()),
+                    ..Default::default()
+                },
+            );
+            ast_base = 1;
+            trap_eof_diag = Some((close, report_line, word_pair));
+        }
         // rubash#1166: rebase the whole action onto this firing's line —
         // nested nodes keep their action-relative offsets from it (see
         // shift_trap_action_lines). The cache tracks the base the stored
@@ -2041,11 +2238,16 @@ impl Executor {
         // debug_trap_running but outside this flag, and keep the
         // unwind channel).
         let saved_debug_action = std::mem::replace(&mut self.debug_action_running, true);
-        let result = self.with_xtrace_indirection(|executor| executor.execute_ast(&ast));
+        let mut result = self.with_xtrace_indirection(|executor| executor.execute_ast(&ast));
+        finish_trap_action_eof(self, trap_eof_diag, &mut result);
         self.debug_action_running = saved_debug_action;
         // Cache the (re-based) AST under its spliced text for the next
-        // firing; the recorded base makes the next rebase exact.
-        *self.debug_trap_action_cache.borrow_mut() = Some((action, ast, ast_base));
+        // firing; the recorded base makes the next rebase exact. A
+        // verdict-fired action caches nothing: its stored AST is the
+        // complete prefix, not the action's own parse (rubash#3641).
+        if trap_eof_diag.is_none() {
+            *self.debug_trap_action_cache.borrow_mut() = Some((action, ast, ast_base));
+        }
         self.resume_alias_streamed(saved_alias_streamed);
         // rubash#546 (cell 2): when the firing happened inside a trap
         // action the frozen BASH_COMMAND belongs to the enclosing action —
@@ -2148,10 +2350,10 @@ impl Executor {
         // (same shape as the EXIT-trap site): GNU _run_trap_internal
         // parses the action string as fresh input, so the echo line
         // is the action's own line verbatim, not a token-join rebuild.
-        let ast = crate::parser::parse_with_options(
+        let mut ast = crate::parser::parse_with_options(
             &tokens,
             crate::parser::ParseLoopOptions {
-                source_text: Some(action.into()),
+                source_text: Some(action.as_str().into()),
                 // Token positions are absolute (start_line-anchored), so
                 // the parse must know the same shift to map them back
                 // onto action-text lines and to compute the physical EOF
@@ -2162,6 +2364,29 @@ impl Executor {
                 ..Default::default()
             },
         );
+        // rubash#3641: an unclosed matched pair the lexer folded into
+        // word text leaves this re-parse marker-free — run only the
+        // complete prefix GNU's parse_and_execute loop would have
+        // executed, then report the failed unit's EOF diagnostic.
+        let mut trap_eof_diag = None;
+        if let Some((prefix, close, report_line, word_pair)) =
+            trap_action_unclosed_eof(&action, &ast.commands, call_line.unwrap_or(1))
+        {
+            let tokens = crate::lexer::tokenize_with_initial_posix_and_line(
+                &prefix,
+                false,
+                call_line.unwrap_or(1),
+            );
+            ast = crate::parser::parse_with_options(
+                &tokens,
+                crate::parser::ParseLoopOptions {
+                    source_text: Some(prefix.as_str().into()),
+                    source_line_offset: call_line.unwrap_or(1).saturating_sub(1),
+                    ..Default::default()
+                },
+            );
+            trap_eof_diag = Some((close, report_line, word_pair));
+        }
         // rubash#1165: the function's return status is fixed BEFORE the
         // RETURN trap runs (execute_cmd.c's return_catch value becomes
         // last_command_exit_value; trap.c _run_trap_internal saves and
@@ -2181,7 +2406,8 @@ impl Executor {
         let saved_inherited = self.shell_state.inherited_loop_depth;
         self.shell_state.loop_depth = 0;
         self.shell_state.inherited_loop_depth = 0;
-        let result = self.with_xtrace_indirection(|executor| executor.execute_ast(&ast));
+        let mut result = self.with_xtrace_indirection(|executor| executor.execute_ast(&ast));
+        finish_trap_action_eof(self, trap_eof_diag, &mut result);
         self.shell_state.loop_depth = saved_loop_depth;
         self.shell_state.inherited_loop_depth = saved_inherited;
         self.trap_saved_exit_value = prev_saved_exit;
@@ -2835,16 +3061,35 @@ impl Executor {
             // (same shape as the EXIT-trap site): GNU trap.c:496 runs
             // the action through parse_and_execute, so the echo line
             // is the action's own line verbatim.
-            let ast = crate::parser::parse_with_options(
+            let mut ast = crate::parser::parse_with_options(
                 &tokens,
                 crate::parser::ParseLoopOptions {
                     source_text: Some(action.as_str().into()),
                     ..Default::default()
                 },
             );
+            // rubash#3641: an unclosed matched pair the lexer folded into
+            // word text leaves this re-parse marker-free — run only the
+            // complete prefix GNU's parse_and_execute loop would have
+            // executed, then report the failed unit's EOF diagnostic.
+            let mut trap_eof_diag = None;
+            if let Some((prefix, close, report_line, word_pair)) =
+                trap_action_unclosed_eof(&action, &ast.commands, 1)
+            {
+                let tokens = crate::lexer::tokenize(&prefix);
+                ast = crate::parser::parse_with_options(
+                    &tokens,
+                    crate::parser::ParseLoopOptions {
+                        source_text: Some(prefix.as_str().into()),
+                        ..Default::default()
+                    },
+                );
+                trap_eof_diag = Some((close, report_line, word_pair));
+            }
             // trap.c:496 runs the action through parse_and_execute: the
             // xtrace indirection level rises by one for the action.
-            let result = self.with_xtrace_indirection(|executor| executor.execute_ast(&ast));
+            let mut result = self.with_xtrace_indirection(|executor| executor.execute_ast(&ast));
+            finish_trap_action_eof(self, trap_eof_diag, &mut result);
             match old_trap_context {
                 Some(value) => {
                     self.shell_state
@@ -3678,7 +3923,7 @@ impl Executor {
         // rubash#3328: thread the spliced action as the diagnostic
         // source (same shape as the EXIT-trap site): the bare parse()
         // re-serialized the echo line.
-        let ast = crate::parser::parse_with_options(
+        let mut ast = crate::parser::parse_with_options(
             &tokens,
             crate::parser::ParseLoopOptions {
                 source_text: Some(action.as_str().into()),
@@ -3690,8 +3935,32 @@ impl Executor {
                 ..Default::default()
             },
         );
+        // rubash#3641: an unclosed matched pair the lexer folded into
+        // word text leaves this re-parse marker-free — run only the
+        // complete prefix GNU's parse_and_execute loop would have
+        // executed, then report the failed unit's EOF diagnostic.
+        let mut trap_eof_diag = None;
+        if let Some((prefix, close, report_line, word_pair)) =
+            trap_action_unclosed_eof(&action, &ast.commands, failed_line.unwrap_or(1))
+        {
+            let tokens = crate::lexer::tokenize_with_initial_posix_and_line(
+                &prefix,
+                false,
+                failed_line.unwrap_or(1),
+            );
+            ast = crate::parser::parse_with_options(
+                &tokens,
+                crate::parser::ParseLoopOptions {
+                    source_text: Some(prefix.as_str().into()),
+                    source_line_offset: failed_line.unwrap_or(1).saturating_sub(1),
+                    ..Default::default()
+                },
+            );
+            trap_eof_diag = Some((close, report_line, word_pair));
+        }
         let saved_alias_streamed = self.mark_alias_streamed();
-        let result = self.with_xtrace_indirection(|executor| executor.execute_ast(&ast));
+        let mut result = self.with_xtrace_indirection(|executor| executor.execute_ast(&ast));
+        finish_trap_action_eof(self, trap_eof_diag, &mut result);
         self.resume_alias_streamed(saved_alias_streamed);
         *self.shell_state.debug_trap_command.borrow_mut() = saved_trap_command;
         match old_trap_context {
@@ -3803,14 +4072,33 @@ impl Executor {
         let mut result: Result<(), ExecuteError> = Ok(());
         loop {
             let tokens = crate::lexer::tokenize(&action);
-            let ast = crate::parser::parse_with_options(
+            let mut ast = crate::parser::parse_with_options(
                 &tokens,
                 crate::parser::ParseLoopOptions {
                     source_text: Some(action_source.clone()),
                     ..Default::default()
                 },
             );
+            // rubash#3641: an unclosed matched pair the lexer folded into
+            // word text leaves this re-parse marker-free — run only the
+            // complete prefix GNU's parse_and_execute loop would have
+            // executed, then report the failed unit's EOF diagnostic.
+            let mut trap_eof_diag = None;
+            if let Some((prefix, close, report_line, word_pair)) =
+                trap_action_unclosed_eof(&action, &ast.commands, 1)
+            {
+                let tokens = crate::lexer::tokenize(&prefix);
+                ast = crate::parser::parse_with_options(
+                    &tokens,
+                    crate::parser::ParseLoopOptions {
+                        source_text: Some(prefix.as_str().into()),
+                        ..Default::default()
+                    },
+                );
+                trap_eof_diag = Some((close, report_line, word_pair));
+            }
             result = self.with_xtrace_indirection(|executor| executor.execute_ast(&ast));
+            finish_trap_action_eof(self, trap_eof_diag, &mut result);
             if result.is_err() {
                 break;
             }
