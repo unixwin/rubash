@@ -834,6 +834,37 @@ impl Executor {
         views
     }
 
+    /// The function half of the assignment-form listing
+    /// (print_all_shell_variables' print_func_list, builtins/set.def:
+    /// 518-527): every function in the table, rendered with the
+    /// listing form of the ast_print port (the name=NULL arm of
+    /// named_function_string — no `function ` fallback — plus the
+    /// definition metadata `declare -f` carries: body kind and
+    /// definition redirects), for print_shell_variables to print after
+    /// the variables when not in POSIX mode (rubash#3487).
+    pub(in crate::executor) fn function_set_views(
+        &self,
+    ) -> Vec<crate::builtins::set::FunctionSetView> {
+        self.shell_state
+            .functions
+            .iter()
+            .map(|(name, body)| {
+                let info = self.shell_state.function_def_infos.get(name);
+                let text = crate::parser::ast_print::multiline_function_listing_text(
+                    name,
+                    &body.commands,
+                    info.and_then(|info| info.body_kind),
+                    info.map(|info| info.def_redirects.as_slice())
+                        .unwrap_or(&[]),
+                );
+                crate::builtins::set::FunctionSetView {
+                    name: name.clone(),
+                    text,
+                }
+            })
+            .collect()
+    }
+
     /// The LISTING form of a dynamic variable's declaration view
     /// (rubash#2973): GNU enumeration renders the variable's CELL,
     /// and for the getter-backed dynamics the cell holds only what a
