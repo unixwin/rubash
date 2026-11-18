@@ -556,10 +556,13 @@ impl Executor {
             return Some(self.open_net_redirect(target));
         }
         if is_null_device(target) {
-            return Some(File::open(shell_path_to_windows(
-                "/dev/null",
-                &self.shell_state.env_vars,
-            )));
+            return Some(
+                File::open(shell_path_to_windows(
+                    "/dev/null",
+                    &self.shell_state.env_vars,
+                ))
+                .map_err(|e| crate::posix_errors::path_error(target, e)),
+            );
         }
         // rubash#1898: /dev/zero reads yield an unbounded stream of
         // NUL bytes, and /dev/full reads yield the same zeros — both
@@ -2478,10 +2481,13 @@ impl Executor {
             return self.open_net_redirect(target);
         }
         if is_null_device(target) {
-            return OpenOptions::new().write(true).open(shell_path_to_windows(
-                "/dev/null",
-                &self.shell_state.env_vars,
-            ));
+            return OpenOptions::new()
+                .write(true)
+                .open(shell_path_to_windows(
+                    "/dev/null",
+                    &self.shell_state.env_vars,
+                ))
+                .map_err(|e| crate::posix_errors::path_error(target, e));
         }
         // rubash#1898: /dev/zero discards writes exactly like the
         // null device; opens route to the same sink. The entropy

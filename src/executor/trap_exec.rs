@@ -6103,32 +6103,29 @@ impl Executor {
                     match redirect.kind {
                         crate::parser::RedirectKind::Append
                         | crate::parser::RedirectKind::CombinedAppend => {
-                            if !is_null_device(&target) {
-                                let _ = open_redirect_append(&self.session_path(
-                                    shell_path_to_windows(&target, &self.shell_state.env_vars),
-                                ));
-                            }
+                            gate_fires =
+                                self.open_append_target_for(Some(redirect), &target).is_ok();
                         }
                         crate::parser::RedirectKind::Output
                         | crate::parser::RedirectKind::ClobberOutput
                         | crate::parser::RedirectKind::CombinedOutput => {
-                            if !is_null_device(&target) {
-                                crate::executor::shell_options::probe_output_redirect(
-                                    self,
-                                    &target,
-                                    redirect.clobber,
-                                )?;
-                            }
+                            crate::executor::shell_options::probe_output_redirect(
+                                self,
+                                &target,
+                                redirect.clobber,
+                            )?;
                         }
                         crate::parser::RedirectKind::ReadWrite => {
-                            if !target.starts_with("/dev/")
+                            if is_null_device(&target) {
+                                gate_fires = self.probe_input_redirect_readwrite(&target).is_ok();
+                            } else if !target.starts_with("/dev/")
                                 && !crate::special_paths::is_net_redirect_target(&target)
                             {
                                 let path = self.session_path(shell_path_to_windows(
                                     &target,
                                     &self.shell_state.env_vars,
                                 ));
-                                let _ = FileFd::open_readwrite_pair(path);
+                                gate_fires = FileFd::open_readwrite_pair(path).is_ok();
                             }
                         }
                         crate::parser::RedirectKind::Input => {
@@ -6328,15 +6325,10 @@ impl Executor {
                         };
                         self.flush_persistent_output_process_substitution(1)?;
                         match probed {
-                            Some(file) => self.set_fd_output_file_from_file(
-                                1,
-                                path.clone(),
-                                false,
-                                file,
-                            )?,
-                            None => {
-                                self.set_fd_output_file(1, path.clone(), false, false)?
+                            Some(file) => {
+                                self.set_fd_output_file_from_file(1, path.clone(), false, file)?
                             }
+                            None => self.set_fd_output_file(1, path.clone(), false, false)?,
                         }
                         self.flush_persistent_output_process_substitution(2)?;
                         self.share_fd_output_file(1, 2, &path, false);
@@ -6416,15 +6408,10 @@ impl Executor {
                     // substitution's deferred body (rubash#1336).
                     self.flush_persistent_output_process_substitution(fd)?;
                     match probed {
-                        Some(file) => self.set_fd_output_file_from_file(
-                            fd,
-                            target.clone(),
-                            fd >= 10,
-                            file,
-                        )?,
-                        None => {
-                            self.set_fd_output_file(fd, target.clone(), fd >= 10, append)?
+                        Some(file) => {
+                            self.set_fd_output_file_from_file(fd, target.clone(), fd >= 10, file)?
                         }
+                        None => self.set_fd_output_file(fd, target.clone(), fd >= 10, append)?,
                     }
                     if matches!(
                         redirect.kind,
@@ -6482,15 +6469,10 @@ impl Executor {
                         };
                         self.flush_persistent_output_process_substitution(1)?;
                         match probed {
-                            Some(file) => self.set_fd_output_file_from_file(
-                                1,
-                                path.clone(),
-                                false,
-                                file,
-                            )?,
-                            None => {
-                                self.set_fd_output_file(1, path.clone(), false, false)?
+                            Some(file) => {
+                                self.set_fd_output_file_from_file(1, path.clone(), false, file)?
                             }
+                            None => self.set_fd_output_file(1, path.clone(), false, false)?,
                         }
                         self.flush_persistent_output_process_substitution(2)?;
                         self.share_fd_output_file(1, 2, &path, false);
