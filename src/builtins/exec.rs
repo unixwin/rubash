@@ -201,6 +201,11 @@ pub(crate) fn replace_process_image(
         effective_argv0.as_deref(),
         cwd,
         setup.cwd_stamp(),
+        // rubash#3310: the true-replacement path never runs inside a
+        // subshell — exec_image_replacement_applies (trap_exec.rs)
+        // requires subshell_depth == 0 — so the SUBSHELL_PAREN skip
+        // GNU's exec.def:200 applies is unreachable here.
+        false,
     );
     // rubash#3311: the image inherits the shell's descriptor table as
     // do_redirections left it (exec.def:231 shell_execve) — the fd >= 3
@@ -433,8 +438,17 @@ where
     };
 
     if command == Some("printenv") {
-        return run_printenv_fallback(operands, env_vars, clean_env, stdout)
-            .map_err(ExecuteError::from);
+        return run_printenv_fallback(
+            operands,
+            env_vars,
+            clean_env,
+            // rubash#3310: the emulation reports the exec'd image's
+            // environment, so it takes the same SUBSHELL_PAREN skip
+            // as the spawn path (see in_subshell_paren).
+            in_subshell_paren(executor.as_deref()),
+            stdout,
+        )
+        .map_err(ExecuteError::from);
     }
 
     if let Some(command) = command {
@@ -856,6 +870,8 @@ where
     W: Write,
     E: Write,
 {
+    // rubash#3310: the SUBSHELL_PAREN latch (see in_subshell_paren).
+    let in_subshell_paren = in_subshell_paren(executor.as_deref());
     let mut process = external_exec_process(
         program,
         command_name,
@@ -865,6 +881,7 @@ where
         argv0,
         cwd,
         setup.cwd_stamp(),
+        in_subshell_paren,
     );
     setup.apply(&mut process);
     process.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -951,6 +968,10 @@ fn run_external_exec_with_stdio<E>(
 where
     E: Write,
 {
+    // rubash#3310: same SUBSHELL_PAREN latch as run_external_exec
+    // above (see in_subshell_paren for the mapping and the
+    // pipeline-element gap).
+    let in_subshell_paren = in_subshell_paren(executor.as_deref());
     let mut process = external_exec_process(
         program,
         command_name,
@@ -960,6 +981,7 @@ where
         argv0,
         cwd,
         setup.cwd_stamp(),
+        in_subshell_paren,
     );
     setup.apply(&mut process);
     process.stdout(child_stdout).stderr(child_stderr);
@@ -1014,6 +1036,25 @@ where
     Ok(crate::executor::wait_status::process_exit_status(&status))
 }
 
+/// rubash#3310: whether the exec builtin runs inside a `( )`
+/// subshell — GNU builtins/exec.def:200 skips the SHLVL decrement
+/// there (SUBSHELL_PAREN). Rubash carries no SUBSHELL_PAREN bit;
+/// the latch set at every `( )` region entry (ast_exec flat region,
+/// compound_exec scoped subshell, the comsub body's stripped `( )`
+/// group) is subshell_login_cleared — a plain `$( )` body leaves it
+/// clear, and a respawned child (background `&`, procsub) starts
+/// from a fresh executor with it clear, so the latch tracks the
+/// paren boundary for the shapes the builtin can observe. Known gap:
+/// a pipeline element also sets the latch (pipeline_exec.rs), while
+/// GNU decrements there (SUBSHELL_FORK/SUBSHELL_PIPE, no PAREN) —
+/// that face is left for a follow-up with a real stage marker, not
+/// an fd-shape heuristic.
+fn in_subshell_paren(executor: Option<&crate::executor::Executor>) -> bool {
+    executor
+        .map(|exec| exec.shell_state.subshell_login_cleared.get())
+        .unwrap_or(false)
+}
+
 fn external_exec_process(
     program: &std::path::Path,
     command_name: &str,
@@ -1023,6 +1064,7 @@ fn external_exec_process(
     argv0: Option<&str>,
     cwd: &std::path::Path,
     cwd_stamp: crate::executor::ChildCwdStamp,
+    in_subshell_paren: bool,
 ) -> Command {
     // GNU builtins/exec.def (exec_builtin): `com2 = full_pathname (command)`
     // rebinds the exec target to its absolute path before shell_execve, so
@@ -1118,9 +1160,48 @@ fn external_exec_process(
     if !clean_env {
         apply_exported_environment(&mut process, env_vars);
         crate::executor::path::apply_required_windows_child_environment(&mut process, env_vars);
+        // rubash#3310: GNU builtins/exec.def:193-201 — `exec` replaces
+        // the shell, so adjust_shell_level(-1) runs before
+        // maybe_make_export_env (variables.c:848-890), unless this is
+        // `exec -c` (cleanenv, handled by the enclosing `if`) or the
+        // builtin runs inside a `( )` subshell (SUBSHELL_PAREN: the
+        // exec'd program takes the subshell's place, so the level
+        // stands). The stamp is unconditional inside this arm: GNU
+        // binds SHLVL even when it was absent, unparseable, or
+        // unexported (adjust_shell_level binds + auto-exports), so
+        // the child env gains the adjusted value rather than
+        // inheriting the shell's live level. The shell's own SHLVL
+        // is never touched — on a failed execve GNU restores it with
+        // adjust_shell_level(1), which here is a no-op by
+        // construction. Same arithmetic as the exec-replace tail's
+        // exec_replace_adjusted_shlvl (external_inner.rs), but read
+        // from env_vars directly: prefix temp assignments are
+        // visible to the builtin (GNU: `SHLVL=9 exec ...` yields 8),
+        // while the tail path must use its frozen dispatch snapshot.
+        // Known gap: a pipeline element also carries the paren
+        // latch (see the call sites), so it is skipped here while
+        // GNU decrements it — see REPORT.md.
+        if !in_subshell_paren {
+            process.env("SHLVL", exec_decremented_shlvl(env_vars));
+        }
     }
     crate::executor::path::suppress_orphan_console(&mut process);
     process
+}
+
+/// GNU variables.c:848-890 `adjust_shell_level(-1)` for the exec
+/// builtin's child environment: an absent, empty, or unparseable
+/// SHLVL counts as 0, the level drops by 1, and clamps at 0. The
+/// >= 1000 warning-and-reset-to-1 arm is not reproduced here — it
+/// is likewise absent from the sibling ports (initialize_shell_level,
+/// exec_replace_adjusted_shlvl), so a one-face warning would split
+/// the spelling; see REPORT.md.
+fn exec_decremented_shlvl(env_vars: &crate::shell::var_table::VarTable) -> String {
+    let current = env_vars
+        .get("SHLVL")
+        .and_then(|value| value.trim().parse::<i64>().ok())
+        .unwrap_or(0);
+    (current - 1).max(0).to_string()
 }
 
 fn apply_exported_environment(process: &mut Command, env_vars: &crate::shell::var_table::VarTable) {
@@ -1146,6 +1227,7 @@ fn run_printenv_fallback<W>(
     names: &[String],
     env_vars: &crate::shell::var_table::VarTable,
     clean_env: bool,
+    in_subshell_paren: bool,
     stdout: &mut W,
 ) -> io::Result<i32>
 where
@@ -1159,20 +1241,40 @@ where
         });
     }
 
+    // rubash#3310: the emulation stands in for the exec'd printenv
+    // image, so it reports the same adjusted SHLVL the spawn path
+    // stamps (exec.def:200, variables.c:848-890) — including when
+    // SHLVL was absent or unexported, which adjust_shell_level binds
+    // and auto-exports into the child env.
+    let adjusted_shlvl = (!in_subshell_paren).then(|| exec_decremented_shlvl(env_vars));
+
     let exported = env_vars.marked_names(EXPORTED_VARS);
     // GNU variables.c make_env_array_from_var_list: array and associative
     // variables never cross the child env boundary (rubash#534) — the
     // internal printenv emulation must mirror the real spawn path.
     let arrays = env_vars.marked_names(crate::executor::types::ARRAY_VARS);
     let assocs = env_vars.marked_names(crate::executor::types::ASSOC_VARS);
-    let exported: Vec<String> = exported
+    let mut exported: Vec<String> = exported
         .into_iter()
         .filter(|name| !arrays.iter().any(|n| n == name) && !assocs.iter().any(|n| n == name))
         .collect();
+    if adjusted_shlvl.is_some()
+        && !exported.iter().any(|name| name == "SHLVL")
+        && !arrays.iter().any(|name| name == "SHLVL")
+        && !assocs.iter().any(|name| name == "SHLVL")
+    {
+        exported.push("SHLVL".to_string());
+    }
     if names.is_empty() {
         let mut exported = exported;
         exported.sort();
         for name in exported {
+            if name == "SHLVL" {
+                if let Some(adjusted) = &adjusted_shlvl {
+                    writeln!(stdout, "SHLVL={adjusted}")?;
+                    continue;
+                }
+            }
             if let Some(value) = env_vars.get(&name) {
                 writeln!(stdout, "{name}={value}")?;
             }
@@ -1182,6 +1284,12 @@ where
 
     let mut found_all = true;
     for name in names {
+        if name == "SHLVL" {
+            if let Some(adjusted) = &adjusted_shlvl {
+                writeln!(stdout, "{adjusted}")?;
+                continue;
+            }
+        }
         if exported.iter().any(|exported_name| exported_name == name) {
             if let Some(value) = env_vars.get(name) {
                 writeln!(stdout, "{value}")?;
