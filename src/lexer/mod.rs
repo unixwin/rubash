@@ -30,8 +30,10 @@ pub(crate) use continuation::{
 };
 pub(crate) use heredoc_scan::dequote_heredoc_delimiter;
 
+#[cfg(test)]
+pub(crate) use alias_stream::expand_aliases_in_source;
 pub(crate) use alias_stream::{
-    expand_aliases_in_source, expand_aliases_in_source_marked, AliasLookup, AliasStreamScanner,
+    expand_aliases_in_source_marked_with_comsubs, AliasLookup, AliasStreamScanner,
 };
 use brace_scan_cache::BraceScanCache;
 pub(crate) use continuation::has_unclosed_command_substitution;
@@ -276,6 +278,25 @@ pub fn tokenize_comsub_body(
         InputOrigin::Direct,
         in_comsub,
         false,
+    )
+}
+
+/// `tokenize_comsub_body` plus `noncounting_newlines` (rubash#3838).
+pub(crate) fn tokenize_comsub_body_marked(
+    input: &str,
+    posix: bool,
+    start_line: usize,
+    in_comsub: bool,
+    noncounting_newlines: &[usize],
+) -> Vec<Token> {
+    tokenize_comsub_body_with_origin_marked(
+        input,
+        posix,
+        start_line,
+        InputOrigin::Direct,
+        in_comsub,
+        false,
+        noncounting_newlines,
     )
 }
 
@@ -545,6 +566,8 @@ pub(crate) struct GroupScanFeeder {
     logical_start_line: usize,
     logical_line: String,
     continued_line: bool,
+    last_line_counted: bool,
+    noncounting_logical_offsets: Vec<usize>,
     /// Byte offsets in `logical_line` where a `\`-newline continuation
     /// joined two physical lines without a newline separator (the backslash
     /// popped and the next line appended directly). Token positions must
@@ -780,6 +803,8 @@ impl GroupScanFeeder {
             logical_start_line: start_line,
             logical_line: String::new(),
             continued_line: false,
+            last_line_counted: true,
+            noncounting_logical_offsets: Vec::new(),
             continuation_join_columns: Vec::new(),
             parse_posix: initial_posix,
             deferred_posix: None,
@@ -1418,8 +1443,13 @@ impl GroupScanFeeder {
         if self.logical_line.is_empty() {
             self.logical_start_line = self.line_number;
             self.continuation_join_columns.clear();
+            self.noncounting_logical_offsets.clear();
         }
         if !self.logical_line.is_empty() && !self.continued_line {
+            if !self.last_line_counted {
+                self.noncounting_logical_offsets
+                    .push(self.logical_line.len());
+            }
             self.logical_line.push('\n');
             self.comsub_chars.push('\n');
         }
@@ -1431,6 +1461,7 @@ impl GroupScanFeeder {
         if counted {
             self.line_number += 1;
         }
+        self.last_line_counted = counted;
 
         // rubash#155 / #130 fast path. GNU reads tokens sequentially
         // (parse.y:3557 read_token): one pass over the input, with the
@@ -2056,6 +2087,11 @@ impl GroupScanFeeder {
             let newline_offsets: Vec<usize> = logical_line
                 .match_indices('\n')
                 .map(|(offset, _)| offset)
+                .filter(|offset| {
+                    self.noncounting_logical_offsets
+                        .binary_search(offset)
+                        .is_err()
+                })
                 .collect();
             for token in &mut line_tokens {
                 let column = token.column.min(logical_line.len());
@@ -2336,6 +2372,11 @@ impl GroupScanFeeder {
                 .logical_line
                 .match_indices('\n')
                 .map(|(offset, _)| offset)
+                .filter(|offset| {
+                    self.noncounting_logical_offsets
+                        .binary_search(offset)
+                        .is_err()
+                })
                 .collect();
             for token in &mut line_tokens {
                 token.position = if leftover_spans_lines {

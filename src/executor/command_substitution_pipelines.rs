@@ -499,7 +499,8 @@ impl Executor {
                 >= 2;
         let closed_by_paren = source[first_line_end..].contains(crate::executor::markers::IFS_GLUE);
         let source = source.replace(crate::executor::markers::IFS_GLUE, "");
-        let source = self.comsub_body_alias_splice_extracted(&source);
+        let (source, comsub_marks, _nested_comsubs) =
+            self.comsub_body_alias_splice_extracted_marked(&source);
         if header_close_marked || heredoc_header_closes_command_substitution(&source) {
             // GNU parse.y:4563-4567: when the `)` that closes a command
             // substitution sits on the heredoc header line (`cat << EOF)`),
@@ -581,11 +582,12 @@ impl Executor {
             .and_then(|line| line.parse::<usize>().ok())
             .unwrap_or(1)
             + self.comsub_leading_newlines.get();
-        let tokens = crate::lexer::tokenize_comsub_body(
+        let tokens = crate::lexer::tokenize_comsub_body_marked(
             &source,
             self.posix_mode_enabled(),
             comsub_start_line,
             true,
+            &comsub_marks,
         );
         let mut ast = crate::parser::parse(&tokens);
         super::command_substitution::normalize_comsub_body_statement_lines(&mut ast, &tokens);
