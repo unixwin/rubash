@@ -822,7 +822,20 @@ impl Executor {
                 // (rubash#1935/#1963/#1964) — with the same
                 // path_error shaping. Skipped when the walk above
                 // already opened this plain-file position (rubash#3828).
-                if !opened_positions.contains(&self.redirect_list_position(cmd, redirect)) {
+                // rubash#3798: skipped too when the target is net and
+                // the funnel's bind already connected it (fd 0 is in
+                // dispatch_net_bound_fds) — the bind performed this
+                // entry's one open (GNU redir.c do_redirections opens
+                // each entry once, r_input_output included), and the
+                // probe's classified open would connect a SECOND
+                // socket and drop it (the #1950 hazard the input
+                // probe already avoids). A refused connect was
+                // already adjudicated by the bind, so skipping loses
+                // no failure verdict.
+                if !opened_positions.contains(&self.redirect_list_position(cmd, redirect))
+                    && !(crate::special_paths::is_net_redirect_target(&target)
+                        && self.dispatch_net_bound_fds.contains(&0))
+                {
                     self.probe_input_redirect_readwrite(&target)
                         .map_err(|e| crate::posix_errors::path_error(&target, e))?;
                 }
@@ -1031,7 +1044,21 @@ impl Executor {
                         // excluded: they name no file to open.
                         // Skipped when the walk above already opened
                         // this plain-file position (rubash#3828).
-                        if !opened_positions.contains(&index) {
+                        // rubash#3798: skipped too when the target is
+                        // net and the funnel's bind already connected
+                        // it (this fd is in dispatch_net_bound_fds) —
+                        // the bind performed this entry's one open
+                        // (GNU redir.c do_redirections opens each
+                        // entry once, r_input_output included), and
+                        // the probe's classified open would connect a
+                        // SECOND socket and drop it (the #1950 hazard
+                        // the input probe already avoids). A refused
+                        // connect was already adjudicated by the bind,
+                        // so skipping loses no failure verdict.
+                        if !opened_positions.contains(&index)
+                            && !(crate::special_paths::is_net_redirect_target(&target)
+                                && self.dispatch_net_bound_fds.contains(&fd))
+                        {
                             self.probe_input_redirect_readwrite(&target)
                                 .map_err(|e| crate::posix_errors::path_error(&target, e))?;
                         }

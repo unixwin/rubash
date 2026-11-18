@@ -8286,6 +8286,40 @@ impl Executor {
             }
         }
 
+        // rubash#3792: a NON-builtin stage whose fd-0 winner is a
+        // `<&N` dup of a WRITE-only fd (`printf x | cat <&3` after
+        // `exec 3>f`) cannot be served by the inline slot arms either:
+        // GNU applies the element's do_redirections after do_piping
+        // (execute_cmd.c:2620 execute_pipeline), so the dup replaces
+        // the pipe on the element's fd 0 and the element's own reads
+        // fail EBADF — the ELEMENT reports it (redir.c:1193 dup2 takes
+        // no access-mode argument). The text serve declines that dup
+        // by design (#2101) and the arms would fall back to the
+        // upstream payload the dup already superseded. Route to the
+        // external stage spawner like the file winners above: its
+        // fd-0 adjudication (#2255) replays
+        // apply_external_stdin_redirect, which dups the write
+        // endpoint's handle into the child. Builtin stages keep the
+        // stage-subshell route (their funnel binds fd 0 itself).
+        if self.fd0_write_only_dup_source(command).is_some() {
+            let first_raw = command
+                .word_metadata
+                .first()
+                .map(|metadata| metadata.raw.as_str());
+            let builtin_stage = command
+                .words
+                .first()
+                .and_then(|name| {
+                    self.expand_command_word(command, 0, name, first_raw)
+                        .into_iter()
+                        .next()
+                })
+                .is_some_and(|expanded| self.routes_as_builtin(&expanded));
+            if !builtin_stage {
+                return self.execute_external_pipeline_stage(command, input, stdin_inherit);
+            }
+        }
+
         // rubash#2255: a NON-builtin stage whose own redirect list
         // binds a numbered input fd (`3<seed`, `3< <(...)`, `4<&0`)
         // cannot be served by the inline slot arms below: they run on
