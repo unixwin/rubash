@@ -3159,7 +3159,12 @@ fn unclosed_array_subscript_walk(
                 line += 1;
                 command_position = true;
                 word.clear();
-                element_start = false;
+                // rubash#3904 (A13): a newline inside a compound
+                // assignment ends the current element -- the next `[`
+                // with an empty word is an element start (token_index
+                // == 0 && PST_COMPASSIGN, parse.y:5638), exactly like
+                // after a space (`v=(a\n[1` reports `]` at line 2).
+                element_start = compassign_depth > 0;
                 extglob = shopt_line_sets_extglob(&chars[line_start..index], extglob);
                 line_start = index + 1;
             }
@@ -3313,7 +3318,10 @@ fn unclosed_array_subscript_walk(
                 line += 1;
                 command_position = true;
                 word.clear();
-                element_start = false;
+                // rubash#3904 (A13): same element-start rule as the
+                // comment-newline arm above -- a newline inside a
+                // compound assignment ends the current element.
+                element_start = compassign_depth > 0;
                 extglob = shopt_line_sets_extglob(&chars[line_start..index], extglob);
                 line_start = index + 1;
             } else {
@@ -3360,8 +3368,18 @@ fn unclosed_array_subscript_walk(
         // identifier at command position (parse.y:5637), or we are at
         // element start inside a compound assignment (parse.y:5638,
         // token_index == 0 && PST_COMPASSIGN).
+        // rubash#3904 (A13): the command-position disjunct never fires
+        // inside a compound assignment. parse_compound_assignment's token
+        // loop (parse.y:7104-7169) reads each element with read_token, so
+        // last_read_token at a `[` is the previous element WORD, never
+        // assignment_acceptable (parse.y:3163) -- a `[` after a non-empty
+        // word fragment (`v=(a[1`) is literal word text, and EOF falls
+        // through to the loop's own `)' report (parse.y:7151-7152). The
+        // walk's command_position stays true from input start through
+        // the `name=(` opener, so without this gate `a[` looked like a
+        // command-position identifier and opened a phantom `]` hunt.
         if ch == '['
-            && ((command_position && is_pure_identifier(&word))
+            && ((command_position && is_pure_identifier(&word) && compassign_depth == 0)
                 || (compassign_depth > 0 && element_start && word.is_empty()))
         {
             // parse_matched_pair ('[', ']'): quote/escape aware, nested
