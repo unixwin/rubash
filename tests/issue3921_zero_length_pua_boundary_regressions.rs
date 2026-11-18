@@ -351,6 +351,31 @@ fn printf_v_stores_literal_pua_chars_as_data() {
             "printf -v u '\\uE000'\ndeclare -p u\n",
             "declare -- u=\"\u{e000}\"\n",
         ),
+        (
+            // rubash#3921 (D2 fallout): a `%s` argument is transport
+            // text already — the -v store must round-trip it, not
+            // re-encode it (entry_encode_value_text double-escaped the
+            // pairs, so the PUA chars stored as four chars and the
+            // byte as two). GNU: len 2, declare -p the pair.
+            "pct_s_pua_len",
+            "w2=$'\\ue000\\ue001'\nprintf -v v '%s' \"$w2\"\nprintf '%s' \"${#v}\"\n",
+            "2",
+        ),
+        (
+            "pct_s_pua_declare",
+            "w2=$'\\ue000\\ue001'\nprintf -v v '%s' \"$w2\"\ndeclare -p v\n",
+            "declare -- v=\"\u{e000}\u{e001}\"\n",
+        ),
+        (
+            "pct_s_byte_len",
+            "c=$'\\x14'\nprintf -v b '%s' \"$c\"\nprintf '%s' \"${#b}\"\n",
+            "1",
+        ),
+        (
+            "pct_s_byte_declare",
+            "c=$'\\x14'\nprintf -v b '%s' \"$c\"\ndeclare -p b\n",
+            "declare -- b=$'\\024'\n",
+        ),
     ] {
         let (out, err, code) = run_file(script, tag);
         assert_eq!(code, 0, "{tag}: exit {code}, stderr {err}");

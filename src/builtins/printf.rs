@@ -493,6 +493,25 @@ fn note_printf_locale_bind(
     Ok(())
 }
 
+/// rubash#3921: the rendered output text is TRANSPORT text — the same
+/// spelling the write path decodes with `raw_bytes` (format escapes
+/// arrive E400-escaped from `unicode_escape_text`, `%s` args verbatim)
+/// — so the -v store must NOT re-encode it with
+/// `entry_encode_value_text`, which E400-escapes every marker-zone
+/// char and would double-escape the pairs
+/// (`printf -v v '\uE000\uE001'` stored a double-escaped value;
+/// `printf -v v '%s' "$w2"` did the same to the argument). Round-trip
+/// through the final bytes instead: identity on well-formed transport,
+/// and it normalizes any lone marker char a conversion emitted (`%C`)
+/// exactly the way the write path folds it — the variable holds what
+/// printf prints. The nameref validation above still keys on the raw
+/// output text.
+fn printf_output_to_storage(text: &str) -> String {
+    crate::executor::substitution_metadata::bytes_to_shell_text(
+        &crate::executor::substitution_metadata::shell_text_to_raw_bytes(text),
+    )
+}
+
 fn assign_printf_output(
     env_vars: &mut crate::shell::var_table::VarTable,
     name: &str,
@@ -527,19 +546,12 @@ fn assign_printf_output(
             )?;
             return Ok(Some(1));
         }
-        // rubash#3921: the formatted output is DATA, not source — a
-        // literal marker-zone char in it (e.g. `\uE000` from a `%s` /
-        // `\u` format) must enter storage in the same spelling every
-        // other value channel produces (entry_encode_value_text, the
-        // bytes_to_shell_text parity) or the first decode boundary
-        // reads the lone U+E000 + payload as a raw-byte marker pair
-        // (`printf -v v '\uE000\uE001'` stored one NUL byte). The
-        // validation above keys on the raw output text, so only the
-        // stored spelling is encoded here.
-        env_vars.insert(
-            name.to_string(),
-            crate::executor::substitution_metadata::entry_encode_value_text(&output),
-        );
+        // rubash#3921: the formatted output is DATA, not source — it
+        // enters storage via printf_output_to_storage (the transport
+        // round-trip; see the helper). The validation above keys on
+        // the raw output text, so only the stored spelling is
+        // converted here.
+        env_vars.insert(name.to_string(), printf_output_to_storage(&output));
         // rubash#1551 sv_path: binding a nameref cell named PATH is a
         // PATH bind (variables.c:5819/5919 -> phash_flush).
         if name == "PATH" {
@@ -582,23 +594,19 @@ fn assign_printf_output(
             // literal.
             let key = crate::executor::arithmetic::decode_arithmetic_assoc_key(subscript)
                 .unwrap_or_else(|| subscript.to_string());
-            // rubash#3921: value-entry encoding (see the nameref arm
-            // above) applies after the attribute transform, at the
-            // last step before storage.
-            let output = crate::executor::substitution_metadata::entry_encode_value_text(
-                &printf_attribute_value(env_vars, base, output),
-            );
+            // rubash#3921: the transport round-trip (see
+            // printf_output_to_storage) applies after the attribute
+            // transform, at the last step before storage.
+            let output = printf_output_to_storage(&printf_attribute_value(env_vars, base, output));
             if let Some(store) = variables.as_deref_mut() {
                 let _ = store.set_associative_element(base, &key, output.clone());
             }
             assign_printf_assoc_element(env_vars, base, &key, output);
         } else if let Some(index) = resolve_printf_indexed_subscript(env_vars, base, subscript) {
-            // rubash#3921: value-entry encoding (see the nameref arm
-            // above) applies after the attribute transform, at the
-            // last step before storage.
-            let output = crate::executor::substitution_metadata::entry_encode_value_text(
-                &printf_attribute_value(env_vars, base, output),
-            );
+            // rubash#3921: the transport round-trip (see
+            // printf_output_to_storage) applies after the attribute
+            // transform, at the last step before storage.
+            let output = printf_output_to_storage(&printf_attribute_value(env_vars, base, output));
             assign_printf_indexed_element(env_vars, base, index, output);
             // rubash#616 (plan Phase 1a): rebuild the structured cell from
             // the mirror this element write just produced. A direct typed
@@ -627,12 +635,10 @@ fn assign_printf_output(
         return Ok(None);
     }
 
-    // rubash#3921: value-entry encoding (see the nameref arm above)
-    // applies after the attribute transform, at the last step before
-    // storage.
-    let output = crate::executor::substitution_metadata::entry_encode_value_text(
-        &printf_attribute_value(env_vars, name, output),
-    );
+    // rubash#3921: the transport round-trip (see
+    // printf_output_to_storage) applies after the attribute transform,
+    // at the last step before storage.
+    let output = printf_output_to_storage(&printf_attribute_value(env_vars, name, output));
     if let Some(store) = variables.as_deref_mut() {
         let _ = store.set_scalar(name, output.clone());
     }
