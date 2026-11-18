@@ -12,7 +12,12 @@
 //! The nail runs bare `help` under a pty whose winsize is set before
 //! exec (tests/interactive/support/pty_help_width_probe.py), COLUMNS
 //! unset, at two widths (120 and 100 — both != 80), and pins the full
-//! 39-row grids. The grids below are rubash's own 78-entry table
+//! 39-row grids. The driver pins LC_ALL=C in the child environment so
+//! the single-byte dispcolumn grids below apply on any leg locale: a
+//! UTF-8 leg would select the wdispcolumn path instead, which keeps
+//! one more character at the truncation boundary (the 100-column
+//! `select` row loses its `>` there) — same product, different grid.
+//! The grids below are rubash's own 78-entry table
 //! rendered by the single-byte dispcolumn path (LC_ALL=C), produced by
 //! the renderer in ~/workspace/fix-3330/gen_expected.py, which was
 //! validated byte-for-byte against the GNU 5.3.20 oracle's own
@@ -65,7 +70,11 @@ fn run_help_under_pty(cols: u32) -> Option<Vec<String>> {
     );
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let lines: Vec<String> = stdout.lines().map(str::to_owned).collect();
-    assert_eq!(lines.len(), 8 + 39, "header + row count at cols={cols}: {lines:?}");
+    assert_eq!(
+        lines.len(),
+        8 + 39,
+        "header + row count at cols={cols}: {lines:?}"
+    );
     assert_eq!(
         lines[1],
         "These shell commands are defined internally.  Type `help' to see this list."

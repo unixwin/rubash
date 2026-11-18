@@ -68,6 +68,14 @@ def main():
             env = dict(os.environ)
             env.pop("COLUMNS", None)
             env.pop("LINES", None)
+            # Pin the single-byte locale: the nail's grids are the
+            # dispcolumn (LC_ALL=C) render. Under a UTF-8 leg locale
+            # the shell selects the wdispcolumn path instead, which
+            # keeps one more character at the truncation boundary
+            # (help.rs listing_cell; GNU help.def wdispcolumn vs
+            # dispcolumn) — same product, different grid. Without the
+            # pin the 100-column row for `select` loses its `>`.
+            env["LC_ALL"] = "C"
             os.execve(shell, [shell, "-c", "help"], env)
         except BaseException:
             os._exit(127)
@@ -84,7 +92,7 @@ def main():
             out += chunk
     finally:
         os.close(master)
-    _, status, _ = os.waitpid(pid, 0)
+    _, status = os.waitpid(pid, 0)
     if not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
         print(f"shell exited with status {status}", file=sys.stderr)
         return 1

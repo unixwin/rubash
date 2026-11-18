@@ -5571,11 +5571,7 @@ pub(crate) fn process_console_size() -> Option<(i32, i32)> {
     // GNU's input_tty fallback is stderr; stdin/stdout follow so a
     // session whose stderr is redirected but whose stdin or stdout
     // is still a tty reports its size.
-    for fd in [
-        libc::STDERR_FILENO,
-        libc::STDIN_FILENO,
-        libc::STDOUT_FILENO,
-    ] {
+    for fd in [libc::STDERR_FILENO, libc::STDIN_FILENO, libc::STDOUT_FILENO] {
         if let Some(size) = unix_console_size_of_fd(fd) {
             return Some(size);
         }
