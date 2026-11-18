@@ -209,9 +209,16 @@ fn issue3310_plain_spawn_env_keeps_live_level() {
     if !env_binary() {
         return;
     }
+    // GNU 5.3.20 oracle (harness shape: `-c`, env_clear + SHLVL=5):
+    // a plain-spawned child sees SHLVL=5, NOT 6 — the live level is 6
+    // but the exported level under `-c` is 5. The script-file form does
+    // export 6 (`SHLVL=5 bash file` -> child 6); the earlier `6`
+    // expectation was copied from that form. The sibling
+    // `plain_spawn_keeps_level` pin already asserts 5 for the same
+    // `-c` shape, and the product matches GNU here — pin-only fix.
     let (stdout, stderr, code) = rubash("/usr/bin/env", &[("SHLVL", "5")]);
     assert_eq!(code, Some(0), "stderr: {stderr}");
-    assert_eq!(shlvl_lines(&stdout), vec!["SHLVL=6"]);
+    assert_eq!(shlvl_lines(&stdout), vec!["SHLVL=5"]);
     assert_eq!(stderr, "");
 }
 
