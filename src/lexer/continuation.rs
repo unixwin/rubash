@@ -1054,9 +1054,18 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
                 // assignment word opens an array list (`declare -a ddd=(aaa`
                 // continues on the next line). A `(` elsewhere is a parse
                 // error for the parser, not a pending delimiter.
-                if at_command || (cur_word.len() > 1 && cur_word.ends_with('=')) {
-                    let is_subshell = at_command && cur_word.is_empty();
-                    let is_array_list = !is_subshell;
+                // The pending word is an assignment only when it ends in
+                // `=` (`name=`, `name+=`); any other command-position word
+                // (`!`, a bare command name) opens a subshell grouping, not
+                // an array list. The old `!is_subshell` reading classified
+                // `!(` (extglob/negation) as an array list, so the EOF
+                // status split read a false-positive `array_list` bit
+                // (rubash#3903: issue3229 case-position extglob flipped
+                // 2 -> 1).
+                let is_assignment = cur_word.len() > 1 && cur_word.ends_with('=');
+                if at_command || is_assignment {
+                    let is_subshell = !is_assignment;
+                    let is_array_list = is_assignment;
                     stack.push(UnclosedDelim {
                         close: ')',
                         open_line: line,
@@ -5876,9 +5885,18 @@ pub(crate) fn close_char_residuals_advance(
                 // assignment word opens an array list (`declare -a ddd=(aaa`
                 // continues on the next line). A `(` elsewhere is a parse
                 // error for the parser, not a pending delimiter.
-                if state.at_command || (state.cur_word.len() > 1 && state.cur_word.ends_with('=')) {
-                    let is_subshell = state.at_command && state.cur_word.is_empty();
-                    let is_array_list = !is_subshell;
+                // The pending word is an assignment only when it ends in
+                // `=` (`name=`, `name+=`); any other command-position word
+                // (`!`, a bare command name) opens a subshell grouping, not
+                // an array list. The old `!is_subshell` reading classified
+                // `!(` (extglob/negation) as an array list, so the EOF
+                // status split read a false-positive `array_list` bit
+                // (rubash#3903: issue3229 case-position extglob flipped
+                // 2 -> 1).
+                let is_assignment = state.cur_word.len() > 1 && state.cur_word.ends_with('=');
+                if state.at_command || is_assignment {
+                    let is_subshell = !is_assignment;
+                    let is_array_list = is_assignment;
                     state.stack.push(UnclosedDelim {
                         close: ')',
                         open_line: state.line,
