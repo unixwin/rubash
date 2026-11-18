@@ -60,7 +60,13 @@ fn inner_dollar_word_owns_the_eof_verdict() {
         ("brace", "v[a=${x\n", '}', 1, None),
         ("backtick", "v[a=`x\n", '`', 1, None),
         ("arith", "v[a=$((1+\n", ')', 1, None),
-        ("multiline_comsub", "v[a=$(echo y\necho z\n", ')', 3, Some(2)),
+        (
+            "multiline_comsub",
+            "v[a=$(echo y\necho z\n",
+            ')',
+            3,
+            Some(2),
+        ),
     ] {
         let (_stdout, stderr, got) = run_file(script, tag);
         if let Some(want) = code {

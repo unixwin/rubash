@@ -3386,17 +3386,14 @@ fn unclosed_array_subscript_walk(
                         }
                         return None;
                     }
-                    '`' => {
-                        match skip_backtick_corrected(&chars, scan) {
-                            Some(end) => {
-                                scan_line +=
-                                    chars[scan..end].iter().filter(|c| **c == '\n').count();
-                                scan = end;
-                                continue;
-                            }
-                            None => return None,
+                    '`' => match skip_backtick_corrected(&chars, scan) {
+                        Some(end) => {
+                            scan_line += chars[scan..end].iter().filter(|c| **c == '\n').count();
+                            scan = end;
+                            continue;
                         }
-                    }
+                        None => return None,
+                    },
                     '[' => depth += 1,
                     ']' => {
                         depth -= 1;

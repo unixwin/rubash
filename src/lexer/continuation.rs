@@ -4800,9 +4800,10 @@ pub(crate) fn subscript_residuals_advance(
                                 continue;
                             }
                             None => {
-                                return Some(park.take().unwrap_or(
-                                    SubscriptResidualPark { pos: index, snapshot },
-                                ));
+                                return Some(park.take().unwrap_or(SubscriptResidualPark {
+                                    pos: index,
+                                    snapshot,
+                                }));
                             }
                         }
                     }
