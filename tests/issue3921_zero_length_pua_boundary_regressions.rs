@@ -387,6 +387,92 @@ fn declare_p_shows_literal_pua_chars_as_data() {
             "declare -A h=( [k]=$'\\ue000\\ue001' )\ndeclare -p h\n",
             "declare -A h=([k]=\"\u{e000}\u{e001}\" )\n",
         ),
+        (
+            // rubash#3921 array fold, other arm of the selective
+            // decode: a typed registry-zone char OUTSIDE the raw-byte
+            // range (U+E314) must still resolve to the lone char —
+            // the flush only decodes when U+E000 is present, so an
+            // unresolved `E400 + E314` would print the introducer.
+            "array_e314",
+            "e=($'\\uE314')\ndeclare -p e\n",
+            "declare -a e=([0]=\"\u{e314}\")\n",
+        ),
+        (
+            // Mixed array: PUA pair, genuine control byte, lone E000.
+            // The byte keeps its `$'\024'` octal form; the lone E000
+            // keeps its pair through the fold and the flush.
+            "array_mixed",
+            "m=($'\\ue000\\ue001' $'\\x14' $'\\ue000')\ndeclare -p m\n",
+            "declare -a m=([0]=\"\u{e000}\u{e001}\" [1]=$'\\024' [2]=\"\u{e000}\")\n",
+        ),
+    ] {
+        let (out, err, code) = run_file(script, tag);
+        assert_eq!(code, 0, "{tag}: exit {code}, stderr {err}");
+        assert_eq!(out, expected, "{tag}: stdout mismatch");
+    }
+}
+
+/// Item 2, format-escape face (D2): `printf '\uE000\uE001'` and
+/// `printf '%b' '\uE000\uE001'` must emit the two PUA chars, not fold
+/// them to NUL. Before the fix `unicode_escape_text` returned the lone
+/// chars as visible text and the printf output path's `raw_bytes`
+/// folded them — this fired even through a pipe, unlike the direct
+/// flush double-decode (D1), which the `plain` cell in the `-v` test
+/// above already locks.
+#[test]
+fn printf_format_unicode_escape_preserves_literal_pua_chars() {
+    // (tag, script, expected stdout)
+    for (tag, script, expected) in [
+        (
+            "fmt_direct",
+            "printf '\\uE000\\uE001'\n",
+            "\u{e000}\u{e001}",
+        ),
+        (
+            "pct_b_direct",
+            "printf '%b' '\\uE000\\uE001'\n",
+            "\u{e000}\u{e001}",
+        ),
+    ] {
+        let (out, err, code) = run_file(script, tag);
+        assert_eq!(code, 0, "{tag}: exit {code}, stderr {err}");
+        assert_eq!(out, expected, "{tag}: stdout mismatch");
+    }
+}
+
+/// Item 2, @Q round-trip face: `${var@Q}` renders the quoted form as
+/// transport text, so assigning it stores the 4-char `'...'` form
+/// (GNU: len 4) instead of folding the lone U+E000 + payload pair to
+/// a NUL byte at the assignment boundary (quote+NUL+quote, len 3).
+#[test]
+fn at_q_round_trip_preserves_literal_pua_chars() {
+    // (tag, script, expected stdout)
+    for (tag, script, expected) in [
+        (
+            "q_len",
+            "w2=$'\\ue000\\ue001'\nq=\"${w2@Q}\"\nprintf '%s' \"${#q}\"\n",
+            "4",
+        ),
+        (
+            "q_declare_p",
+            "w2=$'\\ue000\\ue001'\nq=\"${w2@Q}\"\ndeclare -p q\n",
+            "declare -- q=\"'\u{e000}\u{e001}'\"\n",
+        ),
+        (
+            "q_direct",
+            "w2=$'\\ue000\\ue001'\nprintf '%s' \"${w2@Q}\"\n",
+            "'\u{e000}\u{e001}'",
+        ),
+        (
+            "array_q_len",
+            "a=($'\\ue000\\ue001')\nc=\"${a[0]@Q}\"\nprintf '%s' \"${#c}\"\n",
+            "4",
+        ),
+        (
+            "array_q_declare_p",
+            "a=($'\\ue000\\ue001')\nc=\"${a[0]@Q}\"\ndeclare -p c\n",
+            "declare -- c=\"'\u{e000}\u{e001}'\"\n",
+        ),
     ] {
         let (out, err, code) = run_file(script, tag);
         assert_eq!(code, 0, "{tag}: exit {code}, stderr {err}");

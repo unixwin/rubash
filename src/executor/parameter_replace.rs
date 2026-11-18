@@ -906,11 +906,22 @@ pub(in crate::executor) fn shell_reusable_quote(value: &str) -> String {
         return ansic_quote_bytes(&bytes);
     }
     let visible = crate::locale::decode_to_visible_text(value);
-    if ansic_should_quote_value(&visible) {
+    let quoted = if ansic_should_quote_value(&visible) {
         ansic_quote_value(&visible)
     } else {
         shell_single_quote_assignment_value(&visible)
-    }
+    };
+    // rubash#3921 (@Q round-trip): the quoted form above is VISIBLE
+    // text — a lone U+E000 + payload pair in it folds to a NUL byte
+    // at the next decode boundary (`q="${w2@Q}"` stored quote+NUL+
+    // quote, GNU stores the 4-char `'...'` form). The expansion result
+    // is transport text everywhere else, so re-spell the marker-zone
+    // chars as E400 pairs; the assignment boundary stores it verbatim
+    // and the stdout sink decodes it exactly once. The quoters above
+    // run on the visible text deliberately: under a non-UTF-8 locale
+    // they octal-escape the PUA bytes themselves, and escaping first
+    // would octal-escape the E400 introducer instead.
+    crate::executor::substitution_metadata::escape_marker_zone_chars(&quoted)
 }
 
 /// GNU strtrans.c ansic_quote over the raw byte string: named C escapes,
