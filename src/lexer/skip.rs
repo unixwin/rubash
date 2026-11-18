@@ -4393,10 +4393,42 @@ fn main_level_paren_token_name(chars: &[char], idx: usize) -> String {
     }
 }
 
+/// Skip a `parse_matched_pair` expansion unit (`\`...``, `$(...)`, `$((...))`,
+/// `${...}`, `$[...]`) at `index` inside an extglob group body.
+/// Returns `None` if `chars[index]` does not open such a unit, `Some(Some(end))`
+/// when the unit closes at `end`, or `Some(None)` if the unit is unclosed.
+fn skip_extglob_unit(chars: &[char], index: usize) -> Option<Option<usize>> {
+    match chars[index] {
+        '`' => Some(skip_backtick_corrected(chars, index)),
+        '$' => match chars.get(index + 1) {
+            Some('(') => {
+                if chars.get(index + 2) == Some(&'(')
+                    && super::dollar_double_paren_is_arithmetic(
+                        &chars[index + 1..].iter().collect::<String>(),
+                    )
+                {
+                    Some(skip_arith_substitution_corrected(chars, index + 3))
+                } else {
+                    Some(skip_parenthesized_unit_corrected(chars, index + 1))
+                }
+            }
+            Some('{') => {
+                let (end, _, closed) = skip_braced_unit_scan(chars, index + 1);
+                Some(closed.then_some(end))
+            }
+            Some('[') => Some(dollar_word_group_len(chars, index + 1, '[', ']')),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Quote/backslash-aware balanced-paren scan for an extglob pattern group
 /// body (GNU parse_matched_pair, parse.y:3877: quotes nest, backslash
-/// escapes, nested `(`/`)` count). `open` is the index of the `(`; returns
-/// the index past its matching `)` or `None` when EOF is reached first.
+/// escapes, nested `(`/`)` count, and `` `...` `` / `$(...)` / `${...}` /
+/// `$[...]` are scanned as their own matched-pair units). `open` is the index
+/// of the `(`; returns the index past its matching `)` or `None` when EOF is
+/// reached first.
 pub(crate) fn skip_extglob_group_chars(chars: &[char], open: usize) -> Option<usize> {
     let mut depth = 1usize;
     let mut index = open + 1;
@@ -4422,8 +4454,15 @@ pub(crate) fn skip_extglob_group_chars(chars: &[char], open: usize) -> Option<us
                 escaped = true;
             } else if c == '"' {
                 double = false;
+            } else if let Some(unit) = skip_extglob_unit(chars, index) {
+                index = unit?;
+                continue;
             }
             index += 1;
+            continue;
+        }
+        if let Some(unit) = skip_extglob_unit(chars, index) {
+            index = unit?;
             continue;
         }
         match c {

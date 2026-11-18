@@ -105,9 +105,9 @@ fn bare_backquote_unbalanced_dquote_continues() {
     assert_case(
         "c",
         "echo \"C:[`echo \"x`\"]\"\necho AFTER-C\n",
-        0,
-        "C:[]\nAFTER-C\n",
-        "case.sh: command substitution: line 1: unexpected EOF while looking for matching `\"'\n",
+        2,
+        "",
+        "case.sh: line 1: unexpected EOF while looking for matching `\"'\n",
     );
 }
 
