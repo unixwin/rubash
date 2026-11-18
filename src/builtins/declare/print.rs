@@ -435,6 +435,18 @@ pub(crate) fn declaration_line(
         return None;
     }
     let text = String::from_utf8(out).ok()?;
+    // The snapshot declaration is a display artifact: it must read the
+    // way `declare -p` prints the name, i.e. the transport text decoded
+    // exactly once. The builtin path gets that decode from the stdout
+    // sink; the snapshot has no sink, so decode here (rubash#3921:
+    // the #3921 quoter fix re-spells display text as transport, and
+    // without this decode the E400 introducer leaked into the
+    // debugger transcript). Genuine raw bytes are rendered as
+    // `$'\ooo'` ASCII by the quoters, so the decoded bytes are valid
+    // UTF-8; lossy is the defensive fallback for any byte a quoter
+    // left raw.
+    let decoded = crate::executor::substitution_metadata::shell_text_to_raw_bytes(&text);
+    let text = String::from_utf8_lossy(&decoded);
     Some(text.trim_end_matches('\n').to_string())
 }
 

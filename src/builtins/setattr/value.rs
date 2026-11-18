@@ -253,8 +253,14 @@ pub(super) fn quote_listing_value(value: &str) -> String {
         return crate::executor::ansic_quote(value);
     }
     let visible = crate::locale::decode_to_visible_text(value);
-    if crate::executor::ansic_shouldquote(&visible) {
-        return crate::executor::ansic_quote(&visible);
+    // rubash#3921: re-spell as transport text before the byte-view
+    // quoters (see builtins/declare/storage.rs quote_declare_value)
+    // — a lone U+E000 in the visible text is user data and must not
+    // be re-folded into a byte by the exactly-once decode.
+    let transport =
+        crate::executor::substitution_metadata::escape_marker_zone_chars_for_display(&visible);
+    if crate::executor::ansic_shouldquote(&transport) {
+        return crate::executor::ansic_quote(&transport);
     }
-    format!("\"{}\"", quote_export_value(&visible))
+    format!("\"{}\"", quote_export_value(&transport))
 }

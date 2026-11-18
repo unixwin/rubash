@@ -943,6 +943,30 @@ pub(crate) fn escape_marker_zone_chars(text: &str) -> String {
     output
 }
 
+/// Display-boundary spelling for a decoded (visible) value (rubash#3921
+/// rework): re-spell as transport text ONLY when the downstream flush
+/// decode will run. `declare -p` output leaves the shell through the
+/// stdout flush, whose decode (`decode_raw_byte_marker_bytes`) runs only
+/// when the chunk contains a bare U+E000 — otherwise it returns the chunk
+/// unchanged. Feeding transport text unconditionally (the PR's blanket
+/// escape) is correct only when the visible text contains U+E000: then the
+/// flush decodes the pairs exactly once and the glyphs round-trip. When
+/// the visible text has no U+E000 the flush never decodes, so the E400
+/// introducers leak verbatim in front of every glyph (rubash#2884/#824/
+/// #843: `declare -p` showed `U+E400 U+E301` for a stored `U+E301`).
+/// With no U+E000 the visible text is already the final spelling — feed
+/// it as-is (the pre-PR behaviour, which the flush leaves untouched).
+pub(crate) fn escape_marker_zone_chars_for_display(visible: &str) -> String {
+    if visible
+        .chars()
+        .any(|ch| ch as u32 == crate::executor::markers::RAW_BYTE_MARKER_ESCAPE)
+    {
+        escape_marker_zone_chars(visible)
+    } else {
+        visible.to_string()
+    }
+}
+
 #[allow(dead_code)]
 pub(in crate::executor) fn split_expanded_fragments(
     fragments: &[ExpandedFragment],
