@@ -2803,6 +2803,25 @@ fn skip_parenthesized_unit_ex(chars: &[char], open: usize) -> Option<(usize, boo
             }
         }
         match ch {
+            // ANSI-C `$'...'` (parse.y:5476-5480 → parse_matched_pair
+            // P_ALLOWESC): `\'` inside is an escaped quote, not the close —
+            // a plain `'` toggle truncates `$(...$'a\')b'...)` at `')`.
+            '$' if chars.get(index + 1) == Some(&'\'') => {
+                index += 2;
+                while index < chars.len() {
+                    if chars[index] == '\\' {
+                        index += 2;
+                        continue;
+                    }
+                    if chars[index] == '\'' {
+                        index += 1;
+                        break;
+                    }
+                    index += 1;
+                }
+                token_boundary = false;
+                continue;
+            }
             '\'' => single = true,
             '"' => double = true,
             '(' if case_depth == 0 => depth += 1,
