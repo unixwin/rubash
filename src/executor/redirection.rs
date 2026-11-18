@@ -1424,7 +1424,6 @@ impl Executor {
             // side effect (rubash#264). Other open failures (bad
             // directory, permission) abort like GNU's redir_open.
             if redirect.kind == crate::parser::RedirectKind::ReadWrite
-                && !is_null_device(&target)
                 && dev_stdio_redirect_fd(&target).is_none()
                 && !crate::special_paths::is_net_redirect_target(&target)
                 // rubash#1931: only a parser-recorded (unquoted) span
@@ -1512,7 +1511,6 @@ impl Executor {
             // pipe and exit 0 silently). Plain Input opens have no side
             // effects, so the probe is validation-pure.
             if redirect.kind == crate::parser::RedirectKind::Input
-                && !is_null_device(&target)
                 && dev_stdio_redirect_fd(&target).is_none()
                 && !crate::special_paths::is_net_redirect_target(&target)
                 // rubash#1931: recorded-span exemption only, as in the
@@ -3398,6 +3396,27 @@ impl Executor {
         if is_closed_redirect_target(target) {
             state.fds.insert(fd, OutputTarget::Closed);
         } else if is_null_device(target) {
+            let open_result = if redirect.append {
+                self.open_append_target_for(Some(redirect), target)
+                    .map_err(|e| crate::posix_errors::path_error(target, e))
+            } else {
+                self.create_redirect_output_for(Some(redirect), target, redirect.clobber)
+            };
+            if let Err(error) = open_result {
+                if state.open_failure_via_error {
+                    let mut slot = state.first_open_error.borrow_mut();
+                    if slot.is_none() {
+                        *slot = Some((error.kind(), error.to_string()));
+                    }
+                } else {
+                    let mut stderr = Vec::new();
+                    writeln!(&mut stderr, "{}{error}", self.error_prefix())?;
+                    state.write_to_fd(self, 2, &stderr)?;
+                }
+                self.exit_code = 1;
+                state.redirect_failed = true;
+                return Ok(());
+            }
             state.fds.insert(fd, OutputTarget::Null);
         } else if crate::special_paths::is_full_device(target) {
             // rubash#1898: /dev/full accepts the open (no validation

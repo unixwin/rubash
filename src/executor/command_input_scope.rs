@@ -1495,14 +1495,16 @@ impl Executor {
                             gate_fires = FileFd::open_read(path).is_ok();
                         }
                         crate::parser::RedirectKind::ReadWrite => {
-                            if !target.starts_with("/dev/")
+                            if is_null_device(&target) {
+                                gate_fires = self.probe_input_redirect_readwrite(&target).is_ok();
+                            } else if !target.starts_with("/dev/")
                                 && !crate::special_paths::is_net_redirect_target(&target)
                             {
                                 let path = self.session_path(shell_path_to_windows(
                                     &target,
                                     &self.shell_state.env_vars,
                                 ));
-                                let _ = FileFd::open_readwrite_pair(path);
+                                gate_fires = FileFd::open_readwrite_pair(path).is_ok();
                             }
                         }
                         _ => {}
@@ -1970,24 +1972,19 @@ impl Executor {
                     match redirect.kind {
                         crate::parser::RedirectKind::Append
                         | crate::parser::RedirectKind::CombinedAppend => {
-                            if !is_null_device(&target) {
-                                let _ = open_redirect_append(&self.session_path(
-                                    shell_path_to_windows(&target, &self.shell_state.env_vars),
-                                ));
-                            }
+                            self.open_append_target_for(Some(redirect), &target)
+                                .map_err(|e| crate::posix_errors::path_error(&target, e))?;
                         }
                         crate::parser::RedirectKind::Output
                         | crate::parser::RedirectKind::ClobberOutput
                         | crate::parser::RedirectKind::CombinedOutput
                         | crate::parser::RedirectKind::CombinedAppend => {
-                            if !is_null_device(&target) {
-                                crate::executor::shell_options::probe_output_redirect(
-                                    self,
-                                    Some(redirect),
-                                    &target,
-                                    redirect.clobber,
-                                )?;
-                            }
+                            crate::executor::shell_options::probe_output_redirect(
+                                self,
+                                Some(redirect),
+                                &target,
+                                redirect.clobber,
+                            )?;
                         }
                         _ => {}
                     }

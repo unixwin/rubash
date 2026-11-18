@@ -249,14 +249,13 @@ impl Executor {
                 _ => continue,
             }
             let target = self.expand_redirect_target(redirect);
-            // A plain file target is the only shape this walk opens:
-            // closed forms (`&-`), fd dups (`&N`), /dev/fd aliases, the
-            // null device and process substitutions perform no
-            // filesystem open here.
+            // A plain file target (including the null device, which is a
+            // real open(2) in GNU redir.c) is the only shape this walk
+            // opens: closed forms (`&-`), fd dups (`&N`), /dev/fd aliases,
+            // and process substitutions perform no filesystem open here.
             let plain_file_target = !is_closed_redirect_target(&target)
                 && redirect_target_fd(&target).is_none()
                 && crate::executor::execution_misc::dev_stdio_redirect_fd(&target).is_none()
-                && !is_null_device(&target)
                 && !target.starts_with("<(")
                 && !target.starts_with(">(");
             // rubash#2692 pregate tracking: a creation-kind probe on
@@ -269,6 +268,7 @@ impl Executor {
             // is resolution-only, rubash#1967).
             if let Some(tracked) = created.as_deref_mut() {
                 if plain_file_target
+                    && !is_null_device(&target)
                     && matches!(
                         redirect.kind,
                         RedirectKind::Output
@@ -294,22 +294,15 @@ impl Executor {
             // redirector (redir.c r_output_direction /
             // r_input_direction). This walk serves the no-output
             // builtins (true / : / false), whose mirror applier below
-            // keeps no fd >= 3 verdict of its own. The null device
-            // needs no probe (its open trivially succeeds in GNU), so
-            // its gate stands alone here.
+            // keeps no fd >= 3 verdict of its own.
+            // rubash#3818: /dev/null MUST still run the probe open
+            // before the limit gate — under RLIMIT_NOFILE exhaustion
+            // open("/dev/null") fails EMFILE ("/dev/null: Too many open
+            // files") before dup2 is ever reached.
             let gate_fd = match redirect.kind {
                 RedirectKind::Input | RedirectKind::ReadWrite => redirect.fd.unwrap_or(0),
                 _ => redirect.fd.unwrap_or(1),
             };
-            if is_null_device(&target) {
-                if self.redirect_fd_over_limit(gate_fd) {
-                    return Ok(Some(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!("{gate_fd}: Bad file descriptor"),
-                    )));
-                }
-                continue;
-            }
             let opened: Result<(), io::Error> = match redirect.kind {
                 RedirectKind::Output
                 | RedirectKind::ClobberOutput

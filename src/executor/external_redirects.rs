@@ -1066,10 +1066,11 @@ impl Executor {
             // stricter hosts reject it for device objects); the write-only
             // open is what the fd layer's device arms use (niubash#519).
             let null = if cfg!(windows) {
-                OpenOptions::new().write(true).open("NUL")?
+                OpenOptions::new().write(true).open("NUL")
             } else {
-                File::create("/dev/null")?
-            };
+                File::create("/dev/null")
+            }
+            .map_err(|e| crate::posix_errors::path_error(target, e))?;
             return Ok(Some(null));
         }
         if redirect_target_fd(target).is_some() || dev_stdio_redirect_fd(target).is_some() {
