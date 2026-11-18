@@ -399,7 +399,14 @@ pub(super) fn assign_declare_names(
                     // assign_error after assign_array_element fails).
                     None
                 } else {
-                    eval_conditional_arith_value(index_expression, variables)
+                    {
+                        // GNU arrayfunc.c:1373-1377 array_expand_index
+                        // clears this_command_name around evalexp
+                        // (rubash#3295).
+                        let _arith_label =
+                            crate::executor::arithmetic::arith_eval_label_scope(None);
+                        eval_conditional_arith_value(index_expression, variables)
+                    }
                 };
                 let index = match evaluated_index {
                     Some(value) if value >= 0 => usize::try_from(value).ok(),
@@ -714,8 +721,19 @@ pub(super) fn assign_declare_names(
                     }
                 }
             } else if integer {
-                (eval_integer_value(&current, variables) + eval_integer_value(value, variables))
-                    .to_string()
+                // The sum itself is intmax_t (variables.c:2936-2946
+                // `rval += lval; retval = itos (rval)`), so it wraps at
+                // INT64_MAX instead of storing the out-of-range i128
+                // decimal (rubash#3782/#3866): `declare -i x+=1` and
+                // `local -i y+=1` on INT64_MAX stored
+                // "9223372036854775808" verbatim. The array arms self-heal
+                // through their trailing re-eval; this scalar arm stores
+                // the sum directly, so the narrowing must happen here.
+                crate::executor::arithmetic::intmax_append_sum(
+                    eval_integer_value(&current, variables),
+                    eval_integer_value(value, variables),
+                )
+                .to_string()
             } else {
                 let mut current = current;
                 current.push_str(value);
@@ -926,14 +944,19 @@ fn declare_case_convert(
     name: &str,
 ) -> String {
     if variables.is_marked(UPPERCASE_VARS, name) {
-        value.to_uppercase()
+        crate::locale::simple_uppercase(value)
     } else if variables.is_marked(LOWERCASE_VARS, name) {
-        value.to_lowercase()
+        crate::locale::simple_lowercase(value)
     } else if variables.is_marked(CAPCASE_VARS, name) {
+        // GNU sh_modcase CASE_CAPITALIZE (lib/sh/casemod.c): first
+        // character simple-uppercased, the rest simple-lowercased —
+        // the same conversion variable_state::capitalize_value runs
+        // on the executor paths (rubash#3790).
         let mut chars = value.chars();
         match chars.next() {
             Some(first) => {
-                first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase()
+                crate::locale::simple_case_upper(first).to_string()
+                    + &crate::locale::simple_lowercase(chars.as_str())
             }
             None => value.to_string(),
         }

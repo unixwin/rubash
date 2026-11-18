@@ -1161,6 +1161,37 @@ impl Executor {
                 return Ok(file);
             }
         }
+        // rubash#3792: the #1963 alias fallback moved here from the
+        // stream serve below — it belongs to the ALIAS shape only.
+        // The stream serve is the `<&N` dup model (see its docs): a
+        // dup serves the descriptor's own description, and a
+        // write-only description's reads fail EBADF — it must never
+        // re-open the descriptor's path for reading. The alias open
+        // keeps its old answer: a file binding re-opens its path
+        // (tried above; the retry here only re-reports the failure
+        // for an unlinked target), any other open descriptor reads
+        // EOF off the null device, and a descriptor with no endpoint
+        // at all keeps the EBADF answer.
+        if self.fd_table.read_endpoint(fd).is_none() {
+            match self.fd_table.write_endpoint(fd) {
+                Some(FdWriteEndpoint::File(file)) => {
+                    return File::open(&file.path)
+                        .map_err(|e| crate::posix_errors::path_error(target, e));
+                }
+                Some(_) => {
+                    return File::open(shell_path_to_windows(
+                        "/dev/null",
+                        &self.shell_state.env_vars,
+                    ));
+                }
+                None => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!("{target}: Bad file descriptor"),
+                    ));
+                }
+            }
+        }
         self.open_fd_read_endpoint_stream(fd, target)
     }
 
@@ -1225,30 +1256,22 @@ impl Executor {
                 super::inherited_stdin::duplicate_process_stdin()
             }
             _ => {
-                // rubash#1963: no read endpoint, but the descriptor
-                // may be open write-only (`exec 63>f; : < /dev/fd/63`).
-                // GNU's /dev/fd open is a fresh open of the
-                // descriptor's TARGET, judged against the target
-                // file's mode, not the descriptor's: a file binding
-                // reopens its path (its stored path is the native
-                // form it was opened from), and any other open
-                // descriptor's read-open succeeds against the null
-                // device (reads see EOF — the stdio write ends'
-                // content contract is the dev-operand face's
-                // documented decline). Only a descriptor with no
-                // endpoint at all keeps the EBADF answer.
-                match self.fd_table.write_endpoint(fd) {
-                    Some(FdWriteEndpoint::File(file)) => File::open(&file.path)
-                        .map_err(|e| crate::posix_errors::path_error(target, e)),
-                    Some(_) => File::open(shell_path_to_windows(
-                        "/dev/null",
-                        &self.shell_state.env_vars,
-                    )),
-                    None => Err(io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!("{target}: Bad file descriptor"),
-                    )),
-                }
+                // rubash#3792: no read endpoint — the descriptor is
+                // closed, or open write-only. This serve is the `<&N`
+                // dup model (see the fn docs): it hands the consumer
+                // the descriptor's OWN description, and a write-only
+                // description's reads fail EBADF exactly as GNU's
+                // dup2'd child reads do (redir.c:1193). The #1963
+                // alias re-open (a fresh open of the descriptor's
+                // target path) used to live here and served a dup of
+                // a write-only fd with the file's content — the
+                // emulated-cat face of #3792. It now lives in
+                // open_fd_read_endpoint above, the alias dispatch,
+                // where it belongs; a dup never passes through it.
+                Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("{target}: Bad file descriptor"),
+                ))
             }
         }
     }
@@ -4045,6 +4068,37 @@ impl Executor {
             && !self.fd_table.is_closed(0)
             && !matches!(self.fd_table.read_endpoint(0), Some(FdReadEndpoint::File(_)))
             && self.function_stdin_remaining().is_some()
+    }
+
+    /// rubash#3792: the fd-0 winner is a `<&N` dup (the `&N` spelling —
+    /// the `/dev/fd/N` path spelling is an alias OPEN, #1963, and stays
+    /// on the open serve) of a descriptor that is open WRITE-only: no
+    /// read endpoint, but a live write endpoint (`exec 3>f`). GNU's
+    /// dup2 (redir.c:1193 do_redirection_internal) hands the consumer
+    /// that write-only description itself, so the consumer's own reads
+    /// fail EBADF and the consumer reports it. A text serve cannot
+    /// model the description — stdin_string_for_command's dup arm
+    /// declines it by design (#2101: the caller's descriptor path must
+    /// surface the failure) — so a caller that can only consume text
+    /// must stand down for a descriptor path whenever this returns
+    /// Some. Returns the dup's source fd.
+    pub(in crate::executor) fn fd0_write_only_dup_source(&self, cmd: &CommandNode) -> Option<u32> {
+        let redirect = fd0_stdin_redirect_winner_redirect(cmd)?;
+        if !matches!(redirect.kind, crate::parser::RedirectKind::DuplicateInput) {
+            return None;
+        }
+        let target = self.expand_redirect_target(redirect);
+        if !target.starts_with('&') {
+            return None;
+        }
+        let (source, _) = super::execution_misc::redirect_target_fd_and_move(&target)?;
+        if self.fd_table.read_endpoint(source).is_some() {
+            return None;
+        }
+        if self.fd_table.write_endpoint(source).is_some() {
+            return Some(source);
+        }
+        None
     }
 
     pub(in crate::executor) fn stdin_string_for_command(
