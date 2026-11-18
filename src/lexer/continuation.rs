@@ -1688,7 +1688,13 @@ pub(crate) fn quotes_residuals_advance(
         // committed fall-through lets the body's `"`/`'` bytes toggle the
         // outer quote state, but a longer buffer closes the unit and jumps
         // its body wholesale.
-        if ch == '`' && !state.single && !state.double {
+        // rubash#3435: a backquote group is active inside double quotes
+        // too (GNU parse.y:3877 parse_matched_pair's dquote branch
+        // recurses into backquotes; the `$(` arm above already skips its
+        // unit inside double quotes). With the `!double` gate an
+        // unbalanced `"` inside `` `...` `` toggled the outer state and
+        // the whole input was misread as an unclosed quote.
+        if ch == '`' && !state.single {
             if let Some(end) = skip_backtick_unit(chars, index) {
                 index = end;
                 state.comment_start = false;

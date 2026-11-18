@@ -1507,3 +1507,21 @@ fn issue1544_locked_body_relex_ignores_in_body_posix_switch() {
         "posix pass + dash word = plain word (frozen veto): {tokens:?}"
     );
 }
+
+#[test]
+fn skip_extglob_group_chars_matched_pair_units() {
+    for input in [
+        "@(ax|$(echo `echo \"q`)ay)",
+        "@(ax|`echo \")\"`ay)",
+        "@(ax|${var:-)}ay)",
+        "@(ax|$[1+2]ay)",
+        "@(\"$(echo `echo \"q`)\"|x)",
+    ] {
+        let chars: Vec<char> = input.chars().collect();
+        assert_eq!(
+            super::skip::skip_extglob_group_chars(&chars, 1),
+            Some(chars.len()),
+            "input: {input}"
+        );
+    }
+}

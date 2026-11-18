@@ -281,6 +281,10 @@ fn find_first_valid_brace(text: &str) -> Option<(usize, usize, i32)> {
             i = skip_backtick_body(bytes, i);
             continue;
         }
+        if (bytes[i] == b'<' || bytes[i] == b'>') && i + 1 < bytes.len() && bytes[i + 1] == b'(' {
+            i = skip_dollar_paren_body(bytes, i);
+            continue;
+        }
         if is_dollar_or_carrier(bytes[i]) {
             if i + 1 < bytes.len() && bytes[i + 1] == b'(' {
                 i = skip_dollar_paren_body(bytes, i);
@@ -374,6 +378,10 @@ fn find_first_valid_brace(text: &str) -> Option<(usize, usize, i32)> {
                     continue;
                 }
                 c if is_dollar_or_carrier(c) && j + 1 < bytes.len() && bytes[j + 1] == b'(' => {
+                    j = skip_dollar_paren_body(bytes, j);
+                    continue;
+                }
+                b'<' | b'>' if j + 1 < bytes.len() && bytes[j + 1] == b'(' => {
                     j = skip_dollar_paren_body(bytes, j);
                     continue;
                 }
@@ -477,23 +485,31 @@ fn skip_backtick_body(bytes: &[u8], start: usize) -> usize {
 /// Index just past the matching close paren of the $( at `start` (which
 /// points at the $). Tracks parenthesis nesting while staying inside
 /// single- and double-quoted spans, mirroring parse.y parse_comsub's
-/// matching-paren search.
+/// matching-paren search. A backquote group is its own quote state
+/// (parse.y:3877 parse_matched_pair's grouping branch does not parse
+/// constructs inside a backquote body, so a quote inside it is ordinary
+/// text): track it like `skip_compound_subscript_span` does, so an
+/// unbalanced `"` inside `` `...` `` cannot leak into the paren count
+/// (rubash#3435: `{$(echo `echo "q`),x}` must still brace-expand).
 fn skip_dollar_paren_body(bytes: &[u8], start: usize) -> usize {
     let mut i = start + 2;
     let mut depth = 1usize;
     let mut single = false;
     let mut double = false;
+    let mut in_backtick = false;
     while i < bytes.len() {
         let ch = bytes[i];
         if ch == b'\\' && !single {
             i += 2;
             continue;
         }
-        if ch == b'\'' && !double {
+        if ch == b'\'' && !double && !in_backtick {
             single = !single;
-        } else if ch == b'"' && !single {
+        } else if ch == b'"' && !single && !in_backtick {
             double = !double;
-        } else if !single && !double {
+        } else if ch == b'`' && !single {
+            in_backtick = !in_backtick;
+        } else if !single && !double && !in_backtick {
             if ch == b'(' {
                 depth += 1;
             } else if ch == b')' {
@@ -531,13 +547,26 @@ fn split_brace_commas(s: &str) -> Vec<&str> {
     let bytes = s.as_bytes();
     let mut i = 0;
     let mut escaped = false;
-    // GNU braces.c searches for splitting commas outside quoted spans, so a
-    // comma inside "..." or '...' (echo {"x,x"}) does not split the group.
+    // GNU braces.c:638 brace_gobbler searches for splitting commas outside
+    // quoted spans (`'...'`, `"..."`, `` `...` ``) and command/parameter
+    // substitution units (`$(...)`, `<(...)`, `>(...)`, `${...}`, `$'...'`),
+    // so a comma or unmatched quote inside those units does not split or
+    // poison the outer brace group.
     let mut single = false;
     let mut double = false;
+    let mut backtick = false;
     while i < bytes.len() {
         if escaped {
             escaped = false;
+            i += 1;
+            continue;
+        }
+        if backtick {
+            if bytes[i] == b'\\' {
+                escaped = true;
+            } else if bytes[i] == b'`' {
+                backtick = false;
+            }
             i += 1;
             continue;
         }
@@ -549,6 +578,7 @@ fn split_brace_commas(s: &str) -> Vec<&str> {
             }
             b'\'' if !double => single = !single,
             b'"' if !single => double = !double,
+            b'`' if !single && !double => backtick = true,
             // Data-quote sentinels (markers.rs E301/E302) are the stored
             // form of the quotes GNU braces.c skips while splitting commas
             // (braces.c:189-193 quoted-state handling in brace_gobbler).
@@ -561,6 +591,32 @@ fn split_brace_commas(s: &str) -> Vec<&str> {
                     _ => {}
                 }
                 i += DQUOTE_CARRIER.len();
+                continue;
+            }
+            c if !single
+                && !double
+                && is_dollar_or_carrier(c)
+                && i + 1 < bytes.len()
+                && bytes[i + 1] == b'(' =>
+            {
+                i = skip_dollar_paren_body(bytes, i);
+                continue;
+            }
+            b'<' | b'>' if !single && !double && i + 1 < bytes.len() && bytes[i + 1] == b'(' => {
+                i = skip_dollar_paren_body(bytes, i);
+                continue;
+            }
+            c if !single
+                && !double
+                && is_dollar_or_carrier(c)
+                && i + 1 < bytes.len()
+                && bytes[i + 1] == b'{' =>
+            {
+                i = skip_dollar_brace_body(bytes, i);
+                continue;
+            }
+            b'$' if !single && !double && i + 1 < bytes.len() && bytes[i + 1] == b'\'' => {
+                i = skip_single_quoted(bytes, i + 1);
                 continue;
             }
             b'{' if !single && !double => depth += 1,
@@ -889,5 +945,20 @@ mod tests {
         let result = expand_braces("{a,b}{1,2}");
         println!("Debug: expand_braces = {:?}", result);
         assert_eq!(result, vec!["a1", "a2", "b1", "b2"]);
+    }
+
+    #[test]
+    fn test_split_brace_commas_brace_gobbler_units() {
+        assert_eq!(
+            expand_braces("{$(echo `echo \"q`),x}y"),
+            vec!["$(echo `echo \"q`)y", "xy"]
+        );
+        assert_eq!(
+            expand_braces("{`echo \"a,b\"`,x}"),
+            vec!["`echo \"a,b\"`", "x"]
+        );
+        assert_eq!(expand_braces("{<(echo a,b),x}"), vec!["<(echo a,b)", "x"]);
+        assert_eq!(expand_braces("{>(echo a,b),x}"), vec![">(echo a,b)", "x"]);
+        assert_eq!(expand_braces("<(echo {a,b})"), vec!["<(echo {a,b})"]);
     }
 }
