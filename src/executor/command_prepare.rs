@@ -7026,6 +7026,10 @@ fn skip_raw_command_substitution(chars: &[char], mut index: usize) -> usize {
             '\'' => index = skip_raw_quote(chars, index + 1, '\''),
             '"' => index = skip_raw_quote(chars, index + 1, '"'),
             '`' => index = skip_raw_backtick(&chars, index + 1),
+            '$' if chars.get(index + 1) == Some(&'\'') => {
+                index = skip_raw_ansi_c_span(chars, index + 2);
+                continue;
+            }
             '$' if chars.get(index + 1) == Some(&'(') => {
                 depth += 1;
                 index += 2;
@@ -7062,7 +7066,7 @@ fn skip_raw_braced_parameter(chars: &[char], mut index: usize) -> usize {
                 continue;
             }
             '$' if chars.get(index + 1) == Some(&'\'') => {
-                index = skip_raw_quote(chars, index + 2, '\'');
+                index = skip_raw_ansi_c_span(chars, index + 2);
                 continue;
             }
             '$' if chars.get(index + 1) == Some(&'"') => {
@@ -7119,7 +7123,7 @@ fn skip_raw_backtick(chars: &[char], mut index: usize) -> usize {
 fn skip_raw_ansi_c_span(chars: &[char], mut index: usize) -> usize {
     while index < chars.len() {
         if chars[index] == '\\' {
-            index += 2;
+            index = (index + 2).min(chars.len());
             continue;
         }
         if chars[index] == '\'' {
@@ -7190,7 +7194,7 @@ fn segment_alternate_raw(raw: &str, squotes_literal: bool) -> Vec<AlternatePiece
             };
             index += 1;
             while index < chars.len() {
-                if chars[index] == '\\' && quote != '\'' {
+                if chars[index] == '\\' && (quote != '\'' || dollar_quoted) {
                     index += 2;
                     continue;
                 }

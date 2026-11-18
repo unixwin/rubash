@@ -5420,10 +5420,26 @@ pub(crate) fn dollar_word_group_len(
     let mut single = false;
     let mut double = false;
     let mut escaped = false;
+    // rubash#3859: `$'...'` is ANSI-C quoting (parse.y
+    // read_token_word's dollar-quote arm -> parse_matched_pair
+    // P_ALLOWESC): `\'` is an escaped quote, so without this region a
+    // `'` after a backslash closes the plain single-quote state early
+    // and the `close_ch` after it ends the group
+    // (`$(echo $'a\')b')` truncated at `')`).
+    let mut ansi_single = false;
     while index < chars.len() {
         let ch = chars[index];
         if escaped {
             escaped = false;
+            index += 1;
+            continue;
+        }
+        if ansi_single {
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '\'' {
+                ansi_single = false;
+            }
             index += 1;
             continue;
         }
@@ -5444,6 +5460,10 @@ pub(crate) fn dollar_word_group_len(
             continue;
         }
         match ch {
+            '$' if chars.get(index + 1) == Some(&'\'') => {
+                ansi_single = true;
+                index += 1;
+            }
             '\\' => escaped = true,
             '\'' => single = true,
             '"' => double = true,

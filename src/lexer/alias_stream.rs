@@ -859,6 +859,9 @@ fn skip_matched_paren(buf: &[char], mut pos: usize) -> usize {
             '\'' => pos = skip_single_quote(buf, pos),
             '"' => pos = skip_double_quote(buf, pos),
             '`' => pos = skip_backtick(buf, pos),
+            '$' if buf.get(pos + 1) == Some(&'\'') => {
+                pos = skip_ansi_quote(buf, pos + 2);
+            }
             '(' => {
                 depth += 1;
                 pos += 1;
@@ -970,6 +973,12 @@ fn expand_comsub_alias_bodies(source: &str, lookup: &AliasLookup<'_>, posix: boo
             }
             '\\' => {
                 pos = (pos + 2).min(chars.len());
+                at_word_start = false;
+            }
+            '$' if chars.get(pos + 1) == Some(&'\'') => {
+                // ANSI-C `$'...'`: `\'` inside is an escaped quote, not the
+                // close — skip_single_quote would end the span at `')`.
+                pos = skip_ansi_quote(&chars, pos + 2);
                 at_word_start = false;
             }
             '\'' if !in_double => {
@@ -1305,6 +1314,9 @@ fn skip_dollar_brace(buf: &[char], mut pos: usize) -> usize {
         match buf[pos] {
             '\\' => pos = (pos + 2).min(buf.len()),
             '\'' => pos = skip_single_quote(buf, pos),
+            '$' if buf.get(pos + 1) == Some(&'\'') => {
+                pos = skip_ansi_quote(buf, pos + 2);
+            }
             '"' => pos = skip_double_quote(buf, pos),
             // A nested `$(...)` inside `${...}` is a command list of its
             // own: its `#` comments and heredoc bodies are opaque, so a
@@ -1341,6 +1353,9 @@ fn match_dparen(buf: &[char], mut pos: usize) -> Option<usize> {
             '\'' => pos = skip_single_quote(buf, pos),
             '"' => pos = skip_double_quote(buf, pos),
             '`' => pos = skip_backtick(buf, pos),
+            '$' if buf.get(pos + 1) == Some(&'\'') => {
+                pos = skip_ansi_quote(buf, pos + 2);
+            }
             '(' => {
                 depth += 1;
                 pos += 1;
@@ -1681,6 +1696,12 @@ impl<'a> ComsubAliasScanner<'a> {
                         break;
                     }
                     self.pos = (pos + 2).min(self.chars.len());
+                    self.at_word_start = false;
+                }
+                '$' if self.chars.get(pos + 1) == Some(&'\'') => {
+                    // ANSI-C `$'...'`: `\'` inside is an escaped quote, not
+                    // the close — single_quote_end would end it at `')`.
+                    self.pos = skip_ansi_quote(&self.chars, pos + 2);
                     self.at_word_start = false;
                 }
                 '\'' if !self.in_double => match single_quote_end(&self.chars, pos) {

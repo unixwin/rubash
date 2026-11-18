@@ -2603,6 +2603,19 @@ fn advance_quote_state(state: Option<char>, text: &str) -> Option<char> {
             }
             _ => match c {
                 '\\' => i += 1,
+                '$' if chars.get(i + 1) == Some(&'\'') => {
+                    // ANSI-C `$'...'`: escape-aware close scan
+                    // (parse.y:5476-5480 — `\'` inside is an escaped
+                    // quote, not the terminator).
+                    i += 2;
+                    while i < chars.len() {
+                        match chars[i] {
+                            '\\' => i += 2,
+                            '\'' => break,
+                            _ => i += 1,
+                        }
+                    }
+                }
                 '\'' | '"' | '`' => state = Some(c),
                 '#' if i == 0 || matches!(chars[i - 1], ' ' | '\t' | ';' | '\n') => break,
                 _ => {}
