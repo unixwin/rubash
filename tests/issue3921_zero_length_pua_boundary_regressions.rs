@@ -171,11 +171,7 @@ fn literal_e000_matches_as_one_data_char() {
             "w=$'\\ue000'\nprintf '%s' \"${w//?/_}\"\n",
             "_",
         ),
-        (
-            "len_lone",
-            "w=$'\\ue000'\nprintf '%s' \"${#w}\"\n",
-            "1",
-        ),
+        ("len_lone", "w=$'\\ue000'\nprintf '%s' \"${#w}\"\n", "1"),
         (
             "prefix_question",
             "w=$'\\ue000'\nprintf '%s' \"${w#?}\"\n",
@@ -265,11 +261,7 @@ fn literal_e000_followed_by_payload_range_char_stays_two_units() {
             "w=$'\\ue000\\ue001'\nprintf '%s' \"${w//?/_}\"\n",
             "__",
         ),
-        (
-            "len",
-            "w=$'\\ue000\\ue001'\nprintf '%s' \"${#w}\"\n",
-            "2",
-        ),
+        ("len", "w=$'\\ue000\\ue001'\nprintf '%s' \"${#w}\"\n", "2"),
         (
             "bracket_first",
             "w=$'\\ue000\\ue001'\nprintf '%s' \"${w//[$'\\ue000']/_}\"\n",
@@ -317,4 +309,87 @@ fn literal_e000_from_other_entries_matches_as_one_char() {
     let (out, err, code) = run_file(&script, "source_literal");
     assert_eq!(code, 0, "source_literal: exit {code}, stderr {err}");
     assert_eq!(out, "___|3", "source_literal: stdout mismatch");
+}
+
+/// Item 2, storage face: `printf -v` output is DATA — a literal
+/// U+E000 in it must reach storage in value-entry spelling, so the
+/// value keeps its two data chars in every face (GNU: len 2, replace
+/// `__`, plain expansion the two PUA chars, `declare -p` the
+/// double-quoted pair). Before the fix the formatted text was stored
+/// raw and every boundary folded U+E000 U+E001 into one NUL byte.
+#[test]
+fn printf_v_stores_literal_pua_chars_as_data() {
+    // (tag, script, expected stdout)
+    for (tag, script, expected) in [
+        (
+            "len",
+            "printf -v v '\\uE000\\uE001'\nprintf '%s' \"${#v}\"\n",
+            "2",
+        ),
+        (
+            "replace",
+            "printf -v v '\\uE000\\uE001'\nprintf '%s' \"${v//?/_}\"\n",
+            "__",
+        ),
+        (
+            "plain",
+            "printf -v v '\\uE000\\uE001'\nprintf '%s' \"$v\"\n",
+            "\u{e000}\u{e001}",
+        ),
+        (
+            "declare_p",
+            "printf -v v '\\uE000\\uE001'\ndeclare -p v\n",
+            "declare -- v=\"\u{e000}\u{e001}\"\n",
+        ),
+        (
+            "lone_len",
+            "printf -v u '\\uE000'\nprintf '%s' \"${#u}\"\n",
+            "1",
+        ),
+        (
+            "lone_declare_p",
+            "printf -v u '\\uE000'\ndeclare -p u\n",
+            "declare -- u=\"\u{e000}\"\n",
+        ),
+    ] {
+        let (out, err, code) = run_file(script, tag);
+        assert_eq!(code, 0, "{tag}: exit {code}, stderr {err}");
+        assert_eq!(out, expected, "{tag}: stdout mismatch");
+    }
+}
+/// Item 2, display face: `declare -p` (and the array/assoc
+/// element renders) must show a stored literal U+E000 U+E001 as the
+/// double-quoted pair, not fold it into `$'\000'` (GNU:
+/// `declare -- w2="<E000><E001>"`). Before the fix the display
+/// quoter re-decoded the visible text's lone U+E000 as a raw-byte
+/// marker pair.
+#[test]
+fn declare_p_shows_literal_pua_chars_as_data() {
+    // (tag, script, expected stdout)
+    for (tag, script, expected) in [
+        (
+            "scalar",
+            "w=$'\\ue000\\ue001'\ndeclare -p w\n",
+            "declare -- w=\"\u{e000}\u{e001}\"\n",
+        ),
+        (
+            "scalar_lone",
+            "w=$'\\ue000'\ndeclare -p w\n",
+            "declare -- w=\"\u{e000}\"\n",
+        ),
+        (
+            "array_element",
+            "a=($'\\ue000\\ue001')\ndeclare -p a\n",
+            "declare -a a=([0]=\"\u{e000}\u{e001}\")\n",
+        ),
+        (
+            "assoc_value",
+            "declare -A h=( [k]=$'\\ue000\\ue001' )\ndeclare -p h\n",
+            "declare -A h=([k]=\"\u{e000}\u{e001}\" )\n",
+        ),
+    ] {
+        let (out, err, code) = run_file(script, tag);
+        assert_eq!(code, 0, "{tag}: exit {code}, stderr {err}");
+        assert_eq!(out, expected, "{tag}: stdout mismatch");
+    }
 }

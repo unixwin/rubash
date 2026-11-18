@@ -527,7 +527,19 @@ fn assign_printf_output(
             )?;
             return Ok(Some(1));
         }
-        env_vars.insert(name.to_string(), output);
+        // rubash#3921: the formatted output is DATA, not source — a
+        // literal marker-zone char in it (e.g. `\uE000` from a `%s` /
+        // `\u` format) must enter storage in the same spelling every
+        // other value channel produces (entry_encode_value_text, the
+        // bytes_to_shell_text parity) or the first decode boundary
+        // reads the lone U+E000 + payload as a raw-byte marker pair
+        // (`printf -v v '\uE000\uE001'` stored one NUL byte). The
+        // validation above keys on the raw output text, so only the
+        // stored spelling is encoded here.
+        env_vars.insert(
+            name.to_string(),
+            crate::executor::substitution_metadata::entry_encode_value_text(&output),
+        );
         // rubash#1551 sv_path: binding a nameref cell named PATH is a
         // PATH bind (variables.c:5819/5919 -> phash_flush).
         if name == "PATH" {
@@ -570,13 +582,23 @@ fn assign_printf_output(
             // literal.
             let key = crate::executor::arithmetic::decode_arithmetic_assoc_key(subscript)
                 .unwrap_or_else(|| subscript.to_string());
-            let output = printf_attribute_value(env_vars, base, output);
+            // rubash#3921: value-entry encoding (see the nameref arm
+            // above) applies after the attribute transform, at the
+            // last step before storage.
+            let output = crate::executor::substitution_metadata::entry_encode_value_text(
+                &printf_attribute_value(env_vars, base, output),
+            );
             if let Some(store) = variables.as_deref_mut() {
                 let _ = store.set_associative_element(base, &key, output.clone());
             }
             assign_printf_assoc_element(env_vars, base, &key, output);
         } else if let Some(index) = resolve_printf_indexed_subscript(env_vars, base, subscript) {
-            let output = printf_attribute_value(env_vars, base, output);
+            // rubash#3921: value-entry encoding (see the nameref arm
+            // above) applies after the attribute transform, at the
+            // last step before storage.
+            let output = crate::executor::substitution_metadata::entry_encode_value_text(
+                &printf_attribute_value(env_vars, base, output),
+            );
             assign_printf_indexed_element(env_vars, base, index, output);
             // rubash#616 (plan Phase 1a): rebuild the structured cell from
             // the mirror this element write just produced. A direct typed
@@ -605,7 +627,12 @@ fn assign_printf_output(
         return Ok(None);
     }
 
-    let output = printf_attribute_value(env_vars, name, output);
+    // rubash#3921: value-entry encoding (see the nameref arm above)
+    // applies after the attribute transform, at the last step before
+    // storage.
+    let output = crate::executor::substitution_metadata::entry_encode_value_text(
+        &printf_attribute_value(env_vars, name, output),
+    );
     if let Some(store) = variables.as_deref_mut() {
         let _ = store.set_scalar(name, output.clone());
     }

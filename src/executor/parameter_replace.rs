@@ -176,11 +176,22 @@ fn replace_parameter_pattern_inner(
         output.push_str(&amp(&value[start..end]));
         if end == start {
             // GNU pat_subst:9286-9304: on a zero-length match copy one
-            // character so the scan advances past it.
-            match value[end..].chars().next() {
-                Some(ch) => {
-                    output.push(ch);
-                    cursor = end + ch.len_utf8();
+            // character so the scan advances past it. One character
+            // here is one MATCH UNIT, not one char: a raw-byte marker
+            // pair (U+E000 + payload) or a literal-char escape pair
+            // (U+E400 + char) is a single unit, so copying one char
+            // would copy only the pair's first half and strand the
+            // cursor inside the pair — the scan then finds a phantom
+            // zero-length match at the end position, and a value
+            // ending in a pair gains one spurious trailing replacement
+            // (rubash#3921). `indices` already holds the unit
+            // boundaries (the #3920 finder table); advance to the
+            // next one. A zero-length match at value.len() has no
+            // next boundary, so there is nothing left to copy.
+            match indices.iter().find(|index| **index > end) {
+                Some(next) => {
+                    output.push_str(&value[end..*next]);
+                    cursor = *next;
                 }
                 None => return output,
             }
