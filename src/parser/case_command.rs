@@ -1032,21 +1032,30 @@ pub(super) fn case_body_end(tokens: &[Token], mut index: usize) -> (usize, Optio
             break;
         }
 
-        // A case clause owns a command list, but its top-level compound
-        // terminators belong to the surrounding grammar. Bash parse.y rejects
-        // these instead of executing them as ordinary commands inside the
-        // clause (for example `case x in x) done ;; esac`).
-        if stack.is_empty()
-            && command_boundary_keyword_allowed(tokens, index)
+        let flat = stack.is_empty() && paren_depth == 0;
+        // GNU compound_list (parse.y:1262) has no production for a reserved
+        // word that starts no command, so at a command position `in',
+        // `done', `fi', `then', `else', `elif', `do' or `esac' is the token
+        // yyerror names — `case x in x) in esac' reports `in', never the
+        // `esac' a boundary scan would otherwise reach (`in' is the one
+        // member of reserved_word_acceptable's complement that is not
+        // itself a boundary predecessor, parse.y:5899-5937, so the `esac'
+        // check above cannot see it). The clause-body slice parser applies
+        // the same rule, but only after this walk finds the body end; a
+        // command-position offender ends the body HERE so the caller
+        // reports the first bad token instead of a later `;;'/`esac'/`)'/
+        // `newline'. structural_keyword() keeps argument-position
+        // same-spellings (`echo done fi') out — they are res_pos=false.
+        if flat
+            && at_command_start
+            && tokens[index].structural_keyword()
             && matches!(
                 tokens[index].value.as_str(),
-                "done" | "fi" | "then" | "else" | "elif"
+                "then" | "do" | "else" | "elif" | "fi" | "done" | "esac" | "in"
             )
         {
-            break;
+            return (index, Some(index));
         }
-
-        let flat = stack.is_empty() && paren_depth == 0;
         if flat
             && at_command_start
             && matches!(

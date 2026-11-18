@@ -6282,7 +6282,12 @@ impl Executor {
         // unnumbered here-string has no twin (its fd-0 bind is the
         // `here_string` field below). Pair them in the walk so each
         // entry binds its body at its GNU do_redirections position.
-        let mut heredoc_twins = cmd.heredoc_redirects.iter();
+        // rubash#3893: the heredoc_redirects twins this walk has
+        // already bound at their list positions (see the fd_var
+        // branch below) — the tail loop must not rebind them.
+        let mut bound_fd_var_heredoc_twins: std::collections::HashSet<usize> =
+            std::collections::HashSet::new();
+        let mut heredoc_twins = cmd.heredoc_redirects.iter().enumerate();
         for redirect in &cmd.redirects {
             if let Some(fd) = redirect.fd {
                 occupied_slots.insert(fd);
@@ -6315,29 +6320,66 @@ impl Executor {
             // (exec redirections are never undone). A failed redirect stops
             // the list — do_redirections returns on the first error.
             if redirect.fd_var.is_some() {
-                // A `{var}<<` entry still consumes its heredoc_redirects
-                // twin to keep the pairing aligned — the fd_var heredoc
-                // loop below owns its bind (vredir1.sub).
+                // rubash#3893: a `{var}<<` / `{var}<<<` entry binds
+                // its heredoc at THIS walk position — GNU's single
+                // ordered walk (redir.c:237 do_redirections) dups the
+                // materialized body with F_DUPFD at the entry's own
+                // position (redir.c:1082) and redir_varassign binds
+                // the variable there (redir.c:1113) — so a later
+                // entry's undo-save for an already-open redirector
+                // claims the slot AFTER the var's (occupied_slots is
+                // the walk prefix: only the entries before the
+                // allocation point count, see
+                // command_own_numbered_slots). The generic fd_var
+                // applier below has no HereDoc/HereString arm (it is
+                // a no-op for those kinds), so a twin that binds here
+                // is recorded and the tail loop skips it; a twin that
+                // cannot bind here (no twin, or a twin without
+                // fd_var) falls through to the generic path and the
+                // tail loop still owns it.
+                let mut heredoc_error: Option<ExecuteError> = None;
+                let mut heredoc_bound = false;
                 if matches!(
                     redirect.kind,
                     crate::parser::RedirectKind::HereDoc | crate::parser::RedirectKind::HereString
                 ) {
-                    let _ = heredoc_twins.next();
+                    if let Some((twin_idx, info)) = heredoc_twins.next() {
+                        match self.execute_dynamic_fd_var_heredoc(
+                            info,
+                            false,
+                            &occupied_slots,
+                            &FdWalkSpace::new(),
+                        ) {
+                            Ok(true) => {
+                                bound_fd_var_heredoc_twins.insert(twin_idx);
+                                heredoc_bound = true;
+                            }
+                            Ok(false) => {}
+                            Err(error) => heredoc_error = Some(error),
+                        }
+                    }
                 }
-                match self.execute_dynamic_fd_var_redirect(
-                    redirect,
-                    false,
-                    false,
-                    &occupied_slots,
-                    &std::collections::HashSet::new(),
-                    0,
-                    // rubash#2612: this loop is itself GNU's ordered
-                    // walk over the persistent table — fixed entries
-                    // bind into the table in list order around this
-                    // call — so the table IS the evolved descriptor
-                    // space and the walk overlay stays empty.
-                    &FdWalkSpace::new(),
-                ) {
+                if heredoc_bound {
+                    continue;
+                }
+                let outcome = match heredoc_error {
+                    Some(error) => Err(error),
+                    None => self.execute_dynamic_fd_var_redirect(
+                        redirect,
+                        false,
+                        false,
+                        &occupied_slots,
+                        &std::collections::HashSet::new(),
+                        0,
+                        // rubash#2612: this loop is itself GNU's ordered
+                        // walk over the persistent table — fixed entries
+                        // bind into the table in list order around this
+                        // call — so the table IS the evolved descriptor
+                        // space and the walk overlay stays empty.
+                        &FdWalkSpace::new(),
+                    ),
+                };
+                match outcome {
                     Ok(_) => {}
                     Err(ExecuteError::IoError(error)) => {
                         let mut stderr = Vec::new();
@@ -7149,7 +7191,7 @@ impl Executor {
                         matches!(redirect.kind, crate::parser::RedirectKind::HereString)
                             && redirect.fd.is_none();
                     if !unnumbered_here_string {
-                        if let Some(info) = heredoc_twins.next() {
+                        if let Some((_, info)) = heredoc_twins.next() {
                             if info.body.is_some() || info.body_carrier.is_some() {
                                 let fd = redirect.fd.unwrap_or(0);
                                 let input = self.expand_heredoc_redirect_text(info);
@@ -7167,7 +7209,13 @@ impl Executor {
         // GNU redir.c make_here_document writes the body to a temp file and
         // redir_varassign binds the fresh fd to var persistently under exec
         // (vredir1.sub: `exec {v}<<-EOF` leaves v holding a readable fd).
-        for redirect in &cmd.heredoc_redirects {
+        // rubash#3893: only the twins the walk did NOT bind at their list
+        // positions reach this loop (a store with no `redirects` twin) —
+        // a twin the fd_var branch already bound is skipped, never rebound.
+        for (twin_idx, redirect) in cmd.heredoc_redirects.iter().enumerate() {
+            if bound_fd_var_heredoc_twins.contains(&twin_idx) {
+                continue;
+            }
             if redirect.fd_var.is_none() {
                 continue;
             }
@@ -7218,7 +7266,7 @@ impl Executor {
         // Any heredoc entry the walk did not pair (a store with no
         // `redirects` twin) still binds at its tail position, the same
         // persistent-descriptor semantics the paired entries got.
-        for info in heredoc_twins {
+        for (_, info) in heredoc_twins {
             if info.fd_var.is_none() && (info.body.is_some() || info.body_carrier.is_some()) {
                 let fd = info.fd.unwrap_or(0);
                 let input = self.expand_heredoc_redirect_text(info);

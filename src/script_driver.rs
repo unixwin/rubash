@@ -4666,6 +4666,23 @@ fn run_source_impl_inner_body(
         && !input.contains("<<")
         && !command_paren_verdict_disproved_by_parser(executor, input, parse_posix);
     if unclosed_route || (extglob_eof_line.is_some() && !input.contains("<<")) {
+        // rubash#3899/#3900: whether a compound array assignment is open
+        // anywhere in the delimiter stack at EOF. GNU's EOF inside
+        // parse_compound_assignment's token loop (parse.y:7104) runs
+        // set_exit_status (EXECUTION_FAILURE) after its parser_error
+        // (parse.y:7151-7152, set at parse.y:7167-7169), so the status
+        // stays 1: the `error yacc_EOF' production (parse.y:484-493)
+        // forces EX_BADUSAGE=2 only on a still-zero status. The
+        // diagnostic itself (closer + line) still belongs to the
+        // innermost failed scan; only the status changes.
+        // error.c:324-327 (parser_error's exit_immediately_on_error
+        // tail) forces 2 under live errexit. The close-char scan's
+        // `array_list` bit is exactly "an array-list frame is open in
+        // the stack", so every arm of this route consults it.
+        let compound_assignment_open =
+            crate::lexer::unclosed_input_close_char_posix(input, parse_posix)
+                .map(|u| u.array_list)
+                .unwrap_or(false);
         // GNU parse.y:5635-5643 read_token_word + parse_matched_pair
         // (parse.y:3906-3912): an unclosed array subscript `[` reports
         // `unexpected EOF while looking for matching `]'' at the line the
@@ -4779,9 +4796,21 @@ fn run_source_impl_inner_body(
                     Some(eof.report_line + line_offset),
                 );
             }
-            executor.errexit_live_at_diagnostic();
-            executor.set_last_exit_code(2);
-            return 2;
+            // rubash#3899: a `$[` hunt that dies inside a compound
+            // array assignment is consumed by parse_compound_
+            // assignment's token loop like any other failed element
+            // word (GNU 5.3.20 probe: `v=(a $[1+` -> `]' at the
+            // opener's line, exit 1), so the status split is the
+            // route-wide one: 1 with an array list open, 2 otherwise,
+            // and 2 under live errexit either way.
+            let errexit_live = executor.errexit_live_at_diagnostic();
+            let status = if compound_assignment_open && !errexit_live {
+                1
+            } else {
+                2
+            };
+            executor.set_last_exit_code(status);
+            return status;
         }
         // rubash#3229: an unclosed extglob pattern group — GNU
         // read_token_word's parse_matched_pair scan (parse.y:5466-5489)
@@ -4837,9 +4866,19 @@ fn run_source_impl_inner_body(
                     Some(open_line + line_offset),
                 );
             }
-            executor.errexit_live_at_diagnostic();
-            executor.set_last_exit_code(2);
-            return 2;
+            // rubash#3899: same split as the `$[` arm — an extglob
+            // group that dies inside a compound array assignment is
+            // a failed element word of parse_compound_assignment
+            // (GNU 5.3.20 probe: `v=(a +(x` -> exit 1), while the
+            // bare `echo +(x` keeps 2.
+            let errexit_live = executor.errexit_live_at_diagnostic();
+            let status = if compound_assignment_open && !errexit_live {
+                1
+            } else {
+                2
+            };
+            executor.set_last_exit_code(status);
+            return status;
         }
         // GNU's incremental reader executes complete input lines before the
         // line where the unclosed construct opened; that line itself is part
@@ -5097,7 +5136,29 @@ fn run_source_impl_inner_body(
                     // GNU 5.3.20 exits 2 for unmatched-delimiter EOF
                     // diagnostics (confirmed for word-internal pairs
                     // `'`, `"`, `` ` ``, `${`, `$[`, `a[`, `$((`, `((`
-                    // as well as `$(` and command-position constructs).
+                    // as well as `$(` and command-position constructs)
+                    // — EXCEPT when a compound array assignment is open
+                    // anywhere in the stack: the failed word read is
+                    // then consumed by parse_compound_assignment's
+                    // token loop, which runs set_exit_status
+                    // (EXECUTION_FAILURE) (parse.y:7167-7169) after the
+                    // innermost scan's diagnostic, and the
+                    // `error yacc_EOF' production forces 2 only on a
+                    // still-zero status (parse.y:484-493). So an open
+                    // array list keeps the status at 1 (rubash#3899:
+                    // the plain `name=(` list; rubash#3900: a procsub
+                    // element `v=(<(echo` reporting at the EOF line),
+                    // unless parser_error's exit_immediately_on_error
+                    // tail fires under live errexit (error.c:324-327).
+                    if array_list {
+                        let status = if executor.errexit_live_at_diagnostic() {
+                            2
+                        } else {
+                            1
+                        };
+                        executor.set_last_exit_code(status);
+                        return status;
+                    }
                     executor.set_last_exit_code(2);
                     return 2;
                 }

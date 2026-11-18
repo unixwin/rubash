@@ -1177,7 +1177,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
             if command_is_pending_pipeline_prefix(state)
                 && matches!(
                     token.value.as_str(),
-                    "then" | "do" | "else" | "elif" | "fi" | "done" | "esac"
+                    "then" | "do" | "else" | "elif" | "fi" | "done" | "esac" | "in"
                 )
             {
                 // GNU parse.y:469-482 (`error '\n'` → YYABORT when not
