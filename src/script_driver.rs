@@ -18,7 +18,7 @@ use crate::executor::{ExecuteError, Executor};
 use crate::history::SessionHistory;
 use crate::history_expand::{HistChars, HistCtx};
 use crate::lexer::{
-    expand_aliases_in_source_marked, tokenize, tokenize_with_initial_posix,
+    expand_aliases_in_source_marked_with_comsubs, tokenize, tokenize_with_initial_posix,
     tokenize_with_initial_posix_marked, AliasLookup, Token, TokenKind,
 };
 use crate::parser::CommandNode;
@@ -429,21 +429,15 @@ pub fn script_uses_runtime_parse_gates(contents: &str) -> bool {
 /// (parse.y:5751-5769): posix keeps reserved words as keywords, default
 /// mode lets an alias replace them (rubash#414).
 pub(crate) fn expand_group_aliases(executor: &Executor, source: &str) -> String {
-    expand_group_aliases_marked(executor, source).0
+    expand_group_aliases_inner(executor, source).0
 }
 
-/// `expand_group_aliases` plus the byte offsets of newlines the
-/// expansion itself introduced — GNU consumes pushed alias text through
-/// shell_getc without the yy_readline_get line_number bump
-/// (parse.y:2504), so those newlines must not advance the token line
-/// stamps (rubash#3605 run-nquote: `alias foo=$'echo foo\\n\\nquux\\n'`
-/// + `foo` on line N reports `quux` at line N, not N+2).
-pub(crate) fn expand_group_aliases_marked(
+fn expand_group_aliases_inner(
     executor: &Executor,
     source: &str,
-) -> (String, Vec<usize>) {
+) -> (String, Vec<usize>, Vec<(String, Vec<usize>)>) {
     if !executor.alias_expansion_enabled() || executor.shell_state.aliases.is_empty() {
-        return (source.to_string(), Vec::new());
+        return (source.to_string(), Vec::new(), Vec::new());
     }
     let posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
     let lookup = move |word: &str| {
@@ -456,7 +450,28 @@ pub(crate) fn expand_group_aliases_marked(
             )
         })
     };
-    expand_aliases_in_source_marked(source, &lookup as &AliasLookup<'_>, posix)
+    expand_aliases_in_source_marked_with_comsubs(source, &lookup as &AliasLookup<'_>, posix)
+}
+
+/// `expand_group_aliases` plus the byte offsets of newlines the
+/// expansion itself introduced — GNU consumes pushed alias text through
+/// shell_getc without the yy_readline_get line_number bump
+/// (parse.y:2504), so those newlines must not advance the token line
+/// stamps (rubash#3605 run-nquote: `alias foo=$'echo foo\\n\\nquux\\n'`
+/// + `foo` on line N reports `quux` at line N, not N+2).
+/// Also records per-comsub-body expansion newline marks on `executor`
+/// (rubash#3838).
+pub(crate) fn expand_group_aliases_marked(
+    executor: &mut Executor,
+    source: &str,
+) -> (String, Vec<usize>) {
+    let (expanded, marks, comsub_records) = expand_group_aliases_inner(executor, source);
+    if !comsub_records.is_empty() {
+        executor
+            .shell_state
+            .record_comsub_alias_newlines(comsub_records);
+    }
+    (expanded, marks)
 }
 
 /// shell.c run_pending_command style driver for scripts with history on:

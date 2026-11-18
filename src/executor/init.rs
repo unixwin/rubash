@@ -1460,6 +1460,7 @@ impl Executor {
                 local_attr_scopes: Vec::new(),
                 local_typed_scopes: Vec::new(),
                 expanding_aliases: Vec::new(),
+                comsub_alias_newlines: std::collections::HashMap::new(),
                 loop_depth: 0,
                 inherited_loop_depth: 0,
                 subshell_saved_loop_depth: 0,

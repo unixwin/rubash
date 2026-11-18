@@ -128,7 +128,14 @@ pub(in crate::executor) fn normalize_comsub_body_statement_lines(
     let mut line = 1usize;
     // The body's first command is canonical line 1 regardless of any
     // leading blank lines in the raw text (blank lines have no node).
-    layout_command_list(&mut ast.commands, seed, &mut boundaries, &mut line, false);
+    layout_command_list(
+        &mut ast.commands,
+        seed,
+        tokens,
+        &mut boundaries,
+        &mut line,
+        false,
+    );
 }
 
 /// rubash#1184 f6 follow-up: does an extracted backquote body end with
@@ -262,6 +269,7 @@ pub(in crate::executor) fn canonical_newline_boundaries(
 fn layout_command_list(
     commands: &mut [crate::parser::CommandNode],
     seed: usize,
+    tokens: &[crate::lexer::Token],
     boundaries: &mut std::collections::HashSet<usize>,
     line: &mut usize,
     funcdef: bool,
@@ -294,7 +302,7 @@ fn layout_command_list(
             .heredoc_redirects
             .iter()
             .any(|redirect| redirect.body.is_some());
-        layout_command(command, seed, boundaries, line, funcdef);
+        layout_command(command, seed, tokens, boundaries, line, funcdef);
         // Drain every boundary inside this command's raw span: boundaries
         // that point at internal keywords (`do`, `done`, `then`, `fi`,
         // `esac`) or at continuation words (a redirect target after a
@@ -340,11 +348,17 @@ fn assign(line_field: &mut Option<usize>, seed: usize, canonical: usize) {
 fn layout_command(
     command: &mut crate::parser::CommandNode,
     seed: usize,
+    tokens: &[crate::lexer::Token],
     boundaries: &mut std::collections::HashSet<usize>,
     line: &mut usize,
     funcdef: bool,
 ) {
     let start = *line;
+    let raw_start_line = command.line;
+    let raw_span = command
+        .line
+        .zip(command.end_line)
+        .map(|(s, e)| e.saturating_sub(s));
     assign(&mut command.line, seed, start);
 
     if let Some(for_command) = command.for_command.as_deref_mut() {
@@ -358,7 +372,14 @@ fn layout_command(
             .map(|word| word.matches('\n').count())
             .sum::<usize>();
         *line = start + head_newlines + 2;
-        layout_command_list(&mut for_command.body, seed, boundaries, line, funcdef);
+        layout_command_list(
+            &mut for_command.body,
+            seed,
+            tokens,
+            boundaries,
+            line,
+            funcdef,
+        );
         *line += 1; // `done` at body_end + 1
         assign(&mut command.end_line, seed, *line);
         return;
@@ -370,7 +391,14 @@ fn layout_command(
             .map(|word| word.matches('\n').count())
             .sum::<usize>();
         *line = start + head_newlines + 2;
-        layout_command_list(&mut select_command.body, seed, boundaries, line, funcdef);
+        layout_command_list(
+            &mut select_command.body,
+            seed,
+            tokens,
+            boundaries,
+            line,
+            funcdef,
+        );
         *line += 1; // `done`
         assign(&mut command.end_line, seed, *line);
         return;
@@ -378,9 +406,23 @@ fn layout_command(
     if let Some(loop_command) = command.loop_command.as_mut() {
         // `while test; do` — `do` shares the condition's last line
         // (print_cmd.c:826 ` do\n`).
-        layout_command_list(&mut loop_command.condition, seed, boundaries, line, funcdef);
+        layout_command_list(
+            &mut loop_command.condition,
+            seed,
+            tokens,
+            boundaries,
+            line,
+            funcdef,
+        );
         *line += 1; // body at condition end + 1
-        layout_command_list(&mut loop_command.body, seed, boundaries, line, funcdef);
+        layout_command_list(
+            &mut loop_command.body,
+            seed,
+            tokens,
+            boundaries,
+            line,
+            funcdef,
+        );
         *line += 1; // `done`
         assign(&mut command.end_line, seed, *line);
         return;
@@ -388,20 +430,34 @@ fn layout_command(
     if let Some(if_command) = command.if_command.as_mut() {
         // `if test; then` — `then` shares the condition's last line
         // (print_cmd.c:850 ` then\n`).
-        layout_command_list(&mut if_command.condition, seed, boundaries, line, funcdef);
+        layout_command_list(
+            &mut if_command.condition,
+            seed,
+            tokens,
+            boundaries,
+            line,
+            funcdef,
+        );
         *line += 1; // then-body at condition end + 1
-        layout_command_list(&mut if_command.then_body, seed, boundaries, line, funcdef);
+        layout_command_list(
+            &mut if_command.then_body,
+            seed,
+            tokens,
+            boundaries,
+            line,
+            funcdef,
+        );
         for elif in &mut if_command.elif_branches {
             // An `elif` prints as a nested `else` + `if cond; then`
             // (print_cmd.c:856-864 with the false case being an if node).
             *line += 2;
-            layout_command_list(&mut elif.condition, seed, boundaries, line, funcdef);
+            layout_command_list(&mut elif.condition, seed, tokens, boundaries, line, funcdef);
             *line += 1;
-            layout_command_list(&mut elif.body, seed, boundaries, line, funcdef);
+            layout_command_list(&mut elif.body, seed, tokens, boundaries, line, funcdef);
         }
         if let Some(else_body) = &mut if_command.else_body {
             *line += 2; // `else` then body at else line + 1
-            layout_command_list(else_body, seed, boundaries, line, funcdef);
+            layout_command_list(else_body, seed, tokens, boundaries, line, funcdef);
         }
         // One `fi` per nesting level: innermost at body_end+1, one more
         // line per elif level above it (e1/e2/e6 probes).
@@ -417,7 +473,7 @@ fn layout_command(
         let mut terminator_line = patterns_line;
         for clause in &mut case_command.clauses {
             *line = patterns_line + 1; // `)\n` ends the patterns line
-            layout_command_list(&mut clause.body, seed, boundaries, line, funcdef);
+            layout_command_list(&mut clause.body, seed, tokens, boundaries, line, funcdef);
             *line += 1; // `;;` (or `;&`/`;;&`) at action end + 1
             terminator_line = *line;
             patterns_line = terminator_line + 1;
@@ -441,7 +497,14 @@ fn layout_command(
         let brace_line = start + 1;
         assign(&mut function_command.body_open_line, seed, brace_line);
         *line = brace_line + 1;
-        layout_command_list(&mut function_command.body, seed, boundaries, line, true);
+        layout_command_list(
+            &mut function_command.body,
+            seed,
+            tokens,
+            boundaries,
+            line,
+            true,
+        );
         *line += 1; // closing `}`
         assign(&mut function_command.body_end_line, seed, *line);
         assign(&mut command.end_line, seed, *line);
@@ -455,10 +518,10 @@ fn layout_command(
         // and before the `}`).
         if funcdef {
             *line += 1; // `{` on its own line
-            layout_command_list(&mut group.body, seed, boundaries, line, funcdef);
+            layout_command_list(&mut group.body, seed, tokens, boundaries, line, funcdef);
             *line += 1; // closing `}` on its own line
         } else {
-            layout_command_list(&mut group.body, seed, boundaries, line, funcdef);
+            layout_command_list(&mut group.body, seed, tokens, boundaries, line, funcdef);
         }
         assign(&mut command.end_line, seed, *line);
         return;
@@ -467,7 +530,7 @@ fn layout_command(
         // `( ... )` keeps the body on the braces' line even inside a
         // function definition (print_cmd.c:348-355 has no funcdef branch);
         // only the body's own list separators funcdef-advance.
-        layout_command_list(&mut subshell.body, seed, boundaries, line, funcdef);
+        layout_command_list(&mut subshell.body, seed, tokens, boundaries, line, funcdef);
         assign(&mut command.end_line, seed, *line);
         return;
     }
@@ -479,7 +542,7 @@ fn layout_command(
                 .map(|word| word.matches('\n').count())
                 .sum::<usize>();
         if let Some(body) = &mut coproc.body {
-            layout_command_list(body, seed, boundaries, line, funcdef);
+            layout_command_list(body, seed, tokens, boundaries, line, funcdef);
         }
         assign(&mut command.end_line, seed, *line);
         return;
@@ -487,8 +550,12 @@ fn layout_command(
     if let Some(pipeline) = command.pipeline_command.as_mut() {
         // Stages join with ` | ` on one line (print_cmd.c:257-273).
         for stage in &mut pipeline.stages {
+            let stage_span = stage
+                .line
+                .zip(stage.end_line)
+                .map(|(s, e)| e.saturating_sub(s));
             assign(&mut stage.line, seed, *line);
-            *line += simple_command_embedded_newlines(stage);
+            *line += stage_span.unwrap_or_else(|| simple_command_embedded_newlines(stage));
         }
         assign(&mut command.end_line, seed, *line);
         return;
@@ -496,23 +563,37 @@ fn layout_command(
     if let Some(and_or) = command.and_or_list.as_mut() {
         // ` && `/` || ` join members on one line (print_cmd.c:276-286).
         for member in &mut and_or.commands {
-            layout_command(member, seed, boundaries, line, funcdef);
+            layout_command(member, seed, tokens, boundaries, line, funcdef);
         }
         assign(&mut command.end_line, seed, *line);
         return;
     }
     if let Some(background) = command.background_command.as_mut() {
-        layout_command(&mut background.command, seed, boundaries, line, funcdef);
+        layout_command(
+            &mut background.command,
+            seed,
+            tokens,
+            boundaries,
+            line,
+            funcdef,
+        );
         assign(&mut command.end_line, seed, *line);
         return;
     }
     if let Some(inverted) = command.inverted_command.as_mut() {
-        layout_command(&mut inverted.command, seed, boundaries, line, funcdef);
+        layout_command(
+            &mut inverted.command,
+            seed,
+            tokens,
+            boundaries,
+            line,
+            funcdef,
+        );
         assign(&mut command.end_line, seed, *line);
         return;
     }
     if let Some(timed) = command.time_command.as_mut() {
-        layout_command(&mut timed.command, seed, boundaries, line, funcdef);
+        layout_command(&mut timed.command, seed, tokens, boundaries, line, funcdef);
         assign(&mut command.end_line, seed, *line);
         return;
     }
@@ -524,7 +605,22 @@ fn layout_command(
     // body's lines and its terminator on its own line — leaving `*line` ON
     // the last terminator line; the follower's bump (layout_command_list)
     // accounts the terminator's trailing newline.
-    *line += simple_command_embedded_newlines(command);
+    let embedded = raw_span.unwrap_or_else(|| {
+        let text_newlines = simple_command_embedded_newlines(command);
+        match raw_start_line {
+            Some(rs) => {
+                let token_span = tokens
+                    .iter()
+                    .filter(|t| t.position == rs)
+                    .map(|t| t.end_position.saturating_sub(t.position))
+                    .max()
+                    .unwrap_or(0);
+                text_newlines.min(token_span)
+            }
+            None => text_newlines,
+        }
+    });
+    *line += embedded;
     let heredocs = command
         .heredoc_redirects
         .iter()
@@ -1640,7 +1736,8 @@ impl Executor {
             .and_then(|line| line.parse::<usize>().ok())
             .filter(|line| *line > 0)
             .unwrap_or(1);
-        let alias_spliced = self.comsub_body_alias_splice_extracted(source);
+        let (alias_spliced, comsub_marks, nested_comsubs) =
+            self.comsub_body_alias_splice_extracted_marked(source);
         // Newline-terminated backtick body reader — see the run_ast path
         // (issue #515). The terminator is withheld when the body ends
         // with an active backslash: it would be quoted into a line
@@ -1698,11 +1795,12 @@ impl Executor {
                 return Some(SubstitutionOutput::readback(Vec::new(), 2, context));
             }
         }
-        let tokens = crate::lexer::tokenize_comsub_body(
+        let tokens = crate::lexer::tokenize_comsub_body_marked(
             source,
             self.posix_mode_enabled(),
             body_start_line,
             true,
+            &comsub_marks,
         );
         // GNU parse.y:3105 push_heredoc: HEREDOC_MAX applies inside the
         // substitution's own parse level too (parse.y:4524 resets the
@@ -1755,6 +1853,11 @@ impl Executor {
         // executor is a clone whose session cwd field is independent, so a
         // `cd` in the body cannot move this session (or the process).
         let mut subshell = self.command_substitution_executor();
+        if !nested_comsubs.is_empty() {
+            subshell
+                .shell_state
+                .record_comsub_alias_newlines(nested_comsubs);
+        }
         // rubash#815: the comsub frame is opened by the dispatch entries
         // (expand_command_substitution_with_context / the mut typed
         // dispatcher) — every route into this child executor passes one of
@@ -2454,8 +2557,19 @@ impl Executor {
             .and_then(|line| line.parse::<usize>().ok())
             .filter(|line| *line > 0)
             .unwrap_or(1);
-        let tokens =
-            crate::lexer::tokenize_comsub_body(body, self.posix_mode_enabled(), start_line, true);
+        let noncounting_newlines = self
+            .shell_state
+            .comsub_alias_newlines
+            .get(body)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let tokens = crate::lexer::tokenize_comsub_body_marked(
+            body,
+            self.posix_mode_enabled(),
+            start_line,
+            true,
+            noncounting_newlines,
+        );
         // Same in-level HEREDOC_MAX fatality as the `$(` path above
         // (parse.y:3105 push_heredoc; parse.y:4524 resets the counter at
         // entry without widening the cap).
