@@ -95,6 +95,17 @@ fn comsub_compound_assignment_neighbour_controls() {
         stderr.contains("line 2: unexpected EOF while looking for matching `)'"),
         "plain_comsub: {stderr:?}"
     );
+    // A line continuation inside the body still counts as a physical
+    // line: the inner comsub's EOF report names line 3, not 2. (This
+    // pins the escape-arm line count in the close-char scans; before
+    // it, an escaped newline inside a delimiter body was consumed
+    // without advancing the counter.)
+    let (_stdout, stderr, got) = run_file("echo $(foo \\\nbar $(echo hi", "continuation_eof_line");
+    assert_eq!(got, 2, "continuation_eof_line -> {stderr:?}");
+    assert!(
+        stderr.contains("line 3: unexpected EOF while looking for matching `)'"),
+        "continuation_eof_line: {stderr:?}"
+    );
     // Top-level compound assignment: unchanged (list line, exit 1).
     let (_stdout, stderr, got) = run_file("a=(1", "toplevel");
     assert_eq!(got, 1, "toplevel -> {stderr:?}");

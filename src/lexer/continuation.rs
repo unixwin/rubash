@@ -690,8 +690,15 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
         }
         if let Some(d) = top {
             if d.escapes && ch == '\\' {
-                // An escaped character is word text everywhere.
+                // An escaped character is word text everywhere. An
+                // escaped newline is still a physical line: GNU's reader
+                // counts it, so a construct after a line continuation
+                // inside a body reports its physical line (the
+                // stack-empty arm below counts the same pair).
                 comment_start = false;
+                if chars.get(i + 1) == Some(&'\n') {
+                    line += 1;
+                }
                 i += 2;
                 continue;
             }
@@ -5553,8 +5560,13 @@ pub(crate) fn close_char_residuals_advance(
         }
         if let Some(d) = top {
             if d.escapes && ch == '\\' {
-                // An escaped character is word text everywhere.
+                // An escaped character is word text everywhere; an
+                // escaped newline still advances the physical line
+                // counter (mirror of the one-shot scan's arm).
                 state.comment_start = false;
+                if chars.get(i + 1) == Some(&'\n') {
+                    state.line += 1;
+                }
                 i += 2;
                 continue;
             }
