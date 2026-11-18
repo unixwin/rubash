@@ -1,4 +1,4 @@
-use super::{ArithEvalDiag, ArithLValue, ConditionalArithParser};
+use super::{ArithEvalDiag, ArithLValue, ConditionalArithParser, SubscriptIndex};
 use crate::executor::arithmetic::{assignment_operator_at, skip_arith_ws};
 use crate::executor::{
     is_marked_var, is_shell_name, is_shell_name_char, is_shell_name_start, strip_matching_quotes,
@@ -116,7 +116,21 @@ impl ConditionalArithParser<'_> {
                 subscript,
             }),
             _ => {
-                let index = self.eval_subscript_index(&subscript)?;
+                let index = match self.eval_subscript_index(&subscript)? {
+                    SubscriptIndex::Value(index) => index,
+                    // A compound-assignment operator is not `=`, so the
+                    // STR token was already read at token time (GNU
+                    // expr.c:1395-1401): the empty-bracket token
+                    // diagnoses there, and the bind below fails as
+                    // `` `name[]': not a valid identifier `` — the early
+                    // read in parse_assignment (expression.rs) records
+                    // the two bad-subscript lines (rubash#3252).
+                    SubscriptIndex::Empty => {
+                        return Some(ArithLValue::InvalidElement {
+                            display: format!("{resolved_name}[]"),
+                        });
+                    }
+                };
                 Some(ArithLValue::Indexed {
                     bind_display: format!("{resolved_name}[{subscript}]"),
                     name: resolved_name,

@@ -1,4 +1,4 @@
-use super::{ArithEvalDiag, ArithLValue, ConditionalArithParser};
+use super::{ArithEvalDiag, ArithLValue, ConditionalArithParser, SubscriptIndex};
 use crate::executor::arithmetic::{
     bash_arith, eval_mutable_arith_value_with_random, strip_arith_double_quotes,
 };
@@ -212,7 +212,20 @@ impl ConditionalArithParser<'_> {
                 // STR-token time (expr.c:1183 array_variable_part ->
                 // array_expand_index), once — `a[i++]` reads a[0] and
                 // increments i once (verified GNU 5.3).
-                let index = self.eval_subscript_index(subscript)?;
+                let index = match self.eval_subscript_index(subscript)? {
+                    SubscriptIndex::Value(index) => index,
+                    // The empty-bracket token reads exactly like the
+                    // literal `name[]` (InvalidElement below): GNU
+                    // reports `name[]: bad array subscript` twice —
+                    // array_variable_part and get_array_value each
+                    // diagnose the empty subscript (expr.c:1183/1224)
+                    // — then yields 0 (rubash#3252).
+                    SubscriptIndex::Empty => {
+                        self.record_diag(ArithEvalDiag::BadSubscript(format!("{name}[]")));
+                        self.record_diag(ArithEvalDiag::BadSubscript(format!("{name}[]")));
+                        return Some(0);
+                    }
+                };
                 let value = self.indexed_element_text(name, index);
                 if index < 0 && self.arith_negative_subscript_is_bad(name, index) {
                     self.record_diag(ArithEvalDiag::BadSubscript(name.clone()));
@@ -271,20 +284,34 @@ impl ConditionalArithParser<'_> {
     /// the subscript text — arrayfunc.c:1356-1391 — and a failure jumps
     /// DISCARD, which the `__RUBASH_ARITH_SUBSCRIPT_EXPR` marker lets the
     /// caller reproduce).
-    pub(super) fn eval_subscript_index(&mut self, subscript: &str) -> Option<i128> {
+    pub(super) fn eval_subscript_index(&mut self, subscript: &str) -> Option<SubscriptIndex> {
         // GNU expr.c:1164-1167: subscript evaluation lives inside
         // expr_streval (array_variable_part -> array_expand_index), which
         // returns 0 under noeval before touching the subscript — so
         // `0?a[n++]+=5:2` never bumps n.
         if self.noeval > 0 {
-            return Some(0);
+            return Some(SubscriptIndex::Value(0));
         }
         // \x1e-marker subscripts were already expanded by the caller's
         // array_expand_index-equivalent pass (mod.rs
-        // expand_arith_indexed_subscripts); an empty expansion evaluates
-        // to 0, not to a bad subscript.
+        // expand_arith_indexed_subscripts). Whether an empty expansion
+        // is a bad subscript depends on the entry (rubash#3252): in an
+        // entry that already ran expand_arith_string (`(( ))`, `$(( ))`,
+        // `[[ ]]`) the empty expansion IS the empty-bracket token
+        // `name[]` — array_variable_name (arrayfunc.c:1405-1416) fails
+        // it — while in a no-expand entry (`let`, EXP_EXPANDED) the
+        // same empty expansion is array_expand_index's index 0 (the
+        // token reached evalexp as `name[$undef]`, non-empty bracket
+        // text). A whitespace-only expansion is index 0 in both
+        // entries: GNU's `ni <= ind + 1` check passes it and evalexp
+        // of the blanks yields 0 (`(( b[ $undef ]++ ))` binds b[0]).
         let stripped = match super::super::decode_arithmetic_assoc_key(subscript) {
-            Some(decoded) => decoded,
+            Some(decoded) => {
+                if decoded.is_empty() && self.expanded_entry {
+                    return Some(SubscriptIndex::Empty);
+                }
+                decoded
+            }
             None => {
                 // GNU expr.c:1171: when `array_expand_once` is set and the
                 // operand was already expanded (EXP_EXPANDED — `let`'s
@@ -318,7 +345,7 @@ impl ConditionalArithParser<'_> {
             }
         };
         if stripped.trim().is_empty() {
-            return Some(0);
+            return Some(SubscriptIndex::Value(0));
         }
         // GNU arrayfunc.c:1373-1377 array_expand_index clears
         // this_command_name around evalexp — the subscript's own
@@ -355,7 +382,7 @@ impl ConditionalArithParser<'_> {
                 stripped.clone(),
             );
         }
-        value
+        value.map(SubscriptIndex::Value)
     }
 
     /// expand_arith_string's parameter/arithmetic expansion over subscript
@@ -686,6 +713,10 @@ impl ConditionalArithParser<'_> {
             cells: self.cells,
             error_category: None,
             no_expand: false,
+            // Variable-value recursion: the value text reaches subexpr
+            // verbatim (expr.c:1241), so a non-empty bracket span there
+            // never diagnoses on expansion (rubash#3252).
+            expanded_entry: false,
             error: None,
             last_tok_start: 0,
             last_tok_operand: false,
@@ -818,7 +849,21 @@ impl ConditionalArithParser<'_> {
     fn resolve_raw_subscript(&mut self, lvalue: &ArithLValue) -> Option<ArithLValue> {
         match lvalue {
             ArithLValue::IndexedRaw { name, subscript } => {
-                let index = self.eval_subscript_index(subscript)?;
+                let index = match self.eval_subscript_index(subscript)? {
+                    SubscriptIndex::Value(index) => index,
+                    // The bind side of the empty-bracket token: no read
+                    // diagnostic is recorded here — the read already
+                    // recorded it (`++`/`+=` read before binding), or
+                    // no read runs at all (plain `=` skips expr_streval,
+                    // expr.c:1395-1401). set_lvalue diagnoses the failed
+                    // bind as `` `name[]': not a valid identifier ``
+                    // (rubash#3252).
+                    SubscriptIndex::Empty => {
+                        return Some(ArithLValue::InvalidElement {
+                            display: format!("{name}[]"),
+                        });
+                    }
+                };
                 Some(ArithLValue::Indexed {
                     bind_display: format!("{name}[{subscript}]"),
                     name: name.clone(),
