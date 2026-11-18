@@ -4577,8 +4577,18 @@ fn run_source_impl_inner_body(
                     Some(open_line + line_offset),
                 );
             }
-            executor.set_last_exit_code(2);
-            return 2;
+            // parse_matched_pair's quote recursion dies inside
+            // read_token_word (parse.y:5419-5437): DISCARD keeps
+            // EXECUTION_FAILURE=1; error.c:324-327 forces 2 under
+            // live errexit — same family as the `}`/`'`/`]' word
+            // matched pairs below (GNU 5.3.20: `cat <<'EOF` -> 1).
+            let status = if executor.errexit_live_at_diagnostic() {
+                2
+            } else {
+                1
+            };
+            executor.set_last_exit_code(status);
+            return status;
         }
     }
     // perf19: a pre-lexed group broke COMPLETE at the gather (the
@@ -4677,18 +4687,19 @@ fn run_source_impl_inner_body(
                     Some(open_line + line_offset),
                 );
             }
-            // GNU exits 1 when the subscript opened inside a compound array
-            // assignment (parse_compound_assignment EOF family) and 2 for a
-            // command word (parse.y:3567 read_token error path) — but
-            // error.c:324-327 forces exit status 2 whenever errexit is live
-            // at the parser_error (rubash#306).
-            if inside_compassign && executor.errexit_live_at_diagnostic() {
+            // GNU exits 1 for every subscript EOF shape: the `[` hunt
+            // is a word-internal parse_matched_pair — whether opened by
+            // parse_compound_assignment (`v[a=`) or a command word
+            // (`a[`, `v[a=$(`), read_token_word's EOF is DISCARD at
+            // EXECUTION_FAILURE=1 (GNU 5.3.20 probe matrix) — and
+            // error.c:324-327 still forces 2 under live errexit
+            // (rubash#306).
+            if executor.errexit_live_at_diagnostic() {
                 executor.set_last_exit_code(2);
                 return 2;
             }
-            let status = if inside_compassign { 1 } else { 2 };
-            executor.set_last_exit_code(status);
-            return status;
+            executor.set_last_exit_code(1);
+            return 1;
         }
         // rubash#543: an unterminated `$[` legacy-arithmetic construct is the
         // parse_matched_pair grouping scan opened by read_token_word's
@@ -4741,9 +4752,17 @@ fn run_source_impl_inner_body(
                     Some(eof.report_line + line_offset),
                 );
             }
-            executor.errexit_live_at_diagnostic();
-            executor.set_last_exit_code(2);
-            return 2;
+            // parse_matched_pair's `[` hunt is word-internal like the
+            // quotes/`${` above: EOF exits 1 (GNU 5.3.20 `echo $[1+`
+            // -> 1), forced to 2 only under live errexit
+            // (error.c:324-327).
+            let status = if executor.errexit_live_at_diagnostic() {
+                2
+            } else {
+                1
+            };
+            executor.set_last_exit_code(status);
+            return status;
         }
         // rubash#3229: an unclosed extglob pattern group — GNU
         // read_token_word's parse_matched_pair scan (parse.y:5466-5489)
@@ -5056,6 +5075,26 @@ fn run_source_impl_inner_body(
                             Some(reported),
                         );
                     }
+                    // GNU splits the EOF family on the INNERMOST
+                    // construct: a word-internal matched pair
+                    // (read_token_word's parse_matched_pair — `'`, `"`,
+                    // `` ` ``, `${`'s `}`, `[`'s `]`, and the `$((`/`((`
+                    // arithmetic `)' pair, which reports its OPEN line)
+                    // dies inside the word read at EXECUTION_FAILURE=1;
+                    // the command-position `$(` hunt reported at the EOF
+                    // line goes through `error yacc_EOF` ->
+                    // EX_BADUSAGE=2 (parse.y:489-490). GNU 5.3.20 probe
+                    // matrix: `'abc`/`"abc`/``abc`/`${x`/`$[1+`/`a[`/
+                    // `$((1+`/`((x++` all exit 1; `$(echo x` exits 2.
+                    // error.c:324-327 forces 2 under live errexit.
+                    let word_pair = !command && (close != ')' || report_open);
+                    let status = if word_pair && !executor.errexit_live_at_diagnostic() {
+                        1
+                    } else {
+                        2
+                    };
+                    executor.set_last_exit_code(status);
+                    return status;
                 }
                 // GNU exits 1 for an unterminated `name=(` array list —
                 // but error.c:324-327 forces exit status 2 whenever
