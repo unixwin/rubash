@@ -73,6 +73,11 @@ pub(super) fn apply_export_arg(
     match mode {
         ExportMode::Set => {
             if value.is_some() && env_vars.is_marked(READONLY_VARS, name) {
+                // rubash#3533: GNU setattr.def binds the operand FIRST and
+                // applies att_exported through set_var_attribute whether or
+                // not the bind succeeded — `export s=2` on a readonly s
+                // reports err_readonly but still leaves `declare -rx s`.
+                mark_exported(env_vars, name);
                 diag.err_readonly(&readonly_error_prefix(env_vars), name);
                 return Ok(EXECUTION_FAILURE);
             }
@@ -164,6 +169,14 @@ pub(super) fn apply_export_arg(
             // the operand entirely lost the value.
             if let Some(assigned) = value {
                 if env_vars.is_marked(READONLY_VARS, name) {
+                    // rubash#3533: same setattr.def order as the Set arm —
+                    // the failed bind does not stop the attribute change,
+                    // so `export -n x=2` on a readonly exported x still
+                    // removes att_exported (`declare -r x`). Same
+                    // existence-gated process-env removal as the normal
+                    // tail below (#916/#917).
+                    crate::executor::local_helpers::unset_process_env(name);
+                    unmark_exported(env_vars, name);
                     diag.err_readonly(&readonly_error_prefix(env_vars), name);
                     return Ok(EXECUTION_FAILURE);
                 }

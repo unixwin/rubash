@@ -252,6 +252,52 @@ pub(super) fn assign_declare_names(
                 );
             }
             if assoc || variables.is_marked(ASSOC_VARS, base) {
+                if index_expression.is_empty() {
+                    // `name[]=value` on an assoc target: the declare.rs
+                    // empty-subscript gate already printed err_badarraysub;
+                    // GNU still ran making_array_special /
+                    // convert_var_to_assoc and VSETATTR before
+                    // assign_array_element rejected the empty subscript
+                    // (declare.def:988-1011 -> arrayfunc.c:1422
+                    // array_variable_name), leaving `a` bound as an assoc.
+                    if !variables.is_marked(ASSOC_VARS, base) {
+                        mark_typed(variables, ASSOC_VARS, base);
+                        if variables.contains_key(base) {
+                            if !variables.is_marked(DECLARED_UNSET_VARS, base) {
+                                // convert_var_to_assoc: an existing scalar
+                                // value — empty included — moves into
+                                // element "0" (the same conversion the
+                                // valueless `declare -A` operand performs
+                                // above; `a=; declare -A 'a[]=x'` leaves
+                                // `declare -A a=([0]="" )`).
+                                let current = variables.get(base).cloned().unwrap_or_default();
+                                let is_storage = current.starts_with('(') && current.ends_with(')');
+                                if !is_storage {
+                                    variables.insert(
+                                        base.to_string(),
+                                        format_assoc_storage(vec![("0".to_string(), current)]),
+                                    );
+                                }
+                            }
+                        } else if !variables.is_marked(DECLARED_UNSET_VARS, base) {
+                            if in_function {
+                                // Function-scope creation is
+                                // attribute-only: `f() { declare 'a[]=x';
+                                // declare -p a; }` prints `declare -a a`
+                                // where the global form prints
+                                // `declare -a a=()` (make_local_variable
+                                // binds no cell before the element
+                                // assignment fails).
+                                mark_typed(variables, DECLARED_UNSET_VARS, base);
+                            } else {
+                                variables
+                                    .insert(base.to_string(), format_assoc_storage(Vec::new()));
+                            }
+                        }
+                    }
+                    status = EXECUTION_FAILURE;
+                    continue;
+                }
                 if variables.is_marked(READONLY_VARS, base) {
                     diag.error(DiagKind::Readonly(base.to_string()));
                     status = EXECUTION_FAILURE;
@@ -336,7 +382,16 @@ pub(super) fn assign_declare_names(
                     }
                     _ => Default::default(),
                 };
-                let evaluated_index = if index_expression.trim().is_empty() {
+                let evaluated_index = if index_expression.is_empty() {
+                    // `name[]=value` reaches here only through the
+                    // declare.rs empty-subscript gate, which already
+                    // printed err_badarraysub; like the sentinel arm
+                    // below the element assignment fails AFTER the
+                    // variable was created/converted and flagged
+                    // (declare.def:988-1011 -> arrayfunc.c:1422
+                    // array_variable_name rejects `ni <= ind + 1`).
+                    None
+                } else if index_expression.trim().is_empty() {
                     Some(0)
                 } else if index_expression == crate::executor::types::FAILED_SUBSCRIPT_SENTINEL {
                     // The executor's subscript pass already evaluated this
@@ -344,7 +399,14 @@ pub(super) fn assign_declare_names(
                     // assign_error after assign_array_element fails).
                     None
                 } else {
-                    eval_conditional_arith_value(index_expression, variables)
+                    {
+                        // GNU arrayfunc.c:1373-1377 array_expand_index
+                        // clears this_command_name around evalexp
+                        // (rubash#3295).
+                        let _arith_label =
+                            crate::executor::arithmetic::arith_eval_label_scope(None);
+                        eval_conditional_arith_value(index_expression, variables)
+                    }
                 };
                 let index = match evaluated_index {
                     Some(value) if value >= 0 => usize::try_from(value).ok(),
@@ -431,10 +493,17 @@ pub(super) fn assign_declare_names(
                                 .insert(base.to_string(), format_indexed_array_storage(entries));
                         }
                     } else if !variables.is_marked(DECLARED_UNSET_VARS, base) {
-                        variables.insert(
-                            base.to_string(),
-                            format_indexed_array_storage(Default::default()),
-                        );
+                        if in_function {
+                            // Function-scope creation is attribute-only
+                            // (see the assoc arm above): `f() { local
+                            // 'a[]=x'; declare -p a; }` -> `declare -a a`.
+                            mark_typed(variables, DECLARED_UNSET_VARS, base);
+                        } else {
+                            variables.insert(
+                                base.to_string(),
+                                format_indexed_array_storage(Default::default()),
+                            );
+                        }
                     }
                 }
                 status = EXECUTION_FAILURE;
@@ -652,8 +721,19 @@ pub(super) fn assign_declare_names(
                     }
                 }
             } else if integer {
-                (eval_integer_value(&current, variables) + eval_integer_value(value, variables))
-                    .to_string()
+                // The sum itself is intmax_t (variables.c:2936-2946
+                // `rval += lval; retval = itos (rval)`), so it wraps at
+                // INT64_MAX instead of storing the out-of-range i128
+                // decimal (rubash#3782/#3866): `declare -i x+=1` and
+                // `local -i y+=1` on INT64_MAX stored
+                // "9223372036854775808" verbatim. The array arms self-heal
+                // through their trailing re-eval; this scalar arm stores
+                // the sum directly, so the narrowing must happen here.
+                crate::executor::arithmetic::intmax_append_sum(
+                    eval_integer_value(&current, variables),
+                    eval_integer_value(value, variables),
+                )
+                .to_string()
             } else {
                 let mut current = current;
                 current.push_str(value);
@@ -864,14 +944,19 @@ fn declare_case_convert(
     name: &str,
 ) -> String {
     if variables.is_marked(UPPERCASE_VARS, name) {
-        value.to_uppercase()
+        crate::locale::simple_uppercase(value)
     } else if variables.is_marked(LOWERCASE_VARS, name) {
-        value.to_lowercase()
+        crate::locale::simple_lowercase(value)
     } else if variables.is_marked(CAPCASE_VARS, name) {
+        // GNU sh_modcase CASE_CAPITALIZE (lib/sh/casemod.c): first
+        // character simple-uppercased, the rest simple-lowercased —
+        // the same conversion variable_state::capitalize_value runs
+        // on the executor paths (rubash#3790).
         let mut chars = value.chars();
         match chars.next() {
             Some(first) => {
-                first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase()
+                crate::locale::simple_case_upper(first).to_string()
+                    + &crate::locale::simple_lowercase(chars.as_str())
             }
             None => value.to_string(),
         }

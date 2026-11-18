@@ -203,17 +203,26 @@ pub(in crate::executor) enum ProcsubSpawnFd {
 
 /// The prefix fd state for one output process substitution: a sparse
 /// fd -> disposition map; fds absent from the map inherit.
+/// rubash#3491: executor-visible, so the compound finish can carry
+/// the same prefix plan to its in-process (persistent) consumers.
 #[derive(Debug, Clone, Default)]
-struct ProcsubSpawnPlan {
+pub(in crate::executor) struct ProcsubSpawnPlan {
     fds: Vec<(u32, ProcsubSpawnFd)>,
 }
 
 impl ProcsubSpawnPlan {
-    fn get(&self, fd: u32) -> Option<&ProcsubSpawnFd> {
+    pub(in crate::executor) fn get(&self, fd: u32) -> Option<&ProcsubSpawnFd> {
         self.fds
             .iter()
             .find(|(candidate, _)| *candidate == fd)
             .map(|(_, disposition)| disposition)
+    }
+
+    /// rubash#3491: the plan's (fd, disposition) entries, for
+    /// consumers outside this module (the compound finish derives
+    /// its writer-before-reader order from them).
+    pub(in crate::executor) fn fds(&self) -> &[(u32, ProcsubSpawnFd)] {
+        &self.fds
     }
 }
 
@@ -246,6 +255,13 @@ struct ProcsubLiveStdio {
     stdout: Option<std::fs::File>,
     /// Live pipe write end for the child's fd 2.
     stderr: Option<std::fs::File>,
+    /// rubash#3491: live pipe write ends for numbered fds (>= 3)
+    /// whose disposition names another output's carrier in this
+    /// batch — the same live link as stdout/stderr above, delivered
+    /// through the `__RUBASH_FD_*` env channel instead of stdio
+    /// (see the `CarrierWrite` arm in
+    /// `spawn_output_process_substitution_child`).
+    fd_writes: Vec<(u32, std::fs::File)>,
 }
 
 /// rubash#2234: one live pipe for a chained pair (see ProcsubLiveStdio):
@@ -257,6 +273,24 @@ struct ProcsubLiveStdio {
 struct ProcsubLivePipe {
     read: Option<std::fs::File>,
     write: std::fs::File,
+}
+
+/// rubash#3491: snapshot of one fd's table entry plus its per-fd
+/// ledger keys, for a temporary spawn-plan bind (see
+/// `with_procsub_spawn_plan`): the field set is the union
+/// `SavedDynamicClose` carries, because a plan bind may touch the
+/// entry, the alias generation, and the ledger keys in both
+/// directions.
+struct PlanFdSave {
+    fd: u32,
+    entry: Option<crate::executor::fd_table::FdEntry>,
+    alias_generation: Option<Option<usize>>,
+    fd_stdin: Option<String>,
+    fd_stdin_offset: Option<String>,
+    fd_dynamic: Option<String>,
+    fd_output: Option<String>,
+    fd_procsub: Option<String>,
+    fd_closed: Option<String>,
 }
 
 /// How a prefix redirect's file open went, for the spawn-plan
@@ -876,6 +910,30 @@ impl Executor {
         }
     }
 
+    /// rubash#3792: a duplicate of fd `fd`'s write endpoint for the
+    /// `<&N` dup arm, when the fd carries no read endpoint (a
+    /// write-only descriptor, `exec 3>f`). GNU dup2 (redir.c:1193)
+    /// dups any open descriptor regardless of access mode, so the
+    /// child inherits the write-only description and its own reads
+    /// fail EBADF. Returns None when the fd has no write endpoint
+    /// either (truly absent/closed — the caller's EBADF stands) or
+    /// when the write endpoint is symbolic (no handle to dup).
+    fn dup_write_only_fd_for_stdin(&self, fd: u32) -> Option<crate::fd::HANDLE> {
+        match self.fd_table.write_endpoint(fd) {
+            Some(FdWriteEndpoint::File(file_fd)) => {
+                crate::fd::duplicate_handle(file_fd.handle).ok()
+            }
+            Some(FdWriteEndpoint::CoprocStdin { fd: file_fd, .. }) => {
+                crate::fd::duplicate_handle_inheritable(file_fd.handle).ok()
+            }
+            Some(endpoint @ (FdWriteEndpoint::Stdout | FdWriteEndpoint::Stderr)) => {
+                let (handle, _) = endpoint.standard_backing()?;
+                crate::fd::duplicate_handle_inheritable(handle).ok()
+            }
+            _ => None,
+        }
+    }
+
     pub(in crate::executor) fn apply_external_stdin_redirect(
         &mut self,
         cmd: &CommandNode,
@@ -1040,6 +1098,29 @@ impl Executor {
                             if let Some(file_fd) = self.own_numbered_input_binding(cmd, fd, &target)
                             {
                                 let dup = crate::fd::duplicate_handle(file_fd.handle)?;
+                                process.stdin(Stdio::from(crate::fd::handle_to_file(dup)));
+                                return Ok(());
+                            }
+                            // rubash#3792: no READ endpoint, but the
+                            // descriptor may still be open write-only
+                            // (`exec 3>f`). GNU's dup2 (redir.c:1193)
+                            // takes no access-mode argument — it dups
+                            // ANY open descriptor onto the redirector,
+                            // and the access-mode failure surfaces
+                            // later, in the child's own read (EBADF).
+                            // The read-endpoint match above must not
+                            // turn that into a redirection failure:
+                            // dup the write endpoint's own handle into
+                            // the child's stdin, so the child inherits
+                            // the write-only description and reports
+                            // the failure itself, with its own
+                            // diagnostic and exit status. Only
+                            // handle-backed write endpoints can cross
+                            // (a symbolic one — process substitution,
+                            // /dev/full, a pipe channel — has no
+                            // descriptor to dup and keeps the EBADF
+                            // below; see REPORT).
+                            if let Some(dup) = self.dup_write_only_fd_for_stdin(fd) {
                                 process.stdin(Stdio::from(crate::fd::handle_to_file(dup)));
                                 return Ok(());
                             }
@@ -1316,7 +1397,7 @@ impl Executor {
         // rubash#3210: the body's diagnostic seed is the enclosing
         // command's first-element end line (execute_cmd.c:936), not
         // its start line — see procsub_body_seed_line.
-        let cmd_line = super::command_text::procsub_body_seed_line(cmd);
+        let cmd_line = super::command_text::procsub_body_seed_line(cmd, self.ambient_line.get());
         let mut redirect_target_rewrites = Vec::new();
         // GNU subst.c: an unquoted `name=<( )` word is an assignment whose
         // value is the process substitution (make_dev_fd_filename,
@@ -2108,7 +2189,9 @@ impl Executor {
     /// the walk, matching do_redirections aborting at that entry.
     /// The plan never touches fd 0: GNU's process_substitute
     /// overrides the consumer's fd 0 with the substitution pipe.
-    fn procsub_spawn_plan(
+    /// rubash#3491: executor-visible — the compound materializer
+    /// computes the same prefix plan for its persistent consumers.
+    pub(in crate::executor) fn procsub_spawn_plan(
         &mut self,
         list: &[Redirect],
         position: usize,
@@ -2357,6 +2440,17 @@ impl Executor {
         if super::shell_options::redirect_path_is_fifo(&session_target) {
             return ProcsubPlanCapture::Declined;
         }
+        // rubash#3286: the joined-path check above misses from a
+        // deleted cwd — a FIFO there declines the capture the same way
+        // (the capture open would otherwise block the planner on the
+        // rendezvous, rubash#1820).
+        #[cfg(unix)]
+        {
+            let fs_operand = self.redirect_target_filesystem_path(target);
+            if fs_operand.is_relative() && self.anchor_operand_is_fifo(&fs_operand) == Some(true) {
+                return ProcsubPlanCapture::Declined;
+            }
+        }
         match mode {
             ProcsubPlanMode::Read => match FileFd::open_read(session_target) {
                 Ok(file) => ProcsubPlanCapture::Captured(file),
@@ -2365,6 +2459,7 @@ impl Executor {
             ProcsubPlanMode::WriteAppend => match open_redirect_append(&session_target) {
                 Ok(file) => ProcsubPlanCapture::Captured(Rc::new(FileFd {
                     handle: crate::fd::into_handle(file),
+                    closed: std::cell::Cell::new(false),
                     path: session_target,
                 })),
                 Err(_) => ProcsubPlanCapture::Failed,
@@ -2373,6 +2468,7 @@ impl Executor {
                 match self.create_redirect_output_for(Some(redirect), target, redirect.clobber) {
                     Ok(file) => ProcsubPlanCapture::Captured(Rc::new(FileFd {
                         handle: crate::fd::into_handle(file),
+                        closed: std::cell::Cell::new(false),
                         path: session_target,
                     })),
                     Err(_) => ProcsubPlanCapture::Failed,
@@ -2386,6 +2482,7 @@ impl Executor {
                 {
                     Ok(file) => ProcsubPlanCapture::Captured(Rc::new(FileFd {
                         handle: crate::fd::into_handle(file),
+                        closed: std::cell::Cell::new(false),
                         path: session_target,
                     })),
                     Err(_) => ProcsubPlanCapture::Failed,
@@ -2446,6 +2543,7 @@ impl Executor {
         let handle = crate::fd::duplicate_handle_inheritable(stream).ok()?;
         Some(Rc::new(crate::executor::fd_table::FileFd {
             handle,
+            closed: std::cell::Cell::new(false),
             path: PathBuf::from("ambient:stdout"),
         }))
     }
@@ -2457,6 +2555,7 @@ impl Executor {
         let file = crate::executor::shell_options::background_capture_write_end()?;
         Some(Rc::new(crate::executor::fd_table::FileFd {
             handle: crate::fd::into_handle(file),
+            closed: std::cell::Cell::new(false),
             path: PathBuf::from("ambient:stdout"),
         }))
     }
@@ -2477,6 +2576,7 @@ impl Executor {
                     .map(|dup| {
                         Rc::new(crate::executor::fd_table::FileFd {
                             handle: dup,
+                            closed: std::cell::Cell::new(false),
                             path: PathBuf::from(label),
                         })
                     })
@@ -2516,6 +2616,7 @@ impl Executor {
                             .map(|dup| {
                                 Rc::new(crate::executor::fd_table::FileFd {
                                     handle: dup,
+                                    closed: std::cell::Cell::new(false),
                                     path: PathBuf::from(label),
                                 })
                             })
@@ -2534,6 +2635,7 @@ impl Executor {
                     .map(|dup| {
                         Rc::new(crate::executor::fd_table::FileFd {
                             handle: dup,
+                            closed: std::cell::Cell::new(false),
                             path: PathBuf::from(label),
                         })
                     })
@@ -2611,6 +2713,275 @@ impl Executor {
         }
     }
 
+    /// rubash#3491: bind one spawn-plan disposition into the fd
+    /// table for the duration of an in-process (persistent) consumer
+    /// run, so the body sees the fd state GNU's process_substitute
+    /// fork would have inherited (subst.c:6362: the consumer is
+    /// forked mid-do_redirections, redir.c:237, with the prefix
+    /// entries already applied). The spawned-child form needs no
+    /// twin: it carries the same plan through the `__RUBASH_FD_*`
+    /// env channel instead. Returns the pre-bind snapshot for
+    /// `restore_procsub_spawn_plan_fd`. A disposition that cannot be
+    /// materialized (an unopenable carrier, a failed dup of the NEW
+    /// endpoint) leaves the fd untouched — the ambient behavior, not
+    /// a spawn failure. (A failed dup of the SAVED entry is different:
+    /// see the #3732 note below — it fails the bind.)
+    ///
+    /// rubash#3732 (same hazard as #3706): the pre-bind snapshot
+    /// is a kernel dup (`FdTable::saved_entry`), never a bare Rc
+    /// clone — every bind arm below retires the displaced descriptor
+    /// (`FdTable::close` retires both arms; `set_fd_input_file` /
+    /// `open_output` retire the arm they replace, rubash#3213), so
+    /// a cloned save would restore a dead entry and the next spawn's
+    /// pin pass would dup2 whatever recycled that kernel number.
+    /// GNU's undo save IS that kernel dup (`fcntl (fd, F_DUPFD,
+    /// SHELL_FD_BASE)`, redir.c:965/1082/1144; compound groups run
+    /// `do_redirections (..., RX_ACTIVE|RX_UNDOABLE)`,
+    /// execute_cmd.c:854). A dup failure fails the bind (GNU
+    /// REDIRECTION_ERROR) before anything is mutated, so the caller
+    /// can unwind the bindings already made.
+    fn bind_procsub_spawn_plan_fd(
+        &mut self,
+        fd: u32,
+        disposition: &ProcsubSpawnFd,
+    ) -> Result<PlanFdSave, ExecuteError> {
+        let saved = PlanFdSave {
+            fd,
+            entry: self.fd_table.saved_entry(fd)?,
+            alias_generation: self.fd_table.stdout_alias_generation.get(&fd).cloned(),
+            fd_stdin: self.shell_state.env_vars.get(&fd_stdin_key(fd)).cloned(),
+            fd_stdin_offset: self
+                .shell_state
+                .env_vars
+                .get(&fd_stdin_offset_key(fd))
+                .cloned(),
+            fd_dynamic: self
+                .shell_state
+                .env_vars
+                .get(&fd_dynamic_input_key(fd))
+                .cloned(),
+            fd_output: self.shell_state.env_vars.get(&fd_output_key(fd)).cloned(),
+            fd_procsub: self
+                .shell_state
+                .env_vars
+                .get(&fd_output_process_substitution_key(fd))
+                .cloned(),
+            fd_closed: self.shell_state.env_vars.get(&fd_closed_key(fd)).cloned(),
+        };
+        match disposition {
+            ProcsubSpawnFd::Inherit => {}
+            ProcsubSpawnFd::Closed => {
+                // GNU's close closes the whole descriptor (both
+                // directions share it), not one side.
+                self.fd_table.close(fd);
+                self.shell_state
+                    .env_vars
+                    .insert(fd_closed_key(fd), "1".to_string());
+            }
+            ProcsubSpawnFd::File { read, write } => {
+                // rubash#3655: when both arms are present they are
+                // ONE description — a single open_readwrite install,
+                // not an input bind followed by an output bind (the
+                // second would retire the first). Either arm alone
+                // keeps its single-direction install.
+                match (read, write) {
+                    (Some(read), Some(write)) => {
+                        self.fd_table.open_readwrite(
+                            fd,
+                            // rubash#3655 fix: the enclosing match binds
+                            // by reference (match ergonomics), so both
+                            // arms need `.clone()` — the write side had
+                            // it, the read side did not (E0308, CI run
+                            // 43824819839).
+                            FdReadEndpoint::File(read.clone()),
+                            FdWriteEndpoint::File(write.clone()),
+                            false,
+                        );
+                        self.shell_state.env_vars.remove(&fd_closed_key(fd));
+                        self.shell_state.env_vars.remove(&fd_stdin_key(fd));
+                        self.shell_state.env_vars.remove(&fd_stdin_offset_key(fd));
+                        self.shell_state.env_vars.remove(&fd_dynamic_input_key(fd));
+                        self.shell_state
+                            .env_vars
+                            .insert(fd_output_key(fd), write.path.to_string_lossy().into_owned());
+                        self.shell_state
+                            .env_vars
+                            .remove(&fd_output_process_substitution_key(fd));
+                    }
+                    (Some(file), None) => {
+                        self.set_fd_input_file(fd, file.clone(), false);
+                    }
+                    (None, Some(file)) => {
+                        self.fd_table
+                            .open_output(fd, FdWriteEndpoint::File(file.clone()), false);
+                        self.shell_state.env_vars.remove(&fd_closed_key(fd));
+                        self.shell_state
+                            .env_vars
+                            .insert(fd_output_key(fd), file.path.to_string_lossy().into_owned());
+                        self.shell_state
+                            .env_vars
+                            .remove(&fd_output_process_substitution_key(fd));
+                    }
+                    (None, None) => {}
+                }
+            }
+            ProcsubSpawnFd::TruncatedFile(file) => {
+                if let Ok(dup) = crate::fd::duplicate_handle_inheritable(file.handle) {
+                    // See the variant's offset note: continue where
+                    // the command's writes ended.
+                    let mut seeked = crate::fd::handle_to_file(dup);
+                    use std::io::Seek as _;
+                    let _ = seeked.seek(std::io::SeekFrom::End(0));
+                    let handle = crate::fd::into_handle(seeked);
+                    let bound = std::rc::Rc::new(crate::executor::fd_table::FileFd {
+                        handle,
+                        closed: std::cell::Cell::new(false),
+                        path: file.path.clone(),
+                    });
+                    self.fd_table
+                        .open_output(fd, FdWriteEndpoint::File(bound), false);
+                    self.shell_state.env_vars.remove(&fd_closed_key(fd));
+                    self.shell_state
+                        .env_vars
+                        .insert(fd_output_key(fd), file.path.to_string_lossy().into_owned());
+                    self.shell_state
+                        .env_vars
+                        .remove(&fd_output_process_substitution_key(fd));
+                }
+            }
+            ProcsubSpawnFd::CarrierWrite(path) => {
+                if let Ok(file) = std::fs::OpenOptions::new().append(true).open(path) {
+                    let bound = crate::executor::fd_table::FileFd::from_file(file, path.clone());
+                    self.fd_table
+                        .open_output(fd, FdWriteEndpoint::File(bound), false);
+                    self.shell_state.env_vars.remove(&fd_closed_key(fd));
+                    self.shell_state
+                        .env_vars
+                        .insert(fd_output_key(fd), path.to_string_lossy().into_owned());
+                    self.shell_state
+                        .env_vars
+                        .remove(&fd_output_process_substitution_key(fd));
+                }
+            }
+            ProcsubSpawnFd::CarrierRead(path) => {
+                if let Ok(file) = std::fs::File::open(path) {
+                    let bound = crate::executor::fd_table::FileFd::from_file(file, path.clone());
+                    self.set_fd_input_file(fd, bound, false);
+                }
+            }
+            // rubash#2484/#3149: the capture scope's shared pipe
+            // write end (or the stage pipe's) crosses as a plain
+            // File endpoint — the bytes land in the pipe, and the
+            // dup closes at restore, so no writer registration is
+            // owed (there is no child pid to register).
+            ProcsubSpawnFd::CaptureWrite(file) | ProcsubSpawnFd::StreamWrite(file) => {
+                if let Ok(dup) = crate::fd::duplicate_handle_inheritable(file.handle) {
+                    let bound = std::rc::Rc::new(crate::executor::fd_table::FileFd {
+                        handle: dup,
+                        closed: std::cell::Cell::new(false),
+                        path: file.path.clone(),
+                    });
+                    self.fd_table
+                        .open_output(fd, FdWriteEndpoint::File(bound), false);
+                    self.shell_state.env_vars.remove(&fd_closed_key(fd));
+                    self.shell_state
+                        .env_vars
+                        .insert(fd_output_key(fd), file.path.to_string_lossy().into_owned());
+                    self.shell_state
+                        .env_vars
+                        .remove(&fd_output_process_substitution_key(fd));
+                }
+            }
+        }
+        Ok(saved)
+    }
+
+    fn restore_procsub_spawn_plan_fd(&mut self, saved: PlanFdSave) {
+        match saved.entry {
+            Some(entry) => {
+                self.fd_table.entries.insert(saved.fd, entry);
+            }
+            None => {
+                self.fd_table.entries.remove(&saved.fd);
+            }
+        }
+        match saved.alias_generation {
+            Some(record) => {
+                self.fd_table
+                    .stdout_alias_generation
+                    .insert(saved.fd, record);
+            }
+            None => {
+                self.fd_table.stdout_alias_generation.remove(&saved.fd);
+            }
+        }
+        restore_optional_env_var(
+            &mut self.shell_state.env_vars,
+            &fd_stdin_key(saved.fd),
+            saved.fd_stdin,
+        );
+        restore_optional_env_var(
+            &mut self.shell_state.env_vars,
+            &fd_stdin_offset_key(saved.fd),
+            saved.fd_stdin_offset,
+        );
+        restore_optional_env_var(
+            &mut self.shell_state.env_vars,
+            &fd_dynamic_input_key(saved.fd),
+            saved.fd_dynamic,
+        );
+        restore_optional_env_var(
+            &mut self.shell_state.env_vars,
+            &fd_output_key(saved.fd),
+            saved.fd_output,
+        );
+        restore_optional_env_var(
+            &mut self.shell_state.env_vars,
+            &fd_output_process_substitution_key(saved.fd),
+            saved.fd_procsub,
+        );
+        restore_optional_env_var(
+            &mut self.shell_state.env_vars,
+            &fd_closed_key(saved.fd),
+            saved.fd_closed,
+        );
+    }
+
+    /// rubash#3491: run `run` with every fd of `plan` bound as
+    /// `bind_procsub_spawn_plan_fd` binds it; every binding is
+    /// restored afterwards, even when `run` errors. Plan fds absent
+    /// from the map inherit the ambient table — the in-process
+    /// consumer already sees it, unlike a spawned child, which
+    /// needs the ambient fds transported (see the #2212 loop in
+    /// `spawn_output_process_substitution_child`). A dup failure
+    /// while saving one fd's pre-bind snapshot (rubash#3732) fails
+    /// the whole run before `run` starts — the bindings already made
+    /// are restored in reverse first, the same unwind a redirect
+    /// apply failure performs (GNU `undo_partial_redirects`).
+    pub(in crate::executor) fn with_procsub_spawn_plan<T>(
+        &mut self,
+        plan: &ProcsubSpawnPlan,
+        run: impl FnOnce(&mut Self) -> T,
+    ) -> Result<T, ExecuteError> {
+        let mut saved = Vec::new();
+        for (fd, disposition) in &plan.fds {
+            match self.bind_procsub_spawn_plan_fd(*fd, disposition) {
+                Ok(save) => saved.push(save),
+                Err(error) => {
+                    for save in saved.into_iter().rev() {
+                        self.restore_procsub_spawn_plan_fd(save);
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        let result = run(self);
+        for save in saved.into_iter().rev() {
+            self.restore_procsub_spawn_plan_fd(save);
+        }
+        Ok(result)
+    }
+
     fn materialize_standalone_process_substitution_word(
         &mut self,
         word: &mut String,
@@ -2661,7 +3032,41 @@ impl Executor {
         files: &mut ProcessSubstitutionFiles,
         line: Option<usize>,
     ) -> Result<(), ExecuteError> {
-        for substitution in substitutions {
+        // rubash#3353: the recorded `target` is the RAW span spelling.
+        // Word expansion rewrites the span interior before this runs —
+        // quote removal always applies, and `$` / backquote evaluation
+        // inside the body text follows the word's own quoting — so
+        // `replacen(target)` misses on exactly the embedded mid-word
+        // spans GNU splices (subst.c:11364-11378 expand_word_internal
+        // '<'/'>' arms extract the span from the word being expanded,
+        // subst.c:1311 extract_process_subst). When the recorded
+        // spelling is absent, rescan the expanded word once and pair
+        // spans by order; the recorded `source` still feeds the body,
+        // so body quoting is untouched. A span-count mismatch (expansion
+        // introduced or destroyed a `<(`/`>(` span) keeps the recorded
+        // spelling — the pre-#3353 miss — rather than guessing a pairing.
+        let recorded_count = substitutions.len();
+        let mut expanded_span_targets: Option<Vec<String>> = None;
+        for (substitution_index, substitution) in substitutions.into_iter().enumerate() {
+            let splice_target = if word.contains(&substitution.target) {
+                substitution.target.clone()
+            } else {
+                let targets = expanded_span_targets.get_or_insert_with(|| {
+                    WordMetadata::new(0, word.clone(), word.clone())
+                        .process_substitutions
+                        .into_iter()
+                        .map(|substitution| substitution.target)
+                        .collect()
+                });
+                if targets.len() == recorded_count {
+                    targets
+                        .get(substitution_index)
+                        .cloned()
+                        .unwrap_or_else(|| substitution.target.clone())
+                } else {
+                    substitution.target.clone()
+                }
+            };
             if substitution.output {
                 let path = self.empty_process_substitution_temp()?;
                 files.outputs.push(OutputProcessSubstitution {
@@ -2671,7 +3076,7 @@ impl Executor {
                     spawn_plan: ProcsubSpawnPlan::default(),
                 });
                 let display_path = self.process_substitution_output_fd_word(&path);
-                *word = word.replacen(&substitution.target, &display_path, 1);
+                *word = word.replacen(&splice_target, &display_path, 1);
             } else {
                 // rubash#1952: stream first (see
                 // materialize_standalone_process_substitution_word);
@@ -2680,7 +3085,7 @@ impl Executor {
                 if let Some(streamed) =
                     self.process_substitution_child_fd_word(&substitution.source, line)
                 {
-                    *word = word.replacen(&substitution.target, &streamed, 1);
+                    *word = word.replacen(&splice_target, &streamed, 1);
                     continue;
                 }
                 let Some((output, body_timing)) =
@@ -2696,7 +3101,7 @@ impl Executor {
                 // path form) share one virtual clock.
                 self.procsub_stream_set_timing(&path, body_timing.clone());
                 let display_path = self.process_substitution_fd_word_timed(&output, body_timing);
-                *word = word.replacen(&substitution.target, &display_path, 1);
+                *word = word.replacen(&splice_target, &display_path, 1);
             };
         }
         Ok(())
@@ -3212,7 +3617,7 @@ impl Executor {
         files: ProcessSubstitutionFiles,
     ) -> Result<(), ExecuteError> {
         // rubash#2234: pre-scan for live links — a later consumer whose
-        // fd 1/2 disposition is CarrierWrite naming an earlier output's
+        // fd disposition is CarrierWrite naming an earlier output's
         // carrier in this same batch feeds that consumer live through a
         // pipe (see ProcsubLiveStdio). Pipes are created up front: the
         // outputs list is in materialization order, not redirect order,
@@ -3220,14 +3625,19 @@ impl Executor {
         // buffers its bytes until the reader spawns. A pipe that fails
         // to be created simply leaves that pair on the file-append
         // delivery — the pre-fix behavior, not an error.
+        // rubash#3491: the scan covers EVERY fd in the spawn plan, not
+        // just 1/2 — a numbered-fd chain (`3> >(wc) > >(wc >&3)`)
+        // races exactly the way the fd-1/2 chain did before #2234
+        // (the reader's input is snapshotted before the writer
+        // appends), and the live link is the same cure.
         let mut live_pipes: std::collections::HashMap<std::path::PathBuf, ProcsubLivePipe> =
             std::collections::HashMap::new();
         {
             let carriers: std::collections::HashSet<&std::path::PathBuf> =
                 files.outputs.iter().map(|output| &output.path).collect();
             for output in &files.outputs {
-                for fd in [1u32, 2u32] {
-                    if let Some(ProcsubSpawnFd::CarrierWrite(carrier)) = output.spawn_plan.get(fd) {
+                for (_, disposition) in &output.spawn_plan.fds {
+                    if let ProcsubSpawnFd::CarrierWrite(carrier) = disposition {
                         if *carrier != output.path
                             && carriers.contains(carrier)
                             && !live_pipes.contains_key(carrier)
@@ -3267,6 +3677,22 @@ impl Executor {
                         if let Some(pipe) = live_pipes.get(carrier) {
                             if let Ok(write) = pipe.write.try_clone() {
                                 *slot = Some(write);
+                            }
+                        }
+                    }
+                }
+                // rubash#3491: the same live link for numbered fds —
+                // the write end rides the `__RUBASH_FD_*` env channel
+                // at spawn (see the `CarrierWrite` arm in
+                // `spawn_output_process_substitution_child`).
+                for (fd, disposition) in &output.spawn_plan.fds {
+                    if *fd < 3 {
+                        continue;
+                    }
+                    if let ProcsubSpawnFd::CarrierWrite(carrier) = disposition {
+                        if let Some(pipe) = live_pipes.get(carrier) {
+                            if let Ok(write) = pipe.write.try_clone() {
+                                live.fd_writes.push((*fd, write));
                             }
                         }
                     }
@@ -3505,8 +3931,7 @@ impl Executor {
         spawn_plan: &ProcsubSpawnPlan,
         live: ProcsubLiveStdio,
     ) -> Result<(), ExecuteError> {
-        let exe = std::env::var_os("CARGO_BIN_EXE_rubash")
-            .map(std::path::PathBuf::from)
+        let exe = test_rubash_binary_from_env()
             .or_else(test_rubash_binary_from_current_exe)
             .or_else(|| std::env::current_exe().ok())
             .unwrap_or_else(|| "rubash".into());
@@ -3518,6 +3943,15 @@ impl Executor {
         // source; the line-offset seed below compensates for it.
         let prelude_newlines = source.matches('\n').count();
         source.push_str(body);
+        // rubash#3300: mint the respawn proof FIRST, before any
+        // carrier dup is created (the spawn-fds loop below takes the
+        // lowest free fds; the mint's F_DUPFD_CLOEXEC >= 100 can never
+        // collide with them). A mint failure is fail-open (None):
+        // the spawn proceeds without proof keys, i.e. today's
+        // behavior.
+        #[cfg(unix)]
+        let respawn_proof =
+            crate::fd::mint_respawn_proof(&crate::builtins::kill::new_background_wrapper_nonce());
         // Same environment transport as the `cmd &` respawn
         // (compound_exec.rs execute_background_ast_command): the process env
         // merged with the shell's env_vars, `__RUBASH_*` keys crossing only
@@ -3555,6 +3989,17 @@ impl Executor {
             super::RESPAWN_SPAWNER_PID_KEY.to_string(),
             super::spawner_stamp_value(),
         );
+        // rubash#3300: the per-spawn proof pair (fd number + nonce).
+        // Per-spawn, never forwarded — NOT in FORK_TRANSPORT_KEYS /
+        // rubash_spawn_inherited_state.
+        #[cfg(unix)]
+        if let Some((proof_fd, proof_nonce)) = &respawn_proof {
+            env_map.insert(
+                super::RESPAWN_PROOF_FD_KEY.to_string(),
+                proof_fd.to_string(),
+            );
+            env_map.insert(super::RESPAWN_PROOF_KEY.to_string(), proof_nonce.clone());
+        }
         // rubash#2032: process_substitute's consumer is a forked child
         // (subst.c:6362), so it inherits the parent's positional
         // parameters (POSITIONAL_PARAMS_TRANSPORT).
@@ -3724,18 +4169,51 @@ impl Executor {
                     }
                 }
                 ProcsubSpawnFd::CarrierWrite(path) => {
-                    if let Ok(file) = std::fs::OpenOptions::new().append(true).open(path) {
-                        let handle = crate::fd::into_handle(file);
-                        if let Ok(dup) = crate::fd::duplicate_handle_inheritable(handle) {
-                            env_map
-                                .insert(format!("__RUBASH_FD_WHANDLE_{fd}"), format!("{dup:#x}"));
-                            env_map.insert(
-                                format!("__RUBASH_FD_WPATH_{fd}"),
-                                path.to_string_lossy().into_owned(),
-                            );
-                            parent_side_dups.push(dup);
+                    // rubash#3491: a live-linked carrier rides the
+                    // pipe write end (see ProcsubLiveStdio::fd_writes),
+                    // not the carrier file — the reader's input is the
+                    // pipe, so file-append bytes would land after it
+                    // had read EOF (the #2234 race, at fd >= 3).
+                    let live_delivered = live
+                        .fd_writes
+                        .iter()
+                        .find(|(live_fd, _)| *live_fd == *fd)
+                        .and_then(|(_, live_write)| live_write.try_clone().ok())
+                        .map(|cloned| {
+                            let handle = crate::fd::into_handle(cloned);
+                            let delivered = crate::fd::duplicate_handle_inheritable(handle)
+                                .ok()
+                                .map(|dup| {
+                                    env_map.insert(
+                                        format!("__RUBASH_FD_WHANDLE_{fd}"),
+                                        format!("{dup:#x}"),
+                                    );
+                                    env_map.insert(
+                                        format!("__RUBASH_FD_WPATH_{fd}"),
+                                        path.to_string_lossy().into_owned(),
+                                    );
+                                    parent_side_dups.push(dup);
+                                });
+                            crate::fd::close_handle(handle);
+                            delivered.is_some()
+                        })
+                        .unwrap_or(false);
+                    if !live_delivered {
+                        if let Ok(file) = std::fs::OpenOptions::new().append(true).open(path) {
+                            let handle = crate::fd::into_handle(file);
+                            if let Ok(dup) = crate::fd::duplicate_handle_inheritable(handle) {
+                                env_map.insert(
+                                    format!("__RUBASH_FD_WHANDLE_{fd}"),
+                                    format!("{dup:#x}"),
+                                );
+                                env_map.insert(
+                                    format!("__RUBASH_FD_WPATH_{fd}"),
+                                    path.to_string_lossy().into_owned(),
+                                );
+                                parent_side_dups.push(dup);
+                            }
+                            crate::fd::close_handle(handle);
                         }
-                        crate::fd::close_handle(handle);
                     }
                 }
                 ProcsubSpawnFd::CarrierRead(path) => {
@@ -3802,6 +4280,16 @@ impl Executor {
         // expansion-time table, which is what the stamped handle
         // carries. Declaring the delivery mode is the fix: the
         // #2521 key already means "delivered at stamped number".
+        // rubash#3300: the parent's proof copy closes with the other
+        // parent-side dups right after the spawn attempt (the loop
+        // below runs on both the Ok and the Err path). No pre_exec
+        // closure here: the mint already cleared CLOEXEC, and plain
+        // Command::spawn inherits a non-CLOEXEC fd at its own number
+        // (probe-verified on rustc 1.99.1 std).
+        #[cfg(unix)]
+        if let Some((proof_fd, _)) = respawn_proof {
+            parent_side_dups.push(proof_fd);
+        }
         env_map.insert(
             super::FD_DELIVERY_AT_STAMPED_KEY.to_string(),
             "1".to_string(),

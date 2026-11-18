@@ -69,6 +69,74 @@ struct Driven {
     elapsed: Duration,
 }
 
+/// True when an external `sleep` child of this process exists —
+/// i.e. the widget has spawned its foreground child and the
+/// executor is in (or one slice from) its foreground wait
+/// (`wait_fg_child_draining` / `wait_fg_child_sliced`,
+/// external_inner.rs). Read from /proc, so on unix targets
+/// without /proc this is always false and the caller falls back
+/// to a longer fixed settle.
+fn foreground_sleep_child_running() -> bool {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return false;
+    };
+    let me = std::process::id();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Ok(pid) = name.to_str().unwrap_or("").parse::<u32>() else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            continue;
+        };
+        // stat is `pid (comm) state ppid ...`; comm may contain
+        // spaces, so the fields after it are split off the last ") ".
+        let Some(after) = stat.rsplit(") ").next() else {
+            continue;
+        };
+        let mut fields = after.split_whitespace();
+        let _state = fields.next();
+        let Ok(ppid) = fields.next().unwrap_or("").parse::<u32>() else {
+            continue;
+        };
+        if ppid != me {
+            continue;
+        }
+        let Some(open) = stat.find('(') else { continue };
+        let Some(close) = stat.rfind(')') else {
+            continue;
+        };
+        if close > open && &stat[open + 1..close] == "sleep" {
+            return true;
+        }
+    }
+    false
+}
+
+/// Wait for the widget's foreground wait, then let the wait loop
+/// arm, before the caller delivers SIGINT (rubash#3289). The poll
+/// is bounded so the delivery still lands inside even the
+/// shortest widget sleep (the trapped/ignored cells sleep 4s):
+/// 2s of polling + a 250ms arming grace, then deliver regardless.
+/// The builtin-sleep cell has no external child, so its poll
+/// always runs out — the delivery then lands ~2s into its 4s
+/// sleep, still mid-wait where the fold consumes it. Without
+/// /proc the poll never observes a child and the same bound
+/// degrades to a longer fixed settle (2s, 4x the old 500ms).
+fn wait_for_foreground_wait() {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if foreground_sleep_child_running() {
+            // The child is spawned; give the executor's wait loop
+            // a scheduling quantum to enter its drain before the
+            // delivery lands.
+            std::thread::sleep(Duration::from_millis(250));
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 /// Run one widget scenario. `setup` runs first on the scenario's
 /// own interactive executor (trap declarations); the widget is a
 /// function `w977` whose body is `widget_body` — it drops the
@@ -132,11 +200,21 @@ fn drive(tag: &str, setup: &str, widget_body: &str, deliver: bool) -> Driven {
             std::thread::sleep(Duration::from_millis(25));
             waited += Duration::from_millis(25);
         }
-        // Let the widget settle into its foreground wait, then
-        // deliver a real SIGINT to this process (the shell's pid —
+        // rubash#3289: wait for the widget to reach its foreground
+        // wait before delivering, instead of a blind settle. The
+        // old 500ms sleep from the handshake file flaked under box
+        // load: the runner thread can sit unscheduled for longer
+        // than 500ms between creating `started.txt` and spawning
+        // the child, and a SIGINT delivered in that window is never
+        // registered (trap count 0, no unwind). Delivering only
+        // once the child exists closes the whole window — the
+        // executor has spawned the foreground child and is in (or
+        // one slice from) its wait loop, where the drain records
+        // the delivery.
+        wait_for_foreground_wait();
+        // Deliver a real SIGINT to this process (the shell's pid —
         // the foreground child is reached by the wait's forwarding,
         // rubash#1990, exactly as a group delivery would kill it).
-        std::thread::sleep(Duration::from_millis(500));
         let rc = unsafe { libc::kill(std::process::id() as i32, libc::SIGINT) };
         assert_eq!(rc, 0, "kill(SIGINT) failed");
     }
@@ -188,7 +266,7 @@ fn trapped_sigint_during_widget_runs_trap_once_and_does_not_mark() {
     let run = drive(
         "trapped",
         "trap 'echo trapped >> \"{LOG}\"' INT",
-        "{SLEEP} 2; echo done >> \"{LOG}\"",
+        "{SLEEP} 4; echo done >> \"{LOG}\"",
         true,
     );
     assert!(
@@ -218,7 +296,7 @@ fn ignored_sigint_during_widget_is_a_no_op() {
     let run = drive(
         "ignored",
         "trap '' INT",
-        "{SLEEP} 2; echo done >> \"{LOG}\"",
+        "{SLEEP} 4; echo done >> \"{LOG}\"",
         true,
     );
     assert!(
@@ -232,8 +310,8 @@ fn ignored_sigint_during_widget_is_a_no_op() {
         run.log
     );
     assert!(
-        run.elapsed >= Duration::from_millis(1800),
-        "the ignored delivery must not cut the 2s sleep: {:?}",
+        run.elapsed >= Duration::from_millis(3800),
+        "the ignored delivery must not cut the 4s sleep: {:?}",
         run.elapsed
     );
 }

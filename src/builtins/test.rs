@@ -26,10 +26,15 @@ const EX_BADUSAGE: i32 = 2;
 const NAMEREF_VARS: &str = "__RUBASH_NAMEREF_VARS";
 
 /// Execute `test` or `[` with arguments after the command name.
+///
+/// `positional_count` is the live positional-parameter window length
+/// (ShellState::positional_len), threaded to the `-v` verdict so an
+/// all-digit operand resolves as a positional probe (rubash#3783).
 pub fn execute(
     args: &[String],
     bracket: bool,
     env_vars: &crate::shell::var_table::VarTable,
+    positional_count: usize,
 ) -> io::Result<i32> {
     let mut stderr = io::stderr().lock();
     // Single borrow-only view for the non-hot direct entry; the hot
@@ -37,13 +42,14 @@ pub fn execute(
     // through so this layer adds no third `Vec` collect (GNU `test.c`
     // `test_command` works on `argv` in place, no copy).
     let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
-    execute_with_stderr(&borrowed, bracket, env_vars, &mut stderr)
+    execute_with_stderr(&borrowed, bracket, env_vars, positional_count, &mut stderr)
 }
 
 pub(crate) fn execute_with_stderr<W>(
     args: &[&str],
     bracket: bool,
     env_vars: &crate::shell::var_table::VarTable,
+    positional_count: usize,
     stderr: &mut W,
 ) -> io::Result<i32>
 where
@@ -67,7 +73,7 @@ where
         return Ok(EXECUTION_FAILURE);
     }
 
-    match eval_expr_with_bracket(&args, bracket, env_vars) {
+    match eval_expr_with_bracket(&args, bracket, env_vars, positional_count) {
         Ok(true) => Ok(EXECUTION_SUCCESS),
         Ok(false) => Ok(EXECUTION_FAILURE),
         Err(message) => {
@@ -98,6 +104,7 @@ struct TestParser<'a> {
     pos: usize,
     bracket: bool,
     env_vars: &'a crate::shell::var_table::VarTable,
+    positional_count: usize,
 }
 
 impl TestParser<'_> {
@@ -282,23 +289,23 @@ impl TestParser<'_> {
                     let _ = r;
                     let operand = self.cur().to_string();
                     self.advance(false)?;
-                    return eval_unary("-t", &operand, self.env_vars);
+                    return eval_unary("-t", &operand, self.env_vars, self.positional_count);
                 }
                 // test.c:519 — ANDOR fallback: `-t -a ...` / `-t -o ...`
                 // with argc >= 5 defaults to fd 1.
                 if self.argc() >= 5 && is_andor(self.cur()) {
-                    return eval_unary("-t", "1", self.env_vars);
+                    return eval_unary("-t", "1", self.env_vars, self.positional_count);
                 }
                 // test.c:522 — non-numeric operand is a syntax error.
                 return Err(format!("{}: integer expected", self.cur()));
             }
-            return eval_unary("-t", "1", self.env_vars);
+            return eval_unary("-t", "1", self.env_vars, self.positional_count);
         }
         if self.pos + 1 >= self.argc() {
             return Err("argument expected".to_string());
         }
         let operand = self.argv(self.pos + 1).unwrap_or("");
-        let value = eval_unary(op, operand, self.env_vars)?;
+        let value = eval_unary(op, operand, self.env_vars, self.positional_count)?;
         self.pos += 2;
         Ok(value)
     }
@@ -416,6 +423,7 @@ fn eval_expr_with_bracket(
     args: &[&str],
     bracket: bool,
     env_vars: &crate::shell::var_table::VarTable,
+    positional_count: usize,
 ) -> Result<bool, String> {
     // Hot-path whitelist for `[ <int> -op <int> ]` / `test <int> -op <int>`
     // with canonical pure-decimal operands and a `-eq/-ne/-lt/-le/-gt/-ge`
@@ -438,6 +446,7 @@ fn eval_expr_with_bracket(
         pos: 1,
         bracket,
         env_vars,
+        positional_count,
     };
     let value = parser.posixtest()?;
     // 5.2 test_command: any arguments not consumed by the parse are
@@ -487,10 +496,11 @@ fn eval_unary(
     op: &str,
     operand: &str,
     env_vars: &crate::shell::var_table::VarTable,
+    positional_count: usize,
 ) -> Result<bool, String> {
     // rubash#1902: the executor mirrors the fd table before this runs, so
     // an fd-alias operand answers the bound fd's facts here.
-    if let Some(result) = fd_alias_fact_test(op, operand, env_vars) {
+    if let Some(result) = fd_alias_fact_test(op, operand, env_vars, positional_count) {
         return Ok(result);
     }
     if let Some(result) = virtual_device_test(op, operand) {
@@ -511,7 +521,7 @@ fn eval_unary(
         "-n" => Ok(!operand.is_empty()),
         "-o" => Ok(crate::builtins::set::is_shell_option(operand)
             && crate::builtins::set::shell_option_enabled(env_vars, operand)),
-        "-v" => Ok(variable_is_set(operand, env_vars)),
+        "-v" => Ok(variable_is_set(operand, env_vars, positional_count)),
         "-R" => {
             let namerefs = marked_vars(env_vars, NAMEREF_VARS);
             Ok(namerefs.iter().any(|name| name == operand))
@@ -671,6 +681,7 @@ fn fd_alias_fact_test(
     op: &str,
     operand: &str,
     env_vars: &crate::shell::var_table::VarTable,
+    positional_count: usize,
 ) -> Option<bool> {
     // GNU switches on op (test.c:544 unary_test): only the file cases hand
     // the word to sh_stat/sh_eaccess. The string/option/variable cases
@@ -697,7 +708,7 @@ fn fd_alias_fact_test(
         let result = if ALIAS_CHAIN_DEPTH.with(|depth| depth.get()) > 8 {
             None
         } else {
-            eval_unary(op, target, env_vars).ok()
+            eval_unary(op, target, env_vars, positional_count).ok()
         };
         ALIAS_CHAIN_DEPTH.with(|depth| depth.set(depth.get() - 1));
         return result;
@@ -1071,10 +1082,115 @@ fn is_andor(s: &str) -> bool {
     s == "-a" || s == "-o"
 }
 
+/// rubash#3432: the (dev, inode, mtime) of an fd-alias operand,
+/// from the `__RUBASH_FD_STAT_<fd>` mark the executor mints by
+/// fstat(2) on the fd-table entry's kernel handle (unix only). GNU
+/// never special-cases these names in test.c — sh_stat
+/// (lib/sh/eaccess.c:80) stats the descriptor the process holds,
+/// and in GNU the shell's OS fd N IS user fd N, so a plain stat()
+/// of /proc/self/fd/N lands on the bound file. Rubash's fd table
+/// is virtual: the shell permanently holds its cwd anchor at OS fd
+/// 3, so user fd 3's file lands on the next free OS fd and every
+/// higher user fd cascades — a plain stat() of /proc/self/fd/N
+/// reads OS fd N, the PREVIOUS user fd's file (the anchor directory
+/// for N=3). Only the fstat of the entry's handle names the same
+/// file, and only it answers for pipes, sockets, devices, and
+/// deleted files, which have no re-stat-able path.
+#[cfg(unix)]
+fn fd_alias_stat(
+    operand: &str,
+    env_vars: &crate::shell::var_table::VarTable,
+) -> Option<(u64, u64, std::time::SystemTime)> {
+    let fd = crate::special_paths::fd_alias_target(operand)?;
+    let mark = env_vars.get(&format!("{}{fd}", crate::executor::types::FD_STAT_PREFIX))?;
+    let mut parts = mark.split_ascii_whitespace();
+    let dev: u64 = parts.next()?.parse().ok()?;
+    let ino: u64 = parts.next()?.parse().ok()?;
+    let sec: i64 = parts.next()?.parse().ok()?;
+    let nsec: i64 = parts.next()?.parse().ok()?;
+    Some((dev, ino, stat_mark_time(sec, nsec)))
+}
+
+/// rubash#3432: rebuild a SystemTime from a timespec's (sec, nsec)
+/// pair. The nanosecond part counts forward from the whole second
+/// even before the epoch, so a negative sec subtracts the whole
+/// seconds and adds the nanoseconds back.
+#[cfg(unix)]
+fn stat_mark_time(sec: i64, nsec: i64) -> std::time::SystemTime {
+    let nsec = nsec.clamp(0, 999_999_999) as u32;
+    if sec >= 0 {
+        std::time::SystemTime::UNIX_EPOCH + std::time::Duration::new(sec as u64, nsec)
+    } else {
+        std::time::SystemTime::UNIX_EPOCH - std::time::Duration::new(sec.unsigned_abs(), 0)
+            + std::time::Duration::new(0, nsec)
+    }
+}
+
+/// rubash#3432: the bound target path of an fd-alias operand, from
+/// the `__RUBASH_FD_TARGET_<fd>` mark — the re-stat-able face of a
+/// file-backed fd, and the rung the binary operators fall back to
+/// where no STAT mark is minted (Windows).
+fn fd_alias_target_path(
+    operand: &str,
+    env_vars: &crate::shell::var_table::VarTable,
+) -> Option<String> {
+    let fd = crate::special_paths::fd_alias_target(operand)?;
+    env_vars
+        .get(&format!("{}{fd}", crate::executor::types::FD_TARGET_PREFIX))
+        .cloned()
+}
+
+/// Normalize the platform `file_identity` to (u64, u64): unix
+/// already is, Windows widens the u32 volume serial.
+#[cfg(unix)]
+fn identity_u64(identity: (u64, u64)) -> (u64, u64) {
+    identity
+}
+
+#[cfg(not(unix))]
+fn identity_u64(identity: (u32, u64)) -> (u64, u64) {
+    (u64::from(identity.0), identity.1)
+}
+
+/// rubash#3432: the (dev, inode) identity of a binary-op operand,
+/// resolved through the shell's fd table when the operand names an
+/// fd alias. Resolution ladder, most exact first: (1) the STAT
+/// mark — fstat of the bound descriptor, exact for pipes, sockets,
+/// devices and deleted files too; (2) the TARGET mark's path,
+/// re-statted (the Windows rung, where no STAT mark is minted);
+/// (3) the literal path — the pre-#3432 behaviour, kept for plain
+/// paths and for unsynced embedders.
+fn operand_identity(
+    operand: &str,
+    env_vars: &crate::shell::var_table::VarTable,
+) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    if let Some((dev, ino, _)) = fd_alias_stat(operand, env_vars) {
+        return Some((dev, ino));
+    }
+    if let Some(target) = fd_alias_target_path(operand, env_vars) {
+        return file_identity(&test_path(&target, env_vars)).map(identity_u64);
+    }
+    file_identity(&test_path(operand, env_vars)).map(identity_u64)
+}
+
 fn modified(
     path: &str,
     env_vars: &crate::shell::var_table::VarTable,
 ) -> Option<std::time::SystemTime> {
+    // rubash#3432: the same ladder as operand_identity — the STAT
+    // mark names the bound descriptor's mtime; the TARGET mark's
+    // path is the Windows rung; the literal path is the pre-#3432
+    // behaviour.
+    #[cfg(unix)]
+    if let Some((_, _, mtime)) = fd_alias_stat(path, env_vars) {
+        return Some(mtime);
+    }
+    if let Some(target) = fd_alias_target_path(path, env_vars) {
+        return fs::metadata(test_path(&target, env_vars))
+            .and_then(|metadata| metadata.modified())
+            .ok();
+    }
     fs::metadata(test_path(path, env_vars))
         .and_then(|metadata| metadata.modified())
         .ok()
@@ -1310,9 +1426,14 @@ fn same_file(left: &str, right: &str, env_vars: &crate::shell::var_table::VarTab
     // (st_dev, st_ino) — hardlinks are distinct paths sharing one inode,
     // so a canonical-path comparison misses them. On Windows the
     // equivalent identity is (volume serial, file index).
-    let left = test_path(left, env_vars);
-    let right = test_path(right, env_vars);
-    match (file_identity(&left), file_identity(&right)) {
+    // rubash#3432: an fd-alias operand resolves through the fd table
+    // (operand_identity), never through the raw OS fd namespace — the
+    // shell's OS fd N is the previous user fd's file, so a plain
+    // stat() of /proc/self/fd/N answers for the wrong file.
+    match (
+        operand_identity(left, env_vars),
+        operand_identity(right, env_vars),
+    ) {
         (Some(left), Some(right)) => left == right,
         _ => false,
     }

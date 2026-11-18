@@ -11,6 +11,15 @@ pub(in crate::executor) struct SavedNumberedFd {
     fd_stdin: Option<String>,
     fd_stdin_offset: Option<String>,
     fd_dynamic: Option<String>,
+    /// rubash#3806: the input bind retires the slot's write arm
+    /// (open_input is a wholesale dup2), so the scoped bind clears the
+    /// output ledger — but a compound scope RESTORES the pre-command
+    /// entry afterwards, write arm and deferred `>(...)` registration
+    /// included. Save both output keys with the rest of the slot's
+    /// state or the restored endpoint is left pointing at a body that
+    /// can never run (same union SavedDynamicClose keeps).
+    fd_output: Option<String>,
+    fd_procsub: Option<String>,
     fd_closed: Option<String>,
 }
 
@@ -385,7 +394,17 @@ impl Executor {
                 occupied_slots.insert(fd);
             }
             if redirect.fd_var.is_some() {
-                self.snapshot_dynamic_close_targets(redirect, &mut saved_dynamic_closes);
+                // rubash#3706: a dup failure while snapshotting the
+                // pass's close targets unwinds like an apply failure
+                // (the `{var}` entries before this one already mutated
+                // the table) — GNU fails the whole redirect list and
+                // undoes the partial walk (undo_partial_redirects).
+                if let Err(error) =
+                    self.snapshot_dynamic_close_targets(redirect, &mut saved_dynamic_closes)
+                {
+                    self.unwind_dynamic_fd_pass(&bound_dynamic_fds, saved_dynamic_closes);
+                    return Err(error);
+                }
                 // The bound-fd readback after a successful apply must
                 // not mistake a value the entry never wrote for its
                 // binding: a dup whose source is closed applies
@@ -480,10 +499,24 @@ impl Executor {
                         if let super::trap_exec::FdWalkBinding::TableSlot(table_slot) =
                             self.fd_walk_resolve(&walk_space, source)
                         {
-                            if let Some(entry) = self.fd_table.entries.get(&table_slot).cloned() {
-                                if !entry.closed && (entry.read.is_some() || entry.write.is_some())
-                                {
-                                    materialized_saves.push((slot, entry));
+                            // rubash#3706: a dup failure while
+                            // materializing this save unwinds like an
+                            // apply failure (see the snapshot arm above).
+                            match self.fd_table.saved_entry(table_slot) {
+                                Ok(Some(entry)) => {
+                                    if !entry.closed
+                                        && (entry.read.is_some() || entry.write.is_some())
+                                    {
+                                        materialized_saves.push((slot, entry));
+                                    }
+                                }
+                                Ok(None) => {}
+                                Err(error) => {
+                                    self.unwind_dynamic_fd_pass(
+                                        &bound_dynamic_fds,
+                                        saved_dynamic_closes,
+                                    );
+                                    return Err(ExecuteError::IoError(error));
                                 }
                             }
                         }
@@ -605,12 +638,12 @@ impl Executor {
         &self,
         redirect: &crate::parser::Redirect,
         saved: &mut Vec<SavedDynamicClose>,
-    ) {
+    ) -> Result<(), ExecuteError> {
         match redirect.kind {
             crate::parser::RedirectKind::CloseInput | crate::parser::RedirectKind::CloseOutput => {
                 if let Some(name) = redirect.fd_var.as_deref() {
                     if let Some(fd) = self.dynamic_fd_variable_value(name) {
-                        self.save_dynamic_close_snapshot(saved, fd);
+                        self.save_dynamic_close_snapshot(saved, fd)?;
                     }
                 }
             }
@@ -618,24 +651,29 @@ impl Executor {
             | crate::parser::RedirectKind::DuplicateOutput => {
                 let target = self.expand_redirect_target(redirect);
                 if let Some((source_fd, true)) = redirect_target_fd_and_move(&target) {
-                    self.save_dynamic_close_snapshot(saved, source_fd);
+                    self.save_dynamic_close_snapshot(saved, source_fd)?;
                 }
             }
             _ => {}
         }
+        Ok(())
     }
 
     /// First-snapshot-wins accumulation of a SavedDynamicClose (the
     /// SavedNumberedFd/SavedOutputFd discipline): the state before the
     /// scope's first mutation of the slot is the pre-command state
     /// GNU's undo chain restores.
-    fn save_dynamic_close_snapshot(&self, saved: &mut Vec<SavedDynamicClose>, fd: u32) {
+    fn save_dynamic_close_snapshot(
+        &self,
+        saved: &mut Vec<SavedDynamicClose>,
+        fd: u32,
+    ) -> Result<(), ExecuteError> {
         if saved.iter().any(|saved| saved.fd == fd) {
-            return;
+            return Ok(());
         }
         saved.push(SavedDynamicClose {
             fd,
-            entry: self.fd_table.entries.get(&fd).cloned(),
+            entry: self.fd_table.saved_entry(fd)?,
             alias_generation: self.fd_table.stdout_alias_generation.get(&fd).cloned(),
             fd_stdin: self.shell_state.env_vars.get(&fd_stdin_key(fd)).cloned(),
             fd_stdin_offset: self
@@ -656,6 +694,7 @@ impl Executor {
                 .cloned(),
             fd_closed: self.shell_state.env_vars.get(&fd_closed_key(fd)).cloned(),
         });
+        Ok(())
     }
 
     fn restore_dynamic_close_snapshots(&mut self, saved: Vec<SavedDynamicClose>) {
@@ -781,6 +820,10 @@ impl Executor {
         }
         self.note_compound_redirect_failure();
         if self.timed_dispatch_depth.get() > 0 {
+            // rubash#3325: nested lists mask the depth, so a site that
+            // still sees it raised is the timed command itself — the
+            // time branch owns this failure's adjudication.
+            self.timed_root_redirect_failure.set(true);
             return Ok(false);
         }
         self.maybe_run_error_trap(cmd)?;
@@ -952,9 +995,9 @@ impl Executor {
                     // schedule served #1141 before a live pipe could).
                     if let Some(file_fd) = self.spawn_input_process_substitution_child(
                         &source,
-                        super::command_text::procsub_body_seed_line(cmd),
+                        super::command_text::procsub_body_seed_line(cmd, self.ambient_line.get()),
                     ) {
-                        let saved_fd0_entry = self.fd_table.entries.get(&0).cloned();
+                        let saved_fd0_entry = self.fd_table.saved_entry(0)?;
                         let saved_function_stdin =
                             self.shell_state.env_vars.get(FUNCTION_STDIN).cloned();
                         let saved_function_stdin_offset = self
@@ -964,6 +1007,15 @@ impl Executor {
                             .cloned();
                         self.fd_table
                             .open_input(0, FdReadEndpoint::File(file_fd), false);
+                        // rubash#3605: a real fd-0 endpoint bound by the
+                        // compound's own redirect supersedes the staged
+                        // FUNCTION_STDIN mirror — GNU's do_redirections
+                        // replaces the pipe/heredoc fd 0 (redir.c
+                        // do_redirection_internal after do_piping), so an
+                        // async child inherits the file, not the staged
+                        // payload. The guard restores the pair at scope end.
+                        self.shell_state.env_vars.remove(FUNCTION_STDIN);
+                        self.shell_state.env_vars.remove(FUNCTION_STDIN_OFFSET);
                         return Ok(Some(CommandFd0InputGuard {
                             saved_fd0_entry,
                             saved_function_stdin,
@@ -980,7 +1032,7 @@ impl Executor {
                     if let Some((output, body_timing)) =
                         self.process_substitution_output_bytes_timed(&source)
                     {
-                        let saved_fd0_entry = self.fd_table.entries.get(&0).cloned();
+                        let saved_fd0_entry = self.fd_table.saved_entry(0)?;
                         let saved_function_stdin =
                             self.shell_state.env_vars.get(FUNCTION_STDIN).cloned();
                         let saved_function_stdin_offset = self
@@ -993,6 +1045,8 @@ impl Executor {
                             FdReadEndpoint::process_substitution_bytes(output),
                             false,
                         );
+                        self.shell_state.env_vars.remove(FUNCTION_STDIN);
+                        self.shell_state.env_vars.remove(FUNCTION_STDIN_OFFSET);
                         self.fd_table.set_input_offset(0, 0);
                         if let Some(timing) = body_timing {
                             self.fd_table.set_input_timing(0, timing);
@@ -1032,7 +1086,7 @@ impl Executor {
                     &self.shell_state.env_vars,
                 ));
                 if let Some((data, offset, timing)) = self.procsub_stream_lookup(&path) {
-                    let saved_fd0_entry = self.fd_table.entries.get(&0).cloned();
+                    let saved_fd0_entry = self.fd_table.saved_entry(0)?;
                     let saved_function_stdin =
                         self.shell_state.env_vars.get(FUNCTION_STDIN).cloned();
                     let saved_function_stdin_offset = self
@@ -1045,6 +1099,8 @@ impl Executor {
                         FdReadEndpoint::process_substitution_bytes(data),
                         false,
                     );
+                    self.shell_state.env_vars.remove(FUNCTION_STDIN);
+                    self.shell_state.env_vars.remove(FUNCTION_STDIN_OFFSET);
                     self.fd_table.set_input_offset(0, offset);
                     if let Some(timing) = timing {
                         self.fd_table.set_input_timing(0, timing);
@@ -1082,7 +1138,7 @@ impl Executor {
                 let target = self.expand_redirect_target(redirect);
                 if crate::special_paths::is_net_redirect_target(&target) {
                     let file = self.open_net_redirect(&target)?;
-                    let saved_fd0_entry = self.fd_table.entries.get(&0).cloned();
+                    let saved_fd0_entry = self.fd_table.saved_entry(0)?;
                     let saved_function_stdin =
                         self.shell_state.env_vars.get(FUNCTION_STDIN).cloned();
                     let saved_function_stdin_offset = self
@@ -1093,6 +1149,8 @@ impl Executor {
                     let file_fd = FileFd::from_file(file, target.into());
                     self.fd_table
                         .open_input(0, FdReadEndpoint::File(file_fd), false);
+                    self.shell_state.env_vars.remove(FUNCTION_STDIN);
+                    self.shell_state.env_vars.remove(FUNCTION_STDIN_OFFSET);
                     return Ok(Some(CommandFd0InputGuard {
                         saved_fd0_entry,
                         saved_function_stdin,
@@ -1113,7 +1171,7 @@ impl Executor {
             // Snapshot the FUNCTION_STDIN pair too: restore_command_fd0_input
             // is unconditional, and this branch never rewrites the text
             // channel — the guard must put back exactly what it found.
-            let saved_fd0_entry = self.fd_table.entries.get(&0).cloned();
+            let saved_fd0_entry = self.fd_table.saved_entry(0)?;
             let saved_function_stdin = self.shell_state.env_vars.get(FUNCTION_STDIN).cloned();
             let saved_function_stdin_offset = self
                 .shell_state
@@ -1122,6 +1180,10 @@ impl Executor {
                 .cloned();
             self.fd_table
                 .open_input(0, FdReadEndpoint::File(file), false);
+            // rubash#3605: same real-endpoint supersedes-mirror rule as
+            // the arms above (GNU do_redirections after do_piping).
+            self.shell_state.env_vars.remove(FUNCTION_STDIN);
+            self.shell_state.env_vars.remove(FUNCTION_STDIN_OFFSET);
             return Ok(Some(CommandFd0InputGuard {
                 saved_fd0_entry,
                 saved_function_stdin,
@@ -1137,7 +1199,7 @@ impl Executor {
         let Some(input) = self.command_input_redirect(cmd) else {
             return Ok(None);
         };
-        let saved_fd0_entry = self.fd_table.entries.get(&0).cloned();
+        let saved_fd0_entry = self.fd_table.saved_entry(0)?;
         let saved_function_stdin = self.shell_state.env_vars.get(FUNCTION_STDIN).cloned();
         let saved_function_stdin_offset = self
             .shell_state
@@ -1253,13 +1315,17 @@ impl Executor {
     /// Snapshot one numbered input slot into `saved` (the first
     /// snapshot of a slot wins — it carries the pre-list state the
     /// scope's restore must replay).
-    fn save_compound_numbered_input_fd(&self, saved: &mut Vec<SavedNumberedFd>, fd: u32) {
+    fn save_compound_numbered_input_fd(
+        &self,
+        saved: &mut Vec<SavedNumberedFd>,
+        fd: u32,
+    ) -> Result<(), ExecuteError> {
         if saved.iter().any(|saved| saved.fd == fd) {
-            return;
+            return Ok(());
         }
         saved.push(SavedNumberedFd {
             fd,
-            entry: self.fd_table.entries.get(&fd).cloned(),
+            entry: self.fd_table.saved_entry(fd)?,
             fd_stdin: self.shell_state.env_vars.get(&fd_stdin_key(fd)).cloned(),
             fd_stdin_offset: self
                 .shell_state
@@ -1271,8 +1337,15 @@ impl Executor {
                 .env_vars
                 .get(&fd_dynamic_input_key(fd))
                 .cloned(),
+            fd_output: self.shell_state.env_vars.get(&fd_output_key(fd)).cloned(),
+            fd_procsub: self
+                .shell_state
+                .env_vars
+                .get(&fd_output_process_substitution_key(fd))
+                .cloned(),
             fd_closed: self.shell_state.env_vars.get(&fd_closed_key(fd)).cloned(),
         });
+        Ok(())
     }
 
     /// Whether the descriptor is open at the current walk position.
@@ -1299,13 +1372,21 @@ impl Executor {
         cmd: &CommandNode,
     ) -> Result<Vec<SavedNumberedFd>, ExecuteError> {
         let mut saved: Vec<SavedNumberedFd> = Vec::new();
-        self.open_compound_numbered_input_redirects_in(
+        if let Err(error) = self.open_compound_numbered_input_redirects_in(
             cmd,
             0,
             cmd.redirects.len(),
             &mut saved,
             MoveSourceSave::GnuUndoable,
-        )?;
+        ) {
+            // GNU undo_partial_redirects (execute_cmd.c:855 via
+            // redir.c's undo list, add_undo_redirect:1326): a
+            // mid-list failure unwinds every bind the walk already
+            // applied. Restore the pre-list entries before the
+            // error propagates (rubash#3733).
+            self.restore_compound_numbered_input_redirects(saved);
+            return Err(error);
+        }
         Ok(saved)
     }
 
@@ -1332,6 +1413,27 @@ impl Executor {
             let fd = redirect.fd.unwrap_or(0);
             if redirect.fd_var.is_some() {
                 continue;
+            }
+            // rubash#3195: a heredoc / here-string entry binds its
+            // redirector at this list position in GNU's walk — the
+            // body is materialized first (here_document_to_fd,
+            // redir.c:1072), then the dup2 onto a redirector at/above
+            // the RLIMIT_NOFILE soft limit fails EBADF (redir.c:1120)
+            // and the command never runs. The entries skip the kind
+            // filter below (their bodies are served textually, not
+            // bound into the table here), so without this gate an
+            // over-limit entry binds silently at any fd. `{var}`
+            // forms already continued above: their allocator stays
+            // below the limit by construction.
+            if matches!(
+                redirect.kind,
+                crate::parser::RedirectKind::HereDoc | crate::parser::RedirectKind::HereString
+            ) && self.redirect_fd_over_limit(fd)
+            {
+                return Err(ExecuteError::IoError(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("{fd}: Bad file descriptor"),
+                )));
             }
             if !matches!(
                 redirect.kind,
@@ -1413,7 +1515,7 @@ impl Executor {
                     }
                 }
             }
-            self.save_compound_numbered_input_fd(saved, fd);
+            self.save_compound_numbered_input_fd(saved, fd)?;
             match redirect.kind {
                 // `{ cmd; } N<&-` / `N>&-` — scoped close (redir.c
                 // do_redirection_internal r_close_input).
@@ -1444,7 +1546,7 @@ impl Executor {
                             && (move_source_save == MoveSourceSave::RestoreAlways
                                 || self.redirector_open_at_position(fd))
                         {
-                            self.save_compound_numbered_input_fd(saved, source_fd);
+                            self.save_compound_numbered_input_fd(saved, source_fd)?;
                         }
                         let _ = self.fd_table.dup_input(fd, source_fd);
                         self.shell_state.env_vars.remove(&fd_closed_key(fd));
@@ -1461,6 +1563,15 @@ impl Executor {
             if is_closed_redirect_target(&target) {
                 continue;
             }
+            // rubash#3815: GNU redir.c redir_open has no /dev/null
+            // shortcut — the null device is an ordinary file open, so
+            // on Unix the bind must fall through to the plain open
+            // below and install a real descriptor. An empty-text
+            // endpoint delivers a synthetic carrier pipe to children
+            // (`ls -l /proc/self/fd/8` shows pipe:[...] where GNU shows
+            // /dev/null). Windows keeps the synthetic empty bind: it
+            // has no /dev/null path to open.
+            #[cfg(not(unix))]
             if is_null_device(&target) {
                 self.set_fd_input_bytes(fd, Vec::new(), true);
                 if redirect.kind == crate::parser::RedirectKind::ReadWrite {
@@ -1479,7 +1590,7 @@ impl Executor {
                 // spawn-failure fallback.
                 if let Some(file_fd) = self.spawn_input_process_substitution_child(
                     source,
-                    super::command_text::procsub_body_seed_line(cmd),
+                    super::command_text::procsub_body_seed_line(cmd, self.ambient_line.get()),
                 ) {
                     self.set_fd_input_file(fd, file_fd, true);
                     if redirect.kind == crate::parser::RedirectKind::ReadWrite {
@@ -1673,6 +1784,16 @@ impl Executor {
             );
             restore_optional_env_var(
                 &mut self.shell_state.env_vars,
+                &fd_output_key(saved.fd),
+                saved.fd_output,
+            );
+            restore_optional_env_var(
+                &mut self.shell_state.env_vars,
+                &fd_output_process_substitution_key(saved.fd),
+                saved.fd_procsub,
+            );
+            restore_optional_env_var(
+                &mut self.shell_state.env_vars,
                 &fd_closed_key(saved.fd),
                 saved.fd_closed,
             );
@@ -1723,7 +1844,7 @@ impl Executor {
                         if let super::trap_exec::FdWalkBinding::TableSlot(table_slot) =
                             self.fd_walk_resolve(&walk_space, source)
                         {
-                            if let Some(entry) = self.fd_table.entries.get(&table_slot).cloned() {
+                            if let Some(entry) = self.fd_table.saved_entry(table_slot)? {
                                 if !entry.closed && (entry.read.is_some() || entry.write.is_some())
                                 {
                                     materialized_saves.push((slot, entry));
@@ -1737,7 +1858,7 @@ impl Executor {
         }
         let mut saved: Vec<SavedOutputFd> = Vec::new();
         for (slot, _entry) in &materialized_saves {
-            self.save_compound_output_fd(&mut saved, *slot);
+            self.save_compound_output_fd(&mut saved, *slot)?;
         }
         if let Err(error) = self.open_compound_output_redirects_in(
             cmd,
@@ -1763,13 +1884,17 @@ impl Executor {
         Ok(saved)
     }
 
-    fn save_compound_output_fd(&mut self, saved: &mut Vec<SavedOutputFd>, fd: u32) {
+    fn save_compound_output_fd(
+        &mut self,
+        saved: &mut Vec<SavedOutputFd>,
+        fd: u32,
+    ) -> Result<(), ExecuteError> {
         if saved.iter().any(|entry| entry.fd == fd) {
-            return;
+            return Ok(());
         }
         saved.push(SavedOutputFd {
             fd,
-            entry: self.fd_table.entries.get(&fd).cloned(),
+            entry: self.fd_table.saved_entry(fd)?,
             alias_generation: self.fd_table.stdout_alias_generation.get(&fd).cloned(),
             fd_output: self.shell_state.env_vars.get(&fd_output_key(fd)).cloned(),
             fd_procsub: self
@@ -1779,6 +1904,7 @@ impl Executor {
                 .cloned(),
             fd_closed: self.shell_state.env_vars.get(&fd_closed_key(fd)).cloned(),
         });
+        Ok(())
     }
 
     /// Range-scoped twin of open_compound_output_redirects (the
@@ -1795,7 +1921,7 @@ impl Executor {
         saved: &mut Vec<SavedOutputFd>,
         move_source_save: MoveSourceSave,
     ) -> Result<(), ExecuteError> {
-        for redirect in &cmd.redirects[start..end] {
+        for (offset, redirect) in cmd.redirects[start..end].iter().enumerate() {
             // `{var}`-targeted redirections allocate a persistent dynamic fd
             // (redir.c: the variable keeps the descriptor after the command)
             // and are handled by execute_dynamic_fd_var_redirect above.
@@ -1881,14 +2007,14 @@ impl Executor {
 
             match redirect.kind {
                 crate::parser::RedirectKind::CloseOutput => {
-                    self.save_compound_output_fd(saved, fd);
+                    self.save_compound_output_fd(saved, fd)?;
                     self.fd_table.close_output(fd);
                     self.shell_state
                         .env_vars
                         .insert(fd_closed_key(fd), "1".to_string());
                 }
                 crate::parser::RedirectKind::DuplicateOutput => {
-                    self.save_compound_output_fd(saved, fd);
+                    self.save_compound_output_fd(saved, fd)?;
                     if is_closed_redirect_target(&target) {
                         self.fd_table.close_output(fd);
                         self.shell_state
@@ -1918,7 +2044,7 @@ impl Executor {
                             && (move_source_save == MoveSourceSave::RestoreAlways
                                 || self.redirector_open_at_position(fd))
                         {
-                            self.save_compound_output_fd(saved, source_fd);
+                            self.save_compound_output_fd(saved, source_fd)?;
                         }
                         // GNU dup2 copies the whole descriptor — the group's
                         // fd takes the source's open file description, shared
@@ -1968,20 +2094,33 @@ impl Executor {
                         if redirect.append {
                             self.set_fd_output_file(1, path.to_string(), false, true)
                         } else {
-                            // rubash#1868: probe form — on a FIFO the
-                            // physical create open would consume the
-                            // rendezvous pairing set_fd_output_file's
-                            // bind open waits for (see
-                            // probe_output_redirect).
-                            crate::executor::shell_options::probe_output_redirect(
+                            // rubash#3828: the probe's open IS the
+                            // entry's one open (GNU redir.c
+                            // do_redirection_internal / redir_open) —
+                            // adopt its File as the bind instead of
+                            // opening the target by path again (a
+                            // target created with a mode lacking
+                            // owner-write fails the second open EACCES).
+                            // A FIFO / net / special target probes to
+                            // None and keeps the plain bind below, whose
+                            // open is its single pairing open
+                            // (rubash#1868).
+                            match crate::executor::shell_options::probe_output_redirect_file(
                                 self,
                                 path,
                                 redirect.clobber,
-                            )?;
-                            self.set_fd_output_file(1, path.to_string(), false, false)
+                            )? {
+                                Some(file) => self.set_fd_output_file_from_file(
+                                    1,
+                                    path.to_string(),
+                                    false,
+                                    file,
+                                ),
+                                None => self.set_fd_output_file(1, path.to_string(), false, false),
+                            }
                         }
                         .map_err(|error| crate::posix_errors::path_error(path, error))?;
-                        self.save_compound_output_fd(saved, 2);
+                        self.save_compound_output_fd(saved, 2)?;
                         self.share_fd_output_file(1, 2, path, false);
                     }
                 }
@@ -1999,28 +2138,50 @@ impl Executor {
                     // writes (select prompt, loop diagnostics) follow it,
                     // and the body's leaf writes arrive through the per-leaf
                     // splice on the same carrier.
-                    self.save_compound_output_fd(saved, 1);
-                    self.save_compound_output_fd(saved, 2);
+                    self.save_compound_output_fd(saved, 1)?;
+                    self.save_compound_output_fd(saved, 2)?;
                     let append = redirect.kind == crate::parser::RedirectKind::CombinedAppend;
                     // rubash#1025: same prepare/bind pair as the Output
                     // arm below — consume the prepare phase's record.
-                    // rubash#1868: probe form of the create (FIFO targets
-                    // are access-checked, not opened — the bind open in
-                    // set_fd_output_file is the single pairing open).
-                    if !append && !self.take_noclobber_prepared_target(&target) {
-                        crate::executor::shell_options::probe_output_redirect(
+                    // rubash#3828: the probe's open IS the entry's one
+                    // open — adopt its File as the bind (see the Output
+                    // arm below); a FIFO / net / special target probes
+                    // to None and keeps the plain bind, whose open is
+                    // its single pairing open (rubash#1868).
+                    // rubash#3828: same retained-open adoption as the
+                    // Output arm below — the prepare phase's File is
+                    // this entry's one open.
+                    let pending_fd = self.take_pending_preopened(start + offset, &target);
+                    let probed = if pending_fd.is_none()
+                        && !append
+                        && !self.take_noclobber_prepared_target(&target)
+                    {
+                        crate::executor::shell_options::probe_output_redirect_file(
                             self,
                             &target,
                             redirect.clobber,
-                        )?;
+                        )?
+                    } else {
+                        None
+                    };
+                    let opened = match pending_fd {
+                        Some(file_fd) => Some(crate::fd::handle_to_file(
+                            crate::fd::duplicate_handle(file_fd.handle)?,
+                        )),
+                        None => probed,
+                    };
+                    match opened {
+                        Some(file) => {
+                            self.set_fd_output_file_from_file(1, target.clone(), false, file)
+                        }
+                        None => self.set_fd_output_file(1, target.clone(), false, append),
                     }
-                    self.set_fd_output_file(1, target.clone(), false, append)
-                        .map_err(|error| crate::posix_errors::path_error(&target, error))?;
+                    .map_err(|error| crate::posix_errors::path_error(&target, error))?;
                     self.share_fd_output_file(1, 2, &target, false);
                 }
                 // Output | Append | ClobberOutput
                 _ => {
-                    self.save_compound_output_fd(saved, fd);
+                    self.save_compound_output_fd(saved, fd)?;
                     if is_closed_redirect_target(&target) {
                         self.fd_table.close_output(fd);
                         self.shell_state
@@ -2142,17 +2303,38 @@ impl Executor {
                     // O_EXCL-opened again here — the record is consumed
                     // exactly once, so pre-existing files still fail in
                     // the prepare phase and bind-only scopes keep the
-                    // plain check. rubash#1868: probe form of the create
-                    // (FIFO targets are access-checked, not opened — the
-                    // bind open in set_fd_output_file is the single
-                    // pairing open).
-                    if !redirect.append && !self.take_noclobber_prepared_target(&target) {
-                        crate::executor::shell_options::probe_output_redirect(
+                    // plain check. rubash#3828: the probe's open IS the
+                    // entry's one open — adopt its File as the bind
+                    // below; a FIFO / net / special target probes to
+                    // None and keeps the plain bind, whose open is its
+                    // single pairing open (rubash#1868).
+                    // rubash#3828: the prepare phase's retained open
+                    // IS this entry's one open (GNU do_redirections
+                    // opens each entry once — redir.c
+                    // do_redirection_internal / redir_open) — adopt
+                    // its handle as the bind instead of probing the
+                    // path again, which fails EACCES on a file the
+                    // prepare just created without owner-write
+                    // (umask masking 0200).
+                    let pending_fd = self.take_pending_preopened(start + offset, &target);
+                    let probed = if pending_fd.is_none()
+                        && !redirect.append
+                        && !self.take_noclobber_prepared_target(&target)
+                    {
+                        crate::executor::shell_options::probe_output_redirect_file(
                             self,
                             &target,
                             redirect.clobber,
-                        )?;
-                    }
+                        )?
+                    } else {
+                        None
+                    };
+                    let opened = match pending_fd {
+                        Some(file_fd) => Some(crate::fd::handle_to_file(
+                            crate::fd::duplicate_handle(file_fd.handle)?,
+                        )),
+                        None => probed,
+                    };
                     // GNU redir.c do_redirection_internal: every `>file`
                     // redirection performs its OWN open() — `>f 2>f` binds
                     // two independent open file descriptions with
@@ -2167,8 +2349,13 @@ impl Executor {
                     // through a plain `2>f` binding take the same
                     // independent-offset semantics as GNU's second open.
                     let append = redirect.append;
-                    self.set_fd_output_file(fd, target.clone(), fd >= 10, append)
-                        .map_err(|error| crate::posix_errors::path_error(&target, error))?;
+                    match opened {
+                        Some(file) => {
+                            self.set_fd_output_file_from_file(fd, target.clone(), fd >= 10, file)
+                        }
+                        None => self.set_fd_output_file(fd, target.clone(), fd >= 10, append),
+                    }
+                    .map_err(|error| crate::posix_errors::path_error(&target, error))?;
                 }
             }
         }
@@ -2761,8 +2948,18 @@ impl Executor {
         let target = self.expand_redirect_target(redirect);
         if super::execution_misc::is_closed_redirect_target(&target)
             || super::execution_misc::dev_stdio_redirect_fd(&target).is_some()
-            || is_null_device(&target)
         {
+            return None;
+        }
+        // rubash#3815: on Unix /dev/null is an ordinary file open
+        // (redir.c redir_open) — let it reach the stream-source
+        // class below, which admits character devices, so the
+        // compound's fd 0 binds a real descriptor instead of the
+        // empty text mirror (children would otherwise see a
+        // carrier, not /dev/null). Windows keeps declining it:
+        // NUL is not a filesystem object there.
+        #[cfg(not(unix))]
+        if is_null_device(&target) {
             return None;
         }
         if crate::special_paths::synthetic_proc_content(&target).is_some() {
@@ -3019,10 +3216,15 @@ impl Executor {
                 .create(true)
                 .open(&path)
                 .err()
-        } else if super::shell_options::redirect_path_is_fifo(&path) {
-            super::shell_options::probe_input_redirect_gate(&path).err()
         } else {
-            std::fs::File::open(&path).err()
+            // rubash#3777: validate with the same opener the bind uses
+            // (probe_input_redirect_gate, FILE_FLAG_BACKUP_SEMANTICS
+            // retry) — a bare File::open refuses a directory with EACCES
+            // and the compound is abandoned before its reader ever runs.
+            // The gate owns the FIFO carve-out (rubash#1820: access(2)
+            // validation, no rendezvous consumed), so no separate FIFO
+            // arm is needed here.
+            super::shell_options::probe_input_redirect_gate(&path).err()
         };
         match probe_error {
             None => None,
@@ -3131,7 +3333,8 @@ impl Executor {
     /// order and stops at the first failing step (redir.c:255-260): the
     /// first `M>&N`/`M<&N` (or `M>&N-`/`M<&N-` move) whose source fd N is
     /// not open — judged with the same opened/closed tracking as the
-    /// simple-command preflight (`command_output_redirect_fails` /
+    /// simple-command preflight
+    /// (`command_output_redirect_fails_with_preopened` /
     /// `dup_source_fd_open`) — returns `(index, diagnostic name)`. Pure:
     /// opens nothing, dups nothing.
     ///

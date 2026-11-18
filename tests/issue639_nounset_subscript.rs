@@ -50,6 +50,11 @@ fn run(script: &str) -> Run {
 
 /// A nounset subscript trap: exactly one `k: unbound variable` line on
 /// stderr, nothing on stdout, fatal status (127 under `-c`).
+///
+/// The diagnostic prefix is the shell's invocation name (GNU `shell_name`,
+/// taken from argv[0]; error.c prints it verbatim), so the expected line is
+/// built from the very binary path the harness invokes — never a hardcoded
+/// `bash:` (rubash#3111).
 fn assert_subscript_unbound(script: &str, name: &str) {
     let out = run(script);
     assert_eq!(
@@ -59,7 +64,10 @@ fn assert_subscript_unbound(script: &str, name: &str) {
     );
     assert_eq!(
         out.stderr,
-        format!("bash: line 1: {name}: unbound variable\n"),
+        format!(
+            "{}: line 1: {name}: unbound variable\n",
+            env!("CARGO_BIN_EXE_rubash")
+        ),
         "{script} -> stderr {:?}",
         out.stderr
     );
