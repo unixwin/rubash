@@ -1,4 +1,4 @@
-use super::{ArithEvalDiag, ArithLValue, ConditionalArithParser, SubscriptIndex};
+use super::{ArithLValue, ConditionalArithParser, SubscriptIndex};
 use crate::executor::arithmetic::{assignment_operator_at, skip_arith_ws};
 use crate::executor::{
     is_marked_var, is_shell_name, is_shell_name_char, is_shell_name_start, strip_matching_quotes,
@@ -13,6 +13,18 @@ use std::collections::HashSet;
 pub(super) enum ParsedAssocSubscript {
     Key(String),
     Invalid,
+    /// The bracket text is literally empty (`name[]`, e.g. `C[$undef]`
+    /// with `$undef` unset): GNU keeps the `name[]` TOKEN — the read
+    /// diagnoses it twice (array_variable_part + get_array_value,
+    /// expr.c:1183/1224) and the bind fails it as an invalid identifier
+    /// (expr_bind_variable -> bind_int_variable -> sh_invalidid,
+    /// expr.c:1052 / variables.c:3403). The read-law parse must NOT
+    /// resolve it to `Key("")` (that loses the token and lets `++`/`--`
+    /// bind `C[""]` silently); the caller maps it to
+    /// `ArithLValue::InvalidElement`, whose read reports the two
+    /// bad-subscript lines and whose bind reports the invalid-id line —
+    /// the same shape as the indexed `a[]` arm (rubash#3252).
+    EmptyBracket,
     /// The bracket text rode verbatim into `expand_subscript_string` and
     /// resolved to nothing: GNU arrayfunc.c:1598-1606 (reads, INDEX_ERROR)
     /// and :402-407 (binds, err_badarraysub) diagnose per context and the
@@ -82,6 +94,14 @@ impl ConditionalArithParser<'_> {
                     });
                 }
                 ParsedAssocSubscript::Invalid => {
+                    return Some(ArithLValue::InvalidElement {
+                        display: self.invalid_subscript_display(start),
+                    });
+                }
+                ParsedAssocSubscript::EmptyBracket => {
+                    // Unreachable in practice: for_assignment=true takes
+                    // the Invalid arm above for empty bracket text. The
+                    // same law as Invalid if ever reached.
                     return Some(ArithLValue::InvalidElement {
                         display: self.invalid_subscript_display(start),
                     });
@@ -221,6 +241,17 @@ impl ConditionalArithParser<'_> {
                 ParsedAssocSubscript::Invalid => {
                     return Some(ArithLValue::InvalidElement {
                         display: self.invalid_subscript_display(start),
+                    });
+                }
+                ParsedAssocSubscript::EmptyBracket => {
+                    // `C[]` — the empty-bracket TOKEN survives the
+                    // read-law parse (it must not collapse to `Key("")`):
+                    // reads report `C[]: bad array subscript` twice via
+                    // `lvalue_value(&InvalidElement)`, writes report
+                    // `` `C[]': not a valid identifier `` via
+                    // `set_lvalue` — the indexed `a[]` shape (rubash#3252).
+                    return Some(ArithLValue::InvalidElement {
+                        display: format!("{resolved_name}[]"),
                     });
                 }
             }
@@ -364,16 +395,15 @@ impl ConditionalArithParser<'_> {
                                     // keeps evaluating.
                                     return Some(ParsedAssocSubscript::Invalid);
                                 }
-                                // GNU array_variable_part (arrayfunc.c): an
-                                // assoc subscript whose expand_subscript_string
-                                // result is empty is a bad subscript — diagnosed
-                                // once here and once in get_array_value, so the
-                                // read reports it twice (`A[$k]` with k unset ->
-                                // `A[]: bad array subscript` x2), then the
-                                // element reads as 0.
-                                self.record_diag(ArithEvalDiag::BadSubscript(format!("{name}[]")));
-                                self.record_diag(ArithEvalDiag::BadSubscript(format!("{name}[]")));
-                                return Some(ParsedAssocSubscript::Key(String::new()));
+                                // The `name[]` TOKEN survives: do not resolve
+                                // it to `Key("")` here — the two bad-subscript
+                                // lines are reported at read time by
+                                // `lvalue_value(&InvalidElement)` (the indexed
+                                // `a[]` shape) and the bind reports the
+                                // invalid-id line via `set_lvalue`. Resolving
+                                // eagerly would let `++`/`--` bind `C[""]`
+                                // silently (rubash#3252).
+                                return Some(ParsedAssocSubscript::EmptyBracket);
                             }
                             // Nonempty bracket text resolving empty: the
                             // `*akey == 0` law, not the `name[]` law.
