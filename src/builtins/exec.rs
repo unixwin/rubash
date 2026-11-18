@@ -469,16 +469,29 @@ where
             // (EX_NOEXEC), not "not found" (rubash#2661). The probe
             // anchors at the session cwd (G-02), like the slash branch
             // below.
-            let as_written = crate::executor::path::shell_path_to_windows(command, env_vars);
-            let as_written = if as_written.is_absolute() {
-                as_written
-            } else {
-                cwd.join(&as_written)
-            };
-            if std::fs::metadata(&as_written)
-                .map(|metadata| metadata.is_dir())
-                .unwrap_or(false)
-            {
+            // GNU builtins/exec.def:155-168 + general.c:812-817:
+            // file_isdir (args[0]) is `stat (fn) == 0 && S_ISDIR`,
+            // and `stat ("")` fails ENOENT — the empty word is not a
+            // directory, it is "not found" (127). The session-cwd join
+            // below must not manufacture one: `cwd.join ("")` IS the
+            // cwd, so an unguarded probe reads the empty word as the
+            // cwd directory and misclassifies it as EX_NOEXEC (126)
+            // (rubash#3317). Non-empty words keep the #2661 probe
+            // unchanged (`exec .`, `exec somedir` stay 126).
+            let is_dir = !command.is_empty()
+                && {
+                    let as_written =
+                        crate::executor::path::shell_path_to_windows(command, env_vars);
+                    let as_written = if as_written.is_absolute() {
+                        as_written
+                    } else {
+                        cwd.join(&as_written)
+                    };
+                    std::fs::metadata(&as_written)
+                        .map(|metadata| metadata.is_dir())
+                        .unwrap_or(false)
+                };
+            if is_dir {
                 writeln!(
                     stderr,
                     "{}exec: {command}: cannot execute: Is a directory",
