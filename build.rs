@@ -47,6 +47,16 @@ fn main() {
     if !dirty.is_empty() {
         println!("cargo:rustc-env=RUBASH_GIT_DIRTY_SUFFIX={dirty}");
     }
+    // GNU bash exports its own symbols to loadable builtins: configure:23147
+    // (`linux*) LOCAL_LDFLAGS=-rdynamic # allow dynamic loading`). Without
+    // `-rdynamic` a `#[no_mangle] extern "C"` export such as
+    // `lib/glob/strmatch.c:32-39 strmatch()` lands only in the static
+    // symbol table, and a loadable builtin that calls back into the shell
+    // image (glob-bracket.tests' strmatch.so) dies at its first call.
+    // Binaries only: test harness executables need no loadable ABI.
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+        println!("cargo:rustc-link-arg-bins=-rdynamic");
+    }
 }
 
 /// The git-derived stamp parts for one checkout: `(short rev, suffix)`

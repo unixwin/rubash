@@ -595,7 +595,18 @@ pub(in crate::executor) fn is_parameter_error_name(name: &str) -> bool {
     is_shell_name(name)
         || name
             .strip_prefix('!')
-            .is_some_and(|name| !name.is_empty() && is_shell_name(name))
+            .is_some_and(|name| {
+                // `!` + a legal indirect SOURCE: an identifier, a
+                // positional index (`${!9:-d}` -> `${$9:-d}`), or a
+                // VALID_INDIR_PARAM special (`${!#:-d}`, `${!?-d}`,
+                // `${!@:-d}` — subst.c:122, :9920 want_indir). `$`/`-`
+                // stay excluded: `${!$-d}` is a bad substitution in
+                // GNU, not an indirection through `$$`.
+                !name.is_empty()
+                    && (is_shell_name(name)
+                        || name.parse::<usize>().is_ok()
+                        || matches!(name, "#" | "?" | "@" | "*"))
+            })
         || matches!(name, "#" | "@" | "*" | "?" | "$" | "-" | "0")
         || name.parse::<usize>().is_ok()
         // Array references, including `arr[@]`/`arr[*]` (subst.c:9954-9957).
@@ -618,13 +629,73 @@ pub(in crate::executor) fn has_indirect_parameter_word_operator(name: &str) -> b
     let Some(indirect) = name.strip_prefix('!') else {
         return false;
     };
-    [":-", ":=", ":?", ":+", "-", "=", "?", "+"]
-        .iter()
-        .any(|operator| {
-            indirect
-                .split_once(operator)
-                .is_some_and(|(left, _)| !left.is_empty())
-        })
+    // The operator must apply to the indirect NAME itself, at the top
+    // level: an operator character nested inside a `${...}` (or a quote)
+    // belongs to the nested word, not to this expansion — `${!x#*a=${-y}}`
+    // is an indirect REMOVAL whose pattern merely contains `=` inside
+    // the nested `${-y}` (rubash#3501). Likewise, once a pattern operator
+    // (`#`/`%`/`/`/`^`/`,`/`~`) opens the pattern half, everything after
+    // it is pattern text, never an operator word. Same top-level walk as
+    // split_top_level_pattern_operator / split_once_outside_subscript_impl
+    // (nested `${...}` + quotes); brackets are NOT tracked, matching the
+    // previous scan's treatment of `${!a[i-1]}`.
+    let bytes = indirect.as_bytes();
+    // A leading `#`/`?`/`@`/`*` is the indirect SOURCE itself
+    // (VALID_INDIR_PARAM, subst.c:122: `#` and `?` reach this caller
+    // only outside posix mode — indirect_parameter_body), never a
+    // pattern-open or operator character: `${!#:-d}` is indirection
+    // through `$#` under `:-`, not `$!` minus a `:-d` prefix.
+    let mut index = usize::from(matches!(bytes.first(), Some(b'#' | b'?' | b'@' | b'*')));
+    let mut nested = 0usize;
+    let mut quote: Option<u8> = None;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(active) = quote {
+            if byte == active {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        if byte == b'\\' {
+            index += 2;
+            continue;
+        }
+        if matches!(byte, b'\'' | b'"') {
+            quote = Some(byte);
+            index += 1;
+            continue;
+        }
+        if byte == b'$' && bytes.get(index + 1) == Some(&b'{') {
+            nested += 1;
+            index += 2;
+            continue;
+        }
+        if byte == b'}' && nested > 0 {
+            nested -= 1;
+            index += 1;
+            continue;
+        }
+        if nested == 0 {
+            // A `:`-led pair (`:-`, `:=`, `:?`, `:+`) or a bare
+            // `-`/`=`/`?`/`+` at the top level, after a non-empty name.
+            if index > 0
+                && (matches!(
+                    (byte, bytes.get(index + 1).copied()),
+                    (b':', Some(b'-' | b'=' | b'?' | b'+'))
+                ) || matches!(byte, b'-' | b'=' | b'?' | b'+'))
+            {
+                return true;
+            }
+            // A pattern operator opens the pattern half: nothing after
+            // it can be an operator word on the indirect name.
+            if matches!(byte, b'#' | b'%' | b'/' | b'^' | b',' | b'~') {
+                return false;
+            }
+        }
+        index += 1;
+    }
+    false
 }
 
 pub(in crate::executor) fn parameter_substring(
@@ -848,7 +919,7 @@ fn parameter_name_tail_len(bytes: &[u8]) -> usize {
 /// is only a delimiter at top level — backslash pairs, backquotes,
 /// single/double quotes, `$(...)`, `${...}` and process substitutions are
 /// skipped as units, so a `/` inside any of them stays word text.
-fn split_parameter_separator(value: &str) -> Option<(&str, &str)> {
+pub(in crate::executor) fn split_parameter_separator(value: &str) -> Option<(&str, &str)> {
     let chars: Vec<(usize, char)> = value.char_indices().collect();
     let mut index = 0;
     while index < chars.len() {

@@ -67,10 +67,13 @@ impl Executor {
                 // (arrayfunc.c array_expand_index): `a[1+1]`, `a[i]` and
                 // negative counts back from the last element all resolve
                 // before the render.
-                match (
-                    array_typed,
-                    eval_conditional_arith_value(subscript, &self.shell_state.env_vars),
-                ) {
+                // GNU arrayfunc.c:1373-1377 array_expand_index clears
+                // this_command_name around evalexp (rubash#3295).
+                let subscript_index = {
+                    let _arith_label = crate::executor::arithmetic::arith_eval_label_scope(None);
+                    eval_conditional_arith_value(subscript, &self.shell_state.env_vars)
+                };
+                match (array_typed, subscript_index) {
                     (true, Some(raw)) if raw >= 0 => usize::try_from(raw)
                         .ok()
                         .and_then(|index| stored.and_then(|value| array_value_at(value, index))),

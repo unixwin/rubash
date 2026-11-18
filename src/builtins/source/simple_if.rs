@@ -59,6 +59,13 @@ fn execute_simple_if_inner(
     };
 
     let fi_command = commands.get(fi_index).expect("fi index is valid");
+    // rubash#3454: `time if ...; fi > $nope` reparses the if as a word
+    // sequence whose redirects live on `fi` — GNU aborts the script on
+    // an unbound target, so run the nounset scan before any expansion
+    // side effect and unwind as ExitCode(1).
+    if executor.redirect_list_nounset_fatal(fi_command)? {
+        return Err(ExecuteError::ExitCode(1));
+    }
     if !output_redirects_applied && command_has_output_redirects(fi_command) {
         let mut redirected = Ast {
             commands: commands[index..=fi_index].to_vec(),
@@ -273,7 +280,12 @@ fn test_if_condition_true(executor: &Executor, words: &[String]) -> Result<bool,
     for word in &words[2..] {
         args.push(executor.expand_word(word));
     }
-    let status = crate::builtins::test::execute(&args, true, executor.env_vars_table())?;
+    let status = crate::builtins::test::execute(
+        &args,
+        true,
+        executor.env_vars_table(),
+        executor.positional_len(),
+    )?;
     Ok(status == 0)
 }
 

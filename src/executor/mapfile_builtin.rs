@@ -584,8 +584,7 @@ impl Executor {
         // consumed boundary and byte-wise sources never over-read.
         let bounded_values = if callback.is_none() {
             count.filter(|count| *count > 0).and_then(|limit| {
-                let mut source =
-                    self.mapfile_record_source(cmd, read_fd, delimiter, trim_newline)?;
+                let mut source = self.mapfile_record_source(cmd, read_fd, false)?;
                 let mut values = Vec::new();
                 let mut skipped = 0usize;
                 while values.len() < limit {
@@ -599,7 +598,7 @@ impl Executor {
                     }
                     values.push(record);
                 }
-                source.sync_offset();
+                self.mapfile_source_sync(&mut source);
                 Some(values)
             })
         } else {
@@ -628,6 +627,13 @@ impl Executor {
                 // a fresh read replaces the array wholesale, so the split
                 // batch pushes straight into the dense bulk store with no
                 // intermediate index map (one owner per line, not two).
+                // rubash#3659: convert each record through the array's
+                // attributes before the wholesale store (no callback here,
+                // so no raw-record observer to preserve).
+                let values: Vec<String> = values
+                    .iter()
+                    .map(|value| self.convert_array_element_value(&name, value))
+                    .collect();
                 replace_typed_indexed_array(
                     &mut self.shell_state.variables,
                     &name,
@@ -669,6 +675,10 @@ impl Executor {
                             .unwrap_or_default();
                     }
                 }
+                // rubash#3659: the callback above received the raw record
+                // (GNU mapfile.def:195-203); the attribute conversion
+                // applies at the bind, like bind_array_element.
+                let value = self.convert_array_element_value(&name, &value);
                 entries.insert(target_index, value);
             }
             // rubash#616 (1a): mirror written — sync the structured cell from
