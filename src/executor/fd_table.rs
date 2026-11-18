@@ -422,15 +422,25 @@ impl FdEntry {
     /// direction still retires the shared descriptor.
     pub(crate) fn dup_file_endpoints(&self) -> std::io::Result<Self> {
         let read = match &self.read {
-            Some(FdReadEndpoint::File(file)) => Some(FdReadEndpoint::File(file.duplicate()?)),
-            Some(FdReadEndpoint::CoprocStdout { pid, fd }) => Some(FdReadEndpoint::CoprocStdout {
-                pid: *pid,
-                fd: fd.duplicate()?,
-            }),
+            // A retired kernel endpoint is already dead — its descriptor
+            // number may have been recycled onto an unrelated file, so
+            // there is no live descriptor to duplicate; share the dead
+            // endpoint like a symbolic one (rubash#3865). Duplicating it
+            // would fcntl whatever now owns the number and silently bind
+            // the snapshot to the wrong open file description.
+            Some(FdReadEndpoint::File(file)) if !file.is_retired() => {
+                Some(FdReadEndpoint::File(file.duplicate()?))
+            }
+            Some(FdReadEndpoint::CoprocStdout { pid, fd }) if !fd.is_retired() => {
+                Some(FdReadEndpoint::CoprocStdout {
+                    pid: *pid,
+                    fd: fd.duplicate()?,
+                })
+            }
             other => other.clone(),
         };
         let write = match &self.write {
-            Some(FdWriteEndpoint::File(file)) => {
+            Some(FdWriteEndpoint::File(file)) if !file.is_retired() => {
                 // A `<>` pair shares ONE open file description
                 // between its arms (open_readwrite_pair mints a
                 // single Rc for both); reuse the read arm's
@@ -447,10 +457,12 @@ impl FdEntry {
                     _ => Some(FdWriteEndpoint::File(file.duplicate()?)),
                 }
             }
-            Some(FdWriteEndpoint::CoprocStdin { pid, fd }) => Some(FdWriteEndpoint::CoprocStdin {
-                pid: *pid,
-                fd: fd.duplicate()?,
-            }),
+            Some(FdWriteEndpoint::CoprocStdin { pid, fd }) if !fd.is_retired() => {
+                Some(FdWriteEndpoint::CoprocStdin {
+                    pid: *pid,
+                    fd: fd.duplicate()?,
+                })
+            }
             other => other.clone(),
         };
         Ok(Self {
