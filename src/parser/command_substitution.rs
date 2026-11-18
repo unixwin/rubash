@@ -269,13 +269,34 @@ fn dollar_command_substitution(
         // outer `double` state is preserved.  Without this,
         // `$(echo "foo$(echo ")")")` misparses the inner `"` as the close of
         // the outer quote, truncating the substitution body.
-        if double
-            && ch == '$'
-            && chars.get(index + 1) == Some(&'(')
-            && chars.get(index + 2) != Some(&'(')
-        {
+        //
+        // The same unit skip applies UNQUOTED (parse.y:4173: `$(` hands the
+        // whole nested text to parse_comsub, whose `)` owns the inner
+        // substitution, never the enclosing case machinery). Without it the
+        // inner `)` reaches the case-subject bookkeeping as if it were
+        // glued to the subject word — `$(case $(ls) in *) ... ;; esac)` cut
+        // the body at `case $(ls`, and the trailing ` in *) ... ` `)` then
+        // surfaced as the read-time `unexpected token `)'`. The `\u{1}`
+        // placeholder marks the skipped span as one word unit, exactly how
+        // the `\\` arm keeps `c\ase` out of the reserved-word machine, so a
+        // `$(...)` case subject still completes the `case WORD` stage
+        // (stage 1 -> 2) and lets `in` arm the pattern region. A `$(` span
+        // inside an armed pattern region is pattern content — same
+        // bookkeeping the backquote arm above applies.
+        // `$((` is included: arithmetic or `$(` + subshell, the recursive
+        // span ends at the same `))`/` ) ` boundary, and its `)` belongs to
+        // the nested unit either way (`$(case $((1)) in *) ... ;; esac)`
+        // cut at `case $((1)` for the same reason).
+        if ch == '$' && !single && chars.get(index + 1) == Some(&'(') {
             if let Some((_, next_index)) = dollar_command_substitution(chars, index) {
                 index = next_index;
+                if !double {
+                    word.push('\u{1}');
+                    if case_depth > 0 && case_pattern_region {
+                        case_pattern_content = true;
+                        case_in_completed_empty = false;
+                    }
+                }
                 token_boundary = false;
                 continue;
             }
@@ -1176,5 +1197,29 @@ mod case_reclassification_tests {
     fn reclassifies_space_variant_via_completion_latch() {
         assert_eq!(extract("$(case x in )").as_deref(), Some("case x in "));
         assert_eq!(extract("$(case x in a)"), None);
+    }
+
+    /// rubash#3605 run-comsub-posix: an unquoted nested `$(` inside a
+    /// case body is a complete word unit (GNU parse.y:4173 hands the
+    /// span to parse_comsub atomically), never fed char-by-char to the
+    /// case word machine — otherwise the inner `)` hits the glued-paren
+    /// close predicate (rubash#2789) and truncates the body at
+    /// `case $(ls`.
+    #[test]
+    fn keeps_comsub_case_subject() {
+        // `esac` right after `in` stays the empty-case no-span shape
+        // (keeps_empty_case_esac_shape), comsub subject or not.
+        assert_eq!(extract("$(case $(ls) in esac)"), None);
+        for w in [
+            "$(case $(ls) in *) echo ok;; esac)",
+            "$(case a$(ls)b in *) echo ok;; esac)",
+            "$(case $((1)) in *) echo ok;; esac)",
+            "$(case $(case q in q) echo qq;; esac) in qq) echo n;; esac)",
+            "$(if $(echo true); then echo ok; fi)",
+            "$(for i in $(echo a b); do echo x; done)",
+        ] {
+            let inner = &w[2..w.len() - 1];
+            assert_eq!(extract(w).as_deref(), Some(inner), "input: {w}");
+        }
     }
 }

@@ -603,6 +603,16 @@ pub(super) fn field_split_values_with_ifs(value: &str, ifs: Option<&str>) -> Vec
     if value.is_empty() {
         return Vec::new();
     }
+    // GNU W_SPLITSPACE (command.h:79 → subst.c:11535 accumulate →
+    // subst.c:12103-12107): an unquoted $*/$@ piece produced while IFS was
+    // set-but-null marks the whole word to split on spaces — " " whenever
+    // IFS is set at split time (a mid-word ${IFS:=...} bind does not move
+    // the charset), " \t\n" when unset — instead of the current IFS value.
+    if crate::executor::markers::contains_split_on_spaces_sentinel(value) {
+        let cleaned = crate::executor::markers::strip_split_on_spaces_sentinel(value);
+        let charset = if ifs.is_some() { " " } else { " \t\n" };
+        return field_split_values_with_ifs(&cleaned, Some(charset));
+    }
     let Some(ifs) = ifs else {
         return split_ifs_whitespace(value, " \t\n");
     };
@@ -611,10 +621,18 @@ pub(super) fn field_split_values_with_ifs(value: &str, ifs: Option<&str>) -> Vec
         // GNU expand_word_list_internal (subst.c:13219) contributes no
         // field at all for an unquoted expansion that produces nothing
         // (`IFS='' ; for v in 1 a $x` iterates twice when x is unset).
+        // The word still goes through GNU's final dequote
+        // (subst.c:4807 dequote_string), so the IFS_GLUE / ANSI_C_IFS_GUARD
+        // protection pairs — which only a running splitter consumes —
+        // must be stripped here rather than leak into the emitted field
+        // (`IFS=''; X='X Y'; recho ${0+ "$X" }` is ` X Y `, never
+        // ` X\x1c Y `).
         return if value.is_empty() {
             Vec::new()
         } else {
-            vec![value.to_string()]
+            vec![crate::executor::markers::strip_ansi_c_ifs_guard(
+                &value.replace(crate::executor::markers::IFS_GLUE, ""),
+            )]
         };
     }
 

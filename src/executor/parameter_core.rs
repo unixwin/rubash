@@ -493,6 +493,20 @@ impl Executor {
             return self.expand_embedded_parameters_mut_with_context(word, context);
         }
 
+        // GNU subst.c:7663 parameter_brace_expand_word hands the
+        // `${var op word}` word half back to expand_word_internal, whose
+        // scan owns the `<`/`>` process-substitution cases
+        // (subst.c:11365-11385): an alternate like `9:${foo+<(echo G)}`
+        // embedded in a larger word materializes /dev/fd/N. That needs a
+        // substitution child, so — like the `$(`/backtick arms above —
+        // the word takes the mutable walker; the &self expand_word could
+        // only render the span literal (new-exp1.sub). The alternate
+        // walker's materializer keeps GNU's quote rules (a `"<("` or
+        // value-borne `<(` stays data).
+        if word.contains("${") && (word.contains("<(") || word.contains(">(")) {
+            return self.expand_embedded_parameters_mut_with_context(word, context);
+        }
+
         self.expand_word(word)
     }
 

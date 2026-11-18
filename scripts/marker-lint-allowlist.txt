@@ -270,6 +270,7 @@ src/locale.rs | L2 | \\u\{0*3\} | test data: expected values / probe inputs spel
 src/parser/assignment.rs | L3 | replace:STORAGE_WORD_PREFIX | strips a sentinel/prefix this subsystem itself inserted into the text; the stripped text is not raw user input
 src/parser/case_command.rs | L3 | replace:CTLESC | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
 src/parser/conditional_command.rs | L2 | \\u\{0*1\} | field separator inside an internal diagnostic record string (domain-local 0x01)
+src/parser/command_substitution.rs | L2 | \\u\{0*1\} | inert placeholder byte fed to the case-word machine for an opaquely-skipped nested $( span (domain-local 0x01; not the readline PROMPT_IGNORE_START protocol)
 src/parser/conditional_command.rs | L3 | replace:CTLESC | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
 src/parser/redirections.rs | L3 | contains:PREEXPANDED_STDIN_BODY | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
 src/script_driver.rs | L2 | \\u\{0*1F\} | field separator of the __RUBASH_SETOPT_* env serialization; 0x1F as a domain-local unit separator (not DATA_DOLLAR semantics)

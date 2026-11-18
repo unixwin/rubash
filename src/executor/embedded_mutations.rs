@@ -202,6 +202,31 @@ impl Executor {
         &mut self,
         word: &str,
     ) -> String {
+        // GNU subst.c:7663 parameter_brace_expand_word hands the
+        // `${var op word}` word half back to expand_word_internal,
+        // whose scan owns the `<`/`>` process-substitution cases
+        // (subst.c:11365-11385 — subst.c:11369 also skips them inside
+        // double quotes, which this Unquoted walker's quote state
+        // reproduces). An unquoted `<(`/ `>(` in the alternative's own
+        // text therefore materializes when — and only when — the arm
+        // that expands the alternative is taken
+        // (`cat ${foo:-<(echo a)}` -> /dev/fd/N, new-exp1.sub). A `<(`
+        // arriving from a variable's value is appended as expansion
+        // output below and never re-scanned, so value-borne text stays
+        // data. The materializer's quote-aware scan leaves quoted or
+        // escaped spans literal, matching the same GNU conditions.
+        let word_owned;
+        let word = if word.contains("<(") || word.contains(">(") {
+            match self.materialize_assignment_process_substitutions(word) {
+                Ok(materialized) => {
+                    word_owned = materialized;
+                    word_owned.as_str()
+                }
+                Err(_) => word,
+            }
+        } else {
+            word
+        };
         self.expand_embedded_parameters_mut_inner(
             word,
             SubstitutionQuoteContext::Unquoted,
@@ -671,7 +696,20 @@ impl Executor {
         while let Some(ch) = chars.next() {
             if let Some(span_start) = quoted_span_start.take() {
                 let ifs = self.current_ifs();
-                crate::executor::markers::protect_ifs_chars_in_span(&mut output, span_start, ifs);
+                // subst.c:11535/12103-12107 — a word carrying W_SPLITSPACE
+                // (the sentinel an unquoted $*/${*} piece emitted under a
+                // set-null IFS) splits on " ": a quoted-site span's ' ' is
+                // CTLESC-protected data in GNU, so it joins the protected
+                // set exactly like a literal IFS char.
+                let splitspace = crate::executor::markers::contains_split_on_spaces_sentinel(
+                    &output[..span_start.min(output.len())],
+                );
+                let ifs = if splitspace {
+                    format!("{ifs} ")
+                } else {
+                    ifs.to_string()
+                };
+                crate::executor::markers::protect_ifs_chars_in_span(&mut output, span_start, &ifs);
             }
             let was_literal_escape = prev_literal_escape;
             prev_literal_escape = ch == crate::executor::markers::LITERAL_CHAR_ESCAPE;
@@ -1212,26 +1250,145 @@ impl Executor {
                 }
                 Some('@') => {
                     chars.next();
-                    let value = self.shell_state.positional_window().join(" ");
-                    let value =
-                        protect_rhs_value(&value, protect_rhs_data || protect_expansion_results);
-                    if expansion_ws_marked(alternate, preserve_quotes, in_double) {
-                        output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
+                    // GNU subst.c:12054-12153 param_expand `@` case: `$@`
+                    // contributes one word-list element per positional
+                    // parameter — each element's own whitespace stays
+                    // CTLESC-protected while the element BOUNDARIES remain
+                    // real separators. Joining first and then marking the
+                    // whole value glued the elements into one field
+                    // (dollar-at-star9 `Q${q- "$@" }W`); emitting bare
+                    // whitespace inside an element split `q r` instead
+                    // (`${v- "$@" }` with `set -- p 'q r' r`). Mark each
+                    // element's whitespace, then join with the first IFS
+                    // character — string_list_dollar_at separates the
+                    // positional parameters with $IFS[0] (subst.c:12097),
+                    // so under IFS=: the boundary byte is ':' and splits.
+                    // string_list_dollar_at separates positional
+                    // parameters with a space under PF_ASSIGNRHS, else
+                    // with $IFS[0] when IFS is set non-empty, else ' '
+                    // (subst.c:2975-3000) — a set-but-empty IFS still
+                    // yields ' ' for `$@`.
+                    let assign_rhs = self.inside_assignment_rhs.get()
+                        || super::expand_braced_replacement::ASSIGNMENT_RHS.with(|f| f.get());
+                    let ifs_first = if assign_rhs {
+                        ' '
                     } else {
-                        output.push_str(&value);
+                        self.shell_state
+                            .env_vars
+                            .get("IFS")
+                            .and_then(|ifs| ifs.chars().next())
+                            .unwrap_or(' ')
                     }
+                    .to_string();
+                    // GNU quote_escapes_internal (subst.c:4620-4650):
+                    // element whitespace is protected only when IFS is
+                    // set-but-null (quote_spaces); unset/non-null IFS leaves
+                    // it split-eligible. preserve_quotes keeps its own
+                    // compound tag for the storage pass, independent of IFS.
+                    let no_split =
+                        super::expand_braced_replacement::NO_SPLIT_DOLLAR_STAR.with(|f| f.get());
+                    let quoted_at = in_double
+                        || matches!(
+                            context,
+                            SubstitutionQuoteContext::DoubleQuoted
+                                | SubstitutionQuoteContext::HereDocument
+                        );
+                    let ifs_is_null = self
+                        .shell_state
+                        .env_vars
+                        .get("IFS")
+                        .is_some_and(|ifs| ifs.is_empty());
+                    let value = self
+                        .shell_state
+                        .positional_window()
+                        .iter()
+                        .map(|element| {
+                            let element = protect_rhs_value(
+                                element,
+                                protect_rhs_data || protect_expansion_results,
+                            );
+                            if quoted_at || (ifs_is_null && !no_split) || preserve_quotes {
+                                std::borrow::Cow::Owned(mark_expansion_whitespace(
+                                    &element,
+                                    preserve_quotes,
+                                ))
+                            } else {
+                                element
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(&ifs_first);
+                    // W_SPLITSPACE (subst.c:11535 → 12103-12107): the
+                    // assembled word splits on " " when a piece was
+                    // produced under a set-null IFS, independent of later
+                    // mid-word IFS binds. Never on the assignment-RHS or
+                    // quoted paths — those never split.
+                    if ifs_is_null && !assign_rhs && !no_split && !preserve_quotes && !quoted_at {
+                        output.push(crate::executor::markers::SPLIT_ON_SPACES_SENTINEL);
+                    }
+                    output.push_str(&value);
                 }
                 Some('*') => {
                     chars.next();
-                    // Bash joins `$*` with the first IFS character (not a space).
-                    let value = self.positional_params_star_joined();
-                    let value =
-                        protect_rhs_value(&value, protect_rhs_data || protect_expansion_results);
-                    if expansion_ws_marked(alternate, preserve_quotes, in_double) {
-                        output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
-                    } else {
-                        output.push_str(&value);
+                    // Same element model as `@` above, but unquoted `$*`
+                    // outside an assignment RHS dispatches to
+                    // string_list_dollar_at (Posix interp 888,
+                    // subst.c:10662-10670): separator ' ' when IFS is unset
+                    // or set-but-null, ifs[0] otherwise. Assignment RHS
+                    // takes string_list_dollar_star (subst.c:10612-10660),
+                    // where a set-but-empty IFS joins with no separator
+                    // (`IFS='' x=$*` concatenates).
+                    let star_assign_rhs = self.inside_assignment_rhs.get()
+                        || super::expand_braced_replacement::ASSIGNMENT_RHS.with(|f| f.get());
+                    // expand_no_split_dollar_star (subst.c:237,
+                    // expand_string_for_pat at subst.c:4518): no-split
+                    // contexts take string_list_dollar_star like the
+                    // assignment-RHS arm (subst.c:3048, 10612-10660).
+                    let star_no_split =
+                        super::expand_braced_replacement::NO_SPLIT_DOLLAR_STAR.with(|f| f.get());
+                    let dollar_star = star_assign_rhs || star_no_split;
+                    let star_ifs_value = self.shell_state.env_vars.get("IFS");
+                    let ifs_is_null = star_ifs_value.is_some_and(|ifs| ifs.is_empty());
+                    let ifs_first = match star_ifs_value {
+                        Some(ifs) => {
+                            ifs.chars()
+                                .next()
+                                .map(|c| c.to_string())
+                                .unwrap_or_else(|| {
+                                    if dollar_star {
+                                        String::new()
+                                    } else {
+                                        " ".to_string()
+                                    }
+                                })
+                        }
+                        None => " ".to_string(),
+                    };
+                    let value = self
+                        .shell_state
+                        .positional_window()
+                        .iter()
+                        .map(|element| {
+                            let element = protect_rhs_value(
+                                element,
+                                protect_rhs_data || protect_expansion_results,
+                            );
+                            if (ifs_is_null && !star_no_split) || preserve_quotes {
+                                std::borrow::Cow::Owned(mark_expansion_whitespace(
+                                    &element,
+                                    preserve_quotes,
+                                ))
+                            } else {
+                                element
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(&ifs_first);
+                    // W_SPLITSPACE (subst.c:10665-10668 → 11535 → 12103-12107).
+                    if ifs_is_null && !dollar_star && !preserve_quotes {
+                        output.push(crate::executor::markers::SPLIT_ON_SPACES_SENTINEL);
                     }
+                    output.push_str(&value);
                 }
                 Some('#') => {
                     chars.next();
@@ -1430,6 +1587,15 @@ impl Executor {
                                 // subst.c:11229 expand_word_internal is a
                                 // single pass; its `${` arm runs
                                 // parameter_brace_expand inline).
+                                // GNU param_expand passes `quoted` down to
+                                // parameter_brace_expand_word
+                                // (subst.c:7840-7860): when this fragment
+                                // sits inside a double-quoted region the
+                                // alternate expands under Q_DOUBLE_QUOTES,
+                                // which is also what keeps an unquoted-
+                                // looking `<(`/`>(` inside it literal
+                                // (subst.c:11369 — the procsub cases skip
+                                // double-quoted text, `"${v:-<( )}"`).
                                 executor.expand_braced_parameter_fragment_in_word(
                                     &name,
                                     fragment_context,
@@ -1767,7 +1933,13 @@ impl Executor {
                             })
                         })
                     {
+                        // A stored value's QUOTED_NULL_MARKER is field data,
+                        // never an anchor (GNU subst.c:8090 verbatim value
+                        // read + remove_quoted_nulls at field assembly):
+                        // `S $n T` with n=' ␂ ' yields `S`,`T`, not `S <E002> T`.
                         let value = shell_safe_value(&value);
+                        let value =
+                            crate::executor::parameter_words::dequote_stored_parameter_value(value);
                         let value = protect_rhs_value(
                             &value,
                             protect_rhs_data || protect_expansion_results,
@@ -2001,7 +2173,20 @@ impl Executor {
         // character follows the expansion).
         if let Some(span_start) = quoted_span_start.take() {
             let ifs = self.current_ifs();
-            crate::executor::markers::protect_ifs_chars_in_span(&mut output, span_start, ifs);
+            // subst.c:11535/12103-12107 — a word carrying W_SPLITSPACE
+            // (the sentinel an unquoted $*/${*} piece emitted under a
+            // set-null IFS) splits on " ": a quoted-site span's ' ' is
+            // CTLESC-protected data in GNU, so it joins the protected
+            // set exactly like a literal IFS char.
+            let splitspace = crate::executor::markers::contains_split_on_spaces_sentinel(
+                &output[..span_start.min(output.len())],
+            );
+            let ifs = if splitspace {
+                format!("{ifs} ")
+            } else {
+                ifs.to_string()
+            };
+            crate::executor::markers::protect_ifs_chars_in_span(&mut output, span_start, &ifs);
         }
 
         output

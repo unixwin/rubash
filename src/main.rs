@@ -1778,6 +1778,9 @@ fn run_script_file_with_init(
         // with the same EX_NOINPUT. Windows reports ERROR_ACCESS_DENIED
         // when a directory is opened, so classify from metadata rather
         // than the errno of the failed read (rubash#262).
+        let is_dir = std::fs::metadata(&path)
+            .map(|metadata| metadata.is_dir())
+            .unwrap_or(false);
         let (message, code) = match std::fs::metadata(&path) {
             Ok(metadata) if metadata.is_dir() => ("Is a directory".to_string(), 126),
             Ok(_) => ("Permission denied".to_string(), 126),
@@ -1793,12 +1796,27 @@ fn run_script_file_with_init(
         // GNU error.c:90-117 get_name_for_error: in non-interactive mode,
         // $0 (dollar_vars[0]) is used as the error prefix. When running
         // `${THIS_SH} ./errors1.sub`, $0 is the full path of the shell
-        // executable (e.g. /usr/local/bin/bash).
-        let shell_name = executor
-            .get_env("__RUBASH_SHELL_NAME")
-            .or_else(|| executor.get_env("BASH_ARGV0"))
-            .unwrap_or("bash");
-        eprintln!("{shell_name}: {script}: {message}");
+        // executable (e.g. /usr/local/bin/bash). The directory arm is the
+        // exception: open(2) succeeds on a directory, so dollar_vars[0]
+        // has already been rebound to the spelled script name when
+        // file_isdir reports EISDIR (shell.c:1604-1620) — `bash /`
+        // reports `/: /: Is a directory`, not `bash: /: Is a directory`.
+        // Every other failure happens at open, before the rebind, so the
+        // prolog stays the shell's own name.
+        if is_dir {
+            // The filename slot is the name GNU opened: the spelled
+            // operand, or the PATH-found path when the search supplied
+            // it (shell.c:1595-1597 replaces filename with
+            // path_filename).
+            let shown = path_found_name.as_deref().unwrap_or(script);
+            eprintln!("{script}: {shown}: {message}");
+        } else {
+            let shell_name = executor
+                .get_env("__RUBASH_SHELL_NAME")
+                .or_else(|| executor.get_env("BASH_ARGV0"))
+                .unwrap_or("bash");
+            eprintln!("{shell_name}: {script}: {message}");
+        }
         return code;
     };
     // GNU shell.c:1685-1692 + general.c:718-741 (check_binary_file): a
@@ -1806,12 +1824,17 @@ fn run_script_file_with_init(
     // interpreter specifier) contains NUL, or an ELF image, is refused with
     // "cannot execute binary file" and EX_BINARY_FILE (126).
     if check_binary_file(&bytes) {
-        // GNU shell.c:1685-1692 reports the script name plus resolved path
-        // before the diagnostic. The upstream invocation suite pipes this
-        // through a sed that strips everything up to the last colon-space,
-        // and the environment's sed performs no stripping, so rubash emits
-        // the post-normalization bare diagnostic directly.
-        eprintln!("cannot execute binary file");
+        // GNU shell.c:1685-1692 + error.c:74-117: dollar_vars[0] was
+        // rebound to the spelled script name right after the open
+        // (shell.c:1604-1609), so internal_error's prolog is the script
+        // name and the %s is the opened filename — `bash /bin/sh`
+        // reports `/bin/sh: /bin/sh: cannot execute binary file`,
+        // `bash ls` (PATH hit) reports `ls: /bin/ls: ...`. The
+        // invocation suite's `sed 's|^.*: ||'` normalizes the full
+        // form back to the bare diagnostic, so emitting the GNU prolog
+        // is correct under both harnesses.
+        let shown = path_found_name.as_deref().unwrap_or(script);
+        eprintln!("{script}: {shown}: cannot execute binary file");
         return 126;
     }
     // general.c:718 check_binary_file is GNU's ONLY script rejection gate

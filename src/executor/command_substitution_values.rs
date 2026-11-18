@@ -480,12 +480,11 @@ impl Executor {
             if ifs_set_empty && !quoted {
                 return Some(values);
             }
-            let separator = if ifs_set_empty {
-                " ".to_string()
-            } else {
-                self.ifs_first_char_separator()
-            };
-            return Some(vec![values.join(&separator)]);
+            // A quoted "${*@T}" joins with string_list_dollar_star too —
+            // IFS[0] unconditionally, empty when IFS is set empty (the
+            // Posix-888 dollar_at space fallback above applies only to the
+            // unquoted path that already returned).
+            return Some(vec![values.join(&self.ifs_first_char_separator())]);
         }
         if quoted && var_name == "*" {
             if transform == ParameterTransform::Assignment {
@@ -748,6 +747,23 @@ impl Executor {
             return Some(values);
         }
 
+        // When the raw fragment is a whole double-quoted word, it carries
+        // the quote state the cooked word here may not (synthetic callers
+        // like quoted_braced_alternate_positional_at_values pass a plain
+        // `${...}` alternate next to a synthesized `"..."` raw — GNU
+        // param_expand passes `quoted` into the operator word,
+        // subst.c:7840-7860). A real fully-quoted raw is a no-op: the
+        // cooked word already carries STORAGE_WORD_PREFIX then.
+        let word = if raw
+            .is_some_and(|raw| raw.len() >= 2 && raw.starts_with('"') && raw.ends_with('"'))
+            && !word.starts_with('"')
+            && !word.starts_with('\'')
+            && !word.starts_with(STORAGE_WORD_PREFIX)
+        {
+            raw.expect("checked above")
+        } else {
+            word
+        };
         self.quoted_positional_at_word_values(word, kind)
     }
 

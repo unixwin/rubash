@@ -523,6 +523,11 @@ impl Executor {
         }
         let pattern = self.expand_parameter_pattern_word(pattern);
         if matches!(var_name, "@" | "*") {
+            // GNU string_list_dollar_star / string_list_dollar_at
+            // (subst.c:2902-3000): `*` joins on IFS[0] — a set-empty IFS
+            // concatenates (`d=${*#}` under IFS= stores `12`, star9),
+            // while `@` space-joins except under PF_ASSIGNRHS, where it
+            // joins on IFS[0] too (subst.c:2975-3000).
             let result = self
                 .shell_state
                 .positional_window()
@@ -531,7 +536,7 @@ impl Executor {
                     remove_parameter_pattern(value, &pattern, operation, self.extglob_enabled())
                 })
                 .collect::<Vec<_>>()
-                .join(" ");
+                .join(&self.positional_transform_separator(var_name));
             return Some(result);
         }
 
@@ -771,7 +776,16 @@ impl Executor {
             crate::executor::markers::PATTERN_LITERAL_BACKSLASH,
             crate::executor::markers::DATA_BACKSLASH_STR,
         );
-        let expanded = self.expand_embedded_parameters_preserving_escaped_single_quotes(&protected);
+        let expanded =
+            crate::executor::expand_braced_replacement::with_no_split_dollar_star(|| {
+                // GNU expand_string_for_pat (subst.c:4518): a pattern word
+                // expands with expand_no_split_dollar_star set — an unquoted
+                // `$*` inside the pattern takes string_list_dollar_star
+                // (null-IFS concatenation, subst.c:3048), not the dollar_at
+                // ' '-join + W_SPLITSPACE treatment of a split context.
+                self.expand_embedded_parameters_preserving_escaped_single_quotes(&protected)
+            });
+
         // Quoted glob metacharacters remain pattern literals. Preserve the
         // escape for the parameter matcher instead of exposing a raw marker.
         expanded

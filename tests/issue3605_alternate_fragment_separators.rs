@@ -181,7 +181,6 @@ fn non_whitespace_ifs_separators_delimit_list_bearing_rhs() {
     assert!(stderr.is_empty(), "stderr not empty: {stderr}");
     assert_eq!(code, Some(0));
 }
-
 /// A fragment word that expands to zero fields does not break the glue:
 /// the separators on both sides of it still concatenate through.
 #[test]

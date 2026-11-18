@@ -158,14 +158,11 @@ impl Executor {
             return Some(self.parameter_attribute_transform(var_name));
         }
         if matches!(var_name, "@" | "*") {
-            // GNU string_list_pos_params (subst.c:3030): unquoted `*` joins
-            // with dollar_star (IFS[0], empty when IFS is set empty), while
-            // `@` joins with a space (dollar_at).
-            let separator = if var_name == "*" {
-                self.ifs_first_char_separator()
-            } else {
-                " ".to_string()
-            };
+            // GNU string_list_pos_params (subst.c:3030): `*` joins with
+            // dollar_star (IFS[0], empty when IFS is set empty); `@` joins
+            // with a space (dollar_at) — or IFS[0] under PF_ASSIGNRHS
+            // (subst.c:2951-3000, positional_transform_separator).
+            let separator = self.positional_transform_separator(var_name);
             return Some(
                 self.shell_state
                     .positional_window()
@@ -239,13 +236,17 @@ impl Executor {
             return Some(value);
         }
         if matches!(var_name, "@" | "*") {
+            // Same string_list_dollar_* separators as the transform arm
+            // above: `*` joins on IFS[0] (concatenating under a set-empty
+            // IFS — `f=${*,,}` stores `12`, star9), `@` space-joins except
+            // under PF_ASSIGNRHS.
             return Some(
                 self.shell_state
                     .positional_window()
                     .iter()
                     .map(|value| apply_parameter_case_mod(value, operation, &pattern))
                     .collect::<Vec<_>>()
-                    .join(" "),
+                    .join(&self.positional_transform_separator(var_name)),
             );
         }
         if let Ok(index) = var_name.parse::<usize>() {
