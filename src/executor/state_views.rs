@@ -282,9 +282,11 @@ impl Executor {
                 // import's verbatim copies of the mirror storage
                 // string (init.rs seeds BASH_VERSINFO / DIRSTACK /
                 // BASH_ALIASES / BASH_CMDS into the table as storage
-                // forms, then VariableStore::from_environment binds
-                // the whole seeded table as exported scalars —
-                // rubash#3083). GNU's import binds only the process
+                // forms, then VariableStore::from_var_table binds
+                // the whole seeded table as scalar cells carrying
+                // the table's per-name attribute provenance
+                // (rubash#3083; exported provenance fixed by
+                // rubash#3108). GNU's import binds only the process
                 // environment's plain scalars (variables.c:368
                 // initialize_shell_variables); its own array cells
                 // are born as ARRAY objects (variables.c:1018

@@ -680,8 +680,12 @@ impl Executor {
             // is the adoption the initializer just performed against
             // its inherited $PWD (rubash#2799).
             self.shell_state.logical_cwd = Some(child_logical_cwd);
+            // rubash#3108: same provenance rule as Executor::new —
+            // the child table was just re-seeded by
+            // initialize_fresh_shell_env_vars, so bind exported from
+            // the table's attributes, not blanket-true.
             self.shell_state.variables =
-                crate::shell::VariableStore::from_environment(&self.shell_state.env_vars);
+                crate::shell::VariableStore::from_var_table(&self.shell_state.env_vars);
             // GNU variables.c:511-526 (initialize_shell_variables): a fresh
             // shell invocation inherits only exported variables and exported
             // functions (via BASH_FUNC_<name>%% env vars). Non-exported
