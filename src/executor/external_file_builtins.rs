@@ -123,7 +123,29 @@ impl Executor {
         // search_for_command (and with it the hash record above) runs
         // before the fork whose child opens redirections, so the
         // redirect-killed path records too (rubash#2518).
-        if self.apply_redirect_setup_side_effects(cmd)? {
+        // rubash#3828: the walk's probe opens each plain-file target
+        // once and drops the File — correct only when an emulation arm
+        // below actually answers (those bodies re-open their fd 1/2
+        // mirrors when they write). A command that falls through to
+        // the real exec path gets its redirects from
+        // execute_external_inner's own preflight walk; running this
+        // walk first creates the target under the umask-stripped mode
+        // and the preflight's open then fails EACCES although GNU's
+        // single do_redirections open succeeds (redir.c:237). Skip the
+        // walk unless an arm will emulate — the literal-file gates
+        // inside the pwd/printf arms decline to the real exec path
+        // the same way a non-listed name does. The retained variant
+        // carries the probe's FileFd to the emulation arm's bind so the
+        // entry still opens exactly once (h2).
+        let literal_file_declines =
+            matches!(
+                name,
+                "/bin/pwd" | "/usr/bin/pwd" | "/bin/printf" | "/usr/bin/printf"
+            ) && crate::executor::path::literal_executable_file(name, &self.shell_state.env_vars);
+        if emulated
+            && !literal_file_declines
+            && self.apply_redirect_setup_side_effects_retained(cmd)?
+        {
             self.record_emulated_command_resolution(name, emulated);
             return Ok(true);
         }
@@ -177,7 +199,27 @@ impl Executor {
             #[cfg(windows)]
             "tput" | "/bin/tput" | "/usr/bin/tput" => self.external_tput(cmd),
             _ => Ok(false),
-        }?;
+        };
+        // GNU: every arm above stands in for a forked disk child
+        // (execute_cmd.c:5522 execute_disk_command), so an output write
+        // that meets a pipe with no readers is the child's SIGPIPE
+        // death — the forked child resets SIGPIPE to SIG_DFL
+        // (execute_cmd.c:1670 -> trap.c:1480 reset_signal_handlers) and
+        // dies silently with status 141, the wait status the parent
+        // records. It is NOT the main shell's write failure — only a
+        // shell's own write stays SIG_IGN and reports `Broken pipe'
+        // with status 1 (rubash#440) — so the emulation converts the
+        // EPIPE-class error into the child's verdict: status 141, no
+        // diagnostic, the list continues (rubash#3475 platform debt).
+        let handled = match handled {
+            Err(ExecuteError::IoError(error))
+                if super::shell_options::is_broken_pipe_error(&error) =>
+            {
+                self.exit_code = 141;
+                true
+            }
+            other => other?,
+        };
         // rubash#2518: only an ANSWERED invocation may record — the
         // emulation stood in for the PATH binary the way GNU's single
         // search_for_command would have resolved it. A decline (Ok(false))
@@ -1658,7 +1700,7 @@ impl Executor {
                     status = 1;
                     let _ = writeln!(
                         stderr,
-                        "cp: cannot create '{}': {}",
+                        "cp: cannot create regular file '{}': {}",
                         target_node.display_path().display(),
                         crate::posix_errors::message(&error)
                     );
@@ -1774,7 +1816,7 @@ impl Executor {
                                 Err(error) => {
                                     let _ = writeln!(
                                         stderr,
-                                        "cp: cannot create '{}': {}",
+                                        "cp: cannot create regular file '{}': {}",
                                         target.display_path().display(),
                                         crate::posix_errors::message(&error)
                                     );
@@ -1890,9 +1932,18 @@ impl Executor {
                         }
                     }
                     Err(error) => {
+                        // GNU coreutils copy.c copy_internal names the
+                        // kind it failed to create: `cannot create
+                        // regular file` for plain targets, `cannot
+                        // create directory` for the tree branch.
+                        let kind = if source.is_dir() {
+                            "directory"
+                        } else {
+                            "regular file"
+                        };
                         let _ = writeln!(
                             stderr,
-                            "cp: cannot create '{}': {}",
+                            "cp: cannot create {kind} '{}': {}",
                             target.display_path().display(),
                             crate::posix_errors::message(&error)
                         );
@@ -2261,6 +2312,11 @@ impl Executor {
             CatParsed::Options { options, operands } => (options, operands),
         };
         let (options, operands) = parsed;
+        // GNU shell_execve (execute_cmd.c) hands execve the command word
+        // as typed for argv[0], and coreutils' program_name prints it —
+        // `/bin/cat` diagnostics carry `/bin/cat:`, `cat` carries `cat:`
+        // (rubash#3315).
+        let prog = cmd.words.first().map(String::as_str).unwrap_or("cat");
         let filter = |data: &[u8]| -> Vec<u8> { cat_format(data, &options) };
         if let Some(redirect) = &cmd.redirect_in {
             if redirect.fd.unwrap_or(0) == 0 {
@@ -2439,7 +2495,7 @@ impl Executor {
                             // and continues with the next operand
                             // (cat.c).
                             if let Some(message) = self.fd_table.read_error.take() {
-                                writeln!(&mut diagnostics, "cat: -: {message}")?;
+                                writeln!(&mut diagnostics, "{prog}: -: {message}")?;
                                 status = 1;
                             }
                         }
@@ -2501,7 +2557,7 @@ impl Executor {
                             // every cat diagnostic (rubash#1596).
                             writeln!(
                                 &mut diagnostics,
-                                "cat: {}: input file is output file",
+                                "{prog}: {}: input file is output file",
                                 target
                             )?;
                             status = 1;
@@ -2521,7 +2577,7 @@ impl Executor {
                                     Some(error) => crate::posix_errors::message(&error),
                                     None => "No such file or directory".to_string(),
                                 };
-                            writeln!(&mut diagnostics, "cat: {}: {}", target, reason)?;
+                            writeln!(&mut diagnostics, "{prog}: {}: {}", target, reason)?;
                             status = 1;
                         }
                     }
@@ -2554,7 +2610,7 @@ impl Executor {
                             // reserved-name to ENOENT inference).
                             writeln!(
                                 &mut diagnostics,
-                                "cat: {}: {}",
+                                "{prog}: {}: {}",
                                 super::command_substitution::gnu_cat_quoted_operand(&target),
                                 crate::posix_errors::path_strerror(&target, &error)
                             )?;
@@ -2603,7 +2659,7 @@ impl Executor {
                         Err(error) => {
                             writeln!(
                                 &mut diagnostics,
-                                "cat: {}: {}",
+                                "{prog}: {}: {}",
                                 target,
                                 crate::posix_errors::message(&error)
                             )?;
@@ -2644,7 +2700,7 @@ impl Executor {
                         // lookup failure it stands in for.
                         writeln!(
                             &mut diagnostics,
-                            "cat: {}: {}",
+                            "{prog}: {}: {}",
                             super::command_substitution::gnu_cat_quoted_operand(&target),
                             crate::posix_errors::path_strerror(&target, &error)
                         )?;
@@ -2687,6 +2743,21 @@ impl Executor {
             return Ok(true);
         }
 
+        // rubash#3792: no operands and fd 0 is a `<&N` dup of a
+        // write-only fd — GNU cat's read fails EBADF. The text
+        // channel declined above (it serves no bytes for a dup of a
+        // write-only description), and the plain-stdin fall-through
+        // below would otherwise read the pipe/process stdin or
+        // decline to a spawn that no longer exists on this path.
+        // The check sits beside the closed-stdin check, before any
+        // stdin serve, so a pipeline stage's FUNCTION_STDIN never
+        // pre-empts it.
+        if self.cat_stdin_write_only_dup_source(cmd).is_some() {
+            self.report_cat_write_only_dup_stdin(cmd)?;
+            self.exit_code = 1;
+            return Ok(true);
+        }
+
         if let Some(input) = self.stdin_string_for_command_mut(cmd) {
             self.write_cat_output(
                 cmd,
@@ -2724,7 +2795,7 @@ impl Executor {
                         // exit 0 on the empty read.
                         if let Some(message) = self.fd_table.read_error.take() {
                             let mut stderr = Vec::new();
-                            writeln!(&mut stderr, "cat: -: {message}")?;
+                            writeln!(&mut stderr, "{prog}: -: {message}")?;
                             self.write_buffered_builtin_output(cmd, &filter(&bytes), &stderr)?;
                             self.exit_code = 1;
                             return Ok(true);
@@ -2790,6 +2861,54 @@ impl Executor {
         self.fd_table.is_closed(0)
     }
 
+    /// rubash#3792: the fd-0 stdin winner is a `<&N` dup of a fd that is
+    /// open WRITE-only (no read endpoint, but a live write endpoint —
+    /// `exec 3>f`). GNU dup2'd that descriptor onto fd 0 (redir.c:1193),
+    /// so cat's own reads fail EBADF. Only the dup SPELLING counts: an
+    /// fd-alias path spelling (`< /dev/fd/N`) is an open over the alias
+    /// layer (#1963) and reads the target fine. An in-list source
+    /// (`cmd 3>f1 <&3`) is not covered — the ambient table holds no
+    /// binding for it yet; see REPORT.
+    fn cat_stdin_write_only_dup_source(&self, cmd: &CommandNode) -> Option<u32> {
+        if let Some(winner) = super::shell_options::fd0_stdin_redirect_winner(cmd) {
+            if !matches!(winner, crate::parser::RedirectKind::DuplicateInput) {
+                return None;
+            }
+        }
+        let redirect = cmd.redirect_in.as_ref()?;
+        if redirect.fd.unwrap_or(0) != 0
+            || !matches!(redirect.kind, crate::parser::RedirectKind::DuplicateInput)
+        {
+            return None;
+        }
+        let target = self.expand_redirect_target(redirect);
+        if !target.starts_with('&') {
+            return None;
+        }
+        let (source, _) = crate::executor::execution_misc::redirect_target_fd_and_move(&target)?;
+        if self.fd_table.read_endpoint(source).is_some() {
+            return None;
+        }
+        if self.fd_table.write_endpoint(source).is_some() {
+            return Some(source);
+        }
+        None
+    }
+
+    /// GNU coreutils cat on a dup'd write-only stdin (cat.c): the read
+    /// fails EBADF and cat reports exactly ONE line. The close of
+    /// standard input succeeds on a write-only descriptor, unlike the
+    /// closed-stdin face below, whose failing close earns a second
+    /// line. The line is cat's OWN stderr, written bare (rubash#1596 /
+    /// rubash#1309: no shell envelope).
+    fn report_cat_write_only_dup_stdin(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
+        let prog = cmd.words.first().map(String::as_str).unwrap_or("cat");
+        let mut stderr = Vec::new();
+        writeln!(&mut stderr, "{prog}: -: Bad file descriptor")?;
+        self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+        Ok(())
+    }
+
     /// GNU coreutils cat on a closed stdin (cat.c): the read fails and the
     /// close of standard input fails too — two diagnostics, and the caller
     /// sets exit status 1. The lines are cat's OWN stderr, written bare:
@@ -2797,11 +2916,13 @@ impl Executor {
     /// `script: line N:` envelope (rubash#1596; the same convention
     /// rubash#1309 established for cat's operand errors).
     fn report_cat_closed_stdin(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
+        // Same argv[0] rule as external_cat (rubash#3315).
+        let prog = cmd.words.first().map(String::as_str).unwrap_or("cat");
         let mut stderr = Vec::new();
-        writeln!(&mut stderr, "cat: -: Bad file descriptor")?;
+        writeln!(&mut stderr, "{prog}: -: Bad file descriptor")?;
         writeln!(
             &mut stderr,
-            "cat: closing standard input: Bad file descriptor"
+            "{prog}: closing standard input: Bad file descriptor"
         )?;
         self.write_buffered_builtin_output(cmd, &[], &stderr)?;
         Ok(())
@@ -2814,6 +2935,18 @@ impl Executor {
         use std::io::Read;
         if let Some(input) = self.stdin_string_for_command_mut(cmd) {
             return crate::executor::substitution_metadata::shell_text_to_raw_bytes(&input);
+        }
+        // rubash#3792: the `-' operand's stdin is a `<&N` dup of a
+        // write-only fd — the text channel declined above (the dup
+        // serves no bytes; its reads fail EBADF), and fd 0 was never
+        // rebound, so the fall-throughs below would hand back an
+        // empty stream and exit 0. Record the hard read error the
+        // #2101 face already reports for the `-' operand
+        // (`{prog}: -: ...`, status 1); the caller takes it from
+        // fd_table.read_error.
+        if self.cat_stdin_write_only_dup_source(cmd).is_some() {
+            self.fd_table.read_error = Some("Bad file descriptor".to_string());
+            return Vec::new();
         }
         if !matches!(
             self.fd_table.read_endpoint(0),
@@ -4946,6 +5079,48 @@ impl CpNode {
             }
         }
     }
+
+    /// rubash#3448: the fallible twin of `set_mode_bits` — chmod's
+    /// apply arm needs the failure, not a swallowed one. Under a
+    /// dead cwd the node's stat succeeds through the anchor while
+    /// the joined string path dies ENOENT at the dead component,
+    /// so the apply must go through the node (fchmodat for an At
+    /// node, std::fs::set_permissions for a Plain node) and the
+    /// caller renders the raw errno — the fts verdict GNU reports
+    /// (coreutils 9.4 src/chmod.c:231).
+    #[cfg(unix)]
+    pub(in crate::executor) fn set_mode_bits_checked(&self, mode: u32) -> io::Result<()> {
+        match &self.root {
+            CpRoot::Plain(_) => {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(self.eff_path(), fs::Permissions::from_mode(mode & 0o7777))
+            }
+            CpRoot::At { dir, .. } => {
+                use std::os::unix::io::AsRawFd;
+                let rel = self.at_rel();
+                let c_rel =
+                    std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(rel.as_os_str()))
+                        .map_err(|_| {
+                            io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte")
+                        })?;
+                // SAFETY: see cp_fstatat; fchmodat takes no
+                // descriptor. Flags 0 follows links, as chmod
+                // does.
+                let rc = unsafe {
+                    libc::fchmodat(
+                        dir.as_raw_fd(),
+                        c_rel.as_ptr(),
+                        (mode & 0o7777) as libc::mode_t,
+                        0,
+                    )
+                };
+                if rc != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 /// Copy one regular file, honoring --preserve=links: a source inode
@@ -5814,24 +5989,31 @@ impl Executor {
                 // G-02: relative operands anchor at the session cwd.
                 self.shell_state.cwd.join(&windows)
             };
+            // rubash#3425: route the operand stat through the CpNode
+            // machinery — the same root external_cp builds
+            // (cp_operand_root: an anchor-relative root under a
+            // dead cwd, else the plain joined path) — so the
+            // failure class comes from the path walk instead of a
+            // hardcoded ENOENT text. GNU chmod reports fts's errno
+            // verbatim (coreutils 9.4 src/chmod.c:231 `cannot
+            // access` with ent->fts_errno): the walk dies ENOTDIR
+            // at the first non-directory component.
+            let node = CpNode::at_root(self.cp_operand_root(std::path::Path::new(&windows), &host));
             // Base mode for symbolic clauses: unix reads the file's real
             // inode mode (coreutils chmod(1) applies `+x`/`-w` clauses to
             // the file's current mode via chmod(2)); windows keeps the
             // emulated store, which is the only mode source there.
             #[cfg(unix)]
             let (base, is_dir) = {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::metadata(&host)
-                    .map(|metadata| (metadata.permissions().mode(), metadata.is_dir()))
+                node.stat()
+                    .map(|stat| (stat.mode, stat.is_dir))
                     .unwrap_or((0o644, false))
             };
             #[cfg(not(unix))]
             let base = crate::builtins::test::emulated_file_mode(file, &self.shell_state.env_vars)
                 .unwrap_or_else(|| self.default_emulated_mode(&windows));
             #[cfg(not(unix))]
-            let is_dir = std::fs::metadata(&host)
-                .map(|metadata| metadata.is_dir())
-                .unwrap_or(false);
+            let is_dir = node.stat().map(|stat| stat.is_dir).unwrap_or(false);
             match apply_chmod_mode(
                 base,
                 mode,
@@ -5839,27 +6021,48 @@ impl Executor {
                 is_dir,
             ) {
                 Some(new_mode) => {
+                    // rubash#3425: the operand stat is the node's
+                    // classified stat: a walk that dies at a
+                    // non-directory component reports ENOTDIR, a
+                    // genuinely missing component ENOENT — the same
+                    // verdict #3416 built for cp, generalized here
+                    // to the plain host path via the node machinery.
+                    let classified = node.stat_classified();
                     #[cfg(unix)]
                     {
                         // coreutils chmod(1) -> chmod(2): the real inode mode
                         // is the single source of truth on unix; the readonly
                         // attribute + emulated store below is the Windows
                         // port (no POSIX mode bits there).
-                        match std::fs::metadata(&host) {
-                            Ok(metadata) => {
-                                use std::os::unix::fs::PermissionsExt;
-                                let mut permissions = metadata.permissions();
-                                permissions.set_mode(new_mode);
-                                if std::fs::set_permissions(&host, permissions).is_err() {
+                        //
+                        // rubash#3448: the apply itself must go through
+                        // the node, not the joined string path: under a
+                        // dead cwd the node's stat succeeds through the
+                        // anchor while `metadata(&host)` /
+                        // `set_permissions(&host)` die ENOENT on the
+                        // dead component, so the mode never landed even
+                        // though the classification was right. fchmodat
+                        // against the anchor is the walk GNU's forked
+                        // child gets.
+                        match classified {
+                            Ok(_) => {
+                                if let Err(error) = node.set_mode_bits_checked(new_mode) {
                                     failures += 1;
+                                    writeln!(
+                                        stderr,
+                                        "chmod: cannot access '{}': {}",
+                                        file,
+                                        crate::posix_errors::message(&error)
+                                    )?;
                                 }
                             }
-                            Err(_) => {
+                            Err(error) => {
                                 failures += 1;
                                 writeln!(
                                     stderr,
-                                    "chmod: cannot access '{}': No such file or directory",
-                                    file
+                                    "chmod: cannot access '{}': {}",
+                                    file,
+                                    crate::posix_errors::message(&error)
                                 )?;
                             }
                         }
@@ -5871,23 +6074,38 @@ impl Executor {
                         // attribute, so `>file`/`>>file` fail EACCES like under
                         // GNU-on-WSL (redir12.sub). Sync it for every real path —
                         // relative names resolve against the drive-relative cwd.
-                        match std::fs::metadata(&host) {
-                            Ok(metadata) => {
-                                let readonly = new_mode & 0o222 == 0;
-                                let mut permissions = metadata.permissions();
-                                if permissions.readonly() != readonly {
-                                    permissions.set_readonly(readonly);
-                                    if std::fs::set_permissions(&host, permissions).is_err() {
-                                        failures += 1;
+                        match classified {
+                            Ok(_) => match std::fs::metadata(&host) {
+                                Ok(metadata) => {
+                                    let readonly = new_mode & 0o222 == 0;
+                                    let mut permissions = metadata.permissions();
+                                    if permissions.readonly() != readonly {
+                                        permissions.set_readonly(readonly);
+                                        if std::fs::set_permissions(&host, permissions).is_err() {
+                                            failures += 1;
+                                        }
                                     }
                                 }
-                            }
-                            Err(_) => {
+                                Err(raw) => {
+                                    // The node stat just succeeded
+                                    // (a race): keep the raw verdict,
+                                    // unclassified.
+                                    failures += 1;
+                                    writeln!(
+                                        stderr,
+                                        "chmod: cannot access '{}': {}",
+                                        file,
+                                        crate::posix_errors::message(&raw)
+                                    )?;
+                                }
+                            },
+                            Err(error) => {
                                 failures += 1;
                                 writeln!(
                                     stderr,
-                                    "chmod: cannot access '{}': No such file or directory",
-                                    file
+                                    "chmod: cannot access '{}': {}",
+                                    file,
+                                    crate::posix_errors::message(&error)
                                 )?;
                             }
                         }

@@ -256,9 +256,61 @@ pub fn locale_name_selects_utf8(name: &str) -> bool {
         return false;
     }
     if !is_utf8_locale_name(name) {
+        // locale.c set_locale_var is STATEFUL: a setlocale() failure
+        // leaves the previously effective locale in force — an
+        // un-activatable non-UTF-8 name (zh_TW.big5 on a box without
+        // the big5 archive) does NOT switch semantics to bytes; the
+        // still-effective locale decides ($'\u3b1' still decodes to
+        // α under a surviving UTF-8 locale — glob2.sub). Only a name
+        // the C library actually activates imposes its own charset.
+        if !locale_activatable(name) {
+            return effective_locale_selects_utf8();
+        }
         return false;
     }
-    utf8_locale_active(name)
+    // Same stateful fallback for an un-activatable UTF-8 name:
+    // setlocale() failing keeps the previous locale, which may itself
+    // be UTF-8 — only then does UTF-8 stay selected.
+    utf8_locale_active(name) || effective_locale_selects_utf8()
+}
+
+/// Whether the C library can activate `name` at all. Same probe as
+/// `utf8_locale_active`'s setlocale attempt, generalized past the
+/// UTF-8-name callers: setlocale returns NULL for a name with no
+/// compiled archive, and the previous locale survives — the fact this
+/// predicate exists to expose.
+#[cfg(unix)]
+fn locale_activatable(name: &str) -> bool {
+    probe_utf8_locale(name)
+}
+
+#[cfg(not(unix))]
+fn locale_activatable(_name: &str) -> bool {
+    // The Windows CRT has no compiled locale archive to reject a name
+    // (see utf8_locale_active).
+    true
+}
+
+/// The charset of the locale the C library currently has in force —
+/// what a failed setlocale attempt leaves behind (nl_langinfo CODESET).
+/// Android's libc crate exposes neither nl_langinfo nor CODESET, so it
+/// keeps the requested-name model like the non-Unix fallback.
+#[cfg(all(unix, not(target_os = "android")))]
+fn effective_locale_selects_utf8() -> bool {
+    unsafe {
+        let codeset = libc::nl_langinfo(libc::CODESET);
+        if codeset.is_null() {
+            return false;
+        }
+        std::ffi::CStr::from_ptr(codeset).to_string_lossy() == "UTF-8"
+    }
+}
+
+#[cfg(any(not(unix), target_os = "android"))]
+fn effective_locale_selects_utf8() -> bool {
+    // Windows keeps the requested-name model (utf8_locale_active);
+    // Android has no nl_langinfo binding in the libc crate.
+    false
 }
 
 /// GNU/MBCS view of the same decision: multibyte mode is on when
@@ -542,6 +594,20 @@ pub fn simple_case_lower(ch: char) -> char {
         (Some(lower), None) => lower,
         _ => ch,
     }
+}
+
+/// Whole-string form of [`simple_case_upper`]: GNU sh_modcase
+/// (lib/sh/casemod.c) maps each character through the locale's
+/// towupper, so a bind-time case conversion (variables.c:2970-2986
+/// make_variable_value) is a per-character simple mapping, never
+/// Rust's `str::to_uppercase` full mapping (rubash#3790).
+pub fn simple_uppercase(value: &str) -> String {
+    value.chars().map(simple_case_upper).collect()
+}
+
+/// Whole-string form of [`simple_case_lower`] (rubash#3790).
+pub fn simple_lowercase(value: &str) -> String {
+    value.chars().map(simple_case_lower).collect()
 }
 
 /// Byte offsets of the GNU multibyte character boundaries in `bytes`.
@@ -1047,6 +1113,11 @@ pub fn init_locale() {
 /// | `U+E31A` | COMPOUND_ASSIGNMENT_MARKER (compound assignment tag;
 /// whitelisted carrier — the interactive line-editing boundary delivers
 /// it inside pre-execution AST words, #802) | nothing |
+/// | `U+E31B` | QUOTED_EXPANSION_SITE (quoted expansion-site verdict;
+/// a bare occurrence is protocol — the walkers consume it on sight, and
+/// the only text that still carries it at a decode boundary is a
+/// diagnostic word recorded pre-walk, rubash#3433 — while an E400-escaped
+/// occurrence is user data, restored by the E400 arm below) | nothing |
 /// | `__RUBASH_CA1__`/`__RUBASH_HD1__`/`__RUBASH_CSB1_` | the retired
 /// (pre-#1634) ASCII compound-assignment prefix, QUOTED_HEREDOC_MARKER
 /// and the retired (pre-#840) ASCII comsub payload prefix — the live
@@ -1143,6 +1214,7 @@ pub fn decode_to_visible_text(text: &str) -> String {
             | PARAM_NAME_END_MARKER
             | QUOTED_NULL_MARKER
             | crate::executor::markers::COMPOUND_ASSIGNMENT_MARKER_CHAR
+            | crate::executor::markers::QUOTED_EXPANSION_SITE
             | COMPOUND_EXPANSION_WS_TAG
             | crate::executor::markers::QUOTED_WORD_PREFIX
             | crate::executor::markers::IFS_GLUE
@@ -1983,6 +2055,30 @@ mod tests {
         assert_eq!(super::decode_to_visible_text("a\u{E308}b"), "a\\b");
         // Old DATA_* codepoints are plain byte-chars now: E101 = byte 0x01.
         assert_eq!(super::decode_to_visible_text("a\u{e101}b"), "a\u{1}b");
+    }
+
+    #[test]
+    fn decode_to_visible_text_drops_quoted_expansion_site() {
+        // rubash#3433: a bare QUOTED_EXPANSION_SITE (U+E31B) is protocol —
+        // the walkers consume it on sight, so the only text that still
+        // carries it at a decode boundary is a diagnostic word recorded
+        // pre-walk (bad_substitution_display) — and the decoder drops it,
+        // the same treatment as the sibling U+E31A marker.
+        // The site char is spelled via the registry const: the marker
+        // lint forbids raw U+E31B literals outside markers.rs.
+        let site = crate::executor::markers::QUOTED_EXPANSION_SITE;
+        assert_eq!(super::decode_to_visible_text(&format!("a{site}b")), "ab");
+        assert_eq!(
+            super::decode_to_visible_text(&format!("a{site}${{-x}}")),
+            "a${-x}"
+        );
+        // An E400-escaped occurrence is user data (push_literal_char) and
+        // must still round-trip: the E400 arm above restores it before the
+        // drop arm can see it.
+        assert_eq!(
+            super::decode_to_visible_text(&format!("a\u{E400}{site}b")),
+            format!("a{site}b")
+        );
     }
 
     #[test]

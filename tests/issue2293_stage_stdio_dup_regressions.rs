@@ -31,13 +31,19 @@
 //! probes in the cluster workdir, probes/q3, probes/r2 and the
 //! v_last_* cells).
 
+#[cfg(unix)]
 use std::io::Write;
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::{Command, Stdio};
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
 const RUBASH: &str = env!("CARGO_BIN_EXE_rubash");
 
+#[cfg(unix)]
 fn test_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("rubash-issue2293-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -47,6 +53,7 @@ fn test_dir(tag: &str) -> PathBuf {
     dir
 }
 
+#[cfg(unix)]
 fn rubash_stdin(script: &str) -> (String, String, Option<i32>) {
     let mut child = Command::new(RUBASH)
         .stdin(Stdio::piped())
@@ -82,6 +89,7 @@ fn rubash_stdin(script: &str) -> (String, String, Option<i32>) {
 }
 
 /// Run `body` as a script inside `dir` (seed.txt/seed2.txt there).
+#[cfg(unix)]
 fn run_in(dir: &Path, body: &str) -> (String, String, Option<i32>) {
     rubash_stdin(&format!("cd {} || exit 1\n{body}", dir.display()))
 }
@@ -89,6 +97,7 @@ fn run_in(dir: &Path, body: &str) -> (String, String, Option<i32>) {
 /// Run `script` with the shell's own stdin bound to `stdin_file`:
 /// the ambient-stdin witness for the fd-0 rebound pin (the buggy
 /// delivery read the ambient file instead of the stage payload).
+#[cfg(unix)]
 fn rubash_in_stdin_file(
     dir: &Path,
     script: &str,
@@ -110,6 +119,7 @@ fn rubash_in_stdin_file(
 }
 
 /// Poll until `path` has exactly `expected` contents or the deadline.
+#[cfg(unix)]
 fn wait_file_contents(path: &Path, expected: &str) -> bool {
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {

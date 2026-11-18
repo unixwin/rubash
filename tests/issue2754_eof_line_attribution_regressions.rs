@@ -111,11 +111,13 @@ fn issue2754_three_stage_dangling_pipeline() {
 #[test]
 fn issue2754_dangling_andor_dash_c() {
     let run = run_c("echo a &&");
-    assert_run(
-        "andor-c",
-        &run,
-        "",
-        "bash: -c: line 2: syntax error: unexpected end of file\n",
-        2,
+    // The diagnostic prefix is the shell's invocation name (GNU
+    // `shell_name`, taken from argv[0]; error.c prints it verbatim), so the
+    // expected line is built from the very binary path the harness invokes
+    // — never a hardcoded `bash:` (rubash#3111).
+    let expected = format!(
+        "{}: -c: line 2: syntax error: unexpected end of file\n",
+        env!("CARGO_BIN_EXE_rubash")
     );
+    assert_run("andor-c", &run, "", &expected, 2);
 }

@@ -88,6 +88,41 @@ fn run_stdin(script: &str, stdin: &[u8]) -> (Vec<u8>, String, Option<i32>) {
     )
 }
 
+/// `run_c` with an explicit locale. The multibyte nail below must run in
+/// a UTF-8 locale whatever the ambient test-process locale is: rubash#3785
+/// made `-n` count bytes in a single-byte locale, so under `LC_ALL=C`
+/// `-n 2` over `éZ` takes just `é` (GNU byte counting,
+/// builtins/read.def:851,874,880-886), and the nail's expectation
+/// (`é` + `Z`) is only valid where one character is one unit.
+fn run_c_locale(script: &str, locale: &str) -> (Vec<u8>, String, Option<i32>) {
+    let sandbox = scratch_dir();
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg(script)
+        .current_dir(&sandbox)
+        .env("LC_ALL", locale)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run rubash");
+    let _ = std::fs::remove_dir_all(&sandbox);
+    (
+        output.stdout,
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+        output.status.code(),
+    )
+}
+
+/// `piped_read` under an explicit locale (see `run_c_locale`).
+fn piped_read_locale(producer: &str, read_args: &str, locale: &str) -> Vec<u8> {
+    let script = format!("printf '{producer}' | {{ read {read_args} c; printf %s \"$c\"; }}");
+    let (stdout, stderr, rc) = run_c_locale(&script, locale);
+    assert_eq!(rc, Some(0), "rc for {script:?}; stderr: {stderr:?}");
+    assert_eq!(stderr, "", "stderr for {script:?}");
+    stdout
+}
+
 /// `printf '<producer>' | { read <read_args> c; printf %s "$c"; }` — the
 /// second stage's `read` is served from the upstream stage's FUNCTION_STDIN
 /// carrier mirror. `producer` keeps printf's `\0NN` octal escapes verbatim.
@@ -154,10 +189,20 @@ fn read_n_plain_ascii_count_unchanged() {
 }
 
 /// A true multibyte character is still one unit: `é` (`c3 a9`) + `Z`, `-n 2`.
+/// Pinned to a UTF-8 locale: this nail asserts multibyte counting, and the
+/// ambient test-process locale must not decide the outcome (on a machine
+/// whose test runner carries no locale, the child runs in the C locale,
+/// where rubash#3785 byte counting takes just `é` for `-n 2`).
 #[test]
 fn read_n_multibyte_char_count_unchanged() {
-    assert_eq!(piped_read(r"\303\251Z", "-n2"), vec![0xc3, 0xa9, 0x5a]);
-    assert_eq!(piped_read(r"\303\251Z", "-n1"), vec![0xc3, 0xa9]);
+    assert_eq!(
+        piped_read_locale(r"\303\251Z", "-n2", "C.utf8"),
+        vec![0xc3, 0xa9, 0x5a]
+    );
+    assert_eq!(
+        piped_read_locale(r"\303\251Z", "-n1", "C.utf8"),
+        vec![0xc3, 0xa9]
+    );
 }
 
 /// The issue's outer-pipe shape: the shell's own fd 0 is the pipe.

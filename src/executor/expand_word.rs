@@ -406,6 +406,25 @@ impl Executor {
         // word the carrier path IS the expansion; return it verbatim.
         if operand_is_procsub(&redirect.target) || operand_is_procsub(&redirect.target_metadata.raw)
         {
+            // rubash#3808: a bare process-substitution operand expands to
+            // exactly ONE field — GNU redir.c:296-333 redirection_expand
+            // returns NULL (the AMBIGUOUS_REDIRECT condition) only for
+            // zero or several fields, and expand_word_internal's `<`/`>`
+            // cases (subst.c:11364-11391) extract the substitution whole
+            // (extract_process_subst, subst.c:1311) and splice the single
+            // /dev/fd/N filename in, so the body's characters are never
+            // this word's expansion introducers: a `{ ...; }` group body's
+            // `{` is a compound-command opener, not a brace-expansion
+            // candidate. Record the single-field verdict here (the #3089
+            // memo both ambiguity gates consult) so the textual gate
+            // below never misreads the body's `{` as a multi-field
+            // expansion — the subshell-list body passed only because it
+            // carries no such character, while the group body was
+            // rejected as ambiguous.
+            self.redirect_target_memo.borrow_mut().insert(
+                Self::redirect_target_field_memo_key(redirect, true),
+                String::new(),
+            );
             // rubash#394: while a compound command whose target IS a
             // process substitution is in scope, the substitution's carrier
             // path stands in for the text — the compound fd-table walk runs
@@ -869,6 +888,28 @@ impl Executor {
         }
     }
 
+    /// One-shot gate for the `bad substitution` diagnostic (rubash#3499):
+    /// returns true only for the first report in the current latch
+    /// lifetime. GNU subst.c:10277-10288 reports the FIRST expansion
+    /// failure of a word list and abandons the rest, so a word (or
+    /// pipeline element) expanded on several paths — the stage scan
+    /// plus the dispatch arms, a speculative concurrent attempt plus
+    /// the sequential re-expansion, the compound stage's assignment
+    /// pre-pass plus its subshell execution — must print the
+    /// diagnostic exactly once. The verdict latch
+    /// (`parameter_bad_substitution`) still sets at every site; only
+    /// the print is deduplicated. The budget clears wherever the
+    /// verdict is consumed (abort_on_expansion_errors, the assignment
+    /// loop, the pipeline stage harvest, command-substitution
+    /// boundaries) and rides the save/restore brackets that keep a
+    /// read-side walk transparent, so a spent budget can neither
+    /// suppress a later command's diagnostic nor re-print inside one
+    /// command's expansion. Same shape as the arithmetic print latch
+    /// (`arithmetic_expansion_error.replace(true)`).
+    pub(in crate::executor) fn bad_substitution_report_first(&self) -> bool {
+        !self.shell_state.bad_substitution_reported.replace(true)
+    }
+
     pub(crate) fn expand_word(&self, word: &str) -> String {
         let _xpass = crate::executor::expand_braced_indices::SubXpassFrame::new();
         let _wctx = crate::executor::expand_braced_indices::WordCtxGuard::new_if_absent();
@@ -1051,14 +1092,19 @@ impl Executor {
         // alternate word reaches expansion only when that word is actually
         // evaluated (`${x-${'x1'%'t'}}` with x set is silent in GNU).
         if braced_name_ends_on_quote(name) {
-            self.write_diagnostic_fd2(
-                format!(
-                    "{}{}: bad substitution\n",
-                    self.diagnostic_prefix(),
-                    bad_substitution_display(&diagnostic_word)
-                )
-                .as_bytes(),
-            );
+            // rubash#3499: one diagnostic per latch lifetime — a word
+            // re-expanded on the stage scan, the dispatch arms, or a
+            // speculative attempt must not print again.
+            if self.bad_substitution_report_first() {
+                self.write_diagnostic_fd2(
+                    format!(
+                        "{}{}: bad substitution\n",
+                        self.diagnostic_prefix(),
+                        bad_substitution_display(&diagnostic_word)
+                    )
+                    .as_bytes(),
+                );
+            }
             self.shell_state.parameter_bad_substitution.set(true);
             return String::new();
         }
@@ -1070,14 +1116,18 @@ impl Executor {
         // a bad name nested in an unevaluated word (`${x:-${(M)y}}` with x
         // set) stays silent, matching GNU's lazy expansion.
         if braced_name_is_bad_substitution(name) {
-            self.write_diagnostic_fd2(
-                format!(
-                    "{}{}: bad substitution\n",
-                    self.diagnostic_prefix(),
-                    bad_substitution_display(&diagnostic_word)
-                )
-                .as_bytes(),
-            );
+            // rubash#3499: one diagnostic per latch lifetime (see
+            // bad_substitution_report_first).
+            if self.bad_substitution_report_first() {
+                self.write_diagnostic_fd2(
+                    format!(
+                        "{}{}: bad substitution\n",
+                        self.diagnostic_prefix(),
+                        bad_substitution_display(&diagnostic_word)
+                    )
+                    .as_bytes(),
+                );
+            }
             self.shell_state.parameter_bad_substitution.set(true);
             return String::new();
         }
@@ -1125,7 +1175,15 @@ impl Executor {
             return value;
         }
 
-        if let Some(value) = self.expand_braced_pattern_or_transform_parameter(name) {
+        // rubash#3581: the `${}` fragment's recorded quote context
+        // (EXTQUOTE_NAME_QUOTED_CONTEXT: `in_double || double_quoted ||
+        // heredoc` at the embedded-walker dispatch sites) is what GNU's
+        // `quoted` flag means for the `#`/`%` silent gate — a quoted or
+        // heredoc-context list subject keeps QUOTED_NULL and diagnoses
+        // where the unquoted joined "" stays silent.
+        if let Some(value) =
+            self.expand_braced_pattern_or_transform_parameter(name, extquote_name_quoted_context())
+        {
             return value;
         }
 
@@ -1215,6 +1273,23 @@ impl Executor {
         // expand_word_mut_with_context); expanding the name portion here
         // applied side effects for words that are not assignments at all.
         let (name, value) = split_assignment_word(word)?;
+        // rubash#3441 (F1): mirror the mut path's split arm
+        // (parameter_core.rs): this arm splits the word at `=` and expands
+        // the RHS as its own word, so record the whole word for the RHS
+        // expansion — GNU subst.c:10278 names the whole word
+        // expand_word_internal was expanding, and the walker's `${` arm
+        // keeps an already-recorded enclosing word (install-if-absent).
+        // Compound values are excluded, as there: GNU names the ELEMENT
+        // word there (`[0]=${-x}` for `a=([0]=${-x})`), which needs
+        // element-boundary tracking of its own. Quoted values are excluded
+        // too, as there: the word carries the QUOTED_ASSIGNMENT_VALUE
+        // transport byte after `=`, which must never reach a diagnostic.
+        if value.starts_with(COMPOUND_ASSIGNMENT_MARKER)
+            || value.starts_with(tilde_expand::QUOTED_ASSIGNMENT_VALUE)
+        {
+            return Some(self.expand_plain_assignment_word(name, value));
+        }
+        let _diag_word = PendingDiagnosticWordGuard::new(word);
         Some(self.expand_plain_assignment_word(name, value))
     }
 
@@ -1260,8 +1335,11 @@ impl Executor {
                 let marker = COMPOUND_ASSIGNMENT_MARKER.to_string();
                 return format!("{name}={marker}{expanded}");
             }
-            if let Some(expanded) = self.expand_compound_positional_at_assignment(raw_value, quoted)
-            {
+            if let Some(expanded) = self.expand_compound_positional_at_assignment(
+                raw_value,
+                quoted,
+                self.compound_assignment_is_assoc(name),
+            ) {
                 let marker = COMPOUND_ASSIGNMENT_MARKER.to_string();
                 return format!("{name}={marker}{expanded}");
             }
@@ -1344,6 +1422,25 @@ impl Executor {
                 crate::executor::expand_braced_indices::env_vars_with_pending_subscript_writes(
                     &self.shell_state.env_vars,
                 );
+            // rubash#2701 — a `${x:?word}` inside `$((...))` text is a
+            // parameter-expansion error in the same class as anywhere
+            // else (subst.c:10347 case '?' -> 10414/10418
+            // parameter_brace_expand_error -> expand_wdesc_fatal ->
+            // FORCE_EOF). The word pre-scan skips `$((` units as
+            // arith-owned (rubash#533), so scan the arith text at its
+            // own expansion boundary; the nounset latch carries the
+            // same fatal class as the unbound-variable arm below.
+            if let Some((name, message, _)) =
+                self.parameter_expansion_error_in_word_isolated(&expression)
+            {
+                if !self.shell_state.arithmetic_expansion_error.replace(true) {
+                    self.write_diagnostic_fd2(
+                        format!("{}{}: {}\n", self.error_prefix(), name, message).as_bytes(),
+                    );
+                }
+                self.shell_state.arithmetic_nounset_error.set(true);
+                return Some(String::new());
+            }
             if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset") {
                 if let Some(name) = arithmetic_unbound_variable(&expression, &overlaid) {
                     if !self.shell_state.arithmetic_expansion_error.replace(true) {
@@ -1365,8 +1462,12 @@ impl Executor {
             // into the deferred-write queue (same channel as the embedded
             // parameter walker's arithmetic arm) for the mutable caller to
             // apply.
-            let (value, writes, actual_category) =
-                eval_conditional_arith_value_categorized_with_writes(&expression, &overlaid);
+            // GNU subst.c:10873-10878 arithsub clears
+            // this_command_name around evalexp (rubash#3295).
+            let (value, writes, actual_category) = {
+                let _arith_label = crate::executor::arithmetic::arith_eval_label_scope(None);
+                eval_conditional_arith_value_categorized_with_writes(&expression, &overlaid)
+            };
             if !writes.is_empty() {
                 crate::executor::expand_braced_indices::PENDING_SUBSCRIPT_WRITES
                     .with(|pending| pending.borrow_mut().extend(writes));
@@ -1499,14 +1600,65 @@ thread_local! {
 
 /// Run `f` with `word` recorded as the enclosing word for a walked `${}`
 /// fragment's bad-substitution diagnostic. The record is one-shot (see
-/// [`take_pending_diagnostic_word`]) and always cleared on return so it can
-/// never leak past the fragment.
+/// [`take_pending_diagnostic_word`]); on return the previous record (if
+/// any) is restored, so the frame's record can never leak past the
+/// fragment.
+///
+/// The record is install-if-absent, like [`PendingDiagnosticWordGuard`]:
+/// an outer record belongs to a word the caller is already expanding
+/// (rubash#3441: the assignment split in `expand_word` expands the RHS
+/// as a fresh word, so without this the `${` arm would re-root the
+/// diagnostic at the RHS — GNU subst.c:10278 names the whole word
+/// `expand_word_internal` was expanding). A nested fragment still keeps
+/// its own word: the outer fragment's gate evaluation consumes the record
+/// (take) before any nested operator word expands, so the slot is empty
+/// again by then.
 pub(in crate::executor) fn with_pending_diagnostic_word<T>(word: &str, f: impl FnOnce() -> T) -> T {
-    let previous =
-        PENDING_DIAGNOSTIC_WORD.with(|slot| slot.replace(Some((word.as_ptr(), word.len()))));
-    let result = f();
-    PENDING_DIAGNOSTIC_WORD.with(|slot| slot.set(previous));
-    result
+    let _guard = PendingDiagnosticWordGuard::new(word);
+    f()
+}
+
+// Names the current command is declaring as associative arrays
+// (`declare -A` / `typeset -A` / `local -A` operands, rubash#3500): GNU
+// declare.def creates the variable — with its assoc attribute — BEFORE
+// expanding the operand value (arrayfunc.c:594-599 defers assoc elements
+// and expands key/value separately), but rubash expands command words
+// before the builtin runs, so a fresh `declare -A h=(...)` operand would
+// otherwise look indexed at expansion time. `expand_command_words`
+// installs the operand names for the duration of the command's word
+// expansion; the assoc computation consults this set alongside
+// ASSOC_VARS. Nest-safe: a nested expansion restores the outer set.
+thread_local! {
+    static DECLARE_ASSOC_HINT: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// RAII guard installing `names` as the declare-assoc hint for the
+/// duration of a command's word expansion; the previous set is restored on
+/// drop, so nested expansions cannot leak the hint.
+pub(in crate::executor) struct DeclareAssocHintGuard {
+    previous: Vec<String>,
+}
+
+impl DeclareAssocHintGuard {
+    pub(in crate::executor) fn new(names: Vec<String>) -> Self {
+        let previous =
+            DECLARE_ASSOC_HINT.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), names));
+        DeclareAssocHintGuard { previous }
+    }
+}
+
+impl Drop for DeclareAssocHintGuard {
+    fn drop(&mut self) {
+        DECLARE_ASSOC_HINT.with(|slot| {
+            *slot.borrow_mut() = std::mem::take(&mut self.previous);
+        });
+    }
+}
+
+/// Whether `name` is among the current command's declare-assoc hint names.
+pub(in crate::executor) fn declare_assoc_hint_contains(name: &str) -> bool {
+    DECLARE_ASSOC_HINT.with(|slot| slot.borrow().iter().any(|hint| hint == name))
 }
 
 /// Consume the pending enclosing word, if any. Evaluating a fragment that is
@@ -1533,14 +1685,27 @@ pub(in crate::executor) fn take_pending_diagnostic_word() -> Option<String> {
 
 /// RAII scope arm: records `word` as the enclosing word for the duration of
 /// one `${}` fragment in a walker, restoring the previous record on drop.
+/// The record is install-if-absent: an outer record belongs to a word the
+/// caller is already expanding (rubash#3441: the assignment split in
+/// `expand_word_mut_with_context` expands the RHS as a fresh word, so
+/// without this the RHS walker's `${` arm would re-root the diagnostic at
+/// the RHS — GNU subst.c:10278 names the whole word `expand_word_internal`
+/// was expanding). A nested fragment still keeps its own word: the outer
+/// fragment's gate evaluation consumes the record (take) before any nested
+/// operator word expands, so the slot is empty again by then.
 pub(in crate::executor) struct PendingDiagnosticWordGuard {
     previous: Option<(*const u8, usize)>,
 }
 
 impl PendingDiagnosticWordGuard {
     pub(in crate::executor) fn new(word: &str) -> Self {
-        let previous =
-            PENDING_DIAGNOSTIC_WORD.with(|slot| slot.replace(Some((word.as_ptr(), word.len()))));
+        let previous = PENDING_DIAGNOSTIC_WORD.with(|slot| {
+            let previous = slot.get();
+            if previous.is_none() {
+                slot.set(Some((word.as_ptr(), word.len())));
+            }
+            previous
+        });
         Self { previous }
     }
 }

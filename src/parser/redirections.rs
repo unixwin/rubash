@@ -15,10 +15,7 @@ use crate::lexer::{Token, TokenKind};
 /// alone leaked the \023 name terminator into the warning text
 /// (rubash#1151, the same marker-leak family as #1029/#1060).
 pub(crate) fn heredoc_delimiter_text(value: &str) -> String {
-    let decoded = crate::executor::markers::decode_word_position_carriers(value);
-    let decoded = crate::executor::markers::dequote_ctlesc_pairs(&decoded);
-    let decoded = decoded.replace(crate::executor::markers::PARAM_NAME_END_MARKER, "");
-    crate::executor::markers::strip_ansi_c_ifs_guard(&decoded)
+    crate::executor::markers::decode_transport_word_text(value)
 }
 
 pub(super) fn collect_trailing_redirections(
@@ -128,6 +125,34 @@ pub(super) fn collect_trailing_redirections(
                 let target = process_substitution.target.clone();
                 command.process_substitutions.push(process_substitution);
                 assign_append_redirect(command, &token.value, &target, None, None);
+                *index = next_i + 1;
+                continue;
+            }
+
+            // rubash#3505: the trailing-redirect collector never tried
+            // the numbered-append procsub intake, so `{ ...; } 3>>
+            // >(...)` fell through to the generic target lookup, which
+            // cannot take `>` as a target, and the `Append` token was
+            // left unconsumed (`syntax error near unexpected token
+            // '3>>'`). The simple-command path (`assign_append_target`)
+            // already has this arm; mirror it here exactly as the
+            // `RedirectOut` arm above mirrors its own
+            // `output_process_substitution_redirect_target` intake.
+            if let Some((mut process_substitution, next_i)) =
+                append_process_substitution_redirect_target(tokens, *index)
+            {
+                let fd = redirect_operator_fd(&token.value)
+                    .or_else(|| take_adjacent_redirect_fd_prefix(command, tokens, *index));
+                let fd_var = redirect_fd_var_prefix(tokens, *index);
+                process_substitution.redirect_fd = fd;
+                let target = process_substitution.target.clone();
+                command.process_substitutions.push(process_substitution);
+                let redirect =
+                    redirect_node_with_fd_var(&token.value, fd, fd_var, &target, true, false);
+                command.redirects.push(redirect.clone());
+                if redirect.fd_var.is_none() && redirect.fd.unwrap_or(1) == 1 {
+                    command.append = Some(Box::new(redirect));
+                }
                 *index = next_i + 1;
                 continue;
             }

@@ -182,21 +182,15 @@ pub(crate) fn sync_typed_assignments(
     variables: &crate::shell::var_table::VarTable,
     store: &mut VariableStore,
 ) {
-    let mut parse_options = true;
-    for arg in args {
-        if parse_options && arg == "--" {
-            parse_options = false;
-            continue;
-        }
-        let Some((raw_name, _)) = arg.split_once('=') else {
-            continue;
-        };
-        let name = raw_name.strip_suffix('+').unwrap_or(raw_name);
-        let Some(base) = declare_base_name(name) else {
-            continue;
-        };
+    // One name's mirror->cell sync, factored out so a nameref operand can
+    // sync its resolved target with the same code (rubash#2655).
+    fn sync_one(
+        base: &str,
+        variables: &crate::shell::var_table::VarTable,
+        store: &mut VariableStore,
+    ) {
         let Some(value) = variables.get(base) else {
-            continue;
+            return;
         };
         if variables.is_marked(DECLARED_UNSET_VARS, base) {
             // A declared-but-unset variable has no value: its mirror
@@ -209,7 +203,7 @@ pub(crate) fn sync_typed_assignments(
             if variables.is_marked(ARRAY_VARS, base) {
                 crate::executor::drop_typed_indexed_array(store, base);
             }
-            continue;
+            return;
         }
         if variables.is_marked(ARRAY_VARS, base) {
             let entries = indexed_array_entries(value);
@@ -226,6 +220,35 @@ pub(crate) fn sync_typed_assignments(
             }
         } else if variables.is_marked(ASSOC_VARS, base) {
             let _ = store.replace_associative_array(base, parse_assoc_words(value));
+        }
+    }
+    let mut parse_options = true;
+    for arg in args {
+        if parse_options && arg == "--" {
+            parse_options = false;
+            continue;
+        }
+        let Some((raw_name, _)) = arg.split_once('=') else {
+            continue;
+        };
+        let name = raw_name.strip_suffix('+').unwrap_or(raw_name);
+        let Some(base) = declare_base_name(name) else {
+            continue;
+        };
+        sync_one(base, variables, store);
+        // rubash#2655: a `declare`/`local` operand naming a nameref binds
+        // the RESOLVED target — the builtin wrote the target's mirror, so
+        // syncing only the operand name left the target's typed cell stale
+        // and the command-boundary verifier panicked on the next check
+        // (nameref18/21/22/23.sub: `declare b+=1` with `b -> a[0]` moved
+        // the mirror to 6 while the cell still held 5). A subscripted
+        // cell resolves to its array base (`a[0]` -> `a`).
+        if let Some((_, target)) = declare_nameref_chain(variables, base) {
+            if let Some(target_base) = declare_base_name(&target) {
+                if target_base != base {
+                    sync_one(target_base, variables, store);
+                }
+            }
         }
     }
 }
@@ -1037,20 +1060,95 @@ where
                 continue;
             }
         }
+        // GNU declare.def:613 + arrayfunc.c:359 assign_array_element: an
+        // assignment to an EMPTY subscript (`declare 'a[]=x'`, also -a/-A,
+        // `+=`, typeset, local-in-function) reports the bare
+        // `a[]: bad array subscript` (err_badarraysub, error.c:440-443),
+        // status failure, and the command continues to later operands
+        // (rubash#3186). The -p face stays `not found` (declare.def:389-406
+        // pflag branch runs before the making-variables machinery), the
+        // no-assignment `declare 'a[]'` stays InvalidId, and
+        // export/readonly keep InvalidId (setattr.def never splits
+        // subscripts).
+        //
+        // rubash#3494: GNU does NOT drop the operand — for a valued word
+        // assignment() already validated the `name[subscript]` shape, so
+        // declare.def skips valid_array_reference and only checks
+        // valid_identifier on the bare name; making_array_special /
+        // convert_var_to_array and VSETATTR then run BEFORE
+        // assign_array_element rejects the empty subscript
+        // (declare.def:988-1011 -> arrayfunc.c:1422 array_variable_name),
+        // leaving `a` bound as an empty array (`declare -a a=()`, an
+        // existing scalar promoted to [0], -A -> `declare -A a=()`). The
+        // diagnostic is reported here so operand order is preserved; the
+        // assign stage treats the empty subscript like the
+        // FAILED_SUBSCRIPT_SENTINEL arm — created-then-failed, silent.
+        // Two carve-outs keep GNU's earlier gates: a readonly base is
+        // refused by err_readonly before the subscript is ever parsed
+        // (no badsub, nothing bound), and an unquoted `a[]=(...)` compound
+        // operand is rejected during declaration-argument expansion
+        // before declare_builtin runs, so it keeps the prior drop.
+        if !print && name.contains('=') {
+            if let Some((assign_lhs, value)) = name.split_once('=') {
+                let assign_lhs = assign_lhs.strip_suffix('+').unwrap_or(assign_lhs);
+                if let Some(base) = assign_lhs.strip_suffix("[]") {
+                    if valid_identifier(base) {
+                        if value.starts_with(COMPOUND_ASSIGNMENT_MARKER) {
+                            bare_diag_line(
+                                diag,
+                                prolog,
+                                variables,
+                                &format!("{base}[]: bad array subscript"),
+                            );
+                        } else if variables.is_marked(READONLY_VARS, base) {
+                            diag.error(DiagKind::Readonly(base.to_string()));
+                        } else {
+                            bare_diag_line(
+                                diag,
+                                prolog,
+                                variables,
+                                &format!("{base}[]: bad array subscript"),
+                            );
+                            // declare.def:978-981: an array-shaped operand
+                            // drops the deferred -n, so `declare -n 'a[]=x'`
+                            // yields `declare -a a=()`, not `-an`.
+                            drop_nameref_attrs.push(base.to_string());
+                            assign_names.push(*name);
+                        }
+                        attr_status = EXECUTION_FAILURE;
+                        continue;
+                    }
+                }
+            }
+        }
         if !valid_declare_name(name) {
-            // GNU declare.def:389-406: with -p the operand is a NAME to
-            // print, `=` included — `declare -p dv=6` reports `dv=6: not
-            // found` and assigns nothing, so the `=` carve-out here is
-            // dropped (Stage-2 ④ Phase 4, E1).
             if print {
-                // GNU declare.def: -p is display-only; the identifier check
-                // gates attribute changes, not display, so an invalid name
-                // reaches find_variable and reports "not found" — never the
-                // full listing fallback (niubash issue #102 probe: bash 5.3.0
-                // prints `declare: X(BR): not found` for `declare -p X(BR)`,
-                // `not a valid identifier` only without -p).
-                diag.free(format_args!("{name}: not found"));
-                attr_status = EXECUTION_FAILURE;
+                // GNU builtins/declare.def:389-406: with -p the builtin is
+                // display-only — the pflag branch walks the operands in
+                // order and reports each missing name exactly once
+                // (show_name_attributes + sh_notfound, in place). The
+                // identifier check gates attribute changes, never
+                // display, so an invalid-identifier operand
+                // (option-shaped names, `--`, `--help`, `X(BR)`,
+                // `a[]`, `a[bad`) must reach the print loop below,
+                // which is the single reporter. (A valued operand
+                // like `dv=6` is not invalid here — its base `dv`
+                // is a valid identifier — so it already flows
+                // through and the print loop reports `dv=6: not
+                // found`; there is no `=` carve-out, Stage-2 ④
+                // Phase 4, E1.) Reporting it here as
+                // well double-reported it and put the duplicate before
+                // every other diagnostic (rubash#3345: `declare -p x
+                // --help` reported `--help` twice; `declare -p
+                // nope1 -x nope2` reported `-x` first and again in
+                // place). Dropping it here is not an option either:
+                // with every operand invalid the names list would
+                // empty out and the early return below would skip the
+                // print loop entirely. Flow it through to
+                // assign_names instead — the print loop adjudicates
+                // it (find_variable) and reports it once, in operand
+                // order, with EXECUTION_FAILURE.
+                assign_names.push(*name);
                 continue;
             }
             diag.error(DiagKind::InvalidId(name.to_string()));

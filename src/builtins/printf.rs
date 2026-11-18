@@ -56,17 +56,82 @@ struct FormatSpec {
     precision_digits: Option<String>,
 }
 
+/// One production-ordered unit of a printf rendering: converted text
+/// for stdout, or a diagnostic for stderr.
+#[derive(Debug, Clone)]
+enum PrintfSegment {
+    Text(String),
+    Error(String),
+    /// GNU printf.def:819 checks `ferror (stdout)` once per rendering
+    /// pass, so a failed fd-1 write aborts the builtin at a PASS
+    /// boundary: the failing pass's diagnostics still print while
+    /// later passes' renderings die. The ordered-output route needs
+    /// those boundaries to fold the same verdict into a buffered
+    /// stream (rubash#3453) — one marker per pass after the first.
+    PassBoundary,
+}
+
 #[derive(Debug, Clone)]
 struct RenderedPrintf {
-    output: String,
+    /// The rendering in production order: converted text and
+    /// diagnostics interleaved exactly as GNU emits them. GNU
+    /// line-buffers stdout (shell.c:1921-1922 sh_setlinebuf), so a
+    /// diagnostic for one conversion lands between the values of
+    /// the conversions around it in a merged stream
+    /// (`printf '%d\n' 5 bad 7` -> 5, diagnostic, 0, 7 —
+    /// rubash#3324), not before all the output the way the old
+    /// separate output/errors pair implied.
+    segments: Vec<PrintfSegment>,
     status: i32,
-    errors: Vec<String>,
     stop_output: bool,
     /// GNU printf.def's global `conversion_error': any printf_erange /
     /// sh_invalidnum / EOVERFLOW diagnostic makes the builtin exit status 1
     /// even though processing continues (printf.def:826-827). Warnings
     /// (invalid time format, tescape missing-digit) never set it.
     conversion_error: bool,
+}
+
+impl RenderedPrintf {
+    /// The converted text alone (all Text segments concatenated),
+    /// for the `-v` assignment: the variable gets the output, the
+    /// diagnostics still go to stderr.
+    fn output_text(&self) -> String {
+        let mut output = String::new();
+        for segment in &self.segments {
+            if let PrintfSegment::Text(text) = segment {
+                output.push_str(text);
+            }
+        }
+        output
+    }
+
+    /// The diagnostics alone, in production order.
+    fn errors(&self) -> Vec<String> {
+        self.segments
+            .iter()
+            .filter_map(|segment| match segment {
+                PrintfSegment::Error(body) => Some(body.clone()),
+                PrintfSegment::Text(_) | PrintfSegment::PassBoundary => None,
+            })
+            .collect()
+    }
+}
+
+/// Append converted text to the ordered segments, coalescing with a
+/// trailing Text segment so the log stays one chunk per write.
+fn push_printf_text(segments: &mut Vec<PrintfSegment>, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    if let Some(PrintfSegment::Text(last)) = segments.last_mut() {
+        last.push_str(text);
+    } else {
+        segments.push(PrintfSegment::Text(text.to_string()));
+    }
+}
+
+fn push_printf_error(segments: &mut Vec<PrintfSegment>, body: String) {
+    segments.push(PrintfSegment::Error(body));
 }
 
 enum ParsedFormat {
@@ -115,7 +180,7 @@ where
     W: Write,
     E: Write,
 {
-    execute_with_io_and_store(args, env_vars, None, stdout, stderr)
+    execute_with_io_and_store(args, env_vars, None, stdout, stderr, None)
 }
 
 pub(crate) fn execute_with_io_and_store<'a, I, W, E>(
@@ -124,6 +189,7 @@ pub(crate) fn execute_with_io_and_store<'a, I, W, E>(
     mut variables: Option<&mut VariableStore>,
     stdout: &mut W,
     stderr: &mut E,
+    pass_boundary: Option<&mut dyn Write>,
 ) -> io::Result<i32>
 where
     I: IntoIterator<Item = &'a str>,
@@ -238,27 +304,45 @@ where
     };
 
     let rendered = render(format, &args[index + 1..], env_vars);
-    // GNU printf.def: diagnostics go through builtin_error (unbuffered
-    // stderr) while the converted output accumulates in stdout's stdio
-    // buffer and flushes when the builtin returns — in a merged 2>&1
-    // stream every diagnostic of this invocation therefore precedes its
-    // output (`printf '%d\n' abc` prints the diagnostic, then `0`;
-    // rubash#1134). Emit the errors first; with separate streams the
-    // relative order is unobservable.
-    for error in rendered.errors {
-        writeln!(stderr, "{error}")?;
-    }
+    // GNU line-buffers stdout (shell.c:1921-1922 sh_setlinebuf), so
+    // the diagnostics interleave with the output in production
+    // order in a merged stream — the segments ARE that order
+    // (rubash#3324; the old code emitted all errors first, which
+    // was only right for a single conversion: `printf '%d\n' abc`
+    // prints the diagnostic, then `0`, either way — rubash#1134).
+    // With separate streams the relative order is unobservable.
     let mut assign_status = None;
     if let Some(name) = output_var {
+        for error in rendered.errors() {
+            writeln!(stderr, "{error}")?;
+        }
         assign_status = assign_printf_output(
             env_vars,
             name,
-            rendered.output,
+            rendered.output_text(),
             variables.as_deref_mut(),
             stderr,
         )?;
     } else {
-        stdout.write_all(&escape::raw_bytes(&rendered.output))?;
+        let mut pass_boundary = pass_boundary;
+        for segment in &rendered.segments {
+            match segment {
+                PrintfSegment::Text(text) => {
+                    stdout.write_all(&escape::raw_bytes(text))?;
+                }
+                PrintfSegment::Error(body) => {
+                    writeln!(stderr, "{body}")?;
+                }
+                PrintfSegment::PassBoundary => {
+                    // A one-byte marker on the boundary channel becomes
+                    // a pass-boundary chunk in the ordered log
+                    // (rubash#3453); no boundary sink means no markers.
+                    if let Some(boundary) = pass_boundary.as_mut() {
+                        let _ = boundary.write_all(&[0]);
+                    }
+                }
+            }
+        }
     }
 
     Ok(assign_status.unwrap_or(rendered.status))
@@ -356,14 +440,17 @@ fn printf_attribute_value(
             .to_string();
     }
     if is_marked(env_vars, "__RUBASH_UPPERCASE_VARS", name) {
-        output.to_uppercase()
+        crate::locale::simple_uppercase(&output)
     } else if is_marked(env_vars, "__RUBASH_LOWERCASE_VARS", name) {
-        output.to_lowercase()
+        crate::locale::simple_lowercase(&output)
     } else if is_marked(env_vars, "__RUBASH_CAPCASE_VARS", name) {
+        // GNU sh_modcase CASE_CAPITALIZE: first character
+        // simple-uppercased, the rest simple-lowercased (rubash#3790).
         let mut chars = output.chars();
         match chars.next() {
             Some(first) => {
-                first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase()
+                crate::locale::simple_case_upper(first).to_string()
+                    + &crate::locale::simple_lowercase(chars.as_str())
             }
             None => output,
         }
@@ -547,7 +634,12 @@ fn resolve_printf_indexed_subscript(
         return None;
     }
 
-    let raw_index = crate::executor::arithmetic::eval_conditional_arith_value(subscript, env_vars)?;
+    // GNU arrayfunc.c:1373-1377 array_expand_index clears
+    // this_command_name around evalexp (rubash#3295).
+    let raw_index = {
+        let _arith_label = crate::executor::arithmetic::arith_eval_label_scope(None);
+        crate::executor::arithmetic::eval_conditional_arith_value(subscript, env_vars)?
+    };
     if raw_index >= 0 {
         return usize::try_from(raw_index).ok();
     }
@@ -820,24 +912,29 @@ fn render(
     args: &[&str],
     env_vars: &mut crate::shell::var_table::VarTable,
 ) -> RenderedPrintf {
-    let mut output = String::new();
+    let mut segments = Vec::new();
     let mut arg_index = 0;
-    let mut errors = Vec::new();
     let mut conversion_error = false;
 
+    // printf.def:819's ferror abort is pass-granular — one PassBoundary
+    // segment per pass so the ordered-output route can both locate the
+    // failing pass and tell a printf log from an unmarked builtin's
+    // (rubash#3453). The marker precedes each pass's own segments, so
+    // even a single-pass render carries it.
     if args.is_empty() {
-        return render_one_pass(format, args, &mut arg_index, output, env_vars);
+        segments.push(PrintfSegment::PassBoundary);
+        return render_one_pass(format, args, &mut arg_index, segments, env_vars);
     }
 
     while arg_index < args.len() {
         let before_arg = arg_index;
-        let rendered = render_one_pass(format, args, &mut arg_index, output, env_vars);
-        output = rendered.output;
-        errors.extend(rendered.errors);
+        segments.push(PrintfSegment::PassBoundary);
+        let rendered = render_one_pass(format, args, &mut arg_index, segments, env_vars);
+        segments = rendered.segments;
         conversion_error |= rendered.conversion_error;
         if rendered.stop_output {
             return RenderedPrintf {
-                output,
+                segments,
                 // GNU printf.def: a stop is not itself an error — the %b
                 // \c stop (printstr -> PRETURN) ends output with the status
                 // the conversions earned, which is SUCCESS unless a
@@ -848,7 +945,6 @@ fn render(
                 } else {
                     rendered.status
                 },
-                errors,
                 stop_output: true,
                 conversion_error,
             };
@@ -860,13 +956,12 @@ fn render(
     }
 
     RenderedPrintf {
-        output,
+        segments,
         status: if conversion_error {
             EXECUTION_FAILURE
         } else {
             EXECUTION_SUCCESS
         },
-        errors,
         stop_output: false,
         conversion_error,
     }
@@ -876,11 +971,10 @@ fn render_one_pass(
     format: &str,
     args: &[&str],
     arg_index: &mut usize,
-    mut output: String,
+    mut segments: Vec<PrintfSegment>,
     env_vars: &mut crate::shell::var_table::VarTable,
 ) -> RenderedPrintf {
     let mut chars = format.chars().peekable();
-    let mut errors = Vec::new();
     let mut conversion_error = false;
     let prefix = diagnostic_prefix(env_vars);
 
@@ -888,27 +982,28 @@ fn render_one_pass(
         match ch {
             '\\' => {
                 let (expanded, diagnostic) = expand_format_escape(&mut chars);
-                output.push_str(&expanded);
+                push_printf_text(&mut segments, &expanded);
                 if let Some(body) = diagnostic {
-                    errors.push(format!("{prefix}{body}"));
+                    push_printf_error(&mut segments, format!("{prefix}{body}"));
                 }
             }
             '%' => {
                 if chars.peek() == Some(&'%') {
                     chars.next();
-                    output.push('%');
+                    push_printf_text(&mut segments, "%");
                     continue;
                 }
 
                 let mut spec = match parse_format_spec(&mut chars) {
                     ParsedFormat::Spec(spec) => spec,
                     ParsedFormat::Missing(format) => {
+                        push_printf_error(
+                            &mut segments,
+                            format!("{prefix}printf: `{format}': missing format character"),
+                        );
                         return RenderedPrintf {
-                            output,
+                            segments,
                             status: EXECUTION_FAILURE,
-                            errors: vec![format!(
-                                "{prefix}printf: `{format}': missing format character"
-                            )],
                             stop_output: true,
                             conversion_error: false,
                         };
@@ -920,20 +1015,20 @@ fn render_one_pass(
                         // is reprocessed as ordinary format (escapes and
                         // any later directives still apply), rc unaffected
                         // (rubash#1490).
-                        errors.push(format!(
-                            "{prefix}printf: warning: `\0': invalid time format specification"
-                        ));
-                        output.push('%');
-                        let inner =
-                            render_one_pass(&rescan, args, arg_index, String::new(), env_vars);
-                        output.push_str(&inner.output);
-                        errors.extend(inner.errors);
+                        push_printf_error(
+                            &mut segments,
+                            format!(
+                                "{prefix}printf: warning: `\0': invalid time format specification"
+                            ),
+                        );
+                        push_printf_text(&mut segments, "%");
+                        let inner = render_one_pass(&rescan, args, arg_index, Vec::new(), env_vars);
+                        segments.extend(inner.segments);
                         conversion_error |= inner.conversion_error;
                         if inner.stop_output || inner.status != EXECUTION_SUCCESS {
                             return RenderedPrintf {
-                                output,
+                                segments,
                                 status: inner.status,
-                                errors,
                                 stop_output: true,
                                 conversion_error,
                             };
@@ -948,21 +1043,22 @@ fn render_one_pass(
                     // directive rescanned as ordinary format text (the
                     // old arm printed the raw spec verbatim, which skipped
                     // escape/directive processing inside the parens).
-                    errors.push(format!(
-                        "{prefix}printf: warning: `{}': invalid time format specification",
-                        spec.specifier
-                    ));
-                    output.push('%');
+                    push_printf_error(
+                        &mut segments,
+                        format!(
+                            "{prefix}printf: warning: `{}': invalid time format specification",
+                            spec.specifier
+                        ),
+                    );
+                    push_printf_text(&mut segments, "%");
                     let inner =
-                        render_one_pass(&spec.raw[1..], args, arg_index, String::new(), env_vars);
-                    output.push_str(&inner.output);
-                    errors.extend(inner.errors);
+                        render_one_pass(&spec.raw[1..], args, arg_index, Vec::new(), env_vars);
+                    segments.extend(inner.segments);
                     conversion_error |= inner.conversion_error;
                     if inner.stop_output || inner.status != EXECUTION_SUCCESS {
                         return RenderedPrintf {
-                            output,
+                            segments,
                             status: inner.status,
-                            errors,
                             stop_output: true,
                             conversion_error,
                         };
@@ -971,13 +1067,16 @@ fn render_one_pass(
                 }
 
                 if !valid_format_specifier(spec.specifier) {
-                    return RenderedPrintf {
-                        output,
-                        status: EXECUTION_FAILURE,
-                        errors: vec![format!(
+                    push_printf_error(
+                        &mut segments,
+                        format!(
                             "{prefix}printf: `{}': invalid format character",
                             spec.specifier
-                        )],
+                        ),
+                    );
+                    return RenderedPrintf {
+                        segments,
+                        status: EXECUTION_FAILURE,
                         stop_output: true,
                         conversion_error: false,
                     };
@@ -990,10 +1089,13 @@ fn render_one_pass(
                 // (rc 1, no output for the directive), instead of printing
                 // the current time (rubash#1116).
                 if spec.specifier == 'T' && spec.time_format.is_none() {
+                    push_printf_error(
+                        &mut segments,
+                        format!("{prefix}printf: `T': invalid format character"),
+                    );
                     return RenderedPrintf {
-                        output,
+                        segments,
                         status: EXECUTION_FAILURE,
-                        errors: vec![format!("{prefix}printf: `T': invalid format character")],
                         stop_output: true,
                         conversion_error: false,
                     };
@@ -1003,7 +1105,9 @@ fn render_one_pass(
                 // width/precision argument is a conversion error (rc 1),
                 // but processing continues with the clamped fallback.
                 conversion_error |= !dynamic.is_empty();
-                errors.extend(dynamic.into_iter().map(|body| format!("{prefix}{body}")));
+                for body in dynamic {
+                    push_printf_error(&mut segments, format!("{prefix}{body}"));
+                }
 
                 // Inline (non-`*') width/precision overflow splits along
                 // GNU's two output engines:
@@ -1026,18 +1130,19 @@ fn render_one_pass(
                             .clone()
                             .or_else(|| spec.width_digits.clone())
                             .unwrap_or_default();
-                        errors.push(format!(
-                            "{prefix}printf: {digits}: Numerical result out of range"
-                        ));
+                        push_printf_error(
+                            &mut segments,
+                            format!("{prefix}printf: {digits}: Numerical result out of range"),
+                        );
                         conversion_error = true;
                     } else {
-                        errors.push(format!(
-                            "{prefix}printf: Value too large for defined data type"
-                        ));
+                        push_printf_error(
+                            &mut segments,
+                            format!("{prefix}printf: Value too large for defined data type"),
+                        );
                         return RenderedPrintf {
-                            output,
+                            segments,
                             status: EXECUTION_FAILURE,
-                            errors,
                             stop_output: true,
                             conversion_error: true,
                         };
@@ -1052,13 +1157,22 @@ fn render_one_pass(
                     if name.is_empty() {
                         // `if (var && *var)': an empty operand binds nothing.
                     } else if valid_identifier(name) {
-                        env_vars.insert(name.to_string(), output.chars().count().to_string());
+                        let written: usize = segments
+                            .iter()
+                            .filter_map(|segment| match segment {
+                                PrintfSegment::Text(text) => Some(text.chars().count()),
+                                PrintfSegment::Error(_) | PrintfSegment::PassBoundary => None,
+                            })
+                            .sum();
+                        env_vars.insert(name.to_string(), written.to_string());
                     } else {
-                        errors.push(format!("{prefix}printf: `{name}': not a valid identifier"));
+                        push_printf_error(
+                            &mut segments,
+                            format!("{prefix}printf: `{name}': not a valid identifier"),
+                        );
                         return RenderedPrintf {
-                            output,
+                            segments,
                             status: EXECUTION_FAILURE,
-                            errors,
                             stop_output: true,
                             conversion_error: true,
                         };
@@ -1077,9 +1191,9 @@ fn render_one_pass(
                         // but the builtin's status is EXECUTION_FAILURE
                         // (rubash#1116).
                         conversion_error = true;
-                        errors.push(format!("{prefix}{error}"));
+                        push_printf_error(&mut segments, format!("{prefix}{error}"));
                     }
-                    output.push_str(&rendered);
+                    push_printf_text(&mut segments, &rendered);
                 } else {
                     // GNU getstr/getintmax distinguish a MISSING argument
                     // (treated as ""/0 without complaint) from a PRESENT
@@ -1094,12 +1208,12 @@ fn render_one_pass(
                         if fatal {
                             conversion_error = true;
                         }
-                        errors.push(format!("{prefix}{body}"));
+                        push_printf_error(&mut segments, format!("{prefix}{body}"));
                     }
-                    output.push_str(&rendered);
+                    push_printf_text(&mut segments, &rendered);
                     if stop_output {
                         return RenderedPrintf {
-                            output,
+                            segments,
                             // %b \c (printf.def printstr: the \c ends the
                             // string AND all further output via PRETURN)
                             // stops without failing: status follows the
@@ -1109,24 +1223,22 @@ fn render_one_pass(
                             } else {
                                 EXECUTION_SUCCESS
                             },
-                            errors,
                             stop_output: true,
                             conversion_error,
                         };
                     }
                 }
             }
-            other => output.push(other),
+            other => push_printf_text(&mut segments, &other.to_string()),
         }
     }
     RenderedPrintf {
-        output,
+        segments,
         status: if conversion_error {
             EXECUTION_FAILURE
         } else {
             EXECUTION_SUCCESS
         },
-        errors,
         stop_output: false,
         conversion_error,
     }

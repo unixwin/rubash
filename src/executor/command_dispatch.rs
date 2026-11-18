@@ -539,6 +539,12 @@ impl Executor {
                 .map(|(name, _)| assignment_name_and_append(name).0.to_string())
                 .collect();
             self.merge_converted_tempenv_bindings(&merge_names, &tempenv_saved);
+            // rubash#2771: the in-function posix keep is the same
+            // merge_temporary_env -> bind_variable replay the other
+            // keep arms run — a kept dynamic name converts to the
+            // real dynamic bind (the hook runs on the kept value),
+            // landing on the global dynamic cell.
+            self.convert_kept_tempenv_dynamic_binds(&merge_names);
             for (name, _) in &cmd.assignments {
                 let (base, _) = assignment_name_and_append(name);
                 let is_local = self
@@ -904,7 +910,7 @@ impl Executor {
         if let PreHelpOutcome::Abort(status) =
             self.run_pre_help_prologue(row, &mut prologue_stderr)?
         {
-            self.write_buffered_builtin_output_stderr_first(cmd, &[], &prologue_stderr)?;
+            self.write_buffered_builtin_output(cmd, &[], &prologue_stderr)?;
             self.exit_code = status;
             return Ok(());
         }
@@ -914,8 +920,15 @@ impl Executor {
         // output flushes at builtin exit (the #1134 printf rule),
         // so the prologue's stderr precedes the help text on a
         // merged stream (`bind --help 2>&1` shows the warning
-        // first).
-        self.write_buffered_builtin_output_stderr_first(cmd, &stdout, &prologue_stderr)?;
+        // first). The ordered-chunk log below is the mechanism that
+        // preserves that stderr-first order (union #3399 + #3385).
+        let log = super::trap_stack_builtins::OrderedOutputLog::new();
+        {
+            use std::io::Write;
+            let _ = log.stderr_writer().write_all(&prologue_stderr);
+            let _ = log.stdout_writer().write_all(&stdout);
+        }
+        self.write_buffered_builtin_output_chunks(cmd, &log)?;
         self.exit_code = 2;
         if row
             .flags
@@ -1136,9 +1149,9 @@ impl Executor {
                     }
                 }
             } else if saved_attrs.uppercase {
-                window_value.to_uppercase()
+                crate::locale::simple_uppercase(&window_value)
             } else {
-                window_value.to_lowercase()
+                crate::locale::simple_lowercase(&window_value)
             };
             let current_attrs = capture_var_attrs(&self.shell_state.env_vars, name);
             let mut merged_attrs = *saved_attrs;

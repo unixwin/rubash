@@ -1,5 +1,6 @@
 use super::*;
 use crate::executor::builtin_diag::Diag;
+use std::cell::RefCell;
 
 #[derive(Clone, Copy, Debug)]
 pub(in crate::executor) struct TimeCommandMetrics {
@@ -190,6 +191,114 @@ fn rusage_counters() -> RusageCounters {
     counters
 }
 
+/// Fork-face baseline for the `times` builtin (rubash#3387).
+///
+/// GNU forks every subshell / command-substitution / pipeline element
+/// (builtins/times.def:65-84 reads getrusage(RUSAGE_SELF) in the
+/// forked child, so the child sees its own near-zero clocks;
+/// execute_cmd.c:1576 execute_in_subshell, subst.c:7143
+/// command_substitute, subst.c:6362 process_substitute,
+/// execute_cmd.c:2620 execute_pipeline). rubash runs those faces
+/// in-process on the host's rusage, so `times` printed the host's
+/// accumulated counters there. Each fork face therefore snapshots
+/// the process's raw counters at entry; `process_times` reports the
+/// current counters minus the innermost snapshot (saturating).
+/// The `time` keyword is unaffected: it reads `rusage_counters()`
+/// differentially and never goes through this stack.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TimesBaselineKind {
+    /// `( )` flat region / in-place comsub fast path / fresh-shell
+    /// child script — pushed by `ShellState::clone_for_child_save`,
+    /// popped by `restore_flat_subshell` (or the direct-assignment
+    /// restore in external_finish.rs) when the stack top is this
+    /// boundary at the same depth.
+    CloneBoundary,
+    /// One `execute_pipeline_stage` call — the guard at its top
+    /// pushes, its `Drop` pops. The lastpipe last element never
+    /// comes through that funnel (execute_lastpipe_stage), so its
+    /// `times` keeps the accumulated reading (execute_cmd.c:2758).
+    PipelineStage,
+    /// A `$( )` / `${ }` / `<( )` body running on a
+    /// `command_substitution_executor` clone — the guard around the
+    /// body execution pushes, its `Drop` pops.
+    ComsubBody,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TimesBaseline {
+    kind: TimesBaselineKind,
+    depth: usize,
+    self_user: std::time::Duration,
+    self_sys: std::time::Duration,
+    child_user: std::time::Duration,
+    child_sys: std::time::Duration,
+}
+
+thread_local! {
+    static TIMES_BASELINES: RefCell<Vec<TimesBaseline>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Snapshot the current raw counters as a fork-face baseline
+/// (rubash#3387). `depth` is the `subshell_depth` the face was
+/// entered from — the pop side matches on (kind, depth) so a
+/// restore belonging to another boundary can never pop this entry.
+pub(crate) fn push_times_baseline(kind: TimesBaselineKind, depth: usize) {
+    let (self_user, self_sys, child_user, child_sys) = raw_process_times();
+    TIMES_BASELINES.with(|stack| {
+        stack.borrow_mut().push(TimesBaseline {
+            kind,
+            depth,
+            self_user,
+            self_sys,
+            child_user,
+            child_sys,
+        });
+    });
+}
+
+/// Pop the innermost baseline iff it is the named boundary at the
+/// given depth; returns whether anything was popped. A mismatch
+/// means the matching push never happened (or an inner face is
+/// still live) — the stack is left untouched, so a stray restore
+/// cannot eat an outer face's baseline.
+pub(crate) fn pop_times_baseline_if(kind: TimesBaselineKind, depth: usize) -> bool {
+    TIMES_BASELINES.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        if stack
+            .last()
+            .is_some_and(|top| top.kind == kind && top.depth == depth)
+        {
+            stack.pop();
+            true
+        } else {
+            false
+        }
+    })
+}
+
+/// RAII fork-face baseline (rubash#3387): pushes on creation, pops
+/// on drop iff the stack top is still this entry (the same (kind,
+/// depth) predicate as `pop_times_baseline_if`). The guard must
+/// live exactly for the face's body — a guard that outlives its
+/// face would keep subtracting after the parent resumes.
+pub(crate) struct TimesBaselineGuard {
+    kind: TimesBaselineKind,
+    depth: usize,
+}
+
+impl TimesBaselineGuard {
+    pub(crate) fn enter(kind: TimesBaselineKind, depth: usize) -> Self {
+        push_times_baseline(kind, depth);
+        Self { kind, depth }
+    }
+}
+
+impl Drop for TimesBaselineGuard {
+    fn drop(&mut self) {
+        pop_times_baseline_if(self.kind, self.depth);
+    }
+}
+
 /// The four counters the `times` builtin prints, kept SEPARATE
 /// (rubash#2932): GNU builtins/times.def:65-88 calls
 /// getrusage(RUSAGE_SELF) for the first line and
@@ -198,7 +307,39 @@ fn rusage_counters() -> RusageCounters {
 /// not merge here. Returns (self_user, self_sys, child_user,
 /// child_sys). On Windows the children half is the reap accumulator's
 /// current sum — the same source rusage_counters merges in.
+/// A live fork-face baseline (rubash#3387) is subtracted from each
+/// half (saturating), so `times` inside a subshell, a command
+/// substitution, or a pipeline element reads that face's own clocks.
 pub(crate) fn process_times() -> (
+    std::time::Duration,
+    std::time::Duration,
+    std::time::Duration,
+    std::time::Duration,
+) {
+    let (self_user, self_sys, child_user, child_sys) = raw_process_times();
+    let (base_self_user, base_self_sys, base_child_user, base_child_sys) =
+        TIMES_BASELINES.with(|stack| match stack.borrow().last() {
+            Some(top) => (top.self_user, top.self_sys, top.child_user, top.child_sys),
+            None => (
+                std::time::Duration::ZERO,
+                std::time::Duration::ZERO,
+                std::time::Duration::ZERO,
+                std::time::Duration::ZERO,
+            ),
+        });
+    (
+        self_user.saturating_sub(base_self_user),
+        self_sys.saturating_sub(base_self_sys),
+        child_user.saturating_sub(base_child_user),
+        child_sys.saturating_sub(base_child_sys),
+    )
+}
+
+/// The process's current raw counters in `process_times` order
+/// (self user/sys, children user/sys) — the snapshot source for the
+/// fork-face baselines, factored out of `process_times` so the push
+/// and the read cannot drift apart.
+fn raw_process_times() -> (
     std::time::Duration,
     std::time::Duration,
     std::time::Duration,
@@ -445,9 +586,11 @@ pub(in crate::executor) enum StdinUnit {
 /// Incremental UTF-8 decoder for byte-wise process-stdin reads (the `read`
 /// builtin's unbuffered path and the inherited-stdin fallback). Widening
 /// each byte with `byte as char` Latin-1-encodes multibyte input and lets a
-/// `-n`/`char_limit` break land mid-character; this decoder instead reads a
-/// lead byte, waits for its continuation bytes, and surfaces undecodable
-/// bytes as raw-byte markers. `lookahead` holds at most a few bytes that
+/// `-n`/`char_limit` break land mid-character; in a multibyte locale this
+/// decoder instead reads a lead byte, waits for its continuation bytes,
+/// and surfaces undecodable bytes as raw-byte markers, while in a
+/// single-byte locale one byte is one unit (rubash#3334: GNU never groups
+/// bytes there, read.def:874). `lookahead` holds at most a few bytes that
 /// could not join the pending sequence, so at most the bytes of one
 /// character are ever consumed ahead of the current unit.
 pub(in crate::executor) struct StdinCharDecoder {
@@ -487,8 +630,11 @@ impl StdinCharDecoder {
     /// decoder surfaced each byte of the run separately and a `-n`
     /// budget therefore stopped inside it. A run whose fate is not
     /// yet decided (a proper prefix of a sequence) still waits for
-    /// more bytes. Single-byte locales keep the historical
-    /// byte-at-a-time decoding below unchanged.
+    /// more bytes. In a single-byte locale there is no grouping at
+    /// all: GNU builtins/read.def:874 only calls read_mbchar when
+    /// `mb_cur_max > 1`, so with MB_CUR_MAX == 1 every byte is one
+    /// unit (`nr++` per byte, read.def:880-886) and `read -n 1` over
+    /// `é` (c3 a9) takes just the lead byte (rubash#3334).
     pub(in crate::executor) fn next_unit(&mut self) -> Option<StdinUnit> {
         if crate::locale::is_multi_byte() {
             let mut avail = std::mem::take(&mut self.pending);
@@ -534,47 +680,23 @@ impl StdinCharDecoder {
                 }
             };
         }
-        if !self.pending.is_empty() {
-            match self.lookahead.front() {
-                Some(&next) if (next & 0xC0) == 0x80 => {
-                    self.pending.push(next);
-                    self.lookahead.pop_front();
-                }
-                Some(_) => {
-                    let head = self.pending.remove(0);
-                    return Some(Self::raw_byte_unit(head));
-                }
-                None => {}
-            }
-        }
-        if self.pending.is_empty() {
-            let byte = self.lookahead.pop_front()?;
-            self.pending.push(byte);
-        }
-        match std::str::from_utf8(&self.pending) {
-            Ok(text) => {
-                let ch = text.chars().next().expect("pending is non-empty");
-                self.pending.drain(..ch.len_utf8());
-                Some(StdinUnit::Char(ch))
-            }
-            Err(error) => {
-                let valid = error.valid_up_to();
-                if valid > 0 {
-                    let ch = std::str::from_utf8(&self.pending[..valid])
-                        .expect("valid prefix")
-                        .chars()
-                        .next()
-                        .expect("non-empty valid prefix");
-                    self.pending.drain(..ch.len_utf8());
-                    return Some(StdinUnit::Char(ch));
-                }
-                if error.error_len().is_some() {
-                    let head = self.pending.remove(0);
-                    return Some(Self::raw_byte_unit(head));
-                }
-                None
-            }
-        }
+        // rubash#3334: single-byte locale — one byte is one unit
+        // (read.def:874-886, see the doc comment above). The historical
+        // branch grouped a valid UTF-8 sequence into one Char unit, so
+        // `read -n 1` over `é` took both bytes; ASCII bytes stay Char
+        // and high bytes ride as raw-byte units, whose marker text
+        // re-emits the original byte (and which stdin_unit_is_delimiter
+        // compares by first byte, exactly like the Char form).
+        let byte = if self.pending.is_empty() {
+            self.lookahead.pop_front()?
+        } else {
+            self.pending.remove(0)
+        };
+        Some(if byte < 0x80 {
+            StdinUnit::Char(byte as char)
+        } else {
+            Self::raw_byte_unit(byte)
+        })
     }
 
     /// Drain any bytes still pending at end of input (a truncated UTF-8
@@ -933,17 +1055,29 @@ pub(in crate::executor) fn text_pos_for_byte_len_exact(
     None
 }
 
-/// Whether a `-n`/`-N` serve over `text` must run in the byte domain
-/// because the character walkers' unit accounting diverges from
-/// read_mbchar: in a multibyte locale any raw byte (a raw-byte
-/// marker pair in the transport text) can join an invalid sequence
-/// whose bytes the walkers count one by one while GNU consumes the
-/// run as one unit (rubash#3294). Without a budget, or without raw
-/// bytes, the two domains agree unit for unit.
+/// Whether the byte-domain record scan (`scan_text_record_bytes`) must
+/// serve `text` for a -n/-N budget because the character-domain walkers
+/// count units GNU would not.
+/// In a multibyte locale any raw byte (a raw-byte marker pair in the
+/// transport text) can join an invalid sequence whose bytes the walkers
+/// count one by one while GNU consumes the run as one unit (rubash#3294).
+/// Without a budget, or without raw bytes, the two domains agree unit for
+/// unit.
+/// In a single-byte locale the budget counts BYTES (GNU
+/// builtins/read.def:851,874,880-886), so a literal multibyte character
+/// is as many units as its bytes and the character scan under-counts it
+/// (rubash#3785) — the byte-domain scan must decide whenever the mirror
+/// text holds a non-ASCII character (the scan's decoded_unit_len already
+/// returns one byte per unit there). Pure-ASCII text agrees unit for unit,
+/// so it keeps the historical character scan exactly.
 pub(in crate::executor) fn byte_unit_scan_applies(text: &str, char_limit: Option<usize>) -> bool {
-    char_limit.is_some()
-        && crate::locale::is_multi_byte()
-        && text.chars().any(|ch| ch as u32 == RAW_BYTE_MARKER_ESCAPE)
+    if !char_limit.is_some() {
+        return false;
+    }
+    if crate::locale::is_multi_byte() {
+        return text.chars().any(|ch| ch as u32 == RAW_BYTE_MARKER_ESCAPE);
+    }
+    text.chars().any(|ch| (ch as u32) > 0x7F)
 }
 
 /// Replay GNU's read loop over the DECODED BYTES of a text-domain
@@ -1204,15 +1338,26 @@ pub(in crate::executor) fn slurped_record_eof_no_delimiter(
             }
         } else {
             cursor += 1;
+            // rubash#3785: in a single-byte locale a literal character
+            // costs one unit per BYTE (read.def:851,874,880-886) — an
+            // escaped multibyte character's first byte is the escaped unit
+            // and its remaining bytes are fresh units, so the count is the
+            // character's byte length either way; the multibyte locale
+            // keeps one unit per character.
+            let unit_cost = if crate::locale::is_multi_byte() {
+                1
+            } else {
+                ch.len_utf8()
+            };
             if escaped {
                 if ch != '\n' {
-                    units += 1;
+                    units += unit_cost;
                 }
                 escaped = false;
             } else if !raw && ch == '\\' {
                 escaped = true;
             } else {
-                units += 1;
+                units += unit_cost;
             }
         }
         if char_limit.is_some_and(|limit| units >= limit) {
@@ -1764,7 +1909,18 @@ fn trim_read_input_literal(
 /// raw-byte marker pair is one unit as in truncate_read_units
 /// (rubash#1328, rubash#714).
 fn truncate_read_post_escape(input: &str, limit: usize) -> String {
-    if input.chars().any(|ch| ch as u32 == RAW_BYTE_MARKER_ESCAPE) {
+    // rubash#3785: in a single-byte locale the -n/-N budget counts BYTES
+    // (GNU builtins/read.def:851,874 — read_mbchar runs only when
+    // mb_cur_max > 1; with MB_CUR_MAX == 1 every byte is one unit,
+    // read.def:880-886), so the record is cut in the decoded byte domain
+    // whatever the transport spelling: a literal multibyte character costs
+    // as many units as its bytes, and a cut can land mid-character (the
+    // dangling lead byte rides as a raw-byte marker, exactly like the
+    // marker-spelled input below). The character walk underneath is the
+    // multibyte-locale shape only.
+    if !crate::locale::is_multi_byte()
+        || input.chars().any(|ch| ch as u32 == RAW_BYTE_MARKER_ESCAPE)
+    {
         // The record carries raw bytes: count in the decoded byte
         // domain, where an escaped or plain unit is one read_mbchar
         // consumption (rubash#3294) — the text walk below counts each
