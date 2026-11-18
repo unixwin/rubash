@@ -200,6 +200,7 @@ pub(crate) fn replace_process_image(
         clean_env,
         effective_argv0.as_deref(),
         cwd,
+        setup.cwd_stamp(),
     );
     // rubash#3311: the image inherits the shell's descriptor table as
     // do_redirections left it (exec.def:231 shell_execve) — the fd >= 3
@@ -829,6 +830,7 @@ where
         clean_env,
         argv0,
         cwd,
+        setup.cwd_stamp(),
     );
     setup.apply(&mut process);
     process.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -923,6 +925,7 @@ where
         clean_env,
         argv0,
         cwd,
+        setup.cwd_stamp(),
     );
     setup.apply(&mut process);
     process.stdout(child_stdout).stderr(child_stderr);
@@ -985,6 +988,7 @@ fn external_exec_process(
     clean_env: bool,
     argv0: Option<&str>,
     cwd: &std::path::Path,
+    cwd_stamp: crate::executor::ChildCwdStamp,
 ) -> Command {
     // GNU builtins/exec.def (exec_builtin): `com2 = full_pathname (command)`
     // rebinds the exec target to its absolute path before shell_execve, so
@@ -1036,7 +1040,41 @@ fn external_exec_process(
     let _ = argv0;
     // G-02: the exec'd image starts in the session cwd (for the true
     // replacement path, std's exec applies the chdir before execve).
-    process.current_dir(cwd);
+    // rubash#3286: the stamp is the Executor's stamp_spawn_cwd
+    // decision carried on ChildFdSetup — a resolving cwd keeps
+    // current_dir; a dead cwd the anchor names becomes the same
+    // pre_exec fchdir the Command faces register (the child is born
+    // in the session's dead inode, as GNU's inherited cwd is); a
+    // dead cwd no anchor names stays unstamped rather than failing
+    // the spawn on the dead spelling.
+    match cwd_stamp {
+        crate::executor::ChildCwdStamp::Path => {
+            process.current_dir(cwd);
+        }
+        crate::executor::ChildCwdStamp::AnchorFd(fd) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                // SAFETY: the closure runs in the forked child (or in
+                // process for Command::exec) before execve and only
+                // fchdir's onto the anchor handle the session state
+                // keeps open — the same contract stamp_spawn_cwd's
+                // closure documents; fchdir is async-signal-safe.
+                unsafe {
+                    process.pre_exec(move || {
+                        if libc::fchdir(fd) == 0 {
+                            Ok(())
+                        } else {
+                            Err(std::io::Error::last_os_error())
+                        }
+                    });
+                }
+            }
+            #[cfg(not(unix))]
+            let _ = fd;
+        }
+        crate::executor::ChildCwdStamp::Unstamped => {}
+    }
     process.env_clear();
     if !clean_env {
         apply_exported_environment(&mut process, env_vars);
