@@ -4565,7 +4565,7 @@ pub(crate) fn subscript_residuals_advance(
                 state.line += 1;
                 state.command_position = true;
                 state.word.clear();
-                state.element_start = false;
+                state.element_start = state.compassign_depth > 0;
             }
             index += 1;
             continue;
@@ -4762,7 +4762,7 @@ pub(crate) fn subscript_residuals_advance(
                 state.line += 1;
                 state.command_position = true;
                 state.word.clear();
-                state.element_start = false;
+                state.element_start = state.compassign_depth > 0;
             } else {
                 // `if`, `then`, `while`, ... keep the next word in command
                 // position — but only when they themselves stood at command
@@ -4789,9 +4789,15 @@ pub(crate) fn subscript_residuals_advance(
         // `[` opens a subscript when the word prefix is a pure shell
         // identifier at command position (parse.y:5637), or we are at
         // element start inside a compound assignment (parse.y:5638,
-        // token_index == 0 && PST_COMPASSIGN).
+        // token_index == 0 && PST_COMPASSIGN). The command-position arm
+        // is gated to outside compound assignments: inside the list a
+        // `[` after a non-empty word fragment (`v=(a[1`) is literal word
+        // text (parse.y:3163 assignment_acceptable, :7104-7169), and EOF
+        // falls through to the loop's own `)' report (:7151-7152).
         if ch == '['
-            && ((state.command_position && skip_word_is_pure_identifier(&state.word))
+            && ((state.command_position
+                && skip_word_is_pure_identifier(&state.word)
+                && state.compassign_depth == 0)
                 || (state.compassign_depth > 0 && state.element_start && state.word.is_empty()))
         {
             let snapshot = state.clone();
