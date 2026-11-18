@@ -6199,7 +6199,10 @@ impl Executor {
         cmd: &CommandNode,
     ) -> Result<Option<i32>, ExecuteError> {
         if self.builtin_wrapper_depth == 0 {
-            return self.execute_stdio_only_exec_redirect(cmd);
+            // rubash#3917: the bare top-level `exec` persists its
+            // redirects (execute_cmd.c exec_builtin) — place its
+            // files onto their kernel descriptors.
+            return self.execute_stdio_only_exec_redirect(cmd, true);
         }
         let saved_fd_table = self.fd_table.saved_table();
         let mut saved_env: Vec<(String, Option<String>)> = Vec::new();
@@ -6233,7 +6236,11 @@ impl Executor {
             let value = self.shell_state.env_vars.get(&name).cloned();
             saved_env.push((name, value));
         }
-        let result = self.execute_stdio_only_exec_redirect(cmd);
+        // rubash#3917: the scoped walk undoes its installs by
+        // restoring the saved table — it must NOT place files onto
+        // kernel descriptors (a scoped dup2 would lose the foreign
+        // occupant the restore cannot bring back).
+        let result = self.execute_stdio_only_exec_redirect(cmd, false);
         self.fd_table = saved_fd_table;
         for (key, value) in saved_env {
             match value {
@@ -6249,6 +6256,23 @@ impl Executor {
     }
 
     fn execute_stdio_only_exec_redirect(
+        &mut self,
+        cmd: &CommandNode,
+        place_persistent: bool,
+    ) -> Result<Option<i32>, ExecuteError> {
+        // rubash#3917: arm the persistent-placement flag for the
+        // walk (see FdTable::kernel_place_persistent) and clear it
+        // on every exit path — the inner body returns Result, so a
+        // single wrapper covers all early returns. The flag is
+        // restored to its previous value (never assumed false) so a
+        // nested walk keeps the outer walk's arming.
+        let prev = std::mem::replace(&mut self.fd_table.kernel_place_persistent, place_persistent);
+        let result = self.execute_stdio_only_exec_redirect_inner(cmd);
+        self.fd_table.kernel_place_persistent = prev;
+        result
+    }
+
+    fn execute_stdio_only_exec_redirect_inner(
         &mut self,
         cmd: &CommandNode,
     ) -> Result<Option<i32>, ExecuteError> {

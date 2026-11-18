@@ -4436,6 +4436,12 @@ fn wrapper_relay_install() {
         }
     }
     let (read_end, write_end) = (fds[0], fds[1]);
+    // rubash#3917: keep the relay pipe out of the user range (see
+    // create_capture_pipe) — a persistent `exec N>file` now dup2's
+    // onto its kernel number, and a relay pipe sitting on a low
+    // number would be the descriptor it displaces.
+    let read_end = crate::fd::move_to_high_fd(read_end);
+    let write_end = crate::fd::move_to_high_fd(write_end);
     // The handler's write must never block on a full pipe.
     unsafe {
         let flags = libc::fcntl(write_end, libc::F_GETFL);

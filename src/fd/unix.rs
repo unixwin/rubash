@@ -640,7 +640,15 @@ pub fn create_capture_pipe() -> std::io::Result<(HANDLE, HANDLE)> {
         let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
         unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) };
     }
-    Ok((fds[0], fds[1]))
+    // rubash#3917: keep internal plumbing out of the user range — a
+    // persistent `exec N>file` now dup2's onto its kernel number,
+    // and a capture pipe sitting on a low number would be the
+    // descriptor it displaces. move_to_high_fd returns the fd
+    // unchanged when no high slot is free (GNU's own fallback,
+    // general.c:730-733), so this never fails the pipe.
+    let read_end = move_to_high_fd(fds[0]);
+    let write_end = move_to_high_fd(fds[1]);
+    Ok((read_end, write_end))
 }
 
 /// Read all bytes currently available without blocking (rubash#169

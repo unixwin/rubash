@@ -2,8 +2,9 @@
 //!
 //! GNU keeps its persistent internal descriptors out of the low range
 //! with `move_to_high_fd` (general.c:702, ceiling HIGH_FD_MAX=256,
-//! general.h:257), so fd 3 at startup is an internal pipe and
-//! `exec 3>file` binds the file to fd 3 itself. Rubash's cwd anchor
+//! general.h:257) and binds a redirect's file onto its redirector fd
+//! with dup2 (redir.c:1017/:1120), so `exec 3>file` binds the file to
+//! fd 3 itself whatever occupied the number before. Rubash's cwd anchor
 //! (`ShellState::cwd_anchor`, the open directory handle that lets a
 //! deleted cwd keep spawning and serving reads — rubash#3198/#3268)
 //! used to take the lowest free kernel fd, which is 3 in every
@@ -77,20 +78,30 @@ fn stdout_trimmed(run: &Run) -> &str {
     run.stdout.trim()
 }
 
-/// Seed check 1: fd 3 at startup is GNU's internal pipe, not the
-/// startup cwd directory.
+/// Seed check 1 (rewritten, rubash#3917): no low descriptor names the
+/// startup cwd. The original form — `t=$(readlink /proc/$$/fd/3)`
+/// classified as a pipe — was vacuous: a free fd 3 makes the probe's
+/// own command-substitution capture pipe take (3,4), so `readlink`
+/// saw the probe's pipe, not the shell's startup state (and the
+/// #3917 capture-pipe relocation unmasks it: the probe's pipe now
+/// sits high, so the old form would read an empty target and fail).
+/// The rewrite probes the real #3640 invariant (the cwd anchor must
+/// not sit on a low fd) without a command substitution: each of
+/// fds 3..9 is readlink'd into a scratch file (an external command
+/// with a file redirect — no capture pipe), and the file must not
+/// contain the cwd path.
 #[cfg(unix)]
 #[test]
-fn issue3640_startup_fd3_is_pipe_not_cwd() {
+fn issue3640_startup_no_low_fd_is_cwd() {
     let dir = scratch("fd3-startup");
     let run = rubash_c(
         &dir.0,
-        "t=$(readlink /proc/$$/fd/3); case \"$t\" in pipe:*) echo fd3-is-pipe;; *) echo fd3-other:$t;; esac",
+        "for f in /proc/$$/fd/3 /proc/$$/fd/4 /proc/$$/fd/5 /proc/$$/fd/6 /proc/$$/fd/7 /proc/$$/fd/8 /proc/$$/fd/9; do readlink \"$f\" >>probe.txt 2>/dev/null; done; if grep -qxF \"$PWD\" probe.txt 2>/dev/null; then echo anchor-on-low; else echo anchor-not-on-low; fi",
     );
     assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
     assert_eq!(
         stdout_trimmed(&run),
-        "fd3-is-pipe",
+        "anchor-not-on-low",
         "stderr: {}",
         run.stderr
     );

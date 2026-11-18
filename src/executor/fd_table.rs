@@ -537,6 +537,17 @@ pub(crate) struct FdTable {
     /// `OUT="$(inner 2>&1 1>/dev/null)"` a `$(... 3>&1 1>&4)` body's
     /// stderr writes landed in the INNER capture instead of the outer).
     pub(crate) stdout_alias_generation: std::collections::HashMap<u32, Option<usize>>,
+    /// rubash#3917: while the persistent `exec` redirect walk runs
+    /// (execute_stdio_only_exec_redirect with place_persistent),
+    /// file-backed installs are placed onto their logical kernel
+    /// descriptor with dup2 — GNU redir.c:1017/:1120 — so
+    /// /proc/$$/fd/N names the file even when the number was
+    /// already occupied (an inherited pipe in CI). Scoped redirects
+    /// never set this: a scoped dup2 would lose a foreign occupant
+    /// the virtual table cannot restore (the scoped undo only
+    /// replays the table, not the kernel descriptor). Off Unix the
+    /// flag is inert (no kernel placement exists).
+    pub(crate) kernel_place_persistent: bool,
 }
 
 /// The byte sequences that terminate a `read` record for `delimiter`
@@ -784,6 +795,7 @@ impl FdTable {
             read_eof_no_delimiter: false,
             read_error: None,
             stdout_alias_generation: std::collections::HashMap::new(),
+            kernel_place_persistent: false,
         };
         table.entries.insert(
             0,
@@ -1099,6 +1111,204 @@ impl FdTable {
         Some(target)
     }
 
+    /// rubash#3917: dup `file`'s handle onto kernel descriptor `fd`
+    /// (GNU redir.c:1017/:1120 — the redirector IS the file,
+    /// whatever occupied the number before), returning a fresh
+    /// FileFd naming the placed descriptor, or None when the
+    /// install must stay virtual. Placement covers only fds below
+    /// SHELL_FD_BASE (0-9) — the range #3213 left virtual; fds at
+    /// or above it keep the free-only materialization, and {var}
+    /// allocations live there too, so their replay snapshots (which
+    /// share the Rc) can never be invalidated by a replace-dup2.
+    /// Placement is refused when the number is held by another live
+    /// table entry's non-retired File/Coproc handle, or when the
+    /// kernel descriptor currently on the number is a directory (the
+    /// cwd anchor) or a socket (the signal socketpair, a /dev/tcp
+    /// socket) — those are rubash-internal or user state a
+    /// replace-dup2 must not destroy. Pipes and regular files are
+    /// replaced: that is the CI case (an inherited pipe on fd 3) and
+    /// GNU's own behaviour. The caller drops the returned Rc's
+    /// predecessor, which closes the source handle; the placed
+    /// descriptor is left inheritable (dup2 clears CLOEXEC),
+    /// matching GNU's `exec 3>file` and the #3213 materialized
+    /// handles.
+    #[cfg(unix)]
+    fn place_persistent_file(&mut self, fd: u32, file: &Rc<FileFd>) -> Option<Rc<FileFd>> {
+        if !self.kernel_place_persistent || fd >= Self::SHELL_FD_BASE {
+            return None;
+        }
+        let target = fd as crate::fd::HANDLE;
+        if file.handle == target {
+            return None;
+        }
+        // Another live entry's handle on this number: never clobber.
+        let held = self.entries.iter().any(|(other, entry)| {
+            *other != fd
+                && (matches!(&entry.read,
+                    Some(FdReadEndpoint::File(f))
+                    | Some(FdReadEndpoint::CoprocStdout { fd: f, .. })
+                    if !f.is_retired() && f.handle == target)
+                    || matches!(&entry.write,
+                        Some(FdWriteEndpoint::File(f))
+                        | Some(FdWriteEndpoint::CoprocStdin { fd: f, .. })
+                        if !f.is_retired() && f.handle == target))
+        });
+        if held {
+            return None;
+        }
+        // A directory (cwd anchor) or socket (signal pair, /dev/tcp)
+        // on the number: never clobber. Pipes and regular files are
+        // replaced (the CI inherited-pipe case).
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(target, &mut st) } == 0 {
+            let mode = st.st_mode & libc::S_IFMT;
+            if mode == libc::S_IFDIR || mode == libc::S_IFSOCK {
+                return None;
+            }
+        }
+        if unsafe { libc::dup2(file.handle, target) } < 0 {
+            return None;
+        }
+        Some(Rc::new(FileFd {
+            handle: target,
+            closed: std::cell::Cell::new(false),
+            path: file.path.clone(),
+        }))
+    }
+
+    /// rubash#3917: after a replace-dup2 onto `fd`, the outgoing
+    /// descriptor that held the number was already closed BY the
+    /// dup2 — record the retirement on its FileFd so the retire
+    /// step (retire_file) and a later Drop do not close the new
+    /// descriptor now occupying the number. Only the FileFd whose
+    /// handle IS the number is marked; a shared Rc keeps its other
+    /// bindings alive (their handles differ). Off Unix this is a
+    /// no-op (no placement ever runs).
+    fn mark_displaced_by_dup2(file: &Rc<FileFd>, fd: u32) {
+        #[cfg(unix)]
+        {
+            if file.handle == fd as crate::fd::HANDLE {
+                file.closed.set(true);
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (file, fd);
+        }
+    }
+
+    /// rubash#3917: place a read endpoint's File/Coproc handle onto
+    /// its logical kernel number for a persistent redirect (see
+    /// place_persistent_file). Returns the endpoint to install and
+    /// whether a replace-dup2 ran (the caller then marks the
+    /// displaced outgoing descriptor retired — dup2 already closed
+    /// it — so its retire step cannot close the new file).
+    fn place_persistent_read_endpoint(
+        &mut self,
+        fd: u32,
+        endpoint: FdReadEndpoint,
+    ) -> (FdReadEndpoint, bool) {
+        #[cfg(unix)]
+        {
+            return match endpoint {
+                FdReadEndpoint::File(file) => match self.place_persistent_file(fd, &file) {
+                    Some(placed) => (FdReadEndpoint::File(placed), true),
+                    None => (FdReadEndpoint::File(file), false),
+                },
+                FdReadEndpoint::CoprocStdout { pid, fd: file } => {
+                    match self.place_persistent_file(fd, &file) {
+                        Some(placed) => (FdReadEndpoint::CoprocStdout { pid, fd: placed }, true),
+                        None => (FdReadEndpoint::CoprocStdout { pid, fd: file }, false),
+                    }
+                }
+                other => (other, false),
+            };
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = fd;
+            (endpoint, false)
+        }
+    }
+
+    /// rubash#3917: the write-side twin of
+    /// place_persistent_read_endpoint.
+    fn place_persistent_write_endpoint(
+        &mut self,
+        fd: u32,
+        endpoint: FdWriteEndpoint,
+    ) -> (FdWriteEndpoint, bool) {
+        #[cfg(unix)]
+        {
+            return match endpoint {
+                FdWriteEndpoint::File(file) => match self.place_persistent_file(fd, &file) {
+                    Some(placed) => (FdWriteEndpoint::File(placed), true),
+                    None => (FdWriteEndpoint::File(file), false),
+                },
+                FdWriteEndpoint::CoprocStdin { pid, fd: file } => {
+                    match self.place_persistent_file(fd, &file) {
+                        Some(placed) => (FdWriteEndpoint::CoprocStdin { pid, fd: placed }, true),
+                        None => (FdWriteEndpoint::CoprocStdin { pid, fd: file }, false),
+                    }
+                }
+                other => (other, false),
+            };
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = fd;
+            (endpoint, false)
+        }
+    }
+
+    /// rubash#3917: place a `<>` pair's shared FileFd once (see
+    /// place_persistent_file) — both arms share one Rc, so the
+    /// placed descriptor serves both directions on one open file
+    /// description, as GNU's O_RDWR redirect does. An arm whose
+    /// FileFd is a DIFFERENT file (the /dev/zero split model: read
+    /// from the zero source, write to /dev/null) keeps its own
+    /// endpoint — only the arm sharing the placed Rc is rebound.
+    fn place_persistent_readwrite_endpoint(
+        &mut self,
+        fd: u32,
+        read: FdReadEndpoint,
+        write: FdWriteEndpoint,
+    ) -> (FdReadEndpoint, FdWriteEndpoint, bool) {
+        #[cfg(unix)]
+        {
+            let file = match &read {
+                FdReadEndpoint::File(file) => file.clone(),
+                _ => match &write {
+                    FdWriteEndpoint::File(file) => file.clone(),
+                    _ => return (read, write, false),
+                },
+            };
+            return match self.place_persistent_file(fd, &file) {
+                Some(placed) => {
+                    let read = match read {
+                        FdReadEndpoint::File(f) if Rc::ptr_eq(&f, &file) => {
+                            FdReadEndpoint::File(placed.clone())
+                        }
+                        other => other,
+                    };
+                    let write = match write {
+                        FdWriteEndpoint::File(f) if Rc::ptr_eq(&f, &file) => {
+                            FdWriteEndpoint::File(placed)
+                        }
+                        other => other,
+                    };
+                    (read, write, true)
+                }
+                None => (read, write, false),
+            };
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = fd;
+            (read, write, false)
+        }
+    }
+
     /// rubash#3213: materialize a read endpoint at its logical
     /// number (see materialized_handle). The replacement FileFd owns
     /// the materialized descriptor, so every existing close path —
@@ -1318,6 +1528,11 @@ impl FdTable {
     /// read-write pair is the only dual-arm install and lands
     /// through open_readwrite, never through these two.
     pub(crate) fn open_input(&mut self, fd: u32, endpoint: FdReadEndpoint, dynamic: bool) {
+        // rubash#3917: place the file onto its kernel number for a
+        // persistent redirect BEFORE the entry is swapped (the
+        // placement scans the table, so it cannot run under the
+        // entry_mut borrow below).
+        let (endpoint, placed) = self.place_persistent_read_endpoint(fd, endpoint);
         let (outgoing_read, outgoing_write);
         {
             let entry = self.entry_mut(fd, dynamic);
@@ -1327,6 +1542,22 @@ impl FdTable {
             // afterwards would close the new descriptor a second time.
             outgoing_read = std::mem::replace(&mut entry.read, None);
             outgoing_write = std::mem::replace(&mut entry.write, None);
+            // rubash#3917: the replace-dup2 already closed the
+            // outgoing descriptor that held this number — mark it
+            // retired so the retire step below cannot close the new
+            // file now occupying the number.
+            if placed {
+                if let Some(FdReadEndpoint::File(f) | FdReadEndpoint::CoprocStdout { fd: f, .. }) =
+                    &outgoing_read
+                {
+                    Self::mark_displaced_by_dup2(f, fd);
+                }
+                if let Some(FdWriteEndpoint::File(f) | FdWriteEndpoint::CoprocStdin { fd: f, .. }) =
+                    &outgoing_write
+                {
+                    Self::mark_displaced_by_dup2(f, fd);
+                }
+            }
             let endpoint = Self::materialize_read_endpoint(fd, endpoint);
             entry.read = Some(endpoint);
             entry.closed = false;
@@ -1340,6 +1571,10 @@ impl FdTable {
     /// earlier `14>file` write arm the same way, so the descriptor
     /// never carries arms from two different descriptions.
     pub(crate) fn open_output(&mut self, fd: u32, endpoint: FdWriteEndpoint, dynamic: bool) {
+        // rubash#3917: place the file onto its kernel number for a
+        // persistent redirect BEFORE the entry is swapped (see
+        // open_input).
+        let (endpoint, placed) = self.place_persistent_write_endpoint(fd, endpoint);
         let (outgoing_read, outgoing_write);
         {
             let entry = self.entry_mut(fd, dynamic);
@@ -1347,6 +1582,22 @@ impl FdTable {
             // materializing the new one (see open_input).
             outgoing_read = std::mem::replace(&mut entry.read, None);
             outgoing_write = std::mem::replace(&mut entry.write, None);
+            // rubash#3917: the replace-dup2 already closed the
+            // outgoing descriptor that held this number — mark it
+            // retired so the retire step below cannot close the new
+            // file now occupying the number.
+            if placed {
+                if let Some(FdReadEndpoint::File(f) | FdReadEndpoint::CoprocStdout { fd: f, .. }) =
+                    &outgoing_read
+                {
+                    Self::mark_displaced_by_dup2(f, fd);
+                }
+                if let Some(FdWriteEndpoint::File(f) | FdWriteEndpoint::CoprocStdin { fd: f, .. }) =
+                    &outgoing_write
+                {
+                    Self::mark_displaced_by_dup2(f, fd);
+                }
+            }
             let endpoint = Self::materialize_write_endpoint(fd, endpoint);
             entry.write = Some(endpoint);
             entry.closed = false;
@@ -1370,6 +1621,10 @@ impl FdTable {
         write: FdWriteEndpoint,
         dynamic: bool,
     ) {
+        // rubash#3917: place the pair's shared file onto its kernel
+        // number for a persistent redirect BEFORE the entry is
+        // swapped (see open_input).
+        let (read, write, placed) = self.place_persistent_readwrite_endpoint(fd, read, write);
         let (outgoing_read, outgoing_write);
         {
             let entry = self.entry_mut(fd, dynamic);
@@ -1377,6 +1632,22 @@ impl FdTable {
             // materializing the new ones (see open_input).
             outgoing_read = std::mem::replace(&mut entry.read, None);
             outgoing_write = std::mem::replace(&mut entry.write, None);
+            // rubash#3917: the replace-dup2 already closed the
+            // outgoing descriptor that held this number — mark it
+            // retired so the retire step below cannot close the new
+            // file now occupying the number.
+            if placed {
+                if let Some(FdReadEndpoint::File(f) | FdReadEndpoint::CoprocStdout { fd: f, .. }) =
+                    &outgoing_read
+                {
+                    Self::mark_displaced_by_dup2(f, fd);
+                }
+                if let Some(FdWriteEndpoint::File(f) | FdWriteEndpoint::CoprocStdin { fd: f, .. }) =
+                    &outgoing_write
+                {
+                    Self::mark_displaced_by_dup2(f, fd);
+                }
+            }
             let read = Self::materialize_read_endpoint(fd, read);
             let write = Self::materialize_write_endpoint(fd, write);
             entry.read = Some(read);
