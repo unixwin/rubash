@@ -209,8 +209,19 @@ fn unterminated_varassign_heredoc_still_warns() {
     // GNU warns for `{var}<<` at EOF exactly like for plain `<<`:
     // the warning is about the gather, not fd 0 — the parser fix
     // must not silence it. The body must still not feed stdin.
+    //
+    // Oracle (GNU bash 5.3.20, script file, stdin /dev/null,
+    // 2026-11-18, captain re-verified for the #3915 review):
+    // `cat {v}<<A` + `var-body` + EOF prints NOTHING on stdout
+    // (cat reads the untouched fd 0), warns on stderr, rc 0. The
+    // `v=` expectation the first version of this test carried was
+    // wrong: no `echo "v=$v"` line can follow an unterminated
+    // heredoc — the rest of the file IS the body — so nothing
+    // ever prints `v=`. Empty stdout is itself the assertion
+    // that the body did not feed cat's stdin (it would have
+    // printed `var-body`).
     let (stdout, stderr, code) = run_file("cat {v}<<A\nvar-body\n", "eof-warn");
-    assert_eq!(stdout, "v=\n");
+    assert_eq!(stdout, "");
     assert!(
         stderr.contains("delimited by end-of-file (wanted `A')"),
         "stderr: {stderr}"
