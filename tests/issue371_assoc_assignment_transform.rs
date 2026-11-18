@@ -27,10 +27,19 @@ use rubash::executor::Executor;
 use rubash::lexer::tokenize;
 use rubash::parser::parse;
 use std::fs;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn run_capture(input: &str) -> String {
-    let output_path = "target/rubash-issue371-output.txt";
-    let _ = fs::remove_file(output_path);
+    // nextest runs each test in its own process and plain `cargo test`
+    // runs them as threads in one process; pid + counter keeps the
+    // redirect target unique either way (a shared path races).
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    let output_path = format!(
+        "target/rubash-issue371-output-{}-{}.txt",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let _ = fs::remove_file(&output_path);
     let input = format!("{input} > {output_path}");
     let tokens = tokenize(&input);
     let ast = parse(&tokens);

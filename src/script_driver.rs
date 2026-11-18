@@ -3709,7 +3709,11 @@ pub(crate) fn run_source_pre_lexed_with_line_offset(
 /// (quotes, `${`, `$(`, array lists, `[` subscripts) are read-time
 /// matched-pair verdicts the tokenizer does not model and are never
 /// overridden here.
-fn command_paren_verdict_disproved_by_parser(input: &str, parse_posix: bool) -> bool {
+fn command_paren_verdict_disproved_by_parser(
+    executor: &Executor,
+    input: &str,
+    parse_posix: bool,
+) -> bool {
     let Some(unclosed) = crate::lexer::unclosed_input_close_char_posix(input, parse_posix) else {
         return false;
     };
@@ -3758,6 +3762,19 @@ fn command_paren_verdict_disproved_by_parser(input: &str, parse_posix: bool) -> 
         // `expected `)'` sequence), so yield the route exactly then.
         // Any other marker family present (subshell, compound
         // assignment, ...) keeps the route's diagnostic.
+        // rubash#3306: a clean parse whose only error lives inside a
+        // command-substitution body (the markers sit on the
+        // substitution node, invisible to the tree predicates) also
+        // disproves the verdict — GNU died on the body token at the
+        // `)` (parse.y:4549-4555 parse_comsub) and the read-time
+        // screen prints it. Every other !command_position verdict
+        // keeps the route's diagnostic (unclosed compassign EOF,
+        // stray-paren families, ...).
+        if !ast.commands.iter().any(command_tree_has_parse_error)
+            && executor.comsub_body_error_pending(&ast.commands)
+        {
+            return true;
+        }
         return ast.commands.iter().any(command_tree_has_cond_marker)
             && !ast
                 .commands
@@ -3915,7 +3932,11 @@ fn command_tree_has_hard_token_error(command: &CommandNode) -> bool {
 /// gathering; GNU reports it when the compound completes). Anything
 /// else — clean parses, pure EOF shortfalls, unterminated quotes or
 /// substitutions (which carry no marker) — is genuinely incomplete.
-fn interactive_pending_is_hard_syntax_error(input: &str, parse_posix: bool) -> bool {
+fn interactive_pending_is_hard_syntax_error(
+    executor: &Executor,
+    input: &str,
+    parse_posix: bool,
+) -> bool {
     let tokens = tokenize_with_initial_posix(input, parse_posix);
     if crate::lexer::heredoc_overflow_line().is_some() {
         return false;
@@ -3930,6 +3951,17 @@ fn interactive_pending_is_hard_syntax_error(input: &str, parse_posix: bool) -> b
         },
     );
     if ast.commands.iter().any(command_tree_has_near_marker) {
+        return true;
+    }
+    // rubash#3306: a command substitution whose extracted body already
+    // carries a hard parse error is wrong at the `)` that closed it —
+    // GNU's parse_comsub yyparse dies on the body token while reading
+    // (parse.y:4549-4555, 6858-6865), it does not wait for more input.
+    // The tree predicates cannot see the body's markers (they live on
+    // the comsub node, not in the tree), so ask the body walker
+    // directly; a body that merely ran out stays "incomplete" exactly
+    // like an unclosed `(`.
+    if executor.comsub_body_error_pending(&ast.commands) {
         return true;
     }
     ast.commands.iter().any(command_tree_has_hard_token_error)
@@ -4566,7 +4598,7 @@ fn run_source_impl_inner_body(
         && !interactive
         && crate::lexer::has_unclosed_input_syntax_posix(input, parse_posix)
         && !input.contains("<<")
-        && !command_paren_verdict_disproved_by_parser(input, parse_posix);
+        && !command_paren_verdict_disproved_by_parser(executor, input, parse_posix);
     if unclosed_route || (extglob_eof_line.is_some() && !input.contains("<<")) {
         // GNU parse.y:5635-5643 read_token_word + parse_matched_pair
         // (parse.y:3906-3912): an unclosed array subscript `[` reports
@@ -5945,7 +5977,7 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
             // run below reports the error and the reader moves on).
             let group_complete = pending_heredocs.is_empty()
                 && (!stdin_source_needs_more_posix(&pending, stdin_posix)
-                    || interactive_pending_is_hard_syntax_error(&pending, stdin_posix));
+                    || interactive_pending_is_hard_syntax_error(executor, &pending, stdin_posix));
             if group_complete {
                 // rubash#2849: a group was just accepted for
                 // execution — the read that produced it has returned,

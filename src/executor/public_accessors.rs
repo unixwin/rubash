@@ -715,12 +715,16 @@ impl Executor {
             // parse.y:4519): name it, without the suffix. An operator
             // followed by a real newline inside the body keeps
             // `newline' with the suffix.
-            let died_on_body_eof = token == "newline"
-                && body_text.is_some_and(|text| {
-                    let trimmed = text.trim_end_matches([' ', '\t', '\r']);
-                    !trimmed.ends_with('\n')
-                        && matches!(trimmed.chars().last(), Some('>' | '<' | '&' | '|'))
-                });
+            // rubash#3306: a literal `)' offender IS the sub-parse's
+            // EOF token itself (parse.y:4519-4521) — same no-suffix
+            // rule, e.g. the empty pattern of `$(case x in ())`.
+            let died_on_body_eof = token == ")"
+                || (token == "newline"
+                    && body_text.is_some_and(|text| {
+                        let trimmed = text.trim_end_matches([' ', '\t', '\r']);
+                        !trimmed.ends_with('\n')
+                            && matches!(trimmed.chars().last(), Some('>' | '<' | '&' | '|'))
+                    }));
             let (token, suffix) = if died_on_body_eof {
                 (")".to_string(), "")
             } else {
