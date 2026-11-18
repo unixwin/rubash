@@ -1902,10 +1902,15 @@ impl Executor {
                     continue;
                 }
 
+                // GNU copy.c copy_dir/copy_internal: each node
+                // diagnoses its own failure — `cannot create regular
+                // file` / `cannot create directory` naming THAT node —
+                // and a failed tree child does not stop its siblings
+                // (rubash#3635). The Err is already reported.
                 let result = if source.is_dir() {
-                    cp_copy_tree(&source, &target, 0, preserve, &mut link_map)
+                    cp_copy_tree(&source, &target, 0, preserve, &mut link_map, &mut stderr)
                 } else {
-                    cp_copy_file(&source, &target, preserve, &mut link_map)
+                    cp_copy_file(&source, &target, preserve, &mut link_map, &mut stderr)
                 };
                 match result {
                     Ok(_) => {
@@ -1931,24 +1936,7 @@ impl Executor {
                             );
                         }
                     }
-                    Err(error) => {
-                        // GNU coreutils copy.c copy_internal names the
-                        // kind it failed to create: `cannot create
-                        // regular file` for plain targets, `cannot
-                        // create directory` for the tree branch.
-                        let kind = if source.is_dir() {
-                            "directory"
-                        } else {
-                            "regular file"
-                        };
-                        let _ = writeln!(
-                            stderr,
-                            "cp: cannot create {kind} '{}': {}",
-                            target.display_path().display(),
-                            crate::posix_errors::message(&error)
-                        );
-                        status = 1;
-                    }
+                    Err(_) => status = 1,
                 }
             }
         }
@@ -5123,65 +5111,202 @@ impl CpNode {
     }
 }
 
-/// Copy one regular file, honoring --preserve=links: a source inode
-/// already copied in this invocation links the new destination to
+/// The Err a cp_copy_* site returns once its diagnostic is already
+/// written to the command's stderr buffer: callers only test is_err
+/// (the tree walk continues with the remaining siblings, GNU copy.c
+/// copy_dir's `ok &=` shape), so the payload is never rendered
+/// (rubash#3635).
+fn cp_diagnosed() -> io::Error {
+    io::Error::new(io::ErrorKind::Other, "cp: failure already diagnosed")
+}
+
+/// Copy one non-directory node, honoring --preserve=links: a source
+/// inode already copied in this invocation links the new destination to
 /// the first copy instead of duplicating the bytes (the two
 /// destinations then share an inode, mode and times included —
-/// exactly GNU's result).
+/// exactly GNU's result). Failures are diagnosed at the node itself,
+/// GNU copy.c copy_internal style, so a tree walk can continue with
+/// the siblings (rubash#3635).
 fn cp_copy_file(
     source: &CpNode,
     target: &CpNode,
     preserve: CpPreserve,
     link_map: &mut CpLinkMap,
+    stderr: &mut Vec<u8>,
 ) -> io::Result<()> {
+    // copy.c copy_internal's overwrite gate: a non-directory source
+    // never lands on an existing directory. The destination is
+    // lstat'd — a symlink (even to a directory) is not S_ISDIR there,
+    // so it falls through to the create, whose open then fails
+    // against the linked directory.
+    if target
+        .symlink_stat()
+        .map(|stat| stat.is_dir)
+        .unwrap_or(false)
+    {
+        let _ = writeln!(
+            stderr,
+            "cp: cannot overwrite directory '{}' with non-directory",
+            target.display_path().display()
+        );
+        return Err(cp_diagnosed());
+    }
     if preserve.links {
         if let Some(key) = source.inode_key() {
             if let Some(first) = link_map.get(&key) {
-                return first.hard_link_to(target);
+                return first.hard_link_to(target).map_err(|error| {
+                    // copy.c create_hard_link: dst named first, then
+                    // the source it links to.
+                    let _ = writeln!(
+                        stderr,
+                        "cp: cannot create hard link '{}' to '{}': {}",
+                        target.display_path().display(),
+                        source.display_path().display(),
+                        crate::posix_errors::message(&error)
+                    );
+                    cp_diagnosed()
+                });
             }
-            let copied = source.copy_bytes_to(target);
+            let copied = source.copy_bytes_to(target).map_err(|error| {
+                let _ = writeln!(
+                    stderr,
+                    "cp: cannot create regular file '{}': {}",
+                    target.display_path().display(),
+                    crate::posix_errors::message(&error)
+                );
+                cp_diagnosed()
+            });
             if copied.is_ok() {
                 link_map.insert(key, target.clone());
             }
             return copied;
         }
     }
-    source.copy_bytes_to(target)
+    source.copy_bytes_to(target).map_err(|error| {
+        let _ = writeln!(
+            stderr,
+            "cp: cannot create regular file '{}': {}",
+            target.display_path().display(),
+            crate::posix_errors::message(&error)
+        );
+        cp_diagnosed()
+    })
 }
 
 /// cp -r: directories are created and walked in sorted entry order so the
 /// result is deterministic. Symlinks are followed, which is cp's default
 /// (without -d); the depth cap turns a link cycle into an error instead of
 /// a stack overflow.
+///
+/// Diagnostics are emitted at the failing node, GNU copy.c
+/// copy_internal style — `cannot create regular file` /
+/// `cannot create directory` naming THAT node — and a failed child
+/// does not stop its siblings, copy_dir's `ok &=` loop shape
+/// (rubash#3635). Every Err returned here has already been written
+/// to `stderr`; callers test is_err only.
 fn cp_copy_tree(
     source: &CpNode,
     target: &CpNode,
     depth: usize,
     preserve: CpPreserve,
     link_map: &mut CpLinkMap,
+    stderr: &mut Vec<u8>,
 ) -> io::Result<()> {
     if depth > 40 {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            "too many levels of symbolic links",
-        ));
-    }
-    let metadata = source.symlink_stat()?;
-    if metadata.is_symlink {
-        return cp_copy_tree(
-            &source.resolve_link()?,
-            target,
-            depth + 1,
-            preserve,
-            link_map,
+        let _ = writeln!(
+            stderr,
+            "cp: cannot stat '{}': Too many levels of symbolic links",
+            source.display_path().display()
         );
+        return Err(cp_diagnosed());
+    }
+    let metadata = match source.symlink_stat() {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            let _ = writeln!(
+                stderr,
+                "cp: cannot stat '{}': {}",
+                source.display_path().display(),
+                crate::posix_errors::message(&error)
+            );
+            return Err(cp_diagnosed());
+        }
+    };
+    if metadata.is_symlink {
+        return match source.resolve_link() {
+            Ok(resolved) => cp_copy_tree(&resolved, target, depth + 1, preserve, link_map, stderr),
+            Err(error) => {
+                let _ = writeln!(
+                    stderr,
+                    "cp: cannot stat '{}': {}",
+                    source.display_path().display(),
+                    crate::posix_errors::message(&error)
+                );
+                Err(cp_diagnosed())
+            }
+        };
     }
     if metadata.is_dir {
-        target.create_dir_all()?;
-        let mut entries = source.read_dir_nodes()?;
+        // copy.c copy_internal's overwrite gate, lstat'd like dst_sb:
+        // a directory source never lands on an existing
+        // non-directory — a symlink counts as non-directory even
+        // when it resolves to one.
+        match target.symlink_stat() {
+            Ok(stat) if !stat.is_dir => {
+                let _ = writeln!(
+                    stderr,
+                    "cp: cannot overwrite non-directory '{}' with directory '{}'",
+                    target.display_path().display(),
+                    source.display_path().display()
+                );
+                return Err(cp_diagnosed());
+            }
+            // An existing directory takes the contents — the
+            // `new_dst || !S_ISDIR(dst)` gate skips the mkdir.
+            Ok(_) => {}
+            Err(_) => {
+                // mkdirat is single-level (copy.c): a missing
+                // intermediate component is ENOENT, not a silent
+                // create_dir_all.
+                if let Err(error) = target.create_dir() {
+                    let _ = writeln!(
+                        stderr,
+                        "cp: cannot create directory '{}': {}",
+                        target.display_path().display(),
+                        crate::posix_errors::message(&error)
+                    );
+                    return Err(cp_diagnosed());
+                }
+            }
+        }
+        let mut entries = match source.read_dir_nodes() {
+            Ok(entries) => entries,
+            Err(error) => {
+                // copy_dir's savedir failure is `cannot access`.
+                let _ = writeln!(
+                    stderr,
+                    "cp: cannot access '{}': {}",
+                    source.display_path().display(),
+                    crate::posix_errors::message(&error)
+                );
+                return Err(cp_diagnosed());
+            }
+        };
         entries.sort_by_key(|(name, _)| name.clone());
+        let mut ok = true;
         for (name, child) in entries {
-            cp_copy_tree(&child, &target.child(&name), depth + 1, preserve, link_map)?;
+            if cp_copy_tree(
+                &child,
+                &target.child(&name),
+                depth + 1,
+                preserve,
+                link_map,
+                stderr,
+            )
+            .is_err()
+            {
+                ok = false;
+            }
         }
         // GNU sets a copied directory's preserved attributes only after
         // its contents land, so child writes cannot clobber them.
@@ -5189,9 +5314,9 @@ fn cp_copy_tree(
             cp_apply_preserved(source, target, preserve.mode, preserve.times);
         }
         cp_apply_preserved_attributes(source, target, preserve);
-        return Ok(());
+        return if ok { Ok(()) } else { Err(cp_diagnosed()) };
     }
-    cp_copy_file(source, target, preserve, link_map)?;
+    cp_copy_file(source, target, preserve, link_map, stderr)?;
     if preserve.mode || preserve.times {
         cp_apply_preserved(source, target, preserve.mode, preserve.times);
     }

@@ -43,9 +43,9 @@ fn run_file(script: &str, tag: &str) -> (String, String, i32) {
     )
 }
 
-/// Word-internal matched-pair EOF -> exit 1 (was 2 on master).
+/// Word-internal matched-pair EOF -> exit 2 in GNU bash 5.3.20.
 #[test]
-fn word_internal_eof_exits_one() {
+fn word_internal_eof_exits_two() {
     for (tag, script, closer) in [
         ("squote", "echo 'abc\n", '\''),
         ("dquote", "echo \"abc\n", '"'),
@@ -58,7 +58,7 @@ fn word_internal_eof_exits_one() {
         ("arith_cmd", "((x++\n", ')'),
     ] {
         let (_stdout, stderr, code) = run_file(script, tag);
-        assert_eq!(code, 1, "{tag}: {script:?} -> {stderr:?}");
+        assert_eq!(code, 2, "{tag}: {script:?} -> {stderr:?}");
         let needle = format!("unexpected EOF while looking for matching `{closer}'");
         assert!(stderr.contains(&needle), "{tag}: {stderr:?}");
     }
@@ -93,11 +93,11 @@ fn ansi_c_escaped_quote_inside_comsub_runs() {
 }
 
 /// The same shape without the escape leaves the trailing `'` open —
-/// GNU reports the quote EOF at line 1 with exit 1.
+/// GNU 5.3.20 reports the quote EOF at line 1 with exit 2.
 #[test]
-fn unclosed_quote_after_comsub_exits_one() {
+fn unclosed_quote_after_comsub_exits_two() {
     let (_stdout, stderr, code) = run_file("echo $(echo $'a')b'\n", "stray_quote");
-    assert_eq!(code, 1, "{stderr:?}");
+    assert_eq!(code, 2, "{stderr:?}");
     assert!(
         stderr.contains("unexpected EOF while looking for matching `''"),
         "{stderr:?}"

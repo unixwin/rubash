@@ -2737,7 +2737,7 @@ impl Executor {
                 }
             };
             if !fresh {
-                if let Ok(dir) = std::fs::File::open(cwd) {
+                if let Ok(dir) = std::fs::File::open(cwd).map(crate::fd::move_file_to_high_fd) {
                     *self.shell_state.cwd_anchor.borrow_mut() =
                         Some(crate::shell::state::CwdAnchor {
                             path: cwd.to_path_buf(),
@@ -6760,7 +6760,6 @@ fn is_exec_format_error(error: &io::Error) -> bool {
 /// left to the normal spawn-error classification.
 #[cfg(unix)]
 pub(in crate::executor) fn is_enoexec_candidate(program: &std::path::Path) -> bool {
-    use std::io::Read;
     if !std::fs::metadata(program).is_ok_and(|meta| meta.is_file()) {
         return false;
     }
@@ -6777,8 +6776,8 @@ pub(in crate::executor) fn is_enoexec_candidate(program: &std::path::Path) -> bo
     let Ok(mut file) = std::fs::File::open(program) else {
         return false;
     };
-    let mut head = [0u8; 8];
-    let read = file.read(&mut head).unwrap_or(0);
+    let mut head = [0u8; crate::executor::path::MACHO_SNIFF_BYTES];
+    let read = crate::executor::path::read_exec_sniff_head(&mut file, &mut head);
     let head = &head[..read];
     // execute_cmd.c:6126 shell_execve takes whatever the local kernel
     // loads: a binary format is an ENOEXEC candidate exactly on the

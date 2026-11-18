@@ -1060,13 +1060,13 @@ impl Executor {
                     // (the spawn stamp there falls back to the
                     // unstamped spawn, as before).
                     #[cfg(unix)]
-                    let anchor =
-                        std::fs::File::open(".")
-                            .ok()
-                            .map(|dir| crate::shell::state::CwdAnchor {
-                                path: field.clone(),
-                                dir: std::sync::Arc::new(dir),
-                            });
+                    let anchor = std::fs::File::open(".")
+                        .ok()
+                        .map(crate::fd::move_file_to_high_fd)
+                        .map(|dir| crate::shell::state::CwdAnchor {
+                            path: field.clone(),
+                            dir: std::sync::Arc::new(dir),
+                        });
                     #[cfg(not(unix))]
                     let anchor: Option<crate::shell::state::CwdAnchor> = None;
                     (field, anchor)

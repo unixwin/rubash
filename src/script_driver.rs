@@ -2692,7 +2692,7 @@ pub fn stdin_source_needs_more(source: &str) -> bool {
 /// read_token fails inside the compound's own token read), so none of
 /// the compound — and nothing else on its opening line — ever runs,
 /// and the compound-EOF diagnostic is never printed (rubash#1589).
-fn unclosed_compound_open_line(text: &str) -> Option<usize> {
+pub(crate) fn unclosed_compound_open_line(text: &str) -> Option<usize> {
     let tokens = tokenize(text);
     let mut stack: Vec<(&str, usize)> = Vec::new();
     for token in &tokens {
@@ -3920,6 +3920,44 @@ fn command_tree_has_near_marker(command: &CommandNode) -> bool {
     command_tree_walk_nested(command, command_tree_has_near_marker)
 }
 
+/// True when this command (or any nested command) carries a HARD
+/// parse failure — a token the parser rejected (`__RUBASH_PARSE_ERROR_NEAR__`,
+/// a plain `__RUBASH_PARSE_ERROR__` "unexpected token" value, a
+/// `__RUBASH_PARSE_ERROR_COND__` condition error, or a
+/// `__RUBASH_COMPOUND_SYNTAX_ERROR*` compound error). GNU's reader hits
+/// these at the offending token's position, before EOF inside any
+/// matched pair is ever reached, so they preempt the unclosed-pair
+/// verdict (rubash#3641). The end-of-input marker family is excluded:
+/// an unclosed keyword compound only reports "from `X' command" when
+/// the reader reaches clean EOF, which a pair error inside it beats
+/// (parse.y:6883-6901 checks shell_eof_token before compoundcmd_top).
+pub(crate) fn command_tree_has_hard_parse_error(command: &CommandNode) -> bool {
+    let hard = command.assignments.iter().any(|(name, value)| {
+        name == "__RUBASH_PARSE_ERROR_NEAR__"
+            || name == "__RUBASH_PARSE_ERROR_COND__"
+            || name.starts_with("__RUBASH_COMPOUND_SYNTAX_ERROR")
+            || (name == "__RUBASH_PARSE_ERROR__" && value.starts_with("unexpected token"))
+    });
+    hard || command_tree_walk_nested(command, command_tree_has_hard_parse_error)
+}
+
+/// True when this command (or any nested command) carries an
+/// end-of-input verdict — the `__RUBASH_PARSE_ERROR_EOF*` marker family
+/// or the plain `__RUBASH_PARSE_ERROR__` "unexpected end of file"
+/// value (the incomplete-input family; hard `unexpected token'
+/// diagnostics are excluded). Trap-action prefix screening uses this
+/// to tell a complete command list from one GNU's parse_and_execute
+/// reader loop would still be gathering (rubash#3641).
+pub(crate) fn command_tree_has_eof_parse_error(command: &CommandNode) -> bool {
+    if command.assignments.iter().any(|(name, value)| {
+        name.starts_with("__RUBASH_PARSE_ERROR_EOF")
+            || (name == "__RUBASH_PARSE_ERROR__" && value.starts_with("unexpected end of file"))
+    }) {
+        return true;
+    }
+    command_tree_walk_nested(command, command_tree_has_eof_parse_error)
+}
+
 /// True when this command (or any nested command) carries one of the
 /// end-of-input marker family — the parse only failed for want of
 /// more input, so an interactive reader should keep gathering.
@@ -4577,18 +4615,8 @@ fn run_source_impl_inner_body(
                     Some(open_line + line_offset),
                 );
             }
-            // parse_matched_pair's quote recursion dies inside
-            // read_token_word (parse.y:5419-5437): DISCARD keeps
-            // EXECUTION_FAILURE=1; error.c:324-327 forces 2 under
-            // live errexit — same family as the `}`/`'`/`]' word
-            // matched pairs below (GNU 5.3.20: `cat <<'EOF` -> 1).
-            let status = if executor.errexit_live_at_diagnostic() {
-                2
-            } else {
-                1
-            };
-            executor.set_last_exit_code(status);
-            return status;
+            executor.set_last_exit_code(2);
+            return 2;
         }
     }
     // perf19: a pre-lexed group broke COMPLETE at the gather (the
@@ -4687,19 +4715,18 @@ fn run_source_impl_inner_body(
                     Some(open_line + line_offset),
                 );
             }
-            // GNU exits 1 for every subscript EOF shape: the `[` hunt
-            // is a word-internal parse_matched_pair — whether opened by
-            // parse_compound_assignment (`v[a=`) or a command word
-            // (`a[`, `v[a=$(`), read_token_word's EOF is DISCARD at
-            // EXECUTION_FAILURE=1 (GNU 5.3.20 probe matrix) — and
-            // error.c:324-327 still forces 2 under live errexit
-            // (rubash#306).
-            if executor.errexit_live_at_diagnostic() {
+            // GNU exits 1 when the subscript opened inside a compound array
+            // assignment (parse_compound_assignment EOF family) and 2 for a
+            // command word (parse.y:3567 read_token error path) — but
+            // error.c:324-327 forces exit status 2 whenever errexit is live
+            // at the parser_error (rubash#306).
+            if inside_compassign && executor.errexit_live_at_diagnostic() {
                 executor.set_last_exit_code(2);
                 return 2;
             }
-            executor.set_last_exit_code(1);
-            return 1;
+            let status = if inside_compassign { 1 } else { 2 };
+            executor.set_last_exit_code(status);
+            return status;
         }
         // rubash#543: an unterminated `$[` legacy-arithmetic construct is the
         // parse_matched_pair grouping scan opened by read_token_word's
@@ -4752,17 +4779,9 @@ fn run_source_impl_inner_body(
                     Some(eof.report_line + line_offset),
                 );
             }
-            // parse_matched_pair's `[` hunt is word-internal like the
-            // quotes/`${` above: EOF exits 1 (GNU 5.3.20 `echo $[1+`
-            // -> 1), forced to 2 only under live errexit
-            // (error.c:324-327).
-            let status = if executor.errexit_live_at_diagnostic() {
-                2
-            } else {
-                1
-            };
-            executor.set_last_exit_code(status);
-            return status;
+            executor.errexit_live_at_diagnostic();
+            executor.set_last_exit_code(2);
+            return 2;
         }
         // rubash#3229: an unclosed extglob pattern group — GNU
         // read_token_word's parse_matched_pair scan (parse.y:5466-5489)
@@ -5075,26 +5094,12 @@ fn run_source_impl_inner_body(
                             Some(reported),
                         );
                     }
-                    // GNU splits the EOF family on the INNERMOST
-                    // construct: a word-internal matched pair
-                    // (read_token_word's parse_matched_pair — `'`, `"`,
-                    // `` ` ``, `${`'s `}`, `[`'s `]`, and the `$((`/`((`
-                    // arithmetic `)' pair, which reports its OPEN line)
-                    // dies inside the word read at EXECUTION_FAILURE=1;
-                    // the command-position `$(` hunt reported at the EOF
-                    // line goes through `error yacc_EOF` ->
-                    // EX_BADUSAGE=2 (parse.y:489-490). GNU 5.3.20 probe
-                    // matrix: `'abc`/`"abc`/``abc`/`${x`/`$[1+`/`a[`/
-                    // `$((1+`/`((x++` all exit 1; `$(echo x` exits 2.
-                    // error.c:324-327 forces 2 under live errexit.
-                    let word_pair = !command && (close != ')' || report_open);
-                    let status = if word_pair && !executor.errexit_live_at_diagnostic() {
-                        1
-                    } else {
-                        2
-                    };
-                    executor.set_last_exit_code(status);
-                    return status;
+                    // GNU 5.3.20 exits 2 for unmatched-delimiter EOF
+                    // diagnostics (confirmed for word-internal pairs
+                    // `'`, `"`, `` ` ``, `${`, `$[`, `a[`, `$((`, `((`
+                    // as well as `$(` and command-position constructs).
+                    executor.set_last_exit_code(2);
+                    return 2;
                 }
                 // GNU exits 1 for an unterminated `name=(` array list —
                 // but error.c:324-327 forces exit status 2 whenever

@@ -329,12 +329,25 @@ impl JobTable {
         // common.c:720-738: the switch is on the FIRST byte, so `%+x`
         // is the current job and `%-x` the previous one.
         match body.chars().next() {
+            // common.c:724-727: `%`, `%%`, `%+` (and the empty body of
+            // a bare `%`) return js.j_current VERBATIM — GNU has no
+            // newest-job fallback. The caller-side INVALID_JOB
+            // (jobs.h:115) then rejects NO_JOB and any slot whose job
+            // is already gone, so `wait %%` after the job table drains
+            // reports "no such job" even while dead-but-unreaped
+            // entries still occupy the table (rubash#3638). The
+            // contains_key check is that slot validation folded into
+            // the resolver: a marker can only ever name a live entry
+            // or None, and a stale id must not resolve.
             None | Some('%') | Some('+') => self
                 .current_job
-                .or_else(|| self.jobs.keys().next_back().copied())
+                .filter(|id| self.jobs.contains_key(id))
                 .map_or(JobspecMatch::NoMatch, JobspecMatch::Job),
+            // common.c:729-730: `%-` returns js.j_previous through the
+            // same INVALID_JOB gate.
             Some('-') => self
                 .previous_job
+                .filter(|id| self.jobs.contains_key(id))
                 .map_or(JobspecMatch::NoMatch, JobspecMatch::Job),
             Some('?') => self.get_job_by_name(&body[1..], true),
             Some(_) => self.get_job_by_name(body, false),
@@ -1176,6 +1189,38 @@ mod tests {
         assert_eq!(table.resolve_jobspec("%1"), JobspecMatch::Job(first));
         assert!(table.remove_job(first));
         assert!(table.jobs.is_empty());
+    }
+
+    #[test]
+    fn drained_current_marker_jobspecs_report_no_match() {
+        // rubash#3638: common.c:727 returns js.j_current VERBATIM for
+        // `%%`/`%+`/`%` — there is no newest-job fallback — and the
+        // caller-side INVALID_JOB (jobs.h:115) rejects NO_JOB. After
+        // reset_current clears both markers (every remaining entry is
+        // dead) the spec resolves to nothing even while a
+        // dead-but-notified entry still occupies the table, so `wait
+        // %%` after the table drains reports "no such job".
+        let mut table = JobTable::default();
+        table.register_process(1, "one", true, 1);
+        table.register_process(2, "two", true, 2);
+        table.mark_completed(1, 0);
+        table.mark_job_waited_by_pid(1);
+        table.mark_completed(2, 0);
+        // The `wait %2` cleanup pass: job1 (the previous marker)
+        // leaves and reset_current finds no stopped/running candidate,
+        // clearing current and previous while job2's corpse remains.
+        table.cleanup_dead_jobs();
+        assert_eq!(table.current_job(), None);
+        assert_eq!(table.previous_job(), None);
+        assert!(table.jobs.contains_key(&2));
+        table.mark_job_waited_by_pid(2);
+        assert_eq!(table.resolve_jobspec("%%"), JobspecMatch::NoMatch);
+        assert_eq!(table.resolve_jobspec("%+"), JobspecMatch::NoMatch);
+        assert_eq!(table.resolve_jobspec("%"), JobspecMatch::NoMatch);
+        assert_eq!(table.resolve_jobspec("%-"), JobspecMatch::NoMatch);
+        // The corpse still answers its numeric spec: GNU keeps the
+        // slot until the next cleanup_dead_jobs (jobs.c:1303).
+        assert_eq!(table.resolve_jobspec("%2"), JobspecMatch::Job(2));
     }
 
     #[test]

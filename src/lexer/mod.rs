@@ -26,7 +26,7 @@ pub(crate) use classification::{is_assignment, is_keyword};
 use continuation::{compound_residuals_advance, ends_with_unquoted_backslash, has_unclosed_quotes};
 pub(crate) use continuation::{
     comsub_residuals_advance, quotes_residuals_advance, CompoundResidualState, ComsubResidualState,
-    QuotesResidualState,
+    QuotesResidualState, UnclosedInput,
 };
 pub(crate) use heredoc_scan::dequote_heredoc_delimiter;
 
