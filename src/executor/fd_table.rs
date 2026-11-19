@@ -548,6 +548,30 @@ pub(crate) struct FdTable {
     /// replays the table, not the kernel descriptor). Off Unix the
     /// flag is inert (no kernel placement exists).
     pub(crate) kernel_place_persistent: bool,
+    /// rubash#3917: the placement undo log — GNU's undo list
+    /// (redir.c add_undo_redirect) ported: before a placement dup2
+    /// replaces a kernel descriptor, the displaced occupant is
+    /// saved on a CLOEXEC duplicate so a caller that provisionally
+    /// applied the redirects (execute_exec's option-parse scope,
+    /// whose EX_BADUSAGE outcome undoes them — redir.c's
+    /// exec_redirection_undo_list) can roll the kernel back with
+    /// `rollback_placements`; a caller that keeps the installs
+    /// calls `commit_placements`, which closes the saves. Entries
+    /// are raw handles owned by THIS table instance: snapshots
+    /// (saved_table) start with an empty log, so a snapshot's
+    /// commit/rollback can never close the live table's saves.
+    pub(crate) placement_undo: Vec<PlacementUndo>,
+}
+
+/// rubash#3917: one placement undo record (see
+/// FdTable::placement_undo): the kernel number a placement dup2
+/// landed on, and the displaced occupant's saved duplicate
+/// (None when the number was free — rollback then just closes
+/// the number).
+#[derive(Debug, Clone)]
+pub(crate) struct PlacementUndo {
+    pub(crate) fd: u32,
+    pub(crate) displaced: Option<crate::fd::HANDLE>,
 }
 
 /// The byte sequences that terminate a `read` record for `delimiter`
@@ -796,6 +820,7 @@ impl FdTable {
             read_error: None,
             stdout_alias_generation: std::collections::HashMap::new(),
             kernel_place_persistent: false,
+            placement_undo: Vec::new(),
         };
         table.entries.insert(
             0,
@@ -1161,19 +1186,132 @@ impl FdTable {
         // replaced (the CI inherited-pipe case).
         let mut st: libc::stat = unsafe { std::mem::zeroed() };
         if unsafe { libc::fstat(target, &mut st) } == 0 {
-            let mode = st.st_mode & libc::S_IFMT;
-            if mode == libc::S_IFDIR || mode == libc::S_IFSOCK {
+            // st_mode and the S_IF* constants disagree in width on
+            // some targets (u32 vs u16 on linux/android) — compare
+            // through u32 like external_file_builtins does.
+            let mode = u32::from(st.st_mode) & u32::from(libc::S_IFMT);
+            if mode == u32::from(libc::S_IFDIR) || mode == u32::from(libc::S_IFSOCK) {
                 return None;
             }
         }
+        // GNU saves the displaced descriptor BEFORE the dup2
+        // whenever the redirection is undoable (redir.c
+        // add_undo_redirect); the provisional exec scope rolls the
+        // placement back from this save (see placement_undo). If
+        // the occupant cannot be saved, stay virtual rather than
+        // destroy it irrecoverably.
+        let displaced = if unsafe { libc::fcntl(target, libc::F_GETFD) } >= 0 {
+            let saved = unsafe {
+                libc::fcntl(
+                    target,
+                    libc::F_DUPFD_CLOEXEC,
+                    Self::SHELL_FD_BASE as crate::fd::HANDLE,
+                )
+            };
+            if saved < 0 {
+                return None;
+            }
+            Some(saved as crate::fd::HANDLE)
+        } else {
+            None
+        };
         if unsafe { libc::dup2(file.handle, target) } < 0 {
+            if let Some(saved) = displaced {
+                unsafe { libc::close(saved) };
+            }
             return None;
+        }
+        self.placement_undo.push(PlacementUndo { fd, displaced });
+        // dup2 cleared the descriptor's close-on-exec bit; restore
+        // it so the placed descriptor keeps the table's CLOEXEC
+        // discipline (every executor-owned handle is CLOEXEC —
+        // src/fd/unix.rs). Children receive the binding through
+        // the pin/env delivery like any other entry; leaving the
+        // bit clear would leak the raw descriptor into every
+        // spawned child, bypassing the delivery's close/rebind
+        // decisions (rubash#3917: a `{v}<&-` close for the child
+        // must close a placed fd too).
+        unsafe {
+            libc::fcntl(target, libc::F_SETFD, libc::FD_CLOEXEC);
         }
         Some(Rc::new(FileFd {
             handle: target,
             closed: std::cell::Cell::new(false),
             path: file.path.clone(),
         }))
+    }
+
+    /// rubash#3917: the current placement-undo depth — a caller
+    /// that provisionally applies persistent redirects records
+    /// this mark first, then settles the placements it caused
+    /// with commit_placements / rollback_placements.
+    pub(crate) fn placement_mark(&self) -> usize {
+        self.placement_undo.len()
+    }
+
+    /// rubash#3917: settle every placement above `mark` as
+    /// permanent: close the saved displaced occupants (GNU
+    /// disposes the exec undo list once the exec stands). A mark
+    /// at or above the current depth is a no-op.
+    pub(crate) fn commit_placements(&mut self, mark: usize) {
+        while self.placement_undo.len() > mark {
+            let undo = self.placement_undo.pop().expect("undo entry");
+            if let Some(saved) = undo.displaced {
+                #[cfg(unix)]
+                unsafe {
+                    libc::close(saved);
+                }
+                #[cfg(not(unix))]
+                let _ = saved;
+            }
+        }
+    }
+
+    /// rubash#3917: undo every placement above `mark`, newest
+    /// first (GNU undo_exec_redirects): a saved displaced
+    /// occupant is dup2'd back onto its number and its save
+    /// closed; a number that was free is closed. The placed
+    /// entries are marked retired so dropping them cannot close
+    /// the restored descriptor a second time. The caller must
+    /// discard the table's entries for the rolled-back numbers
+    /// (execute_exec restores its pre-walk snapshot immediately
+    /// after rolling back) — the entries still name the placed
+    /// files, which the kernel no longer holds on those numbers.
+    pub(crate) fn rollback_placements(&mut self, mark: usize) {
+        while self.placement_undo.len() > mark {
+            let undo = self.placement_undo.pop().expect("undo entry");
+            #[cfg(unix)]
+            {
+                let target = undo.fd as crate::fd::HANDLE;
+                match undo.displaced {
+                    Some(saved) => unsafe {
+                        libc::dup2(saved, target);
+                        libc::close(saved);
+                    },
+                    None => unsafe {
+                        libc::close(target);
+                    },
+                }
+            }
+            #[cfg(not(unix))]
+            let _ = undo.fd;
+            if let Some(entry) = self.entries.get_mut(&undo.fd) {
+                if let Some(FdReadEndpoint::File(f) | FdReadEndpoint::CoprocStdout { fd: f, .. }) =
+                    &entry.read
+                {
+                    if f.handle == undo.fd as crate::fd::HANDLE {
+                        f.closed.set(true);
+                    }
+                }
+                if let Some(FdWriteEndpoint::File(f) | FdWriteEndpoint::CoprocStdin { fd: f, .. }) =
+                    &entry.write
+                {
+                    if f.handle == undo.fd as crate::fd::HANDLE {
+                        f.closed.set(true);
+                    }
+                }
+            }
+        }
     }
 
     /// rubash#3917: after a replace-dup2 onto `fd`, the outgoing
@@ -1515,6 +1653,19 @@ impl FdTable {
                 *entry = dup;
             }
         }
+        // rubash#3917: the undo log holds raw saved handles owned
+        // by the live table — a snapshot must never commit or roll
+        // them back (it would close the live table's saves). The
+        // snapshot starts with an empty log; placements made while
+        // it is live log against it normally.
+        table.placement_undo.clear();
+        // Placement arming belongs to the live walk on the live
+        // executor: a snapshot (e.g. the table a command-
+        // substitution clone starts from, taken while an outer
+        // walk is armed) must not inherit it, or the clone's
+        // ordinary redirect opens would dup2 the process's
+        // descriptors.
+        table.kernel_place_persistent = false;
         table
     }
 

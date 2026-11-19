@@ -4596,7 +4596,28 @@ impl Executor {
         if self.exec_has_no_command_operand_after_expansion(cmd) {
             let saved_env_vars = self.shell_state.env_vars.clone();
             let saved_fd_table = self.fd_table.saved_table();
-            self.execute_stdio_only_exec_redirect_scoped(cmd)?;
+            // rubash#3917 (PR #3930 review): when the walk would arm
+            // kernel placement (the true persistent scope), run it
+            // directly and hold the placement undo open across
+            // execute_with_io — the scoped entry settles (commits)
+            // its placements when the walk returns, which would
+            // close the saved displaced occupants before the
+            // option-parse verdict is known. GNU keeps the exec
+            // undo list until the parse outcome is fixed (redir.c
+            // exec_redirection_undo_list): EX_BADUSAGE rolls the
+            // redirections — kernel placements included — back; a
+            // clean parse commits them.
+            let placement_mark = if self.builtin_wrapper_depth == 0
+                && self.shell_state.subshell_depth.get() == 0
+                && self.compound_redirect_scope_depth == 0
+            {
+                let mark = self.fd_table.placement_mark();
+                self.execute_stdio_only_exec_redirect(cmd, true)?;
+                Some(mark)
+            } else {
+                self.execute_stdio_only_exec_redirect_scoped(cmd)?;
+                None
+            };
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
             // rubash#3401 (face 3): the simulated-exec wait takes the
@@ -4605,7 +4626,7 @@ impl Executor {
             // `&self.shell_state.*` borrows.
             let exec_env_vars = self.shell_state.env_vars.clone();
             let exec_cwd = self.shell_state.cwd.clone();
-            let status = crate::builtins::exec::execute_with_io(
+            let status = match crate::builtins::exec::execute_with_io(
                 Some(&mut *self),
                 &cmd.words[1..],
                 &exec_env_vars,
@@ -4617,7 +4638,18 @@ impl Executor {
                 // the no-op value.
                 Stdio::inherit(),
                 &crate::executor::ChildFdSetup::default(),
-            )?;
+            ) {
+                Ok(status) => status,
+                Err(err) => {
+                    // An internal failure must not leave the
+                    // process's descriptors placed behind a table
+                    // the caller is about to abandon.
+                    if let Some(mark) = placement_mark {
+                        self.fd_table.rollback_placements(mark);
+                    }
+                    return Err(err);
+                }
+            };
             // GNU exec.def reports option errors through builtin_error,
             // which carries the script:line context prefix
             // (redir.tests:53: "./redir.tests: line 53: exec: -1: invalid
@@ -4633,8 +4665,20 @@ impl Executor {
             // targets), then undo them if the exec failed.
             self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
             if status == 2 {
+                // Roll the kernel placements back BEFORE the
+                // snapshot table replaces the live one: the
+                // snapshot knows nothing of the dup2s, so without
+                // this the process's descriptor stays redirected
+                // behind the restored table (the fd_redirects CLI
+                // cell: `exec $fd>file` with fd=-1 must keep the
+                // shell's original stdout).
+                if let Some(mark) = placement_mark {
+                    self.fd_table.rollback_placements(mark);
+                }
                 self.shell_state.env_vars = saved_env_vars;
                 self.fd_table = saved_fd_table;
+            } else if let Some(mark) = placement_mark {
+                self.fd_table.commit_placements(mark);
             }
             return Ok(status);
         }
@@ -6201,8 +6245,15 @@ impl Executor {
         if self.builtin_wrapper_depth == 0 {
             // rubash#3917: the bare top-level `exec` persists its
             // redirects (execute_cmd.c exec_builtin) — place its
-            // files onto their kernel descriptors.
-            return self.execute_stdio_only_exec_redirect(cmd, true);
+            // files onto their kernel descriptors. The installs
+            // stand whether the walk reports a status or an error,
+            // so settle the placement undo log either way: the
+            // saved displaced occupants are closed here (GNU
+            // disposes the exec undo list when the exec stands).
+            let mark = self.fd_table.placement_mark();
+            let result = self.execute_stdio_only_exec_redirect(cmd, true);
+            self.fd_table.commit_placements(mark);
+            return result;
         }
         let saved_fd_table = self.fd_table.saved_table();
         let mut saved_env: Vec<(String, Option<String>)> = Vec::new();
@@ -6266,7 +6317,24 @@ impl Executor {
         // single wrapper covers all early returns. The flag is
         // restored to its previous value (never assumed false) so a
         // nested walk keeps the outer walk's arming.
-        let prev = std::mem::replace(&mut self.fd_table.kernel_place_persistent, place_persistent);
+        //
+        // The arming is narrowed to the true persistent scope
+        // (captain review of PR #3930): GNU's dup2 (redir.c:1017)
+        // is process state, and GNU runs a subshell body or a
+        // compound command's body in a FORK — the parent's
+        // descriptors never move. This executor is in-process:
+        // inside a subshell scope (subshell_depth > 0) or a
+        // compound command's redirect bracket
+        // (compound_redirect_scope_depth > 0) the scope restores
+        // the fd TABLE only, so a kernel placement would leak past
+        // the restore and corrupt the outer scope's descriptors
+        // (the issue2690/issue726/issue3403 census regressions).
+        // Over-suppression is safe: an unplaced install stays
+        // virtual, exactly the pre-#3917 model.
+        let arm = place_persistent
+            && self.shell_state.subshell_depth.get() == 0
+            && self.compound_redirect_scope_depth == 0;
+        let prev = std::mem::replace(&mut self.fd_table.kernel_place_persistent, arm);
         let result = self.execute_stdio_only_exec_redirect_inner(cmd);
         self.fd_table.kernel_place_persistent = prev;
         result
