@@ -26,11 +26,15 @@ pub(crate) use classification::{is_assignment, is_keyword};
 use continuation::{compound_residuals_advance, ends_with_unquoted_backslash, has_unclosed_quotes};
 pub(crate) use continuation::{
     comsub_residuals_advance, quotes_residuals_advance, CompoundResidualState, ComsubResidualState,
-    QuotesResidualState,
+    QuotesResidualState, UnclosedInput,
 };
 pub(crate) use heredoc_scan::dequote_heredoc_delimiter;
 
-pub(crate) use alias_stream::{expand_aliases_in_source, AliasLookup, AliasStreamScanner};
+#[cfg(test)]
+pub(crate) use alias_stream::expand_aliases_in_source;
+pub(crate) use alias_stream::{
+    expand_aliases_in_source_marked_with_comsubs, AliasLookup, AliasStreamScanner,
+};
 use brace_scan_cache::BraceScanCache;
 pub(crate) use continuation::has_unclosed_command_substitution;
 pub(crate) use continuation::line_ends_in_open_operator_process_substitution;
@@ -55,15 +59,18 @@ pub(crate) use skip::dollar_word_group_len;
 pub(crate) use skip::extglob_pattern_group_len;
 pub(crate) use skip::skip_arith_substitution_corrected;
 pub(crate) use skip::skip_backtick_corrected;
+pub(crate) use skip::skip_extglob_group_chars;
 pub(crate) use skip::skip_parenthesized_unit_corrected;
 pub use skip::{unclosed_comsub_eof_shape, UnclosedComsubShape};
 
 use crate::executor::markers::DATA_DOLLAR;
 pub(crate) use ansi::decode_ansi_c_quoted;
+pub(crate) use quotes::remove_double_quoted_into_cursor;
 pub(crate) use quotes::remove_shell_quotes;
 pub(crate) use quotes::with_lex_extquote_pin;
 pub(crate) use quotes::{
-    escape_decoded_ansi_c_quotes, ANSI_C_DQUOTE_MARKER, ANSI_C_QUOTE_MARKER, PARAM_NAME_END_MARKER,
+    escape_decoded_ansi_c_quotes, escape_decoded_ansi_c_quotes_unprotected, ANSI_C_DQUOTE_MARKER,
+    ANSI_C_QUOTE_MARKER, PARAM_NAME_END_MARKER,
 };
 pub use token::{Token, TokenKind};
 pub(crate) use word::{raw_has_ansi_u_escape, raw_has_dolbrace_ansi_c, word_value_from_raw};
@@ -239,6 +246,24 @@ pub fn tokenize_with_initial_posix_and_line(
     tokenize_comsub_body(input, posix, start_line, false)
 }
 
+/// `tokenize_with_initial_posix` plus `noncounting_newlines` — see
+/// `tokenize_comsub_body_with_origin_marked` (rubash#3605 run-nquote).
+pub(crate) fn tokenize_with_initial_posix_marked(
+    input: &str,
+    posix: bool,
+    noncounting_newlines: &[usize],
+) -> Vec<Token> {
+    tokenize_comsub_body_with_origin_marked(
+        input,
+        posix,
+        1,
+        InputOrigin::Direct,
+        false,
+        false,
+        noncounting_newlines,
+    )
+}
+
 /// Tokenize a command-substitution body with the in-substitution heredoc
 /// rules enabled (GNU parses these with PST_EOFTOKEN set).
 pub fn tokenize_comsub_body(
@@ -257,6 +282,25 @@ pub fn tokenize_comsub_body(
     )
 }
 
+/// `tokenize_comsub_body` plus `noncounting_newlines` (rubash#3838).
+pub(crate) fn tokenize_comsub_body_marked(
+    input: &str,
+    posix: bool,
+    start_line: usize,
+    in_comsub: bool,
+    noncounting_newlines: &[usize],
+) -> Vec<Token> {
+    tokenize_comsub_body_with_origin_marked(
+        input,
+        posix,
+        start_line,
+        InputOrigin::Direct,
+        in_comsub,
+        false,
+        noncounting_newlines,
+    )
+}
+
 pub fn tokenize_comsub_body_with_origin(
     input: &str,
     posix: bool,
@@ -264,6 +308,34 @@ pub fn tokenize_comsub_body_with_origin(
     input_origin: InputOrigin,
     in_comsub: bool,
     posix_locked: bool,
+) -> Vec<Token> {
+    tokenize_comsub_body_with_origin_marked(
+        input,
+        posix,
+        start_line,
+        input_origin,
+        in_comsub,
+        posix_locked,
+        &[],
+    )
+}
+
+/// `tokenize_comsub_body_with_origin` plus `noncounting_newlines`:
+/// ascending byte offsets of `\n` characters in `input` that alias
+/// expansion introduced — line separators that must NOT advance the
+/// physical line counter (GNU's line_number only bumps on a real input
+/// fetch in yy_readline_get, parse.y:2504; pushed alias text is consumed
+/// by shell_getc). Callers get the set from
+/// `expand_aliases_in_source_marked` / `expand_group_aliases_marked`
+/// (rubash#3605 run-nquote).
+pub(crate) fn tokenize_comsub_body_with_origin_marked(
+    input: &str,
+    posix: bool,
+    start_line: usize,
+    input_origin: InputOrigin,
+    in_comsub: bool,
+    posix_locked: bool,
+    noncounting_newlines: &[usize],
 ) -> Vec<Token> {
     if input.trim().is_empty() {
         return Vec::new();
@@ -273,6 +345,7 @@ pub fn tokenize_comsub_body_with_origin(
         input,
         posix,
         input_origin,
+        noncounting_newlines,
         start_line,
         in_comsub,
         posix_locked,
@@ -318,6 +391,7 @@ fn tokenize_with_heredocs(
     input: &str,
     initial_posix: bool,
     input_origin: InputOrigin,
+    noncounting_newlines: &[usize],
     start_line: usize,
     in_comsub: bool,
     posix_locked: bool,
@@ -332,6 +406,12 @@ fn tokenize_with_heredocs(
     // The feeder's per-push TOKENIZE_DEPTH entry/exit reproduces the
     // original call-long bump: nothing observes the depth between pushes.
     let mut pieces = input.split('\n').peekable();
+    // Byte offset of the current piece's start, for locating its
+    // terminating newline in `noncounting_newlines` (ascending byte
+    // offsets of '\n' characters the alias expansion introduced —
+    // GNU consumes pushed text through shell_getc without the
+    // yy_readline_get line_number bump, parse.y:2504).
+    let mut piece_start = 0usize;
     while let Some(piece) = pieces.next() {
         // str::lines() drops the trailing empty string that split('\n')
         // produces when the input ends with '\n'; the parked feeder never
@@ -339,7 +419,11 @@ fn tokenize_with_heredocs(
         if piece.is_empty() && pieces.peek().is_none() {
             break;
         }
-        feeder.push_line(piece, input.len());
+        let counted = noncounting_newlines
+            .binary_search(&(piece_start + piece.len()))
+            .is_err();
+        feeder.push_line_counted(piece, input.len(), counted);
+        piece_start += piece.len() + 1;
     }
     feeder.finish()
 }
@@ -483,6 +567,8 @@ pub(crate) struct GroupScanFeeder {
     logical_start_line: usize,
     logical_line: String,
     continued_line: bool,
+    last_line_counted: bool,
+    noncounting_logical_offsets: Vec<usize>,
     /// Byte offsets in `logical_line` where a `\`-newline continuation
     /// joined two physical lines without a newline separator (the backslash
     /// popped and the next line appended directly). Token positions must
@@ -718,6 +804,8 @@ impl GroupScanFeeder {
             logical_start_line: start_line,
             logical_line: String::new(),
             continued_line: false,
+            last_line_counted: true,
+            noncounting_logical_offsets: Vec::new(),
             continuation_join_columns: Vec::new(),
             parse_posix: initial_posix,
             deferred_posix: None,
@@ -1035,24 +1123,39 @@ impl GroupScanFeeder {
     /// must keep that arithmetic (a final `...\r` line without '\n' counts
     /// as terminated there).
     pub(crate) fn push_line(&mut self, raw_line: &str, total_input_len: usize) {
+        self.push_line_counted(raw_line, total_input_len, true);
+    }
+
+    /// `counted` answers whether this physical line advances
+    /// `line_number`. GNU bumps the counter only when yy_readline_get
+    /// fetches a real input line (parse.y:2504); pushed alias text is
+    /// consumed by shell_getc without the bump, so a line whose
+    /// terminating newline arrived inside alias expansion passes
+    /// counted=false (rubash#3605 run-nquote).
+    pub(crate) fn push_line_counted(
+        &mut self,
+        raw_line: &str,
+        total_input_len: usize,
+        counted: bool,
+    ) {
         let tokenize_depth = TOKENIZE_DEPTH.with(|depth| {
             let value = depth.get() + 1;
             depth.set(value);
             value
         });
         if !self.awaiting_bodies.is_empty() {
-            self.feed_awaiting_body(raw_line);
+            self.feed_awaiting_body(raw_line, counted);
             TOKENIZE_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
             return;
         }
-        self.push_main_line(raw_line, total_input_len, tokenize_depth);
+        self.push_main_line(raw_line, total_input_len, tokenize_depth, counted);
         TOKENIZE_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
     }
 
     /// The parked body-pull loop: one pushed line serves the front awaiting
     /// heredoc (the original pulls body lines one at a time from the same
     /// input stream, in delimiter order).
-    fn feed_awaiting_body(&mut self, raw_line: &str) {
+    fn feed_awaiting_body(&mut self, raw_line: &str, counted: bool) {
         // Body lines never enter the logical-line mirror, so the gather's
         // pending text is no longer the mirror's twin (perf21 battery fusion).
         self.group_clean = false;
@@ -1062,7 +1165,9 @@ impl GroupScanFeeder {
             raw_line.to_string()
         };
         self.position += body_line.len() + 1;
-        self.line_number += 1;
+        if counted {
+            self.line_number += 1;
+        }
         let mut raw_line = body_line;
         let (found, found_with_warning) = {
             let awaiting = &mut self.awaiting_bodies[0];
@@ -1310,7 +1415,13 @@ impl GroupScanFeeder {
         self.param_checkpoint = None;
     }
 
-    fn push_main_line(&mut self, raw_line: &str, total_input_len: usize, tokenize_depth: usize) {
+    fn push_main_line(
+        &mut self,
+        raw_line: &str,
+        total_input_len: usize,
+        tokenize_depth: usize,
+        counted: bool,
+    ) {
         if self.overflowed {
             return;
         }
@@ -1333,8 +1444,13 @@ impl GroupScanFeeder {
         if self.logical_line.is_empty() {
             self.logical_start_line = self.line_number;
             self.continuation_join_columns.clear();
+            self.noncounting_logical_offsets.clear();
         }
         if !self.logical_line.is_empty() && !self.continued_line {
+            if !self.last_line_counted {
+                self.noncounting_logical_offsets
+                    .push(self.logical_line.len());
+            }
             self.logical_line.push('\n');
             self.comsub_chars.push('\n');
         }
@@ -1343,7 +1459,10 @@ impl GroupScanFeeder {
         self.comsub_chars.extend(line.chars());
         self.position += line.len() + 1;
         let line_had_terminator = self.position <= total_input_len;
-        self.line_number += 1;
+        if counted {
+            self.line_number += 1;
+        }
+        self.last_line_counted = counted;
 
         // rubash#155 / #130 fast path. GNU reads tokens sequentially
         // (parse.y:3557 read_token): one pass over the input, with the
@@ -1969,6 +2088,11 @@ impl GroupScanFeeder {
             let newline_offsets: Vec<usize> = logical_line
                 .match_indices('\n')
                 .map(|(offset, _)| offset)
+                .filter(|offset| {
+                    self.noncounting_logical_offsets
+                        .binary_search(offset)
+                        .is_err()
+                })
                 .collect();
             for token in &mut line_tokens {
                 let column = token.column.min(logical_line.len());
@@ -2249,6 +2373,11 @@ impl GroupScanFeeder {
                 .logical_line
                 .match_indices('\n')
                 .map(|(offset, _)| offset)
+                .filter(|offset| {
+                    self.noncounting_logical_offsets
+                        .binary_search(offset)
+                        .is_err()
+                })
                 .collect();
             for token in &mut line_tokens {
                 token.position = if leftover_spans_lines {

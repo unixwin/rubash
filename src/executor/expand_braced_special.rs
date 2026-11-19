@@ -11,7 +11,43 @@ impl Executor {
             // GNU string_list_dollar_star: `*` joins with IFS[0] in scalar
             // contexts; `@` stays space-joined.
             "@" => return Some(self.shell_state.positional_window().join(" ")),
-            "*" => return Some(self.positional_params_star_joined()),
+            "*" => {
+                // Posix interp 888: an unquoted ${*} produced while IFS is
+                // set-but-null dispatches to the dollar_at word list
+                // (subst.c:10662-10668) — ' '-joined elements whose internal
+                // spaces stay protected (quote_spaces, subst.c:4636), and
+                // W_SPLITSPACE marks the assembled word to split on " "
+                // regardless of a later mid-word IFS bind
+                // (subst.c:11535 → 12103-12107). Quoted and assignment-RHS
+                // contexts keep string_list_dollar_star's ifs_firstc join
+                // (concat under a null IFS, subst.c:2902-2930).
+                let assign_rhs = self.inside_assignment_rhs.get()
+                    || super::expand_braced_replacement::ASSIGNMENT_RHS.with(|f| f.get());
+                if unquoted
+                    && !assign_rhs
+                    && !super::expand_braced_replacement::NO_SPLIT_DOLLAR_STAR.with(|f| f.get())
+                    && self
+                        .shell_state
+                        .env_vars
+                        .get("IFS")
+                        .is_some_and(|ifs| ifs.is_empty())
+                {
+                    let joined = self
+                        .shell_state
+                        .positional_window()
+                        .iter()
+                        .map(|element| {
+                            crate::executor::embedded_mutations::mark_alternate_whitespace(element)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    return Some(format!(
+                        "{}{joined}",
+                        crate::executor::markers::SPLIT_ON_SPACES_SENTINEL
+                    ));
+                }
+                return Some(self.positional_params_star_joined());
+            }
             "?" => return Some(self.dollar_question_status().to_string()),
             "$" => return Some(self.shell_pid_value().to_string()),
             "!" => return Some(self.last_background_pid_value()),
@@ -58,6 +94,50 @@ impl Executor {
         // resolves the base `!` through parameter_operator_value.
         if matches!(indirect_name.chars().next(), Some('-' | '=' | '+' | ':')) {
             return None;
+        }
+        // GNU subst.c:9844-9860: after `!` + a VALID_INDIR_PARAM
+        // single-char source (`#`/`?`/`@`/`*`), string_extract scans the
+        // operator tail with the class `#%:-=?+/@`, and the operator then
+        // applies to the parameter the resolved t names
+        // (parameter_brace_find_indir, subst.c:7839-7881): `${!#/a/Q}`
+        // with $#=2 is `${2/a/Q}`. The operator parsers' name heads stop
+        // at `!` (`!#` is two units to them), so the pattern/replacement/
+        // transform/substring tails are dispatched here — `:-`-family
+        // word operators keep the existing has_indirect_parameter_
+        // word_operator route below (already verified against GNU).
+        if let Some(head) = indirect_name
+            .chars()
+            .next()
+            .filter(|c| matches!(c, '#' | '?' | '@' | '*'))
+        {
+            let tail = &indirect_name[head.len_utf8()..];
+            let dispatched = match tail.chars().next() {
+                Some('#' | '%' | '/' | '@') => true,
+                // `:` is a word operator only in the `:-`/`:=`/`:?`/`:+`
+                // forms; anything else is a substring operator.
+                Some(':') => !matches!(tail.chars().nth(1), Some('-' | '=' | '?' | '+')),
+                _ => false,
+            };
+            if dispatched {
+                let Some(t) = self.parameter_error_value(&head.to_string()) else {
+                    // NULL t (e.g. `${!@/...}` with no positional
+                    // parameters): the operator adjudicates an unset
+                    // parameter — an empty result for these families.
+                    return Some(String::new());
+                };
+                if !Self::is_valid_indirect_target(&t) {
+                    // `<t>: invalid variable name` is diagnosed by
+                    // parameter_expansion_error_in_word_context.
+                    return Some(String::new());
+                }
+                let inner = format!("{t}{tail}");
+                let word = format!("${{{inner}}}");
+                return Some(if unquoted {
+                    self.expand_braced_parameter_word(&word, &inner)
+                } else {
+                    self.expand_quoted_parameter_word(&word)
+                });
+            }
         }
         if has_indirect_parameter_word_operator(name) {
             return None;
@@ -151,13 +231,13 @@ impl Executor {
         }
 
         if indirect_name == "#" {
-            return Some(
-                self.shell_state
-                    .positional_window()
-                    .last()
-                    .cloned()
-                    .unwrap_or_default(),
-            );
+            // `${!#}` indirects through the $# VALUE, not through the
+            // positional list itself: find_indir (subst.c:7917-7928)
+            // resolves t = itos($#) and names the parameter t — with N
+            // positionals that is the last one, with zero positionals
+            // it is parameter `0`, the script/function name.
+            let count = self.shell_state.positional_window().len().to_string();
+            return Some(self.parameter_error_value(&count).unwrap_or_default());
         }
 
         // GNU subst.c parameter_brace_expand_indir: the target may itself be
@@ -187,11 +267,15 @@ impl Executor {
             // joins the positionals with a space.
             self.shell_state.positional_window().join(" ")
         } else if let Ok(index) = indirect_name.parse::<usize>() {
-            self.shell_state
-                .positional_window()
-                .get(index.saturating_sub(1))
-                .cloned()
-                .unwrap_or_default()
+            // GNU subst.c:7839-7881 parameter_brace_find_indir resolves a
+            // positional source through the parameter itself, whose
+            // get_dollar_var_value (subst.c:3707) reads `index == 0` as
+            // the `$0` special parameter — the script/function name — and
+            // 1.. as the positional window. `00`/`000` are numerically 0,
+            // so they name `$0` too, never positional_window[0]
+            // (rubash#3784). BASH_ARGV0 ranks above argv[0]
+            // (variables.c:1547-1555), which script_name_value carries.
+            self.numeric_parameter_value(index).unwrap_or_default()
         } else if let Some((base, sub)) = indirect_name
             .split_once('[')
             .and_then(|(base, rest)| rest.strip_suffix(']').map(|sub| (base, sub)))
@@ -313,23 +397,12 @@ impl Executor {
         // (`i=3; ${!i}` -> $3). bash-completion's _comp_get_words walks its
         // name operands through exactly this form (`case ${!OPTIND} ...`).
         if let Ok(index) = target_name.parse::<usize>() {
-            if !target_name.starts_with('0') || target_name == "0" {
-                // Index 0 designates $0, which lives OUTSIDE the
-                // $1.. positional window: the saturating subtraction
-                // below silently read $1 for it. This is the target
-                // every PIPESTATUS indirection names (its element 0
-                // is a status, most often 0) — rubash#1566.
-                if index == 0 {
-                    return Some(self.script_name_value());
-                }
-                return Some(
-                    self.shell_state
-                        .positional_window()
-                        .get(index.saturating_sub(1))
-                        .cloned()
-                        .unwrap_or_default(),
-                );
-            }
+            // GNU parameter_brace_expand_word re-expands the target through
+            // valid_number (general.c:248 -> strtoimax base 10) and then
+            // get_dollar_var_value (subst.c:3707): "0", "00" and "000" all
+            // name $0, and leading zeros are otherwise insignificant
+            // (`x=010; ${!x}` is $10 — GNU 5.3.20 probe, rubash#3784).
+            return Some(self.numeric_parameter_value(index).unwrap_or_default());
         }
 
         // GNU parameter_brace_expand_word (subst.c:7955) re-expands the

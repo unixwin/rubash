@@ -201,10 +201,22 @@ pub(super) fn quote_declare_value(value: &str) -> String {
         return crate::executor::ansic_quote(value);
     }
     let visible = display_text(value);
-    if gnu_ansic_shouldquote(&visible) {
-        return gnu_ansic_quote(&visible);
+    // rubash#3921: the visible text is DECODED text — a lone U+E000 in
+    // it (folded from an E400 pair) is user data, not a marker
+    // introducer, but the byte-view quoters below and the stdout sink
+    // both decode marker pairs exactly once, so feeding them the
+    // visible text would fold U+E000 + a payload-range char into a
+    // byte (`declare -p` showed `$'\000'` for a stored U+E000 U+E001).
+    // Re-spell the visible text as transport text (E400-escape the
+    // marker zone) so the exactly-once decode yields the visible
+    // chars; the CTLESC/DATA decoding display_text already did stays
+    // in force because those chars are outside the marker zone.
+    let transport =
+        crate::executor::substitution_metadata::escape_marker_zone_chars_for_display(&visible);
+    if gnu_ansic_shouldquote(&transport) {
+        return gnu_ansic_quote(&transport);
     }
-    format!("\"{}\"", quote_double(&visible))
+    format!("\"{}\"", quote_double(&transport))
 }
 
 /// array.c array_to_assign element rule (964-968, same pair in
@@ -224,10 +236,15 @@ pub(super) fn quote_array_element_value(value: &str) -> String {
         return crate::executor::ansic_quote(value);
     }
     let visible = display_text(value);
-    if gnu_ansic_shouldquote(&visible) {
-        return gnu_ansic_quote(&visible);
+    // rubash#3921: re-spell as transport text before the byte-view
+    // quoters (see quote_declare_value) — a lone U+E000 in the visible
+    // text is user data and must not be re-folded into a byte.
+    let transport =
+        crate::executor::substitution_metadata::escape_marker_zone_chars_for_display(&visible);
+    if gnu_ansic_shouldquote(&transport) {
+        return gnu_ansic_quote(&transport);
     }
-    format!("\"{}\"", quote_double(&visible))
+    format!("\"{}\"", quote_double(&transport))
 }
 
 /// Storage roundtrip for element values: decode the full escape set
@@ -351,6 +368,12 @@ fn gnu_sh_contains_shell_metas(value: &str) -> bool {
 /// or `@` key (ALL_ELEMENT_SUB), otherwise the bare key.
 fn quote_assoc_display_key(key: &str) -> String {
     let key = display_text(key);
+    // rubash#3921: re-spell as transport text before the byte-view
+    // quoters (see quote_declare_value) — a lone U+E000 in the visible
+    // text is user data and must not be re-folded into a byte; the
+    // bare-key return below is also transport text for the same
+    // reason (the stdout sink decodes exactly once).
+    let key = crate::executor::substitution_metadata::escape_marker_zone_chars_for_display(&key);
     if gnu_ansic_shouldquote(&key) {
         return gnu_ansic_quote(&key);
     }
@@ -368,8 +391,13 @@ fn quote_assoc_display_key(key: &str) -> String {
 /// otherwise always double quotes.
 fn quote_declare_display_value(value: &str) -> String {
     let visible = display_text(value);
-    if gnu_ansic_shouldquote(&visible) {
-        return gnu_ansic_quote(&visible);
+    // rubash#3921: re-spell as transport text before the byte-view
+    // quoters (see quote_declare_value) — a lone U+E000 in the visible
+    // text is user data and must not be re-folded into a byte.
+    let transport =
+        crate::executor::substitution_metadata::escape_marker_zone_chars_for_display(&visible);
+    if gnu_ansic_shouldquote(&transport) {
+        return gnu_ansic_quote(&transport);
     }
-    format!("\"{}\"", quote_double(&visible))
+    format!("\"{}\"", quote_double(&transport))
 }

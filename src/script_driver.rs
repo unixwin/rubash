@@ -18,7 +18,8 @@ use crate::executor::{ExecuteError, Executor};
 use crate::history::SessionHistory;
 use crate::history_expand::{HistChars, HistCtx};
 use crate::lexer::{
-    expand_aliases_in_source, tokenize, tokenize_with_initial_posix, AliasLookup, Token, TokenKind,
+    expand_aliases_in_source_marked_with_comsubs, tokenize, tokenize_with_initial_posix,
+    tokenize_with_initial_posix_marked, AliasLookup, Token, TokenKind,
 };
 use crate::parser::CommandNode;
 
@@ -56,12 +57,6 @@ pub fn script_may_set_onecmd(contents: &str) -> bool {
 }
 
 fn line_may_set_onecmd(line: &str) -> bool {
-    // `set -o onecmd` and `set -oonecmd` both carry the option name
-    // verbatim; so does a comment or string mentioning it — the
-    // scan only routes, so the substring is enough.
-    if line.contains("onecmd") {
-        return true;
-    }
     let bytes = line.as_bytes();
     let mut i = 0usize;
     while i < bytes.len() {
@@ -89,7 +84,9 @@ fn line_may_set_onecmd(line: &str) -> bool {
                     if word != "set" {
                         return true;
                     }
-                    if set_args_may_set_onecmd(&line[i + w.len()..]) {
+                    if set_args_may_set_onecmd(&line[i + w.len()..])
+                        || set_option_words_contain(&line[i + w.len()..], "onecmd")
+                    {
                         return true;
                     }
                 }
@@ -114,20 +111,106 @@ fn dot_is_command_position(bytes: &[u8], i: usize) -> bool {
     j == 0 || matches!(bytes[j - 1], b';' | b'&' | b'|' | b'(' | b'{')
 }
 
-fn set_args_may_set_onecmd(args: &str) -> bool {
+/// A word of a `set` command's arguments that GNU's option scan can
+/// reach, in order, tagged by role. The walk models the pre-scan
+/// (builtins/set.def:671-691, `internal_getopt` with optflags
+/// `"+<flags>o;"`, flags.c:372-382) together with the apply loop's
+/// `o` arm (set.def:737-762):
+///
+/// * `--` and a lone `-` end option interpretation (bashgetopt.c
+///   returns the end-of-options marker; the apply loop stops there
+///   too) — rubash#3410: everything after them is positional.
+/// * A `-`/`+` word is a flag bundle; every `o` in it consumes one
+///   following word as the option name, but only when that word is
+///   not itself an option word (a dash word is scanned as a bundle
+///   in its own right — `set -o -t` sets onecmd via the `-t`).
+/// * The first non-option word that no `o` consumed ends option
+///   interpretation (`set foo -t` leaves `-t` positional).
+/// * `++` is skipped, never a bundle: the validation pass rejects
+///   it before anything applies.
+///
+/// Words past the stop point are never returned, so no caller can
+/// mistake a positional for a flag again.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SetWordRole {
+    /// A `-`/`+` flag bundle.
+    Bundle,
+    /// A word consumed as an `-o`/`+o` option name.
+    Operand,
+}
+
+fn set_option_words(args: &str) -> Vec<(&str, SetWordRole)> {
+    let mut words = Vec::new();
+    let mut operands_due = 0usize;
     for token in args.split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|')) {
-        if token.len() >= 2 && token.starts_with('-') && !token.starts_with("--") {
-            // A flag bundle: `t` counts only before any `o`, which
-            // would swallow the rest of the bundle as its option
-            // name operand (`set -ot` names an option, sets none).
-            let bundle = &token[1..];
-            let head = bundle.split('o').next().unwrap_or("");
-            if head.contains('t') {
-                return true;
+        if token.is_empty() {
+            continue;
+        }
+        if operands_due > 0 {
+            if token.starts_with('-') || token.starts_with('+') {
+                // Not consumed: a dash word is a bundle, and the
+                // `o` that waited for a name prints the table
+                // instead — no later `o` consumes this word either.
+                operands_due = 0;
+            } else {
+                operands_due -= 1;
+                words.push((token, SetWordRole::Operand));
+                continue;
             }
         }
+        if token == "--" || token == "-" {
+            break;
+        }
+        if token.starts_with('-') || token.starts_with('+') {
+            if token.starts_with("++") {
+                continue;
+            }
+            let body = &token[1..];
+            operands_due += body.chars().filter(|c| *c == 'o').count();
+            words.push((token, SetWordRole::Bundle));
+            continue;
+        }
+        break;
     }
-    false
+    words
+}
+
+/// Whether the option name `needle` appears in a `set` command's
+/// option region — inside a flag bundle (`set -oonecmd`) or as an
+/// `-o` operand (`set -o onecmd`). The old bare-substring check
+/// fired for the name anywhere on the line, including past `--`
+/// (`set -- -o onecmd`) and in comments; the option region is the
+/// only place the name can act (rubash#3410).
+fn set_option_words_contain(args: &str, needle: &str) -> bool {
+    set_option_words(args)
+        .iter()
+        .any(|(word, _)| word.contains(needle))
+}
+
+fn set_args_may_set_onecmd(args: &str) -> bool {
+    // A flag bundle carrying `t` in any position counts:
+    // GNU's apply loop walks the bundle letter by letter
+    // (builtins/set.def:726-766), and an `o` takes its
+    // option name from the NEXT WORD, never from the bundle
+    // remainder (set.def:737-762) — after listing options
+    // (no next word) or setting the named option it
+    // CONTINUES with the next letter, so `set -ot` sets
+    // onecmd AND lists the option table (verified against
+    // GNU bash 5.3.20: `FLAGS=htBc`, table printed), the
+    // same letter-by-letter rule the verbose scanner
+    // already uses for `set -ov`. The old `split('o')`
+    // truncation assumed the rest was swallowed as the
+    // option name; it is not. A false positive (an `o`
+    // whose next word is an invalid option name aborts
+    // before the `t`, or a bundle the validation pass
+    // rejects) only costs the incremental driver.
+    //
+    // rubash#3410: the walk stops at `--` (and at a lone `-`,
+    // and at the first non-option word) — a `t` bundle past
+    // the stop point is a positional parameter, never a flag.
+    set_option_words(args).iter().any(|(word, role)| {
+        *role == SetWordRole::Bundle && word.starts_with('-') && word[1..].contains('t')
+    })
 }
 
 /// rubash#2773: over-admitting routing scan in the
@@ -147,12 +230,6 @@ pub fn script_may_toggle_verbose(contents: &str) -> bool {
 }
 
 fn line_may_toggle_verbose(line: &str) -> bool {
-    // `set -o verbose` and `set -overbose` both carry the option
-    // name verbatim; so does a comment or string mentioning it —
-    // the scan only routes, so the substring is enough.
-    if line.contains("verbose") {
-        return true;
-    }
     let bytes = line.as_bytes();
     let mut i = 0usize;
     while i < bytes.len() {
@@ -181,7 +258,9 @@ fn line_may_toggle_verbose(line: &str) -> bool {
                     if word != "set" {
                         return true;
                     }
-                    if set_args_may_toggle_verbose(&line[i + w.len()..]) {
+                    if set_args_may_toggle_verbose(&line[i + w.len()..])
+                        || set_option_words_contain(&line[i + w.len()..], "verbose")
+                    {
                         return true;
                     }
                 }
@@ -193,25 +272,22 @@ fn line_may_toggle_verbose(line: &str) -> bool {
 }
 
 fn set_args_may_toggle_verbose(args: &str) -> bool {
-    for token in args.split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|')) {
-        if token.len() >= 2
-            && (token.starts_with('-') || token.starts_with('+'))
-            && !token.starts_with("--")
-            && !token.starts_with("++")
-        {
-            // A flag bundle carrying `v` in any position counts:
-            // GNU's set parser works the bundle letter by letter,
-            // and an `o` whose remainder is not an option name does
-            // not swallow the rest (verified against GNU bash
-            // 5.3.20: `set -ov` prints the option table AND sets
-            // verbose, `$-` = hvBc). A false positive (the `-ovi`
-            // name form) only costs the incremental driver.
-            if token[1..].contains('v') {
-                return true;
-            }
-        }
-    }
-    false
+    // A flag bundle carrying `v` in any position counts:
+    // GNU's set parser works the bundle letter by letter,
+    // and an `o` whose remainder is not an option name does
+    // not swallow the rest (verified against GNU bash
+    // 5.3.20: `set -ov` prints the option table AND sets
+    // verbose, `$-` = hvBc). A false positive (the `-ovi`
+    // name form) only costs the incremental driver.
+    //
+    // rubash#3410: the walk stops at `--` (and at a lone `-`,
+    // and at the first non-option word) — a `v` bundle past
+    // the stop point is a positional parameter, never a flag.
+    set_option_words(args).iter().any(|(word, role)| {
+        *role == SetWordRole::Bundle
+            && (word.starts_with('-') || word.starts_with('+'))
+            && word[1..].contains('v')
+    })
 }
 
 fn line_enables_history(line: &str) -> bool {
@@ -238,29 +314,22 @@ fn line_enables_history(line: &str) -> bool {
 }
 
 fn set_args_enable_history(args: &str) -> bool {
-    let mut expecting_option = false;
-    for token in args.split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|')) {
-        if token.is_empty() {
-            continue;
-        }
-        if expecting_option {
-            if token == "history" || token == "histexpand" {
-                return true;
-            }
-            expecting_option = false;
-            continue;
-        }
-        if token == "-o" {
-            expecting_option = true;
-        } else if token.len() >= 2
-            && token.starts_with('-')
-            && !token.starts_with("--")
-            && token[1..].contains('H')
-        {
-            return true;
-        }
-    }
-    false
+    // rubash#3410: the walk stops at `--` (and at a lone `-`,
+    // and at the first non-option word) — `-H` / `-o history`
+    // past the stop point are positionals. A bundle `o` also
+    // takes its option name from the next word (`set -eo history`
+    // enables history, `set -o -H` enables histexpand via the
+    // `-H` the `-o` refused to consume); the old exact-`-o`
+    // check missed both, an under-admission the shared walk
+    // fixes. (`set +o history` now routes too — disabling
+    // history needs no grouped reader, but the over-admission
+    // costs only the incremental driver.)
+    set_option_words(args)
+        .iter()
+        .any(|(word, role)| match role {
+            SetWordRole::Operand => *word == "history" || *word == "histexpand",
+            SetWordRole::Bundle => word.starts_with('-') && word[1..].contains('H'),
+        })
 }
 
 /// Does this script turn alias expansion on? `shopt -s expand_aliases` is
@@ -360,8 +429,15 @@ pub fn script_uses_runtime_parse_gates(contents: &str) -> bool {
 /// (parse.y:5751-5769): posix keeps reserved words as keywords, default
 /// mode lets an alias replace them (rubash#414).
 pub(crate) fn expand_group_aliases(executor: &Executor, source: &str) -> String {
+    expand_group_aliases_inner(executor, source).0
+}
+
+fn expand_group_aliases_inner(
+    executor: &Executor,
+    source: &str,
+) -> (String, Vec<usize>, Vec<(String, Vec<usize>)>) {
     if !executor.alias_expansion_enabled() || executor.shell_state.aliases.is_empty() {
-        return source.to_string();
+        return (source.to_string(), Vec::new(), Vec::new());
     }
     let posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
     let lookup = move |word: &str| {
@@ -374,7 +450,28 @@ pub(crate) fn expand_group_aliases(executor: &Executor, source: &str) -> String 
             )
         })
     };
-    expand_aliases_in_source(source, &lookup as &AliasLookup<'_>, posix)
+    expand_aliases_in_source_marked_with_comsubs(source, &lookup as &AliasLookup<'_>, posix)
+}
+
+/// `expand_group_aliases` plus the byte offsets of newlines the
+/// expansion itself introduced — GNU consumes pushed alias text through
+/// shell_getc without the yy_readline_get line_number bump
+/// (parse.y:2504), so those newlines must not advance the token line
+/// stamps (rubash#3605 run-nquote: `alias foo=$'echo foo\\n\\nquux\\n'`
+/// + `foo` on line N reports `quux` at line N, not N+2).
+/// Also records per-comsub-body expansion newline marks on `executor`
+/// (rubash#3838).
+pub(crate) fn expand_group_aliases_marked(
+    executor: &mut Executor,
+    source: &str,
+) -> (String, Vec<usize>) {
+    let (expanded, marks, comsub_records) = expand_group_aliases_inner(executor, source);
+    if !comsub_records.is_empty() {
+        executor
+            .shell_state
+            .record_comsub_alias_newlines(comsub_records);
+    }
+    (expanded, marks)
 }
 
 /// shell.c run_pending_command style driver for scripts with history on:
@@ -745,6 +842,7 @@ fn run_script_grouped_at_line_offset(
             false,
             feeder_tokens.take(),
             Some(gather_info.entry_extended_glob),
+            pending.ends_with('\n'),
         );
         if executor.evalerror_failglob_pending.get() {
             failglob_discard_until = Some(group_last_line);
@@ -2091,6 +2189,7 @@ fn run_history_group(
     interactive: bool,
     feeder_tokens: Option<Vec<Token>>,
     entry_extended_glob: Option<bool>,
+    trailing_newline: bool,
 ) -> i32 {
     let history_on = executor.get_env("__RUBASH_SETOPT_history").as_deref() == Some("1");
     let histexpand_on = executor.get_env("__RUBASH_SETOPT_histexpand").as_deref() == Some("1");
@@ -2176,30 +2275,20 @@ fn run_history_group(
                 // location to this entry's physical line, not the last
                 // executed command's line.
                 executor.set_current_line_value(line_no);
-                // GNU error.c error_prolog gate: history-expansion failures
-                // are internal_error-class, so the ` line N` segment honors
-                // gnu_errfmt like every other error_prefix site.
-                let gnu_errfmt = executor.gnu_error_format_enabled();
-                let prefix = match (
-                    executor.get_env("__RUBASH_SCRIPT_NAME"),
-                    executor.get_env("__RUBASH_CURRENT_LINE"),
-                ) {
-                    (Some(script), Some(line)) => {
-                        let line: usize = line.parse().unwrap_or(1);
-                        let head = if executor.get_env("__RUBASH_EVAL_CONTEXT").is_some() {
-                            format!("{script}: eval")
-                        } else {
-                            script.to_string()
-                        };
-                        if gnu_errfmt {
-                            format!("{head}:{line}: ")
-                        } else {
-                            format!("{head}: line {line}: ")
-                        }
-                    }
-                    _ => "bash: ".to_string(),
-                };
-                eprintln!("{}{}", prefix, result.text);
+                // GNU bashhist.c:594 pre_process_line reports a failed
+                // history expansion through internal_error ("%s",
+                // history_value) -> error_prolog (error.c:75-86) ->
+                // get_name_for_error (error.c:90-120): no `eval`/`-c`
+                // segment (those belong to parser_error only) and no
+                // literal fallback. The executor's error_prefix()
+                // family is that chain (rubash#3255): it honors
+                // gnu_errfmt for the ` line N` segment like every
+                // other error_prefix site. The hand-rolled (script,
+                // line) match this replaces fell back to the literal
+                // "bash: " whenever the script name was absent — which
+                // is exactly the interactive read-line shape, since no
+                // script name is seeded on that route.
+                eprintln!("{}{}", executor.error_prefix(), result.text);
                 exec_parts.push(String::new());
                 record_texts.push(None);
                 // A dropped line changes the executed text even when no other
@@ -2239,6 +2328,12 @@ fn run_history_group(
     }
 
     // Record the entry (bashhist.c history_delimiting_chars join).
+    // readline/history.c hist_inittime: the stamp an entry takes is
+    // armed by the first HISTTIMEFORMAT bind (rubash#3392) — the sticky
+    // latch, or the variable existing right now (its bind arms the
+    // latch at the latest by the per-command boundary).
+    let comment_char_armed = executor.shell_state.history_comment_char_armed
+        || executor.get_env("HISTTIMEFORMAT").is_some();
     if history_on {
         if cmdhist {
             let mut record = build_recorded_entry(&record_texts, group, lithist);
@@ -2252,9 +2347,13 @@ fn run_history_group(
             let was_recorded = if record.trim().is_empty() {
                 false
             } else {
-                session
-                    .borrow_mut()
-                    .record(&record, &control, &ignore, histsize)
+                session.borrow_mut().record(
+                    &record,
+                    &control,
+                    &ignore,
+                    histsize,
+                    comment_char_armed,
+                )
             };
 
             // bashhist.c:961 really_add_history: recording the line resets
@@ -2276,9 +2375,13 @@ fn run_history_group(
                 if text.is_empty() {
                     continue;
                 }
-                let was_recorded = session
-                    .borrow_mut()
-                    .record(text, &control, &ignore, histsize);
+                let was_recorded = session.borrow_mut().record(
+                    text,
+                    &control,
+                    &ignore,
+                    histsize,
+                    comment_char_armed,
+                );
                 let mut shell = session.borrow_mut();
                 shell.last_line_added = was_recorded;
                 if was_recorded {
@@ -2290,7 +2393,7 @@ fn run_history_group(
         session.borrow_mut().last_line_added = false;
     }
 
-    let exec_text = if modified_any {
+    let mut exec_text = if modified_any {
         exec_parts.join("\n")
     } else {
         group
@@ -2299,8 +2402,27 @@ fn run_history_group(
             .collect::<Vec<_>>()
             .join("\n")
     };
+    // GNU's reader sees the physical line's trailing newline: a
+    // `\<newline>` ending the input is a continuation that disappears
+    // (parse.y:5379 `peek_char == '\n'` -> `goto next_character`), while
+    // `\<EOF>` stays a literal backslash. Re-joining the group's
+    // stripped line texts drops that byte — `eval "x" ; echo AAA\\\n`
+    // (one physical line ending backslash-newline) printed `AAA\`
+    // where GNU prints `AAA` (rubash#3605 class B, run-parser). Put
+    // the newline back when the group's last raw line carried one so
+    // the re-parse sees the same stream GNU's reader fed it; for every
+    // other shape a trailing newline is just a command separator.
+    if trailing_newline {
+        exec_text.push('\n');
+    }
     let pre_alias_text = exec_text.clone();
-    let exec_text = expand_group_aliases(executor, &exec_text);
+    // GNU pushes the alias text onto the input (parse.y:2055 push_string)
+    // and consumes it through shell_getc — the yy_readline_get
+    // line_number bump (parse.y:2504) only fires on REAL input fetches,
+    // so newlines inside the expansion are line separators but not line
+    // advances (run-nquote: `quux` inside `foo`'s value reports the
+    // `foo` line, not the pushed line's own index).
+    let (exec_text, expansion_newlines) = expand_group_aliases_marked(executor, &exec_text);
     if exec_text.trim().is_empty() {
         return executor.last_exit_code();
     }
@@ -2367,7 +2489,7 @@ fn run_history_group(
                 crate::lexer::set_parse_extended_glob(entry);
                 saved
             });
-            let status = run_source_with_line_offset(
+            let status = run_source_with_line_offset_marked(
                 executor,
                 &exec_text,
                 interactive,
@@ -2378,6 +2500,7 @@ fn run_history_group(
                 } else {
                     Some(pre_alias_text.as_str())
                 },
+                &expansion_newlines,
             );
             if let Some(saved) = saved_extended_glob {
                 crate::lexer::set_parse_extended_glob(saved);
@@ -2495,6 +2618,19 @@ fn advance_quote_state(state: Option<char>, text: &str) -> Option<char> {
             }
             _ => match c {
                 '\\' => i += 1,
+                '$' if chars.get(i + 1) == Some(&'\'') => {
+                    // ANSI-C `$'...'`: escape-aware close scan
+                    // (parse.y:5476-5480 — `\'` inside is an escaped
+                    // quote, not the terminator).
+                    i += 2;
+                    while i < chars.len() {
+                        match chars[i] {
+                            '\\' => i += 2,
+                            '\'' => break,
+                            _ => i += 1,
+                        }
+                    }
+                }
                 '\'' | '"' | '`' => state = Some(c),
                 '#' if i == 0 || matches!(chars[i - 1], ' ' | '\t' | ';' | '\n') => break,
                 _ => {}
@@ -2556,7 +2692,7 @@ pub fn stdin_source_needs_more(source: &str) -> bool {
 /// read_token fails inside the compound's own token read), so none of
 /// the compound — and nothing else on its opening line — ever runs,
 /// and the compound-EOF diagnostic is never printed (rubash#1589).
-fn unclosed_compound_open_line(text: &str) -> Option<usize> {
+pub(crate) fn unclosed_compound_open_line(text: &str) -> Option<usize> {
     let tokens = tokenize(text);
     let mut stack: Vec<(&str, usize)> = Vec::new();
     for token in &tokens {
@@ -3532,6 +3668,19 @@ pub fn inject_console_ctrl_c() {
     crate::builtins::kill::note_console_ctrl_c();
 }
 
+/// Tier B host hook (PLAN row 11, M-3): note a console Ctrl+Z the
+/// host's own input watch received, so the engine's in-process waits
+/// see the stop request (rubash#3467, companion to niubash#877).
+/// This is the driver-layer face hosts consume; it delegates to the
+/// kill builtin's mailbox plumbing
+/// (`builtins::kill::note_console_ctrl_z`), which is internal from
+/// this row on. On Unix it is a no-op by design: the kernel delivers
+/// SIGTSTP to the foreground process group and waitpid reports the
+/// stop — there is no console keypress to forward.
+pub fn inject_console_ctrl_z() {
+    crate::builtins::kill::note_console_ctrl_z();
+}
+
 /// Tier B host hook (PLAN row 11, M-3): consume the background
 /// wrapper handshake from a host launcher's argv before the
 /// host's own option parsing sees it — the driver-layer face of
@@ -3575,6 +3724,7 @@ pub(crate) fn run_source_pre_lexed_with_line_offset(
         diagnostic_text,
         Some(pre_lexed),
         false,
+        &[],
     )
 }
 
@@ -3587,7 +3737,11 @@ pub(crate) fn run_source_pre_lexed_with_line_offset(
 /// (quotes, `${`, `$(`, array lists, `[` subscripts) are read-time
 /// matched-pair verdicts the tokenizer does not model and are never
 /// overridden here.
-fn command_paren_verdict_disproved_by_parser(input: &str, parse_posix: bool) -> bool {
+fn command_paren_verdict_disproved_by_parser(
+    executor: &Executor,
+    input: &str,
+    parse_posix: bool,
+) -> bool {
     let Some(unclosed) = crate::lexer::unclosed_input_close_char_posix(input, parse_posix) else {
         return false;
     };
@@ -3636,6 +3790,19 @@ fn command_paren_verdict_disproved_by_parser(input: &str, parse_posix: bool) -> 
         // `expected `)'` sequence), so yield the route exactly then.
         // Any other marker family present (subshell, compound
         // assignment, ...) keeps the route's diagnostic.
+        // rubash#3306: a clean parse whose only error lives inside a
+        // command-substitution body (the markers sit on the
+        // substitution node, invisible to the tree predicates) also
+        // disproves the verdict — GNU died on the body token at the
+        // `)` (parse.y:4549-4555 parse_comsub) and the read-time
+        // screen prints it. Every other !command_position verdict
+        // keeps the route's diagnostic (unclosed compassign EOF,
+        // stray-paren families, ...).
+        if !ast.commands.iter().any(command_tree_has_parse_error)
+            && executor.comsub_body_error_pending(&ast.commands)
+        {
+            return true;
+        }
         return ast.commands.iter().any(command_tree_has_cond_marker)
             && !ast
                 .commands
@@ -3643,6 +3810,25 @@ fn command_paren_verdict_disproved_by_parser(input: &str, parse_posix: bool) -> 
                 .any(command_tree_has_non_cond_parse_error);
     }
     if !ast.commands.iter().any(command_tree_has_parse_error) {
+        // rubash#3405: the real parser stays silent when the offending
+        // `(` hides inside a comsub word — the lexer swallows the whole
+        // body into the word token, so no marker is raised — but the
+        // body's own nested yyparse still dies on the token after it
+        // (parse.y:4549-4555 parse_comsub, 6858-6859). A
+        // ComsubBodyTokenError verdict is therefore NOT disproved by the
+        // main parse's silence: let the unclosed route run and print it.
+        // Every other shape keeps the disproof (notably the matched-pair
+        // EOF, whose `$( (` subshell root the #516/q1, `((` and
+        // `for ((` guards already keep out of this class).
+        if matches!(
+            crate::lexer::unclosed_comsub_eof_shape(input, crate::lexer::parse_extended_glob()),
+            Some((
+                crate::lexer::UnclosedComsubShape::ComsubBodyTokenError { .. },
+                _
+            ))
+        ) {
+            return false;
+        }
         return true;
     }
     // rubash#413: GNU's parser reports the FIRST offending event inside the
@@ -3734,6 +3920,44 @@ fn command_tree_has_near_marker(command: &CommandNode) -> bool {
     command_tree_walk_nested(command, command_tree_has_near_marker)
 }
 
+/// True when this command (or any nested command) carries a HARD
+/// parse failure — a token the parser rejected (`__RUBASH_PARSE_ERROR_NEAR__`,
+/// a plain `__RUBASH_PARSE_ERROR__` "unexpected token" value, a
+/// `__RUBASH_PARSE_ERROR_COND__` condition error, or a
+/// `__RUBASH_COMPOUND_SYNTAX_ERROR*` compound error). GNU's reader hits
+/// these at the offending token's position, before EOF inside any
+/// matched pair is ever reached, so they preempt the unclosed-pair
+/// verdict (rubash#3641). The end-of-input marker family is excluded:
+/// an unclosed keyword compound only reports "from `X' command" when
+/// the reader reaches clean EOF, which a pair error inside it beats
+/// (parse.y:6883-6901 checks shell_eof_token before compoundcmd_top).
+pub(crate) fn command_tree_has_hard_parse_error(command: &CommandNode) -> bool {
+    let hard = command.assignments.iter().any(|(name, value)| {
+        name == "__RUBASH_PARSE_ERROR_NEAR__"
+            || name == "__RUBASH_PARSE_ERROR_COND__"
+            || name.starts_with("__RUBASH_COMPOUND_SYNTAX_ERROR")
+            || (name == "__RUBASH_PARSE_ERROR__" && value.starts_with("unexpected token"))
+    });
+    hard || command_tree_walk_nested(command, command_tree_has_hard_parse_error)
+}
+
+/// True when this command (or any nested command) carries an
+/// end-of-input verdict — the `__RUBASH_PARSE_ERROR_EOF*` marker family
+/// or the plain `__RUBASH_PARSE_ERROR__` "unexpected end of file"
+/// value (the incomplete-input family; hard `unexpected token'
+/// diagnostics are excluded). Trap-action prefix screening uses this
+/// to tell a complete command list from one GNU's parse_and_execute
+/// reader loop would still be gathering (rubash#3641).
+pub(crate) fn command_tree_has_eof_parse_error(command: &CommandNode) -> bool {
+    if command.assignments.iter().any(|(name, value)| {
+        name.starts_with("__RUBASH_PARSE_ERROR_EOF")
+            || (name == "__RUBASH_PARSE_ERROR__" && value.starts_with("unexpected end of file"))
+    }) {
+        return true;
+    }
+    command_tree_walk_nested(command, command_tree_has_eof_parse_error)
+}
+
 /// True when this command (or any nested command) carries one of the
 /// end-of-input marker family — the parse only failed for want of
 /// more input, so an interactive reader should keep gathering.
@@ -3774,7 +3998,11 @@ fn command_tree_has_hard_token_error(command: &CommandNode) -> bool {
 /// gathering; GNU reports it when the compound completes). Anything
 /// else — clean parses, pure EOF shortfalls, unterminated quotes or
 /// substitutions (which carry no marker) — is genuinely incomplete.
-fn interactive_pending_is_hard_syntax_error(input: &str, parse_posix: bool) -> bool {
+fn interactive_pending_is_hard_syntax_error(
+    executor: &Executor,
+    input: &str,
+    parse_posix: bool,
+) -> bool {
     let tokens = tokenize_with_initial_posix(input, parse_posix);
     if crate::lexer::heredoc_overflow_line().is_some() {
         return false;
@@ -3789,6 +4017,17 @@ fn interactive_pending_is_hard_syntax_error(input: &str, parse_posix: bool) -> b
         },
     );
     if ast.commands.iter().any(command_tree_has_near_marker) {
+        return true;
+    }
+    // rubash#3306: a command substitution whose extracted body already
+    // carries a hard parse error is wrong at the `)` that closed it —
+    // GNU's parse_comsub yyparse dies on the body token while reading
+    // (parse.y:4549-4555, 6858-6865), it does not wait for more input.
+    // The tree predicates cannot see the body's markers (they live on
+    // the comsub node, not in the tree), so ask the body walker
+    // directly; a body that merely ran out stays "incomplete" exactly
+    // like an unclosed `(`.
+    if executor.comsub_body_error_pending(&ast.commands) {
         return true;
     }
     ast.commands.iter().any(command_tree_has_hard_token_error)
@@ -4003,6 +4242,32 @@ pub fn run_source_with_line_offset(
     redirect_cmd: Option<&CommandNode>,
     diagnostic_text: Option<&str>,
 ) -> i32 {
+    run_source_with_line_offset_marked(
+        executor,
+        input,
+        interactive,
+        line_offset,
+        redirect_cmd,
+        diagnostic_text,
+        &[],
+    )
+}
+
+/// `run_source_with_line_offset` plus `noncounting_newlines`: ascending
+/// byte offsets of `\n` characters in `input` that alias expansion
+/// introduced — line separators that must not advance the physical line
+/// counter (GNU: pushed text goes through shell_getc without the
+/// yy_readline_get line_number bump, parse.y:2504 — rubash#3605
+/// run-nquote).
+pub fn run_source_with_line_offset_marked(
+    executor: &mut Executor,
+    input: &str,
+    interactive: bool,
+    line_offset: usize,
+    redirect_cmd: Option<&CommandNode>,
+    diagnostic_text: Option<&str>,
+    noncounting_newlines: &[usize],
+) -> i32 {
     run_source_impl(
         executor,
         input,
@@ -4012,6 +4277,7 @@ pub fn run_source_with_line_offset(
         diagnostic_text,
         None,
         false,
+        noncounting_newlines,
     )
 }
 
@@ -4039,6 +4305,7 @@ fn run_source_prefix_diagnostic_owned(
         diagnostic_text,
         None,
         true,
+        &[],
     )
 }
 
@@ -4175,6 +4442,7 @@ fn run_source_impl(
     diagnostic_text: Option<&str>,
     pre_lexed: Option<Vec<Token>>,
     suppress_unclosed_diagnostic: bool,
+    noncounting_newlines: &[usize],
 ) -> i32 {
     // rubash#2332: mark the call active for its whole duration so the
     // root-span re-seed inside run_source_impl_inner fires only for
@@ -4202,6 +4470,7 @@ fn run_source_impl(
         pre_lexed,
         suppress_unclosed_diagnostic,
         !source_run_prior,
+        noncounting_newlines,
     );
     // rubash#2680: a unit that ended in a parse error has that error's
     // status as its own $? — GNU's reader abandons the unit with the
@@ -4243,6 +4512,7 @@ fn run_source_impl_inner(
     pre_lexed: Option<Vec<Token>>,
     suppress_unclosed_diagnostic: bool,
     root_span_outermost: bool,
+    noncounting_newlines: &[usize],
 ) -> i32 {
     let saved_unit_source = executor
         .shell_state
@@ -4258,6 +4528,7 @@ fn run_source_impl_inner(
         pre_lexed,
         suppress_unclosed_diagnostic,
         root_span_outermost,
+        noncounting_newlines,
     );
     executor
         .shell_state
@@ -4276,6 +4547,7 @@ fn run_source_impl_inner_body(
     pre_lexed: Option<Vec<Token>>,
     suppress_unclosed_diagnostic: bool,
     root_span_outermost: bool,
+    noncounting_newlines: &[usize],
 ) -> i32 {
     // WP-8 (debugger design 5.1): take the file identity the
     // calling group driver set for this unit, if any (see
@@ -4392,8 +4664,25 @@ fn run_source_impl_inner_body(
         && !interactive
         && crate::lexer::has_unclosed_input_syntax_posix(input, parse_posix)
         && !input.contains("<<")
-        && !command_paren_verdict_disproved_by_parser(input, parse_posix);
+        && !command_paren_verdict_disproved_by_parser(executor, input, parse_posix);
     if unclosed_route || (extglob_eof_line.is_some() && !input.contains("<<")) {
+        // rubash#3899/#3900: whether a compound array assignment is open
+        // anywhere in the delimiter stack at EOF. GNU's EOF inside
+        // parse_compound_assignment's token loop (parse.y:7104) runs
+        // set_exit_status (EXECUTION_FAILURE) after its parser_error
+        // (parse.y:7151-7152, set at parse.y:7167-7169), so the status
+        // stays 1: the `error yacc_EOF' production (parse.y:484-493)
+        // forces EX_BADUSAGE=2 only on a still-zero status. The
+        // diagnostic itself (closer + line) still belongs to the
+        // innermost failed scan; only the status changes.
+        // error.c:324-327 (parser_error's exit_immediately_on_error
+        // tail) forces 2 under live errexit. The close-char scan's
+        // `array_list` bit is exactly "an array-list frame is open in
+        // the stack", so every arm of this route consults it.
+        let compound_assignment_open =
+            crate::lexer::unclosed_input_close_char_posix(input, parse_posix)
+                .map(|u| u.array_list)
+                .unwrap_or(false);
         // GNU parse.y:5635-5643 read_token_word + parse_matched_pair
         // (parse.y:3906-3912): an unclosed array subscript `[` reports
         // `unexpected EOF while looking for matching `]'' at the line the
@@ -4507,9 +4796,21 @@ fn run_source_impl_inner_body(
                     Some(eof.report_line + line_offset),
                 );
             }
-            executor.errexit_live_at_diagnostic();
-            executor.set_last_exit_code(2);
-            return 2;
+            // rubash#3899: a `$[` hunt that dies inside a compound
+            // array assignment is consumed by parse_compound_
+            // assignment's token loop like any other failed element
+            // word (GNU 5.3.20 probe: `v=(a $[1+` -> `]' at the
+            // opener's line, exit 1), so the status split is the
+            // route-wide one: 1 with an array list open, 2 otherwise,
+            // and 2 under live errexit either way.
+            let errexit_live = executor.errexit_live_at_diagnostic();
+            let status = if compound_assignment_open && !errexit_live {
+                1
+            } else {
+                2
+            };
+            executor.set_last_exit_code(status);
+            return status;
         }
         // rubash#3229: an unclosed extglob pattern group — GNU
         // read_token_word's parse_matched_pair scan (parse.y:5466-5489)
@@ -4565,9 +4866,19 @@ fn run_source_impl_inner_body(
                     Some(open_line + line_offset),
                 );
             }
-            executor.errexit_live_at_diagnostic();
-            executor.set_last_exit_code(2);
-            return 2;
+            // rubash#3899: same split as the `$[` arm — an extglob
+            // group that dies inside a compound array assignment is
+            // a failed element word of parse_compound_assignment
+            // (GNU 5.3.20 probe: `v=(a +(x` -> exit 1), while the
+            // bare `echo +(x` keeps 2.
+            let errexit_live = executor.errexit_live_at_diagnostic();
+            let status = if compound_assignment_open && !errexit_live {
+                1
+            } else {
+                2
+            };
+            executor.set_last_exit_code(status);
+            return status;
         }
         // GNU's incremental reader executes complete input lines before the
         // line where the unclosed construct opened; that line itself is part
@@ -4638,7 +4949,29 @@ fn run_source_impl_inner_body(
                 // end of file from `(' command on line N" — while
                 // `$(`/`$((`/array/quote matched pairs keep the "matching
                 // `X'" wording.
-                if close == ')' && command {
+                // rubash#3405: when the shape scan positively identifies
+                // a token-level error inside the comsub body, the
+                // command-position branch must NOT claim the input for
+                // its subshell-EOF fallthrough — the `else if` arm below
+                // renders that verdict (with the matching suffix), and
+                // the MainLevel/dparen arms inside this branch have no
+                // verdict for it. The shape's own guards (#516/q1,
+                // `((` arithmetic root, `for ((` pair) already keep
+                // those families out of the ComsubBodyTokenError class,
+                // so only genuine body token errors defer.
+                if close == ')'
+                    && command
+                    && !matches!(
+                        crate::lexer::unclosed_comsub_eof_shape(
+                            input,
+                            crate::lexer::parse_extended_glob()
+                        ),
+                        Some((
+                            crate::lexer::UnclosedComsubShape::ComsubBodyTokenError { .. },
+                            _
+                        ))
+                    )
+                {
                     // Issue #516 (F181 class): a `(` that follows word
                     // text — any second word, a redirect or an assignment
                     // prefix before it — is a yacc token error at the
@@ -4751,6 +5084,43 @@ fn run_source_impl_inner_body(
                             Some(global_eof),
                         );
                     }
+                } else if let Some((
+                    crate::lexer::UnclosedComsubShape::ComsubBodyTokenError { line, token },
+                    _,
+                )) = crate::lexer::unclosed_comsub_eof_shape(
+                    input,
+                    crate::lexer::parse_extended_glob(),
+                ) {
+                    // rubash#3405: a token-level error inside the
+                    // unclosed comsub's body preempts the matched-pair
+                    // EOF report in file mode too — GNU's nested
+                    // yyparse (parse.y:4549-4555) fails on the offending
+                    // token before EOF is reached, and
+                    // report_syntax_error (parse.y:6833-6865) names it
+                    // with the matching suffix plus the offending line.
+                    let report = line + line_offset;
+                    let prefix = executor.parser_error_prefix_for_line(report);
+                    unclosed_report!(
+                        "{prefix}syntax error near unexpected token `{token}' while looking for matching `{close}'"
+                    );
+                    if !suppress_unclosed_diagnostic {
+                        executor.record_run_diagnostic(
+                            format!(
+                                "syntax error near unexpected token `{token}' while looking for matching `{close}'"
+                            ),
+                            Some(report),
+                        );
+                    }
+                    if !executor.invocation_interactive() {
+                        let offending = input
+                            .lines()
+                            .nth(line.saturating_sub(1))
+                            .unwrap_or_default();
+                        unclosed_report!("{prefix}`{offending}'");
+                    }
+                    executor.errexit_live_at_diagnostic();
+                    executor.set_last_exit_code(2);
+                    return 2;
                 } else {
                     let reported = if report_open { global_open } else { global_eof };
                     unclosed_report!(
@@ -4763,6 +5133,34 @@ fn run_source_impl_inner_body(
                             Some(reported),
                         );
                     }
+                    // GNU 5.3.20 exits 2 for unmatched-delimiter EOF
+                    // diagnostics (confirmed for word-internal pairs
+                    // `'`, `"`, `` ` ``, `${`, `$[`, `a[`, `$((`, `((`
+                    // as well as `$(` and command-position constructs)
+                    // — EXCEPT when a compound array assignment is open
+                    // anywhere in the stack: the failed word read is
+                    // then consumed by parse_compound_assignment's
+                    // token loop, which runs set_exit_status
+                    // (EXECUTION_FAILURE) (parse.y:7167-7169) after the
+                    // innermost scan's diagnostic, and the
+                    // `error yacc_EOF' production forces 2 only on a
+                    // still-zero status (parse.y:484-493). So an open
+                    // array list keeps the status at 1 (rubash#3899:
+                    // the plain `name=(` list; rubash#3900: a procsub
+                    // element `v=(<(echo` reporting at the EOF line),
+                    // unless parser_error's exit_immediately_on_error
+                    // tail fires under live errexit (error.c:324-327).
+                    if array_list {
+                        let status = if executor.errexit_live_at_diagnostic() {
+                            2
+                        } else {
+                            1
+                        };
+                        executor.set_last_exit_code(status);
+                        return status;
+                    }
+                    executor.set_last_exit_code(2);
+                    return 2;
                 }
                 // GNU exits 1 for an unterminated `name=(` array list —
                 // but error.c:324-327 forces exit status 2 whenever
@@ -4795,7 +5193,7 @@ fn run_source_impl_inner_body(
     // `input` again would re-read every byte the feeder already scanned.
     let mut tokens = match pre_lexed {
         Some(tokens) => tokens,
-        None => tokenize_with_initial_posix(input, parse_posix),
+        None => tokenize_with_initial_posix_marked(input, parse_posix, noncounting_newlines),
     };
     // A command with more than HEREDOC_MAX (16) here-documents is fatal in
     // GNU (parse.y push_heredoc -> report_syntax_error + exit_shell with
@@ -4821,6 +5219,11 @@ fn run_source_impl_inner_body(
         for token in &mut tokens {
             token.position += line_offset;
             token.column += line_offset;
+            // rubash#3605: end_position lives in the same line space — a
+            // folded `{ ... }' token spans lines, and finish_compound_command
+            // stamps end_line from max(position, end_position): unshifted,
+            // `function name\n{ ... }' reported the `{' line.
+            token.end_position += line_offset;
             // rubash#1186: logical_line must shift with position — the
             // DISCARD skip gates compare command.logical_line against
             // reader-line state seeded in the absolute (offset) space, so
@@ -4829,6 +5232,13 @@ fn run_source_impl_inner_body(
             // compound boundaries (`{ set -- /no/such/*.zzz; }; echo rc`
             // printed rc in the REPL only).
             token.logical_line += line_offset;
+            // rubash#3605 run-heredoc: the gather end line lives in the
+            // same line space as position — the `here-document delimited
+            // by end-of-file` warning and the unclosed-compound EOF error
+            // report it (make_cmd.c:626 internal_warning at the post-gather
+            // line_number; parse.y:6899). Unshifted, a group's EOF-heredoc
+            // diagnostics stamped the fragment-local line.
+            token.heredoc_end_line = token.heredoc_end_line.map(|line| line + line_offset);
         }
     }
     // GNU parse.y: a `)` or case-clause terminator at command position is
@@ -4994,6 +5404,15 @@ fn run_source_impl_inner_body(
         // startup file run by run_init_file (rubash#1161). Printing it
         // via the catch-all below leaked a bare `return N` line.
         Err(ExecuteError::Return(code)) => code,
+        // A respawned fork-child whose own write met a dead pipe is
+        // GNU's SIGPIPE death (trap.c:1480 reset_signal_handlers leaves
+        // the fork SIG_DFL): the process ends at the verdict with no
+        // diagnostic — status 141, matching child_process_exit_status's
+        // BrokenPipe arm for in-process child scripts. Pipeline-stage
+        // producers absorb their own BrokenPipe as a 141 element status
+        // long before this arm, so what reaches here is the run's own
+        // death.
+        Err(ExecuteError::BrokenPipe) => 141,
         Err(e) => {
             if interactive {
                 eprintln!("Error: {}", e);
@@ -5098,8 +5517,65 @@ pub(crate) fn process_console_size() -> Option<(i32, i32)> {
     None
 }
 
+/// (rows, cols) of the terminal behind `fd` via TIOCGWINSZ, or None
+/// when the fd is not a terminal or reports a degenerate size.
+/// winsize.c tcgetwinsize is plain ioctl(fd, TIOCGWINSZ, &win); the
+/// get_new_window_size caller only trusts ws_row > 0 && ws_col > 0,
+/// so a zero dimension is None here rather than a size the callers
+/// would have to re-filter (rubash#3330: the unix stub returned None
+/// unconditionally, so every COLUMNS-unset consumer fell back to 80).
+#[cfg(not(windows))]
+fn unix_console_size_of_fd(fd: libc::c_int) -> Option<(i32, i32)> {
+    // SAFETY: ioctl TIOCGWINSZ writes a plain winsize struct; the
+    // fd is borrowed, never owned or closed here.
+    unsafe {
+        let mut win: libc::winsize = std::mem::zeroed();
+        if libc::ioctl(fd, libc::TIOCGWINSZ, &mut win) != 0 {
+            return None;
+        }
+        if win.ws_row > 0 && win.ws_col > 0 {
+            Some((i32::from(win.ws_row), i32::from(win.ws_col)))
+        } else {
+            None
+        }
+    }
+}
+
+/// Unix analog of the controlling-terminal winsize query
+/// (winsize.c:97 input_tty -> tcgetwinsize): the process console,
+/// found via /dev/tty (GNU's shell_tty — the fd jobs.c opens on the
+/// controlling terminal at startup, falling back to stderr) so it
+/// works even when stdin/stdout/stderr are all redirected, with the
+/// std fds as fallbacks (stderr first, GNU's input_tty fallback).
 #[cfg(not(windows))]
 pub(crate) fn process_console_size() -> Option<(i32, i32)> {
+    // SAFETY: plain open/close of the terminal device; the fd is
+    // closed before returning. Opening /dev/tty never acquires a
+    // controlling terminal (only a by-path open of the tty device
+    // does that — see acquire_controlling_terminal); without one
+    // the open fails and we fall through to the std fds.
+    unsafe {
+        let dev_tty = b"/dev/tty\0";
+        let fd = libc::open(
+            dev_tty.as_ptr() as *const libc::c_char,
+            libc::O_RDONLY | libc::O_NONBLOCK,
+        );
+        if fd >= 0 {
+            let size = unix_console_size_of_fd(fd);
+            libc::close(fd);
+            if size.is_some() {
+                return size;
+            }
+        }
+    }
+    // GNU's input_tty fallback is stderr; stdin/stdout follow so a
+    // session whose stderr is redirected but whose stdin or stdout
+    // is still a tty reports its size.
+    for fd in [libc::STDERR_FILENO, libc::STDIN_FILENO, libc::STDOUT_FILENO] {
+        if let Some(size) = unix_console_size_of_fd(fd) {
+            return Some(size);
+        }
+    }
     None
 }
 
@@ -5110,9 +5586,14 @@ fn stdin_console_size() -> Option<(i32, i32)> {
     windows_console_size_of(std::io::stdin().as_raw_handle() as *mut _)
 }
 
+/// Size of the console on STDIN itself (readline's rl_instream winsize:
+/// lib/readline/terminal.c _rl_get_screen_size ioctls the tty fd).
+/// Same TIOCGWINSZ query as the process console above; the unix stub
+/// used to return None, so the screen-size bind never saw a stdin
+/// terminal (rubash#3330).
 #[cfg(not(windows))]
 fn stdin_console_size() -> Option<(i32, i32)> {
-    None
+    unix_console_size_of_fd(libc::STDIN_FILENO)
 }
 
 /// variables.c:1039 sh_set_lines_and_columns: bind LINES then COLUMNS as
@@ -5340,7 +5821,15 @@ pub fn initialize_interactive_history(executor: &mut Executor) {
         let histsize = SessionHistory::size_limit(executor.get_env("HISTSIZE"));
         let mut shell = session.borrow_mut();
         shell.histfile_loaded = true;
-        let _ = shell.load_file(&path.to_string_lossy(), histsize);
+        // bashhist.c load_history -> read_history: the startup read takes
+        // the same read-time HISTTIMEFORMAT state as `history -r` — it
+        // arms the comment char (variables.c:6168 sv_histtimefmt) and
+        // gates multi-line regrouping (histfile.c:384, rubash#3393).
+        // The comment-char arming is sticky (rubash#3535): include the
+        // latch a previous session segment may have set.
+        let comment_armed = executor.shell_state.history_comment_char_armed || write_ts;
+        let _ =
+            shell.load_file_with_arming(&path.to_string_lossy(), histsize, write_ts, comment_armed);
     }
 }
 
@@ -5804,7 +6293,7 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
             // run below reports the error and the reader moves on).
             let group_complete = pending_heredocs.is_empty()
                 && (!stdin_source_needs_more_posix(&pending, stdin_posix)
-                    || interactive_pending_is_hard_syntax_error(&pending, stdin_posix));
+                    || interactive_pending_is_hard_syntax_error(executor, &pending, stdin_posix));
             if group_complete {
                 // rubash#2849: a group was just accepted for
                 // execution — the read that produced it has returned,
@@ -5847,6 +6336,7 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                         true,
                         None,
                         None,
+                        pending.ends_with('\n'),
                     )
                 } else {
                     run_source_with_line_offset(
@@ -8022,9 +8512,13 @@ fn record_stdin_group_if_armed(executor: &mut Executor, pending: &str) {
     let control = executor.get_env("HISTCONTROL").unwrap_or_default();
     let ignore = executor.get_env("HISTIGNORE").unwrap_or_default();
     let histsize = SessionHistory::size_limit(executor.get_env("HISTSIZE"));
+    // readline/history.c hist_inittime: the stamp an entry takes is
+    // armed by the first HISTTIMEFORMAT bind (rubash#3392).
+    let comment_char_armed = executor.shell_state.history_comment_char_armed
+        || executor.get_env("HISTTIMEFORMAT").is_some();
     session
         .borrow_mut()
-        .record(trimmed, &control, &ignore, histsize);
+        .record(trimmed, &control, &ignore, histsize, comment_char_armed);
 }
 
 /// Whether a finish pass's stream-end duties write the engine

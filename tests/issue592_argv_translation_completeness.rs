@@ -246,7 +246,7 @@ fn data_primaries_stay_verbatim_while_paths_translate() {
     // find: the start operand translates (the path position find cannot
     // resolve itself, WinuxCmd#1170) while a `-name` pattern value with a
     // drive-shaped form stays data.
-    let (code, stdout, stderr) = run_rubash(
+    let (code, _stdout, stderr) = run_rubash(
         &format!("find '{posix}' -maxdepth 1 -name 'data.txt' | grep -q data.txt"),
         &env,
     );

@@ -86,6 +86,40 @@ impl Executor {
         status
     }
 
+    /// rubash#3382: consume a fatal arithmetic evalerror latched while
+    /// expanding this `[[ ]]` command's operands, and arm the DISCARD
+    /// class for the list loop. Returns true when a fatal record was
+    /// consumed. GNU has no cross-command error state at all: expr.c's
+    /// evalerror jumps DISCARD for the CURRENT command only, so the
+    /// `[[ ]]` command itself must own the failure — the flags may
+    /// not survive into the next command (where `abort_on_expansion_errors`
+    /// would discard an innocent command instead). Nounset is excluded:
+    /// it has its own FORCE_EOF path (`[[ $((b)) = x ]]` under `set -u`
+    /// aborts the script, and the next command's abort check is what
+    /// fires it today). Nonfatal arith errors (e.g. a ternary
+    /// assignment error) do not fire this check — they print and the
+    /// command continues with status 1.
+    pub(super) fn take_conditional_arith_evalerror(&mut self) -> bool {
+        if self.shell_state.arithmetic_expansion_error.get()
+            && self.shell_state.arithmetic_fatal_error.get()
+            && !self.shell_state.arithmetic_nounset_error.get()
+        {
+            self.shell_state.arithmetic_expansion_error.set(false);
+            self.shell_state.arithmetic_fatal_error.set(false);
+            // A nonfatal flag latched by this command's operands
+            // belongs to this command too; leaving it standing would
+            // let the next command's funnel misread it as its own.
+            self.shell_state.arithmetic_nonfatal_error.set(false);
+            // rubash#1518: the arithmetic evalerror class — the
+            // reader's errexit promotion skips it, so the DISCARD
+            // does not exit the script under `set -e`.
+            self.evalerror_arith_pending.set(true);
+            true
+        } else {
+            false
+        }
+    }
+
     /// rubash#1915: mask the process-substitution spans the parser
     /// recorded for THIS conditional word out of the text a `[[ ]]`
     /// nounset scan is about to judge. The lookup is by the word's
@@ -242,8 +276,13 @@ impl Executor {
                 let args = vec![op.to_string(), w];
                 self.sync_fd_terminal_marks(None);
                 i32::from(
-                    !(crate::builtins::test::execute(&args, false, &self.shell_state.env_vars)
-                        .unwrap_or(1)
+                    !(crate::builtins::test::execute(
+                        &args,
+                        false,
+                        &self.shell_state.env_vars,
+                        self.shell_state.positional_len(),
+                    )
+                    .unwrap_or(1)
                         == 0),
                 )
             }
@@ -257,8 +296,13 @@ impl Executor {
                 let args = vec![op.to_string(), w];
                 self.sync_fd_terminal_marks(None);
                 i32::from(
-                    !(crate::builtins::test::execute(&args, false, &self.shell_state.env_vars)
-                        .unwrap_or(1)
+                    !(crate::builtins::test::execute(
+                        &args,
+                        false,
+                        &self.shell_state.env_vars,
+                        self.shell_state.positional_len(),
+                    )
+                    .unwrap_or(1)
                         == 0),
                 )
             }
@@ -382,6 +426,22 @@ impl Executor {
     }
 
     fn expand_conditional_word(&mut self, word: &str) -> String {
+        // rubash#3605: GNU raises comsub_ignore_return around a flagged
+        // `[[ ]]`'s operand expansion (execute_cmd.c:4012, :4060,
+        // :4067 — `ignore` = the cond node's CMD_IGNORE_RETURN), so a
+        // `$( )` inside an exempt conditional stamps CMD_IGNORE_RETURN
+        // on its body commands (builtins/evalstring.c:496).
+        if self.suppress_errexit > 0 {
+            self.comsub_ignore_return += 1;
+        }
+        let result = self.expand_conditional_word_inner(word);
+        if self.comsub_ignore_return > 0 {
+            self.comsub_ignore_return -= 1;
+        }
+        result
+    }
+
+    fn expand_conditional_word_inner(&mut self, word: &str) -> String {
         // rubash#1422: an earlier operand already hit the DISCARD-class
         // error below; GNU abandons the conditional at the first bad
         // word, so later operands are never expanded at all.
@@ -922,7 +982,11 @@ impl Executor {
         let base = rewritten.split('[').next().unwrap_or(&rewritten);
         let overlaid_env = self.env_with_frame_arrays(&[base]);
         let env_vars = overlaid_env.as_ref().unwrap_or(&self.shell_state.env_vars);
-        Ok(crate::builtins::test::variable_is_set(&rewritten, env_vars))
+        Ok(crate::builtins::test::variable_is_set(
+            &rewritten,
+            env_vars,
+            self.shell_state.positional_len(),
+        ))
     }
 
     pub(super) fn conditional_string_unary(&mut self, op: &str, operand: &str) -> bool {
@@ -1009,7 +1073,14 @@ impl Executor {
             self.sync_fd_alias_facts_scoped(None, redirects.as_deref());
         }
         let args = vec![op.to_string(), value];
-        crate::builtins::test::execute(&args, false, &self.shell_state.env_vars).unwrap_or(1) == 0
+        crate::builtins::test::execute(
+            &args,
+            false,
+            &self.shell_state.env_vars,
+            self.shell_state.positional_len(),
+        )
+        .unwrap_or(1)
+            == 0
     }
 
     /// rubash#545 (cell 3): GNU realizes a `[[ ]]` process-substitution
@@ -1073,16 +1144,39 @@ impl Executor {
         let left_exp = self.expand_conditional_word(left);
         let right_exp = self.expand_conditional_word(right);
         self.xtrace_conditional_term(op, &left_exp, Some(&right_exp));
+        // rubash#3432: the binary file operators (-ef/-nt/-ot) resolve
+        // an fd-alias operand through the fd table (sh_stataccess
+        // stats the current binding, eaccess.c:116), so the marks
+        // must be fresh for THIS evaluation — the same contract as
+        // the unary arm above and the [ ] path's fused scan. The
+        // binary arm never synced at all: without this, [[ ]] binary
+        // ops read the marks stale from a previous evaluation (or
+        // none) and fall to the literal path, whose OS fd namespace
+        // is shifted one fd down from the user's.
+        if crate::special_paths::fd_alias_target(&left_exp).is_some()
+            || crate::special_paths::fd_alias_target(&right_exp).is_some()
+        {
+            self.sync_fd_pipe_marks();
+            let redirects = self.current_conditional_redirects.clone();
+            self.sync_fd_alias_facts_scoped(None, redirects.as_deref());
+        }
         let args = vec![left_exp, op.to_string(), right_exp];
-        crate::builtins::test::execute(&args, false, &self.shell_state.env_vars).unwrap_or(1) == 0
+        crate::builtins::test::execute(
+            &args,
+            false,
+            &self.shell_state.env_vars,
+            self.shell_state.positional_len(),
+        )
+        .unwrap_or(1)
+            == 0
     }
 
     pub(super) fn conditional_regex_match(&mut self, left: &str, right: &str) -> bool {
         // Both operands are byte strings in GNU (sh_regmatch regexec's the
-        // expanded text); decode the comsub payload spelling on the subject
+        // expanded text); decode both transport spellings on the subject
         // side too, symmetric with the pattern decode inside
-        // compile_conditional_regex.
-        let left = crate::executor::execution_misc::decode_command_substitution_payload(left);
+        // compile_conditional_regex (rubash#3545).
+        let left = decode_regex_operand(left);
         let right = restore_numeric_decimal_regex_escapes(right);
         let Ok(regex) = self.compile_conditional_regex(&right) else {
             return false;
@@ -1156,6 +1250,10 @@ impl Executor {
         if !crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset") {
             return false;
         }
+        // niubash#993 §1: the operand walks below record `:=`/`=` binds
+        // as they pass them — start from a fresh table so a previous
+        // command's scan records never adjudicate this `[[ =~ ]]`.
+        crate::executor::expand_braced_indices::scan_ctx_begin();
         let mut prefix_comsubs: Vec<String> = Vec::new();
         for word in [left, right] {
             // rubash#1915: same recorded-span masking as the operand
@@ -1206,7 +1304,7 @@ impl Executor {
         let left_exp = self.expand_conditional_word(left);
         let right_exp = self.expand_conditional_word(right);
         let right_f = restore_numeric_decimal_regex_escapes(&right_exp);
-        let left = crate::executor::execution_misc::decode_command_substitution_payload(&left_exp);
+        let left = decode_regex_operand(&left_exp);
         let right = right_f;
         // GNU xtrace prints arg2 as cond_expand_word returned it —
         // expanded but not yet glob-quoted (execute_cmd.c:4074).
@@ -1245,9 +1343,7 @@ impl Executor {
         if self.regex_operands_nounset_fatal(left, right) {
             return 1;
         }
-        let left = crate::executor::execution_misc::decode_command_substitution_payload(
-            &self.expand_conditional_word(left),
-        );
+        let left = decode_regex_operand(&self.expand_conditional_word(left));
         let right = self.quote_aware_regex_rhs(right, metadata);
         let right = restore_numeric_decimal_regex_escapes(&right);
         self.xtrace_conditional_term("=~", &left, Some(&right));
@@ -1332,7 +1428,12 @@ impl Executor {
         // byte 0x01 (execute_cmd.c:4137 sh_regmatch regcomps the expanded
         // operand). rubash#729 widened the protected byte set, so this
         // decode boundary is what keeps the sentinel out of regcomp.
-        let pattern = crate::executor::execution_misc::decode_command_substitution_payload(pattern);
+        // rubash#3545: the same boundary must also fold the U+E000
+        // raw-byte pairs, or a carrier byte the quoted path already
+        // decoded to a raw byte never matches a pair-encoded subject —
+        // decode_regex_operand covers both spellings, symmetric with
+        // the subject decode at the three match entry points.
+        let pattern = decode_regex_operand(pattern);
         // In a UTF-8 locale the bracket classes expand to Unicode
         // tables (glibc regcomp resolves them through wctype); in byte
         // mode they pass through to the regex crate's ASCII classes,
@@ -1353,6 +1454,13 @@ impl Executor {
         // differently (nested `?`, empty-minimum intervals): rewrite
         // to the nested form before compiling (rubash#1058).
         let pattern = translate_posix_ere_quantifiers(&pattern);
+        // Byte mode (rubash#3791): expand non-ASCII chars to their
+        // `\xHH` byte escapes — see expand_non_ascii_to_byte_escapes.
+        let pattern = if byte_mode {
+            Self::expand_non_ascii_to_byte_escapes(&pattern)
+        } else {
+            pattern
+        };
         // GNU regcomp is called WITHOUT REG_NEWLINE (lib/sh/shmatch.c
         // sh_regmatch), so `.` matches a newline (rubash#1058).
         // Granularity follows the locale model (rubash#1061): glibc
@@ -1374,6 +1482,66 @@ impl Executor {
                 .dot_matches_new_line(true)
                 .build()
                 .map(CompiledConditionalRegex::Text)
+        }
+    }
+
+    /// Byte-mode only (rubash#3791): glibc regcomp in the C locale
+    /// reads the pattern as bytes — a non-ASCII char inside a bracket
+    /// expression is the set of its UTF-8 bytes (`[é]` is {0xC3,
+    /// 0xA9}, `[é-ÿ]` is the byte range 0xA9-0xC3 plus 0xC3/0xBF;
+    /// lib/sh/shmatch.c:79-86 sh_regmatch regcomps with REG_EXTENDED
+    /// and no multibyte decoding). The regex crate in bytes mode
+    /// (unicode(false)) rejects every non-ASCII char inside a class
+    /// with "Unicode not allowed here", so expand each one to its
+    /// `\xHH` byte escapes before compiling: ranges then resolve on
+    /// bytes exactly as glibc resolves them, and a literal non-ASCII
+    /// char outside brackets keeps the byte-sequence meaning it
+    /// already had. A backslash before a non-ASCII char is dropped —
+    /// glibc reads `\` + byte as the literal byte, while the crate
+    /// rejects `\é` as an unrecognized escape. Runs after the bracket
+    /// translation (which doubles bare backslashes inside brackets,
+    /// so a `\` + non-ASCII pair can only be an outside-bracket
+    /// escape here) and after the quantifier rewrite (which copies
+    /// bracket spans verbatim). Raw-byte marker pairs (U+E000…)
+    /// expand the same way; pattern and subject stay in the same
+    /// marker encoding, so their consistency is preserved.
+    fn expand_non_ascii_to_byte_escapes(pattern: &str) -> String {
+        let chars: Vec<char> = pattern.chars().collect();
+        let mut out = String::with_capacity(pattern.len());
+        let mut index = 0usize;
+        while index < chars.len() {
+            let c = chars[index];
+            if c == '\\' && index + 1 < chars.len() {
+                let next = chars[index + 1];
+                if next == '\\' {
+                    out.push('\\');
+                    out.push('\\');
+                    index += 2;
+                    continue;
+                }
+                if !next.is_ascii() {
+                    Self::push_char_as_byte_escapes(&mut out, next);
+                    index += 2;
+                    continue;
+                }
+                out.push('\\');
+                index += 1;
+                continue;
+            }
+            if c.is_ascii() {
+                out.push(c);
+            } else {
+                Self::push_char_as_byte_escapes(&mut out, c);
+            }
+            index += 1;
+        }
+        out
+    }
+
+    fn push_char_as_byte_escapes(out: &mut String, c: char) {
+        let mut buf = [0u8; 4];
+        for byte in c.encode_utf8(&mut buf).as_bytes() {
+            out.push_str(&format!("\\x{byte:02X}"));
         }
     }
 
@@ -1615,19 +1783,32 @@ impl Executor {
         // (expr.c:1502-1510), hence no_expand inside the parser.
         let left_eval = self.expand_arith_indexed_subscripts(&left_expanded);
         let left_dynamic = self.arith_dynamic_context();
-        let (Some(left_val), _) = eval_mutable_arith_value_with_random_flags(
-            &left_eval,
-            &mut self.shell_state.env_vars,
-            Some(&self.shell_state.random_state),
-            Some(&left_dynamic),
-            true,
-            Some(&self.shell_state.variables),
-        ) else {
-            self.flush_arith_diags(Some("[["));
+        // GNU execute_cmd.c:4164 execute_cond_command sets
+        // this_command_name = "[[" for the whole conditional; the
+        // arithcomp evalexp diagnostics carry that label
+        // (rubash#3295).
+        let (Some(left_val), _) = ({
+            let _arith_label =
+                crate::executor::arithmetic::arith_eval_label_scope(Some("[[".to_string()));
+            eval_mutable_arith_value_with_random_flags(
+                &left_eval,
+                &mut self.shell_state.env_vars,
+                Some(&self.shell_state.random_state),
+                Some(&left_dynamic),
+                true,
+                // GNU cond_expand_word (execute_cmd.c:4024) word-expands
+                // the operand before arithcomp's evalexp, so an empty
+                // subscript expansion is the empty-bracket token
+                // (rubash#3252).
+                true,
+                Some(&self.shell_state.variables),
+            )
+        }) else {
+            self.flush_arith_diags();
             self.report_conditional_arithmetic_error(&left_eval);
             return 1;
         };
-        self.flush_arith_diags(Some("[["));
+        self.flush_arith_diags();
         // rubash#404: GNU test.c:357-372 arithcomp -> evalexp binds the
         // operand's assignment side effects into the one variable store, so
         // the next parameter expansion sees them (`n=1; x='n+=2';
@@ -1640,19 +1821,26 @@ impl Executor {
         }
         let right_eval = self.expand_arith_indexed_subscripts(&right_expanded);
         let right_dynamic = self.arith_dynamic_context();
-        let (Some(right_val), _) = eval_mutable_arith_value_with_random_flags(
-            &right_eval,
-            &mut self.shell_state.env_vars,
-            Some(&self.shell_state.random_state),
-            Some(&right_dynamic),
-            true,
-            Some(&self.shell_state.variables),
-        ) else {
-            self.flush_arith_diags(Some("[["));
+        let (Some(right_val), _) = ({
+            let _arith_label =
+                crate::executor::arithmetic::arith_eval_label_scope(Some("[[".to_string()));
+            eval_mutable_arith_value_with_random_flags(
+                &right_eval,
+                &mut self.shell_state.env_vars,
+                Some(&self.shell_state.random_state),
+                Some(&right_dynamic),
+                true,
+                // Same expand-entry law as the left operand above
+                // (rubash#3252).
+                true,
+                Some(&self.shell_state.variables),
+            )
+        }) else {
+            self.flush_arith_diags();
             self.report_conditional_arithmetic_error(&right_eval);
             return 1;
         };
-        self.flush_arith_diags(Some("[["));
+        self.flush_arith_diags();
         super::arithmetic::sync_arith_writes(self);
         i32::from(!conditional_numeric_matches(left_val, op, right_val))
     }
@@ -2051,6 +2239,31 @@ impl CompiledConditionalRegex {
 /// (rubash#1061) and is gone with it.
 fn conditional_regex_byte_mode() -> bool {
     !crate::locale::is_utf8()
+}
+
+/// Regex-boundary decode (rubash#3545): GNU sh_regmatch receives the
+/// expanded operands as raw bytes (execute_cmd.c:4096, via
+/// execute_cmd.c:4068 cond_expand_word mode 2 and subst.c:4114
+/// QGLOB_REGEXP). Rubash transport pair-encodes carrier bytes (0x0c,
+/// 0x11, 0x13, 0x14..=0x1f) as U+E000 raw-byte pairs, and
+/// decode_command_substitution_payload only restores the U+E319 comsub
+/// sentinel — so a pattern the quoted path had already decoded to raw
+/// bytes (regex_rhs_marked_chars via shell_text_to_raw_bytes) never
+/// matched a pair-encoded subject, while the unquoted path only
+/// matched by accident of both sides staying encoded. Decode both
+/// spellings — sentinel first (it can only yield U+0000..=U+00FF, so
+/// it can never mint a pair introducer), then the raw-byte pairs —
+/// so pattern and subject meet as the same raw bytes, the same
+/// normalization the #729 glob side already applies. Non-UTF-8 bytes
+/// ride as byte-chars (U+0000..=U+00FF), which keep pattern and
+/// subject in the same spelling in both regex modes.
+fn decode_regex_operand(value: &str) -> String {
+    let decoded = crate::executor::execution_misc::decode_command_substitution_payload(value);
+    if crate::executor::markers::contains_decodable_transport(&decoded) {
+        crate::executor::substitution_metadata::decode_raw_byte_markers_to_byte_chars(&decoded)
+    } else {
+        decoded
+    }
 }
 
 /// Convert one byte-mode capture into rubash's storage spelling: valid

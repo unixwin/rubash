@@ -13,11 +13,13 @@ pub(crate) mod paths;
 
 use super::diagnostic::{diagnostic_prefix, readonly_error_prefix};
 use crate::builtins::pushd::{load_stack, save_stack, DIR_STACK};
+use crate::expand::tilde::tilde::expand_tilde_segment;
 
 use paths::{
-    current_logical_pwd, filesystem_path_for_display, logical_canon_erased_components_exist,
-    logical_destination_display, logical_pwd_var_display, set_shell_env, shell_display_path,
-    shell_pwd_display_path, shell_var, starts_with_dot_component, validated_logical_pwd,
+    cd_filesystem_path, current_logical_pwd, filesystem_path_for_display,
+    logical_canon_erased_components_exist, logical_destination_display, logical_pwd_var_display,
+    set_shell_env, shell_display_path, shell_pwd_display_path, shell_var,
+    starts_with_dot_component, validated_logical_pwd,
 };
 use std::env;
 use std::io::{self, Write};
@@ -50,6 +52,14 @@ struct Target {
     path: PathBuf,
     display: Option<PathBuf>,
     print: PrintPath,
+    /// rubash#3372: the operand carried pre-fold byte transport, so
+    /// `path` is the raw-byte spelling (unix; `cd_filesystem_path`
+    /// ignores the spelling off unix). The logical-mode probe must
+    /// join THAT onto the logical base — GNU change_to_directory's
+    /// make_absolute hands chdir the operand's verbatim bytes —
+    /// not the folded display's UTF-8 re-encoding, which names the
+    /// genuine-char sibling.
+    byte_spelling: bool,
 }
 
 /// Execute `cd` with arguments after the command name.
@@ -149,14 +159,68 @@ where
     // cdable_vars lookup reported the variable's VALUE, where GNU
     // reports the operand).
     let dirname_display = target.display.clone();
-    let target = match resolve_cdpath(&target, env_vars, cwd) {
-        Some(found) => found,
-        None => target,
-    };
-    let target = match resolve_cdable_vars(&target, env_vars, cwd) {
-        Some(found) => found,
-        None => target,
-    };
+    let (cdpath_found, cdpath_attempts) = resolve_cdpath(&target, env_vars, cwd);
+    let cdpath_hit = cdpath_found.is_some();
+    let target = cdpath_found.unwrap_or(target);
+    let cdable_found = resolve_cdable_vars(&target, env_vars, cwd);
+    let cdable_substituted = cdable_found.is_some();
+    let target = cdable_found.unwrap_or(target);
+
+    // rubash#3574: GNU builtins/cd.def:529-534 change_to_directory —
+    // when the_current_working_directory is NULL, the entry
+    // re-derives through get_working_directory ("chdir")
+    // (builtins/common.c:592-624): a failing getcwd prints
+    // `chdir: error retrieving current directory: ...` and the move
+    // proceeds; a succeeding one silently restores the cached value,
+    // which then bases make_absolute. The session's logical cache is
+    // poisoned exactly when logical_cwd is None
+    // (pwd_loop_builtins rubash#3349: a failed physical pwd
+    // resolution clears it, mirroring resetpwd cd.def:183-191).
+    // The session cwd field is this port's getcwd truth (G-02), so
+    // canonicalize is the gate. The entry fires once per
+    // change_to_directory call — the CDPATH candidates in order,
+    // then the plain operand, then the cdable_vars value (oracle:
+    // 1 failed CDPATH unit + hit = 2 lines; 2 failed units + plain
+    // fail = 3; cdable_vars success = plain + cdable_vars = 2) — so
+    // the count is the attempts the stages above performed or stand
+    // for. The early returns above (bad options, too many arguments,
+    // unset HOME/OLDPWD, null directory) never reach
+    // change_to_directory, so they owe no line (oracle p8/p9).
+    let entry_poisoned = logical_cwd.is_none();
+    if entry_poisoned {
+        // Attempts owed: the CDPATH candidates probed; a hit ends
+        // the sequence there (cd.def:371-388 returns after the
+        // successful candidate), otherwise the plain operand's
+        // attempt, plus the cdable_vars attempt when its value was
+        // substituted (cd.def:397-405 — reached only after the plain
+        // attempt failed).
+        let chdir_attempts = if cdpath_hit {
+            cdpath_attempts
+        } else {
+            cdpath_attempts + 1 + usize::from(cdable_substituted)
+        };
+        match cwd.canonicalize() {
+            Ok(physical) => {
+                // Re-derivation succeeded: GNU leaves
+                // the_current_working_directory set to the getcwd
+                // spelling (a directory recreated at the path after
+                // the poison), so restore the stored logical cwd —
+                // the make_absolute base below is the physical
+                // spelling, as in GNU.
+                *logical_cwd = Some(shell_pwd_display_path(&physical.to_string_lossy()));
+            }
+            Err(error) => {
+                for _ in 0..chdir_attempts {
+                    writeln!(
+                        stderr,
+                        "chdir: error retrieving current directory: getcwd: \
+                         cannot access parent directories: {}",
+                        crate::posix_errors::message(&error)
+                    )?;
+                }
+            }
+        }
+    }
 
     // OLDPWD records the RAW old $PWD variable (bindpwd, cd.def:136:
     // get_string_value("PWD") — a forged variable lands there verbatim),
@@ -265,12 +329,18 @@ where
     } else {
         cwd.join(&target.path)
     };
+    // rubash#3788: the probe is the chdir verdict itself — canonicalize
+    // + directory + the search-permission check on the target
+    // (executor::path::probe_directory_for_chdir). canonicalize and
+    // is_dir alone both succeed on a directory without the search bit
+    // (path resolution needs search permission only on the PARENT
+    // components), so the old probe reported success for a directory
+    // the shell could never enter and cd/pushd bound PWD/DIRSTACK to
+    // a move that never happened. GNU builtins/cd.def
+    // change_to_directory performs a real chdir and refuses with
+    // EACCES.
     let probe = |path: &Path| -> Result<PathBuf, io::Error> {
-        match crate::executor::path::canonicalize_native(path) {
-            Ok(path) if path.is_dir() => Ok(path),
-            Ok(_) => Err(not_a_directory_error()),
-            Err(error) => Err(error),
-        }
+        crate::executor::path::probe_directory_for_chdir(path)
     };
     // A completed move: the session cwd field's new physical value,
     // the value bindpwd binds into $PWD (and the new stored logical
@@ -301,7 +371,18 @@ where
                 return Ok(Move {
                     physical: cwd.clone(),
                     pwd_value: shell_pwd_display_path(&bind),
-                    stayed_deleted_dot: Some(cwd_error),
+                    // rubash#3574: in the poisoned state GNU's
+                    // make_absolute base is NULL, so the canon of a
+                    // dot-only operand cannot fail on a deleted
+                    // component and the verbatim chdir's resetpwd arm
+                    // (the `cd:` line this field owes) never runs —
+                    // the entry re-derivation's `chdir:` line above
+                    // is the only diagnostic (oracle p5/p12).
+                    stayed_deleted_dot: if entry_poisoned {
+                        None
+                    } else {
+                        Some(cwd_error)
+                    },
                 });
             }
         }
@@ -318,6 +399,18 @@ where
         },
         Mode::Logical => {
             let logical_dest_display = logical_destination_display(&old_logical, target_display);
+            // rubash#3372: a byte-spelling operand probes the spelling
+            // joined onto the logical base — the same operand bytes
+            // GNU's make_absolute hands chdir — not the folded
+            // display's UTF-8 re-encoding, which names the
+            // genuine-char sibling directory.
+            #[cfg(unix)]
+            let logical_probe_path = if target.byte_spelling {
+                paths::logical_destination(&old_logical, &target.path)
+            } else {
+                filesystem_path_for_display(&logical_dest_display, env_vars)
+            };
+            #[cfg(not(unix))]
             let logical_probe_path = filesystem_path_for_display(&logical_dest_display, env_vars);
             // The textual destination is only sh_canonpath's result
             // when canon itself succeeds, and canon carries an
@@ -512,20 +605,23 @@ where
                 .unwrap_or_else(|| shell_pwd_display_path(&new_pwd_display));
             writeln!(stdout, "{verbatim}")?
         }
-        // GNU builtins/cd.def: the CDPATH announcement prints the path
-        // that was FOUND (the CDPATH-joined pathname), even under -P —
-        // only $PWD becomes the physical directory. new_pwd_display is
-        // the resolved physical path in Mode::Physical, which leaked
-        // into the announcement (rubash#1329); the logical destination
-        // built from the target display is the found path in both modes.
-        PrintPath::CdPath => writeln!(
-            stdout,
-            "{}",
-            shell_pwd_display_path(&logical_destination_display(
-                &old_logical,
-                target.display.as_deref().unwrap_or(&target.path)
-            ))
-        )?,
+        // GNU builtins/cd.def:370 `path = no_symlinks ? temp :
+        // the_current_working_directory`: under -P the announcement is
+        // `temp` itself — the sh_makepath join of the CDPATH unit and the
+        // operand, verbatim (a relative unit stays relative, `./` and
+        // `..` components stay; rubash#3395) — never the resolved
+        // physical directory (rubash#1329). Under -L it is the new
+        // logical cwd, the canonical absolute destination.
+        PrintPath::CdPath => {
+            let found = target.display.as_deref().unwrap_or(&target.path);
+            let announced = match mode {
+                Mode::Physical => found.to_string_lossy().into_owned(),
+                Mode::Logical => {
+                    shell_pwd_display_path(&logical_destination_display(&old_logical, found))
+                }
+            };
+            writeln!(stdout, "{announced}")?
+        }
         _ => {}
     }
 
@@ -568,20 +664,6 @@ fn refresh_dirstack_top(
         None => stack.push(new_pwd.to_string()),
     }
     save_stack(env_vars, &stack);
-}
-
-/// The error chdir would have reported for a target that exists but
-/// is not a directory (ENOTDIR / ERROR_DIRECTORY), in a form
-/// `posix_errors::message` renders as "Not a directory".
-fn not_a_directory_error() -> io::Error {
-    #[cfg(windows)]
-    {
-        io::Error::from_raw_os_error(267)
-    }
-    #[cfg(not(windows))]
-    {
-        io::Error::from_raw_os_error(20)
-    }
 }
 
 fn parse_options<W>(
@@ -635,6 +717,19 @@ where
     Ok(Ok((mode, index)))
 }
 
+/// rubash#3372: the pre-fold byte spelling of a cd pathname, when it
+/// carried raw-byte transport — the exact bytes
+/// `transport_name_spelling_bytes` computes from the word the fold
+/// receives. None when the word carried no transport, so the caller
+/// keeps the folded road (a genuine non-ASCII name keeps UTF-8 bytes).
+fn cd_operand_spelling(word: &str) -> Option<Vec<u8>> {
+    if crate::executor::markers::contains_decodable_transport(word) {
+        Some(crate::executor::substitution_metadata::transport_name_spelling_bytes(word))
+    } else {
+        None
+    }
+}
+
 fn resolve_target<W>(
     operand: Option<&str>,
     env_vars: &HashMap<String, String>,
@@ -650,11 +745,13 @@ where
             // fold a stored E400 pair in it like an operand's
             // (rubash#3076).
             Some(home) => {
+                let home_spelling = cd_operand_spelling(&home);
                 let home = crate::executor::substitution_metadata::fold_literal_char_escapes(&home);
                 Ok(Some(Target {
-                    path: filesystem_path_for_display(&home, env_vars),
+                    path: cd_filesystem_path(home_spelling.as_deref(), &home, env_vars),
                     display: Some(PathBuf::from(home)),
                     print: PrintPath::Never,
+                    byte_spelling: home_spelling.is_some(),
                 }))
             }
             // GNU builtins/cd.def:316-322: the operand-less refusal is
@@ -668,6 +765,7 @@ where
                 path: cwd.to_path_buf(),
                 display: None,
                 print: PrintPath::Never,
+                byte_spelling: false,
             })),
             None => {
                 writeln!(stderr, "{}cd: HOME not set", diagnostic_prefix(env_vars))?;
@@ -680,12 +778,14 @@ where
         }
         Some("-") => match shell_var(env_vars, "OLDPWD") {
             Some(old_pwd) => {
+                let old_pwd_spelling = cd_operand_spelling(&old_pwd);
                 let old_pwd =
                     crate::executor::substitution_metadata::fold_literal_char_escapes(&old_pwd);
                 Ok(Some(Target {
-                    path: filesystem_path_for_display(&old_pwd, env_vars),
+                    path: cd_filesystem_path(old_pwd_spelling.as_deref(), &old_pwd, env_vars),
                     display: Some(PathBuf::from(old_pwd)),
                     print: PrintPath::Always,
+                    byte_spelling: old_pwd_spelling.is_some(),
                 }))
             }
             None => {
@@ -709,13 +809,17 @@ where
             // The operand is a pathname from here on: fold a stored
             // E400 pair to the raw char so the probe, the CDPATH joins
             // downstream, and the failure diagnostic all name the real
-            // directory (rubash#3076).
+            // directory (rubash#3076). rubash#3372: the byte spelling
+            // is taken before the fold, so a raw-byte directory is
+            // probed by its bytes, not its UTF-8 re-encoding.
+            let dir_spelling = cd_operand_spelling(dir);
             let dir = crate::executor::substitution_metadata::fold_literal_char_escapes(dir);
             let dir = windows_bare_drive_operand(&dir);
             Ok(Some(Target {
-                path: filesystem_path_for_display(&dir, env_vars),
+                path: cd_filesystem_path(dir_spelling.as_deref(), &dir, env_vars),
                 display: Some(PathBuf::from(dir)),
                 print: PrintPath::Never,
+                byte_spelling: dir_spelling.is_some(),
             }))
         }
     }
@@ -740,42 +844,107 @@ fn operand_is_dot_only(path: &Path) -> bool {
 
 /// The logical destination display the real cd/pwd pair produces for
 /// `target` from the given session state: logical_destination_display
-/// built on validated_logical_pwd — the same chain cd_builtin binds
-/// into $PWD (builtins/cd.def bindpwd) and pwd_builtin prints verbatim.
-/// Exposed for the `$(cd X && pwd)` fast path (rubash#2220) so its
-/// bare-`pwd` rendering is the builtin's own chain rather than a
-/// parallel implementation that could drift from it.
+/// built on the session's STORED logical cwd — the same chain
+/// cd_builtin binds into $PWD (builtins/cd.def bindpwd) and
+/// pwd_builtin prints verbatim. Exposed for the `$(cd X && pwd)` fast
+/// path (rubash#2220) so its bare-`pwd` rendering is the builtin's own
+/// chain rather than a parallel implementation that could drift from
+/// it.
+///
+/// rubash#3348: the base is the stored value, not a re-derivation
+/// from $PWD — GNU's change_to_directory builds from
+/// the_current_working_directory (builtins/cd.def:535), never from
+/// the variable, which a user assignment can desynchronize. The
+/// stored value is used when it still names the session cwd (the
+/// reader protocol pwd's logical face and cd's old_logical share);
+/// otherwise — a mover outside the cd family changed the cwd without
+/// maintaining it — the validated derivation stands in, exactly as
+/// before.
 pub(crate) fn logical_destination_display_from(
+    logical_cwd: Option<&str>,
     env_vars: &HashMap<String, String>,
     cwd: &Path,
     target: &Path,
 ) -> String {
-    paths::logical_destination_display(&paths::validated_logical_pwd(env_vars, cwd), target)
+    let base = match logical_cwd {
+        Some(tcwd) if crate::builtins::pwd::logical_value_names_cwd(tcwd, cwd, env_vars) => {
+            PathBuf::from(tcwd)
+        }
+        _ => paths::validated_logical_pwd(env_vars, cwd),
+    };
+    paths::logical_destination_display(&base, target)
 }
 
+/// The CDPATH resolution `cd_builtin` performs (builtins/cd.def:353-388):
+/// each colon-unit join is a `change_to_directory` candidate, tried
+/// in order until one moves (an empty unit is the cwd itself).
+///
+/// Returns the found target (if any) together with the number of
+/// candidates probed — the CDPATH leg of rubash#3574's per-attempt
+/// count: in the poisoned state every `change_to_directory` call
+/// re-derives through get_working_directory ("chdir") and prints one
+/// `chdir:` line, so each probed candidate (failed or found) owes one.
 fn resolve_cdpath(
     target: &Target,
     env_vars: &HashMap<String, String>,
     cwd: &Path,
-) -> Option<Target> {
+) -> (Option<Target>, usize) {
     if target
         .display
         .as_ref()
         .and_then(|path| path.to_str())
         .is_some_and(|path| path.starts_with('/'))
     {
-        return None;
+        return (None, 0);
     }
 
     if target.path.is_absolute() || starts_with_dot_component(&target.path) {
-        return None;
+        return (None, 0);
     }
 
-    let cdpath = shell_var(env_vars, "CDPATH")?;
+    let Some(cdpath) = shell_var(env_vars, "CDPATH") else {
+        return (None, 0);
+    };
+    let mut attempted = 0;
     for unit in cdpath.split(':') {
         let base = if unit.is_empty() { "." } else { unit };
+        // rubash#3394: GNU tilde-expands each CDPATH element before
+        // the join (builtins/cd.def:360 `sh_makepath (path, dirname,
+        // MP_DOTILDE)`; lib/sh/makepath.c:98 expands a `~`-led path
+        // with bash_tilde_expand). `expand_tilde_segment` is that
+        // expansion: `~`/`~/` glue $HOME (an empty HOME still glues,
+        // lib/tilde/tilde.c:304-317), `~+`/`~-`/`~N` take the stack,
+        // `~user` takes the passwd home, and an unresolvable prefix
+        // keeps the unit verbatim (tilde.c:398 savestring fallback) —
+        // so one call covers the whole GNU rule, not just `~/`.
+        // The expanded base feeds BOTH the filesystem probe and the
+        // display spelling: GNU announces the found (joined, expanded)
+        // path (cd.def:375-377) and binds $PWD from it.
+        let expanded_base;
+        let base = if base.starts_with('~') {
+            expanded_base = expand_tilde_segment(base, env_vars);
+            expanded_base.as_str()
+        } else {
+            base
+        };
         let candidate = filesystem_path_for_display(base, env_vars).join(&target.path);
-        let display = Path::new(base).join(&target.path);
+        // GNU builtins/cd.def:360 `temp = sh_makepath (path, dirname,
+        // MP_DOTILDE)` — lib/sh/makepath.c:66 sh_makepath glues the unit
+        // and the operand AS SPELLED with one `/` (none when the unit
+        // already ends in one). That string is both the chdir target and,
+        // under -P, the announcement (cd.def:370), so it is built
+        // textually here rather than through Path::join, whose separator
+        // is the host's (rubash#3395).
+        let operand = target
+            .display
+            .as_deref()
+            .unwrap_or(&target.path)
+            .to_string_lossy();
+        let display = if base.ends_with('/') {
+            PathBuf::from(format!("{base}{operand}"))
+        } else {
+            PathBuf::from(format!("{base}/{operand}"))
+        };
 
         // G-02: CDPATH units are relative to the SESSION cwd, not the
         // process cwd; the returned candidate keeps its as-spelled form
@@ -785,20 +954,33 @@ fn resolve_cdpath(
         } else {
             cwd.join(&candidate)
         };
-        if probed.is_dir() {
-            return Some(Target {
-                print: if unit.is_empty() {
-                    PrintPath::Never
-                } else {
-                    PrintPath::CdPath
-                },
-                display: Some(display),
-                path: candidate,
-            });
+        // rubash#3574: every candidate probed is a
+        // change_to_directory call in GNU (builtins/cd.def:360-371),
+        // and each owes one entry diagnostic while the cache is
+        // poisoned — count the failed ones as well as the hit.
+        attempted += 1;
+        // rubash#3788: the hit test is the chdir verdict, not a
+        // bare existence probe — a candidate without the search bit
+        // fails GNU's change_to_directory with EACCES, so cd.def's
+        // loop moves on to the next unit instead of taking it.
+        if crate::executor::path::probe_directory_for_chdir(&probed).is_ok() {
+            return (
+                Some(Target {
+                    print: if unit.is_empty() {
+                        PrintPath::Never
+                    } else {
+                        PrintPath::CdPath
+                    },
+                    display: Some(display),
+                    path: candidate,
+                    byte_spelling: target.byte_spelling,
+                }),
+                attempted,
+            );
         }
     }
 
-    None
+    (None, attempted)
 }
 
 /// The directory-search resolution `pushd` inherits from `cd_builtin`:
@@ -832,8 +1014,9 @@ pub(crate) fn resolve_search_operand(
         path: filesystem_path_for_display(operand, env_vars),
         display: Some(PathBuf::from(operand)),
         print: PrintPath::Never,
+        byte_spelling: false,
     };
-    if let Some(found) = resolve_cdpath(&target, env_vars, cwd) {
+    if let (Some(found), _) = resolve_cdpath(&target, env_vars, cwd) {
         return Some(SearchResolution::CdPath {
             candidate: found
                 .display
@@ -867,7 +1050,19 @@ fn resolve_cdable_vars(
     } else {
         cwd.join(&target.path)
     };
-    if here.is_dir() || !crate::builtins::shopt::cdable_vars_enabled(env_vars) {
+    // rubash#3788: GNU tries the cdable_vars value only when the
+    // plain operand's change_to_directory FAILED (builtins/cd.def
+    // LCD_DOVARS, cd.def:397-405). A directory without the search bit
+    // fails that chdir with EACCES, so it must NOT block the variable
+    // step the way a chdir-able directory does — the guard is "the
+    // operand names a directory the shell could enter", not a bare
+    // existence probe. The deleted-cwd dot-only shape keeps its old
+    // verdict: is_dir still holds on the deleted inode and its search
+    // bit still reads, so GNU's verbatim-chdir success there still
+    // skips the variable step.
+    if (here.is_dir() && crate::executor::path::directory_has_search_permission(&here))
+        || !crate::builtins::shopt::cdable_vars_enabled(env_vars)
+    {
         return None;
     }
 
@@ -879,11 +1074,14 @@ fn resolve_cdable_vars(
     let value = shell_var(env_vars, name)?;
     // The variable's VALUE becomes the pathname (cd.def LCD_DOVARS):
     // fold a stored E400 pair in it (rubash#3076).
+    // rubash#3372: byte spelling before the fold, as in resolve_target.
+    let value_spelling = cd_operand_spelling(&value);
     let value = crate::executor::substitution_metadata::fold_literal_char_escapes(&value);
     Some(Target {
-        path: filesystem_path_for_display(&value, env_vars),
+        path: cd_filesystem_path(value_spelling.as_deref(), &value, env_vars),
         display: Some(PathBuf::from(value)),
         print: PrintPath::Always,
+        byte_spelling: value_spelling.is_some(),
     })
 }
 

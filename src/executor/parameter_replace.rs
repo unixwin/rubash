@@ -140,10 +140,22 @@ fn replace_parameter_pattern_inner(
         crate::executor::markers::PATTERN_LITERAL_BACKSLASH_STR,
     );
     let pattern = pattern.as_str();
+    // Candidate boundaries are MATCH units, not chars: a raw-byte marker
+    // pair (U+E000 + payload) or a literal-char escape pair (U+E400 +
+    // char) is one unit — the bound below counts pattern atoms in units,
+    // so a boundary inside a pair would strand a lone marker half and,
+    // worse, the pair itself (two chars) would never be tried as one
+    // unit (rubash#3546: a carrier byte in [...] never matched because
+    // bound 1 pruned the two-char pair slice). The `${v#pat}` /
+    // `${v%pat}` removal walks already exclude these split points
+    // (marker_pair_split_points, rubash#1261); the replace finders must
+    // do the same, or the bound prune is unsound.
+    let split_points = marker_pair_split_points(value);
     let indices: Vec<usize> = value
         .char_indices()
         .map(|(index, _)| index)
         .chain(std::iter::once(value.len()))
+        .filter(|index| !split_points.contains(index))
         .collect();
     let mut output = String::new();
     let mut cursor = 0;
@@ -164,11 +176,22 @@ fn replace_parameter_pattern_inner(
         output.push_str(&amp(&value[start..end]));
         if end == start {
             // GNU pat_subst:9286-9304: on a zero-length match copy one
-            // character so the scan advances past it.
-            match value[end..].chars().next() {
-                Some(ch) => {
-                    output.push(ch);
-                    cursor = end + ch.len_utf8();
+            // character so the scan advances past it. One character
+            // here is one MATCH UNIT, not one char: a raw-byte marker
+            // pair (U+E000 + payload) or a literal-char escape pair
+            // (U+E400 + char) is a single unit, so copying one char
+            // would copy only the pair's first half and strand the
+            // cursor inside the pair — the scan then finds a phantom
+            // zero-length match at the end position, and a value
+            // ending in a pair gains one spurious trailing replacement
+            // (rubash#3921). `indices` already holds the unit
+            // boundaries (the #3920 finder table); advance to the
+            // next one. A zero-length match at value.len() has no
+            // next boundary, so there is nothing left to copy.
+            match indices.iter().find(|index| **index > end) {
+                Some(next) => {
+                    output.push_str(&value[end..*next]);
+                    cursor = *next;
                 }
                 None => return output,
             }
@@ -313,19 +336,25 @@ pub(in crate::executor) fn find_parameter_prefix_match(
         }
     };
     // A star-free pattern matches at most pattern_match_length_bound
-    // chars (the invariant find_parameter_pattern_match documents), so
-    // candidate ends past that char distance cannot match and are not
-    // tested; extglob groups change the match width, so the prune is
-    // disabled for extglob patterns, exactly as in the scanning finder.
+    // MATCH UNITS (the invariant find_parameter_pattern_match
+    // documents), so candidate ends past that unit distance cannot
+    // match and are not tested; extglob groups change the match width,
+    // so the prune is disabled for extglob patterns, exactly as in the
+    // scanning finder. The walk below counts positions in `indices`,
+    // so `indices` must hold unit boundaries only — a raw-byte marker
+    // pair is one unit spanning two chars (rubash#3546, same split
+    // exclusion as the removal walks).
     let bound = if extglob && pattern_uses_extglob_syntax(pattern) {
         None
     } else {
         pattern_match_length_bound(pattern)
     };
+    let split_points = marker_pair_split_points(value);
     let indices: Vec<usize> = value
         .char_indices()
         .map(|(index, _)| index)
         .chain(std::iter::once(value.len()))
+        .filter(|index| !split_points.contains(index))
         .collect();
     indices
         .iter()
@@ -355,18 +384,22 @@ pub(in crate::executor) fn find_parameter_suffix_match(
         }
     };
     // Bound prune, twin of find_parameter_prefix_match: a star-free
-    // pattern matches at most pattern_match_length_bound chars, so
-    // candidate starts whose suffix is longer than the bound cannot
-    // match; disabled for extglob patterns.
+    // pattern matches at most pattern_match_length_bound match units,
+    // so candidate starts whose suffix is longer than the bound cannot
+    // match; disabled for extglob patterns. `indices` holds unit
+    // boundaries only (rubash#3546, same split exclusion as the
+    // removal walks), so `total - pos` counts units.
     let bound = if extglob && pattern_uses_extglob_syntax(pattern) {
         None
     } else {
         pattern_match_length_bound(pattern)
     };
+    let split_points = marker_pair_split_points(value);
     let indices: Vec<usize> = value
         .char_indices()
         .map(|(index, _)| index)
         .chain(std::iter::once(value.len()))
+        .filter(|index| !split_points.contains(index))
         .collect();
     let total = indices.len() - 1;
     indices
@@ -408,10 +441,11 @@ pub(in crate::executor) fn find_parameter_pattern_match(
     // debug build -> multi-minute hang where GNU finishes instantly).
     // Restrict the candidate ends with two pattern-shape facts, both of
     // which preserve exact leftmost-longest match semantics:
-    //   1. A pattern without a star can match at most BOUND characters
+    //   1. A pattern without a star can match at most BOUND match units
     //      (one per ? / bracket / escaped / literal atom), so ends beyond
-    //      start + BOUND characters are pruned (indices[k] is the byte
-    //      offset of the k-th char, so char distance is an index delta).
+    //      start + BOUND units are pruned (`indices` holds unit
+    //      boundaries only — rubash#3546 — so the index delta from
+    //      `start` counts units, not chars).
     //   2. With a star, the match must still END with the literal text
     //      after the last star (when that tail is wildcard-free), so only
     //      byte offsets directly following an occurrence of the tail can
@@ -487,8 +521,12 @@ fn pattern_ends_with_lone_backslash(pattern: &str) -> bool {
     count % 2 == 1
 }
 
-/// Maximum number of characters a pattern without a star can match, or
-/// `None` when the pattern contains a star (unbounded).
+/// Maximum number of match units a pattern without a star can match, or
+/// `None` when the pattern contains a star (unbounded). One unit is one
+/// matcher atom: a bracket expression, `?`, an escaped character or a
+/// literal — and on the value side a raw-byte marker pair counts once
+/// (rubash#3546), so callers must compare this bound against
+/// unit-boundary walks, never raw char positions.
 fn pattern_match_length_bound(pattern: &str) -> Option<usize> {
     let chars: Vec<char> = pattern.chars().collect();
     let mut bound = 0usize;
@@ -868,11 +906,22 @@ pub(in crate::executor) fn shell_reusable_quote(value: &str) -> String {
         return ansic_quote_bytes(&bytes);
     }
     let visible = crate::locale::decode_to_visible_text(value);
-    if ansic_should_quote_value(&visible) {
+    let quoted = if ansic_should_quote_value(&visible) {
         ansic_quote_value(&visible)
     } else {
         shell_single_quote_assignment_value(&visible)
-    }
+    };
+    // rubash#3921 (@Q round-trip): the quoted form above is VISIBLE
+    // text — a lone U+E000 + payload pair in it folds to a NUL byte
+    // at the next decode boundary (`q="${w2@Q}"` stored quote+NUL+
+    // quote, GNU stores the 4-char `'...'` form). The expansion result
+    // is transport text everywhere else, so re-spell the marker-zone
+    // chars as E400 pairs; the assignment boundary stores it verbatim
+    // and the stdout sink decodes it exactly once. The quoters above
+    // run on the visible text deliberately: under a non-UTF-8 locale
+    // they octal-escape the PUA bytes themselves, and escaping first
+    // would octal-escape the E400 introducer instead.
+    crate::executor::substitution_metadata::escape_marker_zone_chars(&quoted)
 }
 
 /// GNU strtrans.c ansic_quote over the raw byte string: named C escapes,

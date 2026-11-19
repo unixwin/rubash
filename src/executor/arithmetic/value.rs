@@ -1,4 +1,4 @@
-use super::{ArithEvalDiag, ArithLValue, ConditionalArithParser};
+use super::{ArithEvalDiag, ArithLValue, ConditionalArithParser, SubscriptIndex};
 use crate::executor::arithmetic::{
     bash_arith, eval_mutable_arith_value_with_random, strip_arith_double_quotes,
 };
@@ -9,7 +9,8 @@ use crate::executor::{
     is_shell_name_char, mark_env_name, next_random_from_state, next_srandom_from_state,
     parse_array_subscript, resolve_indexed_array_subscript, set_process_env,
     sync_shell_assignment_process_env, unmark_env_name, ARRAY_VARS, ASSOC_128_VARS, ASSOC_VARS,
-    NAMEREF_VARS, READONLY_VARS, SECONDS_OFFSET, SHELL_START_EPOCH, UNSET_DYNAMIC_VARS,
+    DECLARED_UNSET_VARS, NAMEREF_VARS, READONLY_VARS, SECONDS_OFFSET, SHELL_START_EPOCH,
+    UNSET_DYNAMIC_VARS,
 };
 
 impl ConditionalArithParser<'_> {
@@ -148,12 +149,48 @@ impl ConditionalArithParser<'_> {
         }
     }
 
+    /// GNU expr.c:1183-1190 expr_streval: the variable cell is looked up
+    /// first — for an array reference (`e == ']'`) `array_variable_part`
+    /// finds the ARRAY variable before any subscript is evaluated — and
+    /// `v == 0 || invisible_p (v)` under `set -u` raises `err_unboundvar`
+    /// naming the variable (`array_variable_name` for a reference). Absent, or declared without a
+    /// value (`declare -a e` / `declare -A h`: att_invisible, rubash
+    /// `DECLARED_UNSET_VARS` over an empty mirror), is unbound; an
+    /// assigned empty array (`h=()`) is visible and reads its element
+    /// as 0. Returns true (category + name recorded) on a trap.
+    fn trap_unbound_variable_cell(&mut self, name: &str) -> bool {
+        let unbound = match self.env_vars.get(name) {
+            None => {
+                super::super::arithmetic_name_is_unbound(name, self.env_vars)
+                    && std::env::var(name).is_err()
+            }
+            Some(value) => {
+                value.is_empty() && is_marked_var(self.env_vars, DECLARED_UNSET_VARS, name)
+            }
+        };
+        if unbound && crate::builtins::set::shell_option_enabled(self.env_vars, "nounset") {
+            self.error_category = Some(super::super::ArithmeticErrorCategory::UnboundVariable);
+            super::super::record_arith_unbound_name(name.to_string());
+            return true;
+        }
+        false
+    }
+
     pub(super) fn lvalue_value(&mut self, lvalue: &ArithLValue) -> Option<i128> {
         // GNU expr.c:1164-1167 expr_streval: under noeval the whole read
         // (array lookup, subscript evaluation, dynamic special variables)
         // short-circuits to 0 before any side effect runs.
         if self.noeval > 0 {
             return Some(0);
+        }
+        if let ArithLValue::Indexed { name, .. }
+        | ArithLValue::IndexedRaw { name, .. }
+        | ArithLValue::Assoc { name, .. }
+        | ArithLValue::AssocEmptyKey { name, .. } = lvalue
+        {
+            if self.trap_unbound_variable_cell(name) {
+                return None;
+            }
         }
         match lvalue {
             ArithLValue::Scalar { name, .. } => self.variable_value(name),
@@ -175,7 +212,20 @@ impl ConditionalArithParser<'_> {
                 // STR-token time (expr.c:1183 array_variable_part ->
                 // array_expand_index), once — `a[i++]` reads a[0] and
                 // increments i once (verified GNU 5.3).
-                let index = self.eval_subscript_index(subscript)?;
+                let index = match self.eval_subscript_index(subscript)? {
+                    SubscriptIndex::Value(index) => index,
+                    // The empty-bracket token reads exactly like the
+                    // literal `name[]` (InvalidElement below): GNU
+                    // reports `name[]: bad array subscript` twice —
+                    // array_variable_part and get_array_value each
+                    // diagnose the empty subscript (expr.c:1183/1224)
+                    // — then yields 0 (rubash#3252).
+                    SubscriptIndex::Empty => {
+                        self.record_diag(ArithEvalDiag::BadSubscript(format!("{name}[]")));
+                        self.record_diag(ArithEvalDiag::BadSubscript(format!("{name}[]")));
+                        return Some(0);
+                    }
+                };
                 let value = self.indexed_element_text(name, index);
                 if index < 0 && self.arith_negative_subscript_is_bad(name, index) {
                     self.record_diag(ArithEvalDiag::BadSubscript(name.clone()));
@@ -234,20 +284,34 @@ impl ConditionalArithParser<'_> {
     /// the subscript text — arrayfunc.c:1356-1391 — and a failure jumps
     /// DISCARD, which the `__RUBASH_ARITH_SUBSCRIPT_EXPR` marker lets the
     /// caller reproduce).
-    pub(super) fn eval_subscript_index(&mut self, subscript: &str) -> Option<i128> {
+    pub(super) fn eval_subscript_index(&mut self, subscript: &str) -> Option<SubscriptIndex> {
         // GNU expr.c:1164-1167: subscript evaluation lives inside
         // expr_streval (array_variable_part -> array_expand_index), which
         // returns 0 under noeval before touching the subscript — so
         // `0?a[n++]+=5:2` never bumps n.
         if self.noeval > 0 {
-            return Some(0);
+            return Some(SubscriptIndex::Value(0));
         }
         // \x1e-marker subscripts were already expanded by the caller's
         // array_expand_index-equivalent pass (mod.rs
-        // expand_arith_indexed_subscripts); an empty expansion evaluates
-        // to 0, not to a bad subscript.
+        // expand_arith_indexed_subscripts). Whether an empty expansion
+        // is a bad subscript depends on the entry (rubash#3252): in an
+        // entry that already ran expand_arith_string (`(( ))`, `$(( ))`,
+        // `[[ ]]`) the empty expansion IS the empty-bracket token
+        // `name[]` — array_variable_name (arrayfunc.c:1405-1416) fails
+        // it — while in a no-expand entry (`let`, EXP_EXPANDED) the
+        // same empty expansion is array_expand_index's index 0 (the
+        // token reached evalexp as `name[$undef]`, non-empty bracket
+        // text). A whitespace-only expansion is index 0 in both
+        // entries: GNU's `ni <= ind + 1` check passes it and evalexp
+        // of the blanks yields 0 (`(( b[ $undef ]++ ))` binds b[0]).
         let stripped = match super::super::decode_arithmetic_assoc_key(subscript) {
-            Some(decoded) => decoded,
+            Some(decoded) => {
+                if decoded.is_empty() && self.expanded_entry {
+                    return Some(SubscriptIndex::Empty);
+                }
+                decoded
+            }
             None => {
                 // GNU expr.c:1171: when `array_expand_once` is set and the
                 // operand was already expanded (EXP_EXPANDED — `let`'s
@@ -281,15 +345,33 @@ impl ConditionalArithParser<'_> {
             }
         };
         if stripped.trim().is_empty() {
-            return Some(0);
+            return Some(SubscriptIndex::Value(0));
         }
-        let (value, _cat) = eval_mutable_arith_value_with_random(
-            &stripped,
-            self.env_vars,
-            self.random_state,
-            self.dynamic_values,
-            self.cells,
-        );
+        // GNU arrayfunc.c:1373-1377 array_expand_index clears
+        // this_command_name around evalexp — the subscript's own
+        // diagnostics carry no command label even inside an
+        // enclosing `(( ))` (rubash#3295).
+        let (value, category) = {
+            let _arith_label = crate::executor::arithmetic::arith_eval_label_scope(None);
+            eval_mutable_arith_value_with_random(
+                &stripped,
+                self.env_vars,
+                self.random_state,
+                self.dynamic_values,
+                self.cells,
+            )
+        };
+        // GNU expr.c:1190-1216 expr_streval: an unbound read inside the
+        // subscript's own evalexp frame does not evalerror — it
+        // err_unboundvar()s and jumps to top level (FORCE_EOF) straight
+        // out of every enclosing frame, so array_expand_index never
+        // sees a failed subscript. Carry the category out unchanged
+        // (the name already rides ARITH_UNBOUND_NAME) instead of
+        // turning it into a subscript evalerror.
+        if category == Some(super::super::ArithmeticErrorCategory::UnboundVariable) {
+            self.error_category = category;
+            return None;
+        }
         self.adopt_error(super::super::take_arith_eval_error());
         // Nested-frame diagnostics already sit in the shared
         // evaluation-order event log at their production points
@@ -300,7 +382,7 @@ impl ConditionalArithParser<'_> {
                 stripped.clone(),
             );
         }
-        value
+        value.map(SubscriptIndex::Value)
     }
 
     /// expand_arith_string's parameter/arithmetic expansion over subscript
@@ -338,13 +420,20 @@ impl ConditionalArithParser<'_> {
                         end += 1;
                     }
                     let inner = text[index + 3..end.saturating_sub(1)].to_string();
-                    let (value, _cat) = eval_mutable_arith_value_with_random(
-                        &inner,
-                        self.env_vars,
-                        self.random_state,
-                        self.dynamic_values,
-                        self.cells,
-                    );
+                    // GNU subst.c:10873-10878 arithsub clears
+                    // this_command_name around evalexp
+                    // (rubash#3295).
+                    let (value, _cat) = {
+                        let _arith_label =
+                            crate::executor::arithmetic::arith_eval_label_scope(None);
+                        eval_mutable_arith_value_with_random(
+                            &inner,
+                            self.env_vars,
+                            self.random_state,
+                            self.dynamic_values,
+                            self.cells,
+                        )
+                    };
                     match value {
                         Some(value) => {
                             output.push_str(&value.to_string());
@@ -522,6 +611,12 @@ impl ConditionalArithParser<'_> {
         // must NOT fall through to the serialized storage text, which is
         // not an expression (niubash#508: `a=(); $((a))` reported
         // `error token is "()"`).
+        // GNU expr.c:1190 for a bare name: find_variable's cell is
+        // `invisible_p` when declared without a value (`declare -a e`),
+        // which traps under nounset exactly like an absent name.
+        if self.trap_unbound_variable_cell(name) {
+            return None;
+        }
         if is_marked_var(self.env_vars, ARRAY_VARS, name) {
             return match self
                 .env_vars
@@ -618,6 +713,10 @@ impl ConditionalArithParser<'_> {
             cells: self.cells,
             error_category: None,
             no_expand: false,
+            // Variable-value recursion: the value text reaches subexpr
+            // verbatim (expr.c:1241), so a non-empty bracket span there
+            // never diagnoses on expansion (rubash#3252).
+            expanded_entry: false,
             error: None,
             last_tok_start: 0,
             last_tok_operand: false,
@@ -750,7 +849,21 @@ impl ConditionalArithParser<'_> {
     fn resolve_raw_subscript(&mut self, lvalue: &ArithLValue) -> Option<ArithLValue> {
         match lvalue {
             ArithLValue::IndexedRaw { name, subscript } => {
-                let index = self.eval_subscript_index(subscript)?;
+                let index = match self.eval_subscript_index(subscript)? {
+                    SubscriptIndex::Value(index) => index,
+                    // The bind side of the empty-bracket token: no read
+                    // diagnostic is recorded here — the read already
+                    // recorded it (`++`/`+=` read before binding), or
+                    // no read runs at all (plain `=` skips expr_streval,
+                    // expr.c:1395-1401). set_lvalue diagnoses the failed
+                    // bind as `` `name[]': not a valid identifier ``
+                    // (rubash#3252).
+                    SubscriptIndex::Empty => {
+                        return Some(ArithLValue::InvalidElement {
+                            display: format!("{name}[]"),
+                        });
+                    }
+                };
                 Some(ArithLValue::Indexed {
                     bind_display: format!("{name}[{subscript}]"),
                     name: name.clone(),
@@ -820,6 +933,17 @@ impl ConditionalArithParser<'_> {
     }
 
     pub(super) fn set_lvalue(&mut self, lvalue: &ArithLValue, value: i128) {
+        // GNU variables.c:5820/6257-6266 sv_strict_posix via
+        // expr.c:352 expr_bind_variable: the post-bind hook is keyed on
+        // the WRITTEN lhs text, so only a scalar lvalue spelled exactly
+        // POSIXLY_CORRECT re-derives the mode once the store below
+        // lands; an element lvalue's written text carries the subscript
+        // and matches no special variable. The diag-only lvalue shapes
+        // store nothing and never fire it (rubash#3661).
+        let posix_bind = matches!(
+            lvalue,
+            ArithLValue::Scalar { written, .. } if written == "POSIXLY_CORRECT"
+        );
         match lvalue {
             ArithLValue::Scalar { name, .. } => self.set_variable(name, value),
             ArithLValue::Indexed {
@@ -850,6 +974,10 @@ impl ConditionalArithParser<'_> {
                 self.record_diag(ArithEvalDiag::BadSubscript(bind_display.clone()));
             }
             ArithLValue::Assoc { name, key } => self.set_assoc_element(name, key, value),
+        }
+        if posix_bind {
+            let isset = self.env_vars.contains_key("POSIXLY_CORRECT");
+            crate::builtins::set::sync_posix_mode_from_variable(self.env_vars, isset);
         }
     }
 
@@ -973,13 +1101,20 @@ impl ConditionalArithParser<'_> {
             if let Some((elem_base, subscript)) = target.split_once('[') {
                 if let Some(subscript) = subscript.strip_suffix(']') {
                     let stripped = strip_arith_double_quotes(subscript);
-                    let (index, _cat) = eval_mutable_arith_value_with_random(
-                        &stripped,
-                        self.env_vars,
-                        self.random_state,
-                        self.dynamic_values,
-                        self.cells,
-                    );
+                    // GNU arrayfunc.c:1373-1377 array_expand_index
+                    // clears this_command_name around evalexp
+                    // (rubash#3295).
+                    let (index, _cat) = {
+                        let _arith_label =
+                            crate::executor::arithmetic::arith_eval_label_scope(None);
+                        eval_mutable_arith_value_with_random(
+                            &stripped,
+                            self.env_vars,
+                            self.random_state,
+                            self.dynamic_values,
+                            self.cells,
+                        )
+                    };
                     if let Some(index) = index {
                         self.set_array_element(
                             elem_base,

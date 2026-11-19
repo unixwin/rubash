@@ -267,6 +267,9 @@ impl Executor {
         // conversion further down.
         let mut builtin_pregate_failed = false;
         let result = if redirect_rejected {
+            if cmd.words.first().map(String::as_str) == Some("exec") {
+                let _ = self.apply_dynamic_fd_var_redirects(cmd, false, true)?;
+            }
             Ok(())
         } else {
             // rubash#2124: GNU redir.c do_redirections opens a winning
@@ -317,6 +320,9 @@ impl Executor {
                         && self.pregate_redirect_open_check(cmd)?;
                     let result = if pregate_failed {
                         builtin_pregate_failed = true;
+                        if cmd.words.first().map(String::as_str) == Some("exec") {
+                            let _ = self.apply_dynamic_fd_var_redirects(cmd, false, true)?;
+                        }
                         Ok(())
                     } else {
                         self.execute_prepared_command(cmd)
@@ -539,6 +545,12 @@ impl Executor {
                 .map(|(name, _)| assignment_name_and_append(name).0.to_string())
                 .collect();
             self.merge_converted_tempenv_bindings(&merge_names, &tempenv_saved);
+            // rubash#2771: the in-function posix keep is the same
+            // merge_temporary_env -> bind_variable replay the other
+            // keep arms run — a kept dynamic name converts to the
+            // real dynamic bind (the hook runs on the kept value),
+            // landing on the global dynamic cell.
+            self.convert_kept_tempenv_dynamic_binds(&merge_names);
             for (name, _) in &cmd.assignments {
                 let (base, _) = assignment_name_and_append(name);
                 let is_local = self
@@ -1143,9 +1155,9 @@ impl Executor {
                     }
                 }
             } else if saved_attrs.uppercase {
-                window_value.to_uppercase()
+                crate::locale::simple_uppercase(&window_value)
             } else {
-                window_value.to_lowercase()
+                crate::locale::simple_lowercase(&window_value)
             };
             let current_attrs = capture_var_attrs(&self.shell_state.env_vars, name);
             let mut merged_attrs = *saved_attrs;

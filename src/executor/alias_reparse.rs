@@ -94,7 +94,14 @@ impl Executor {
             return Ok(None);
         }
         let words = self.expand_aliases(&command.words);
-        if words.first().map(String::as_str) != Some("!") {
+        // rubash#3557: a literal `!` head word (the parser froze
+        // it as data — GNU `(`/`{` operators and reserved words exist only
+        // unquoted, parse.y:3667 read_token) is a plain command name, not
+        // syntax; only an alias VALUE re-lexed via push_string
+        // (parse.y:3249 alias_expand_token) may open compound syntax here.
+        if words.first().map(String::as_str) != Some("!")
+            || command.words.first().map(String::as_str) == Some("!")
+        {
             return Ok(None);
         }
 
@@ -129,7 +136,14 @@ impl Executor {
             return Ok(None);
         };
         let words = self.expand_aliases(&command.words);
-        if words.first().map(String::as_str) != Some("(") {
+        // rubash#3557: a literal `(` head word (the parser froze
+        // it as data — GNU `(`/`{` operators and reserved words exist only
+        // unquoted, parse.y:3667 read_token) is a plain command name, not
+        // syntax; only an alias VALUE re-lexed via push_string
+        // (parse.y:3249 alias_expand_token) may open compound syntax here.
+        if words.first().map(String::as_str) != Some("(")
+            || command.words.first().map(String::as_str) == Some("(")
+        {
             return Ok(None);
         }
 
@@ -163,7 +177,14 @@ impl Executor {
             return Ok(None);
         };
         let words = self.expand_aliases(&command.words);
-        if words.first().map(String::as_str) != Some("{") {
+        // rubash#3557: a literal `{` head word (the parser froze
+        // it as data — GNU `(`/`{` operators and reserved words exist only
+        // unquoted, parse.y:3667 read_token) is a plain command name, not
+        // syntax; only an alias VALUE re-lexed via push_string
+        // (parse.y:3249 alias_expand_token) may open compound syntax here.
+        if words.first().map(String::as_str) != Some("{")
+            || command.words.first().map(String::as_str) == Some("{")
+        {
             return Ok(None);
         }
 
@@ -197,7 +218,14 @@ impl Executor {
             return Ok(None);
         };
         let words = self.expand_aliases(&command.words);
-        if words.first().map(String::as_str) != Some("function") {
+        // rubash#3557: a literal `function` head word (the parser froze
+        // it as data — GNU `(`/`{` operators and reserved words exist only
+        // unquoted, parse.y:3667 read_token) is a plain command name, not
+        // syntax; only an alias VALUE re-lexed via push_string
+        // (parse.y:3249 alias_expand_token) may open compound syntax here.
+        if words.first().map(String::as_str) != Some("function")
+            || command.words.first().map(String::as_str) == Some("function")
+        {
             return Ok(None);
         }
 
@@ -263,7 +291,14 @@ impl Executor {
             return Ok(None);
         }
         let words = self.expand_aliases(&command.words);
-        if words.first().map(String::as_str) != Some("time") {
+        // rubash#3557: a literal `time` head word (the parser froze
+        // it as data — GNU `(`/`{` operators and reserved words exist only
+        // unquoted, parse.y:3667 read_token) is a plain command name, not
+        // syntax; only an alias VALUE re-lexed via push_string
+        // (parse.y:3249 alias_expand_token) may open compound syntax here.
+        if words.first().map(String::as_str) != Some("time")
+            || command.words.first().map(String::as_str) == Some("time")
+        {
             return Ok(None);
         }
         // rubash#1520: decline when the ORIGINAL node's head was frozen
@@ -338,7 +373,14 @@ impl Executor {
             return Ok(None);
         };
         let words = self.expand_aliases(&command.words);
-        if words.first().map(String::as_str) != Some("case") {
+        // rubash#3557: a literal `case` head word (the parser froze
+        // it as data — GNU `(`/`{` operators and reserved words exist only
+        // unquoted, parse.y:3667 read_token) is a plain command name, not
+        // syntax; only an alias VALUE re-lexed via push_string
+        // (parse.y:3249 alias_expand_token) may open compound syntax here.
+        if words.first().map(String::as_str) != Some("case")
+            || command.words.first().map(String::as_str) == Some("case")
+        {
             return Ok(None);
         }
 
@@ -385,7 +427,14 @@ impl Executor {
             return Ok(None);
         };
         let words = self.expand_aliases(&command.words);
-        if words.first().map(String::as_str) != Some("coproc") {
+        // rubash#3557: a literal `coproc` head word (the parser froze
+        // it as data — GNU `(`/`{` operators and reserved words exist only
+        // unquoted, parse.y:3667 read_token) is a plain command name, not
+        // syntax; only an alias VALUE re-lexed via push_string
+        // (parse.y:3249 alias_expand_token) may open compound syntax here.
+        if words.first().map(String::as_str) != Some("coproc")
+            || command.words.first().map(String::as_str) == Some("coproc")
+        {
             return Ok(None);
         }
 

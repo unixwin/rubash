@@ -435,6 +435,13 @@ impl ShellInvocation {
             if !executor.set_shopt_option(name, *enabled) {
                 return Err(format!("{name}: invalid shell option name"));
             }
+            // rubash#3909: startup arming of extdebug sets
+            // bash_argv_initialized before any positional binding
+            // (shell.c:576 run_shopt_alist) — see
+            // mark_bash_argv_initialized.
+            if name.as_str() == "extdebug" && *enabled {
+                executor.mark_bash_argv_initialized();
+            }
         }
         if let Some(recreate) = self.list_shopt_options {
             // rubash#780: the `-o` sibling. The `-O`/`+O` pairs parsed
@@ -471,6 +478,9 @@ impl ShellInvocation {
         // this meaning in place.
         if self.debug {
             executor.set_shopt_option("extdebug", true);
+            // rubash#3909: startup arming — see
+            // mark_bash_argv_initialized.
+            executor.mark_bash_argv_initialized();
         }
         if self.debugger {
             // GNU shell.c:257: --debugger sets debugging_mode only; the
@@ -496,11 +506,34 @@ impl ShellInvocation {
                 &crate::executor::substitution_metadata::entry_encode_value_text(name),
             );
         } else if self.command.is_some() && executor.get_env("__RUBASH_SCRIPT_NAME").is_none() {
-            // GNU `bash -c` without explicit $0 reports as "bash: -c: ...".
-            // Internal respawns (coproc / async `&` children) carry the
-            // parent's script name through init.rs — GNU's forked subshell
-            // keeps $0, so do not clobber it here.
-            executor.set_env("__RUBASH_SCRIPT_NAME", "bash");
+            // GNU error.c:88-120 get_name_for_error: a `-c` string's
+            // BASH_SOURCE[0] is empty, so diagnostics report
+            // dollar_vars[0] — the invocation name verbatim. Mirror
+            // main.rs's twin site (rubash#2714, #3355): seed the
+            // reader-name carrier from the BASH_ARGV0 the host
+            // pre-seeded with its own name, NOT the literal "bash"
+            // this used to plant (rubash#3255) — a host (niu-class)
+            // driving `-c` under a renamed argv[0] otherwise gets its
+            // diagnostics named "bash". A present-but-empty $0 stays
+            // empty (get_name_for_error stops at dollar_vars[0]
+            // itself), so it leaves the carrier unset; only the
+            // no-carrier-at-all case (library host / argc==0) takes
+            // PROGRAM. Internal respawns (coproc / async `&` children)
+            // carry the parent's script name through init.rs — GNU's
+            // forked subshell keeps $0, so do not clobber it here.
+            // Owned copy: get_env borrows the executor, set_env needs
+            // it mutably.
+            let invocation_name: Option<String> =
+                executor.get_env("BASH_ARGV0").map(str::to_string);
+            match invocation_name.as_deref() {
+                Some(value) if !value.is_empty() => {
+                    executor.set_env("__RUBASH_SCRIPT_NAME", value);
+                }
+                Some(_) => {}
+                None => {
+                    executor.set_env("__RUBASH_SCRIPT_NAME", "bash");
+                }
+            }
         }
         if self.command.is_some() {
             executor.set_env("__RUBASH_IS_C", "1");
@@ -538,6 +571,12 @@ impl ShellInvocation {
                     })
                     .collect(),
             );
+            // rubash#3909: bind_args latch (shell.c:1504-1529) —
+            // inside the guard on purpose: the #2032 respawn-seed
+            // case (empty invocation params, non-empty executor
+            // window) binds nothing here, so the inherited seed
+            // window must not be latched.
+            executor.latch_bash_argv_after_startup_bind();
         }
         Ok(())
     }

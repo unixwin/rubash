@@ -194,36 +194,172 @@ fn copy_dollar_paren_word(
 /// quotes does NOT count toward the parenthesis depth — this mirrors GNU
 /// `extract_command_substitution` (subst.c) and `xparse_dolparen` (parse.y),
 /// where the parser tracks quote state independently inside the substitution.
+///
+/// rubash#3605: the depth counter also has to know the shell structure GNU's
+/// reader knows. `parse_comsub` reads the body as fresh input
+/// (parse.y:4451), so `case` after `$(` is a command-position reserved word
+/// (parse.y:3369-3386 `special_case_tokens`) — feed the skipped `(` to the
+/// `case WORD in` machine or `$(case` never arms it. A `)` closing a case
+/// pattern list is grammar, not grouping, and `#` at a token boundary
+/// comments out the rest of the line (parse.y:3630-3643). Arm-for-arm with
+/// `lexer::quotes::copy_dollar_paren_body_raw_cursor`, which runs the same
+/// `update_command_substitution_case_depth` tracker.
 fn copy_dollar_paren_body(
     current: &mut String,
     chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
 ) {
     let mut depth = 1usize;
+    let mut case_depth = 0usize;
+    let mut word = String::new();
+    let mut word_boundary = true;
+    let mut current_word_boundary = true;
+    let mut case_in_stage = 0u8;
+    let mut case_pattern_region = false;
+    // rubash#380: previous significant char fed to the case word machine
+    // (the `esac` previous-token witness, parse.y:3181/3183).
+    let mut prev_sig: Option<char> = None;
+    // Paren depth of a `$(` nested inside the case context
+    // (`$(case $(w) in e) ...`): counted in `depth` unconditionally, this
+    // only marks how many `)`s the nested substitution owns.
+    let mut nested_case_subst = 0usize;
+    // parse.y:3630-3643: `#` at a token boundary starts a comment to end of
+    // line; its `)` never closes the body.
+    let mut token_boundary = true;
     while let Some(ch) = chars.next() {
         current.push(ch);
-        match ch {
-            '\\' => {
-                if let Some(escaped) = chars.next() {
-                    current.push(escaped);
+        if ch == '\\' {
+            // A backslash-quoted character is word text, never a reserved
+            // word; push the same placeholder the lexer walkers use.
+            if let Some(escaped) = chars.next() {
+                current.push(escaped);
+                word.push('\u{1}');
+            }
+            token_boundary = false;
+            continue;
+        }
+        if ch == '#' && token_boundary {
+            for comment in chars.by_ref() {
+                current.push(comment);
+                if comment == '\n' {
+                    break;
                 }
             }
-            '\'' => copy_quoted_word_part(current, chars, '\''),
-            '"' => copy_quoted_word_part(current, chars, '"'),
-            '`' => copy_backtick_word_part(current, chars),
+            word.clear();
+            word_boundary = true;
+            current_word_boundary = true;
+            token_boundary = true;
+            continue;
+        }
+        crate::lexer::update_command_substitution_case_depth(
+            ch,
+            false,
+            false,
+            &mut word,
+            &mut case_depth,
+            &mut word_boundary,
+            &mut current_word_boundary,
+            chars.peek().copied(),
+            &mut case_in_stage,
+            &mut case_pattern_region,
+            prev_sig,
+        );
+        if crate::lexer::esac_prev_token_char(ch) {
+            prev_sig = Some(ch);
+        }
+        match ch {
+            '\'' => {
+                copy_quoted_word_part(current, chars, '\'');
+                word.clear();
+                word_boundary = false;
+                token_boundary = false;
+            }
+            '"' => {
+                copy_quoted_word_part(current, chars, '"');
+                word.clear();
+                word_boundary = false;
+                token_boundary = false;
+            }
+            '`' => {
+                copy_backtick_word_part(current, chars);
+                word.clear();
+                word_boundary = false;
+                token_boundary = false;
+            }
+            '$' if chars.peek().copied() == Some('\'') => {
+                // ANSI-C `$'...'` (parse.y:5476-5480 read_token_word ->
+                // parse_matched_pair P_ALLOWESC): `\'` is an escaped
+                // quote, not the close; a `)` inside is body text. The
+                // plain `'` arm would end the region at `\'` and let
+                // the following `)` close the substitution.
+                chars.next();
+                current.push('\'');
+                let mut ansi_c_escaped = false;
+                for body_ch in chars.by_ref() {
+                    current.push(body_ch);
+                    if ansi_c_escaped {
+                        ansi_c_escaped = false;
+                        continue;
+                    }
+                    match body_ch {
+                        '\\' => ansi_c_escaped = true,
+                        '\'' => break,
+                        _ => {}
+                    }
+                }
+                word.clear();
+                word_boundary = false;
+                token_boundary = false;
+            }
             '$' if chars.peek().copied() == Some('(') => {
                 chars.next();
                 current.push('(');
                 depth += 1;
+                if case_depth > 0 {
+                    nested_case_subst += 1;
+                }
+                // Feed the skipped `(` to the case word machine — `(` ends
+                // a token, so `case` right after `$(` is a command-position
+                // keyword; otherwise `$(case` never armed the tracker and
+                // the pattern `)` closed the body one `)` early.
+                crate::lexer::update_command_substitution_case_depth(
+                    '(',
+                    false,
+                    false,
+                    &mut word,
+                    &mut case_depth,
+                    &mut word_boundary,
+                    &mut current_word_boundary,
+                    chars.peek().copied(),
+                    &mut case_in_stage,
+                    &mut case_pattern_region,
+                    prev_sig,
+                );
+                if crate::lexer::esac_prev_token_char('(') {
+                    prev_sig = Some('(');
+                }
+                token_boundary = false;
             }
-            '(' => depth += 1,
-            ')' => {
+            '(' if case_depth == 0 || nested_case_subst > 0 => {
+                depth += 1;
+                if nested_case_subst > 0 {
+                    nested_case_subst += 1;
+                }
+                token_boundary = true;
+            }
+            ')' if case_depth == 0 || nested_case_subst > 0 => {
                 depth = depth.saturating_sub(1);
+                if nested_case_subst > 0 {
+                    nested_case_subst -= 1;
+                }
                 if depth == 0 {
                     break;
                 }
+                token_boundary = true;
             }
             _ => {}
         }
+        token_boundary =
+            ch.is_whitespace() || matches!(ch, ';' | '&' | '|' | '(' | ')' | '<' | '>');
     }
 }
 

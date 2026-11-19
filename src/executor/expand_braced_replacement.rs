@@ -27,6 +27,27 @@ thread_local! {
     pub(in crate::executor) static ASSIGNMENT_RHS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+// The W_NOSPLIT2 / expand_string_for_pat arm of expand_no_split_dollar_star
+// (subst.c:237, set at subst.c:4518-4523 for pattern expansion): in a
+// no-split context an unquoted `$*` with a null IFS takes
+// string_list_dollar_star (concatenating join, subst.c:3048) instead of the
+// string_list_dollar_at ' '-join + W_SPLITSPACE marking
+// (subst.c:10662-10668). Set by expand_parameter_pattern_word while the
+// pattern text is being expanded (`${x#$*}` removes the concatenated
+// prefix "ab", never the ' '-joined "a b").
+thread_local! {
+    pub(in crate::executor) static NO_SPLIT_DOLLAR_STAR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `f` with [`NO_SPLIT_DOLLAR_STAR`] set (save/restore for nesting).
+pub(in crate::executor) fn with_no_split_dollar_star<T>(f: impl FnOnce() -> T) -> T {
+    let old = NO_SPLIT_DOLLAR_STAR.with(|f| f.get());
+    NO_SPLIT_DOLLAR_STAR.with(|f| f.set(true));
+    let result = f();
+    NO_SPLIT_DOLLAR_STAR.with(|f| f.set(old));
+    result
+}
+
 /// Scalar values of the single-char special parameters usable as pattern
 /// substitution names (subst.c:9837-9852 VALID_SPECIAL_LENGTH_PARAM plus
 /// `$`/`0`/`!`). `@`/`*` are handled by the positional-list arm above.
@@ -48,6 +69,12 @@ impl Executor {
         name: &str,
     ) -> Option<String> {
         let (var_name, pattern, replacement, global) = parse_parameter_replacement(name)?;
+        // GNU subst.c:9362-9367 parameter_brace_patsub: an unset parameter
+        // word returns NULL before getpattern, so neither the pattern nor
+        // the replacement is expanded (rubash#3501).
+        if self.pattern_word_is_silent(var_name, false, false) {
+            return Some(String::new());
+        }
         // GNU subst.c match_upattern applies FNMATCH_IGNCASE when nocasematch
         // is set, so pattern substitution honors the shopt (bash 4.3+).
         let pattern = self.expand_parameter_pattern_word(
@@ -110,6 +137,18 @@ impl Executor {
             );
         }
         if let Ok(index) = var_name.parse::<usize>() {
+            // GNU patsub_replacement (subst.c:9424-9428) looks the target up
+            // by name first: `0` is the special parameter $0 (shell name),
+            // not positional_window[0] — `${0/0/x}` rewrites the script
+            // name, and `${!x/0/Q}` with x=0 does too.
+            if index == 0 {
+                return Some(self.replace_patsub_pattern(
+                    &self.script_name_value(),
+                    &pattern,
+                    &replacement,
+                    global,
+                ));
+            }
             return Some(
                 self.shell_state
                     .positional_window()
@@ -472,6 +511,26 @@ impl Executor {
             return Some(self.replace_patsub_pattern(&target_name, pattern, replacement, global));
         }
 
+        // VALID_INDIR_PARAM specials and positional digits
+        // (subst.c:7839-7881 parameter_brace_find_indir): t is the
+        // parameter the source VALUE names and the patsub applies to
+        // that parameter — `${!?/a/Q}` with $?=0 is `${0/a/Q}`. An env
+        // lookup of `?` sees no cell, so the generic path below would
+        // return NULL and render empty.
+        if indirect_name.len() == 1 && matches!(indirect_name, "#" | "?" | "@" | "*")
+            || !indirect_name.is_empty() && indirect_name.chars().all(|c| c.is_ascii_digit())
+        {
+            let Some(t) = self.indirect_holder_target_name(indirect_name) else {
+                return Some(String::new());
+            };
+            if !Self::is_valid_indirect_target(&t) {
+                return Some(String::new());
+            }
+            let rep = if global { "//" } else { "/" };
+            let inner = format!("{t}{rep}{pattern}/{replacement}");
+            return self.expand_braced_replacement_parameter(&inner);
+        }
+
         let target_expr = self.shell_state.env_vars.get(indirect_name)?;
         let values = self.indirect_target_values(target_expr);
         if values.is_empty() {
@@ -518,15 +577,24 @@ fn push_replacement_literal(marked: &mut String, ch: char) {
 /// (rubash#1927: `${v/b/<U+E312>x}` printed U+E400 U+E312 x). An existing
 /// pair is already-escaped user data — copy it as a unit, the same
 /// verbatim rule push_single_quoted_replacement_char applies to decoded
-/// ANSI-C text. The E400 + E000 pair is NOT taken: U+E000 owns the
-/// raw-byte pair protocol (push_replacement_literal copies it verbatim)
-/// and its pair form here is that protocol, not the literal escape.
+/// ANSI-C text.
+///
+/// The E400 + E000 pair IS taken, like every other E400 pair: in
+/// transport text an E400-first pair is always the literal-char escape
+/// (a typed U+E000 user glyph, entry-escaped once), never the raw-byte
+/// pair protocol — raw-byte pairs are E000-FIRST (E000 + E001..E100
+/// payload) and cannot start with E400. Excluding E000 here made the
+/// mark pass re-escape the pair (E400 -> E400 E400, E000 verbatim), so
+/// a typed `${v/b/\u{E000}x}` replacement came out double-escaped
+/// (rubash#1927: `literal_typed_e000_unchanged` printed U+E400 U+E000
+/// x). A bare E000 (a genuine raw-byte introducer) still rides
+/// push_replacement_literal's verbatim arm — this helper only fires on
+/// E400-first pairs, so raw-byte pairs are untouched.
 fn push_existing_literal_pair(marked: &mut String, chars: &[char], index: usize) -> Option<usize> {
     if chars.get(index).copied() == Some(crate::executor::markers::LITERAL_CHAR_ESCAPE)
-        && chars.get(index + 1).is_some_and(|next| {
-            crate::executor::markers::is_marker_zone_char(*next)
-                && *next as u32 != crate::executor::markers::RAW_BYTE_MARKER_ESCAPE
-        })
+        && chars
+            .get(index + 1)
+            .is_some_and(|next| crate::executor::markers::is_marker_zone_char(*next))
     {
         marked.push(chars[index]);
         marked.push(chars[index + 1]);

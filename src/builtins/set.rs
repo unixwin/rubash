@@ -9,7 +9,8 @@ mod unset;
 pub(crate) use options::{
     is_flag_only_shell_option, is_shell_option, print_shell_option, print_shell_options,
     print_shell_options_by_state, set_shell_option, shell_option_enabled, shell_option_names,
-    shellopts_value, sync_shell_option_flag, SET_O_PRINT_WIDTH, SHOPT_O_PRINT_WIDTH,
+    shellopts_value, sync_posix_mode_from_variable, sync_shell_option_flag, SET_O_PRINT_WIDTH,
+    SHOPT_O_PRINT_WIDTH,
 };
 pub use unset::unset;
 pub(crate) use unset::unset_with_stderr;
@@ -116,6 +117,7 @@ pub fn set(args: &[String], env_vars: &mut crate::shell::var_table::VarTable) ->
         &mut diag,
         &mut stdout,
         &crate::shell::var_table::TempenvListingUnderlay::new(),
+        &[],
     );
     diag.flush_with(|| prolog_for_env(env_vars));
     status
@@ -135,8 +137,13 @@ fn prolog_for_env(env_vars: &crate::shell::var_table::VarTable) -> Prolog {
     // the shell-name carrier VERBATIM as the interactive name —
     // a renamed shell invoked by path reported its full path —
     // and a hard-coded "rubash" as the error name, rubash#3256).
-    let script_file = env_vars.get("__RUBASH_SCRIPT_NAME").cloned();
+    // rubash#3048: the file arm prefers the FRAME file carrier
+    // (__RUBASH_CURRENT_FILE = BASH_SOURCE[0], the definition file
+    // inside a function) over the top-level SCRIPT_NAME —
+    // prefix::error_file_name, the same pairing
+    // Executor::current_error_file_name composes.
     let get = |key: &str| env_vars.get(key).cloned();
+    let script_file = crate::builtins::prefix::error_file_name(&get);
     Prolog {
         interactive: env_vars.get("__RUBASH_INTERACTIVE").is_some(),
         shell_basename: crate::builtins::prefix::shell_basename(&get),
@@ -188,11 +195,22 @@ pub(crate) fn set_with_io<'a, W>(
     diag: &mut Diag<'a>,
     stdout: &mut W,
     underlay: &crate::shell::var_table::TempenvListingUnderlay,
+    functions: &[FunctionSetView],
 ) -> io::Result<i32>
 where
     W: Write,
 {
-    set_with_io_tracked(row, args, env_vars, diag, stdout, underlay, &[], None)
+    set_with_io_tracked(
+        row,
+        args,
+        env_vars,
+        diag,
+        stdout,
+        underlay,
+        &[],
+        functions,
+        None,
+    )
 }
 
 /// [`set_with_io`] plus a sink for the `-o` option WRITES (name,
@@ -213,6 +231,7 @@ pub(crate) fn set_with_io_and_o_writes<'a, W>(
     stdout: &mut W,
     underlay: &crate::shell::var_table::TempenvListingUnderlay,
     dynamic: &[DynamicSetView],
+    functions: &[FunctionSetView],
     o_writes: &mut Vec<(String, bool)>,
 ) -> io::Result<i32>
 where
@@ -226,6 +245,7 @@ where
         stdout,
         underlay,
         dynamic,
+        functions,
         Some(o_writes),
     )
 }
@@ -238,13 +258,14 @@ fn set_with_io_tracked<'a, W>(
     stdout: &mut W,
     underlay: &crate::shell::var_table::TempenvListingUnderlay,
     dynamic: &[DynamicSetView],
+    functions: &[FunctionSetView],
     mut o_writes: Option<&mut Vec<(String, bool)>>,
 ) -> io::Result<i32>
 where
     W: Write,
 {
     if args.is_empty() {
-        print_shell_variables(env_vars, underlay, dynamic, stdout)?;
+        print_shell_variables(env_vars, underlay, dynamic, functions, stdout)?;
         return Ok(EXECUTION_SUCCESS);
     }
 
@@ -430,16 +451,42 @@ where
 pub(crate) struct DynamicSetView {
     pub name: String,
     pub storage: String,
+    /// True for a scalar cell (BASH_ARGV0): its storage text renders
+    /// through print_var_value's scalar quoting, not array_to_assign
+    /// — the visible registry class was uniformly array-valued until
+    /// rubash#3026.
+    pub scalar: bool,
 }
 
-/// GNU `set` with no arguments: print_var_list (variables.c) — assignment
-/// form with print_var_value quoting. `declare` with no operands and no
-/// minus-form attribute options dispatches here too (declare.def:373-380
+/// One shell function's entry in the assignment-form listing: the
+/// function's name and its definition rendered in the multiline form.
+/// GNU's listing is a single enumerator, print_all_shell_variables
+/// (builtins/set.def:506-527): print_var_list over the variables, then
+/// print_func_list (variables.c:1079-1090) over all_shell_functions —
+/// but only when posixly_correct == 0. Each function prints as
+/// `name ` + named_function_string (FUNC_MULTILINE|FUNC_EXTERNAL,
+/// variables.c:1152-1162) + newline, in name order, after ALL
+/// variables. The function table and the definition metadata live on
+/// ShellState, which the builtins never see, so the executor renders
+/// each entry with the same ast_print port `declare -f` / `type` use
+/// and supplies the views here (rubash#3487; the variable half's
+/// DynamicSetView above is the same supply pattern).
+pub(crate) struct FunctionSetView {
+    pub name: String,
+    pub text: String,
+}
+
+/// GNU `set` with no arguments: print_all_shell_variables
+/// (builtins/set.def:506-527) — print_var_list (assignment form with
+/// print_var_value quoting) followed, when not in POSIX mode, by
+/// print_func_list. `declare` with no operands and no minus-form
+/// attribute options dispatches here too (declare.def:373-380
 /// `set_builtin ((WORD_LIST *)NULL)`), so the two listings stay identical.
 pub(crate) fn print_shell_variables<W>(
     env_vars: &crate::shell::var_table::VarTable,
     underlay: &crate::shell::var_table::TempenvListingUnderlay,
     dynamic: &[DynamicSetView],
+    functions: &[FunctionSetView],
     stdout: &mut W,
 ) -> io::Result<()>
 where
@@ -488,8 +535,14 @@ where
         // GNU att_invisible (variables.c print_var_list skips
         // invisible_p): COMP_WORDBREAKS is bound invisible at startup, so
         // `set` never lists it even though the variable exists
-        // (rubash#1325).
-        if unset::is_marked_variable(env_vars, INVISIBLE_VARS, name) {
+        // (rubash#1325). A dynamic-set view supersedes the mark: the
+        // mark stands for the dynamic variable's unset cell, and a
+        // supplied view means a by-name read already stored a value
+        // into it — the GNU cell was never att_invisible and now lists
+        // (BASH_ARGV0's materialization, rubash#3026).
+        if unset::is_marked_variable(env_vars, INVISIBLE_VARS, name)
+            && !entry_storage.contains_key(name)
+        {
             continue;
         }
         // GNU variables.c:511-526 (initialize_shell_variables): environment
@@ -540,15 +593,26 @@ where
         }
         // A dynamic registry entry supersedes the mirror cell: the
         // composition is the live value (rubash#2700). The visible
-        // registry class is array-valued, so it renders through the
-        // same array_to_assign form as an array cell.
-        if let Some(storage) = entry_storage.get(name) {
-            writeln!(
-                stdout,
-                "{}={}",
-                name,
-                crate::builtins::declare::format_array_for_output(storage)
-            )?;
+        // registry class is array-valued and renders through the same
+        // array_to_assign form as an array cell; a scalar cell (the
+        // materialized BASH_ARGV0, rubash#3026) takes print_var_value's
+        // scalar quoting like a table entry.
+        if let Some(view) = dynamic.iter().find(|entry| entry.name.as_str() == name) {
+            if view.scalar {
+                writeln!(
+                    stdout,
+                    "{}={}",
+                    name,
+                    shell_quote(&view.storage, posix_mode)
+                )?;
+            } else {
+                writeln!(
+                    stdout,
+                    "{}={}",
+                    name,
+                    crate::builtins::declare::format_array_for_output(&view.storage)
+                )?;
+            }
             continue;
         }
         let Some(value) = value else {
@@ -589,10 +653,26 @@ where
         writeln!(stdout, "{}={}", name, shell_quote(value, posix_mode))?;
     }
 
+    // GNU builtins/set.def:518-527: POSIX.2 does not allow function
+    // definitions in the no-argument listing (PASC Interp #202), so
+    // print_func_list runs only when posixly_correct == 0 — the same
+    // live `posix` option read the ansic quoting branch above uses
+    // (the executor's __RUBASH_POSIX_MODE cell is kept in sync by
+    // set_shell_option). print_func_list (variables.c:1079-1090)
+    // walks all_shell_functions in name order, after every variable,
+    // one multiline definition per function (rubash#3487).
+    if !posix_mode {
+        let mut funcs: Vec<&FunctionSetView> = functions.iter().collect();
+        funcs.sort_by(|left, right| left.name.cmp(&right.name));
+        for function in funcs {
+            writeln!(stdout, "{}", function.text)?;
+        }
+    }
+
     Ok(())
 }
 
-fn shell_quote(value: &str, posix_mode: bool) -> String {
+pub(crate) fn shell_quote(value: &str, posix_mode: bool) -> String {
     // GNU variables.c print_var_value: dollar-quote for values containing
     // non-printing characters (ansic_shouldquote), sh_single_quote for
     // values containing shell metacharacters (sh_contains_shell_metas),
@@ -692,6 +772,7 @@ mod tests {
             &mut diag,
             stdout,
             &crate::shell::var_table::TempenvListingUnderlay::new(),
+            &[],
         )
         .unwrap();
         diag.flush_with(|| Prolog {

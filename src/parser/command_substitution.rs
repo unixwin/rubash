@@ -172,6 +172,33 @@ fn dollar_command_substitution(
     // when the region disarms, and it lets the `)` that follows
     // close the substitution like its glued twin `in)`.
     let mut case_in_completed_empty = false;
+    // rubash#3605: paren depth of a `$(` nested inside the case context
+    // (`$(case $(w) in e) ...`). The `(`/`)` match arms below do not
+    // count parens while `case_depth > 0` (pattern parens belong to the
+    // case machinery), so without this tracker the `)` ending the inner
+    // substitution reaches the truncated-case close arm and the outer
+    // substitution ends early at `$(w` — GNU parse_comsub instead lets
+    // the nested substitution's own reader consume its `)`.
+    let mut nested_case_subst = 0usize;
+    // rubash#3306: paren depth opened INSIDE a case context while the
+    // pattern region is disarmed (clause body, or the `case … in`
+    // preamble). GNU's `)` is the substitution's shell_eof_token only
+    // at body paren depth zero (parse.y:4519-4521); `(b)`/`((…))`
+    // groups in the body own their own `)` first, exactly like the
+    // pattern-paren tracker above owns pattern parens.
+    let mut case_body_paren_depth = 0usize;
+    // rubash#3306: a `;;`/`;&`/`;;&` seen while the pattern region is
+    // still armed is fatal in GNU's grammar — a clause terminator is
+    // only legal after a clause BODY (region disarmed). Once seen the
+    // case can never complete, so the next top-level `)` closes the
+    // substitution for the body parser's verdict no matter what the
+    // pattern bookkeeping makes of it (`$(case x in a;; echo hi)`).
+    let mut case_clause_terminator_in_pattern = false;
+    // rubash#3834: previous significant unquoted char fed to the case
+    // word machine — the `esac` pattern-text witness (parse.y:3181/3183,
+    // `last_read_token == '|' or '('`), arm-for-arm with the skip.rs /
+    // embedded_mutations machines (rubash#380).
+    let mut prev_sig: Option<char> = None;
     // GNU read_token (parse.y:3630-3643): `#` introduces a comment only at
     // a token boundary — after whitespace, a separator (`;&|()<>`), or at
     // the start. `word_boundary`/`word.is_empty()` are wrong: `$`, quotes
@@ -242,13 +269,34 @@ fn dollar_command_substitution(
         // outer `double` state is preserved.  Without this,
         // `$(echo "foo$(echo ")")")` misparses the inner `"` as the close of
         // the outer quote, truncating the substitution body.
-        if double
-            && ch == '$'
-            && chars.get(index + 1) == Some(&'(')
-            && chars.get(index + 2) != Some(&'(')
-        {
+        //
+        // The same unit skip applies UNQUOTED (parse.y:4173: `$(` hands the
+        // whole nested text to parse_comsub, whose `)` owns the inner
+        // substitution, never the enclosing case machinery). Without it the
+        // inner `)` reaches the case-subject bookkeeping as if it were
+        // glued to the subject word — `$(case $(ls) in *) ... ;; esac)` cut
+        // the body at `case $(ls`, and the trailing ` in *) ... ` `)` then
+        // surfaced as the read-time `unexpected token `)'`. The `\u{1}`
+        // placeholder marks the skipped span as one word unit, exactly how
+        // the `\\` arm keeps `c\ase` out of the reserved-word machine, so a
+        // `$(...)` case subject still completes the `case WORD` stage
+        // (stage 1 -> 2) and lets `in` arm the pattern region. A `$(` span
+        // inside an armed pattern region is pattern content — same
+        // bookkeeping the backquote arm above applies.
+        // `$((` is included: arithmetic or `$(` + subshell, the recursive
+        // span ends at the same `))`/` ) ` boundary, and its `)` belongs to
+        // the nested unit either way (`$(case $((1)) in *) ... ;; esac)`
+        // cut at `case $((1)` for the same reason).
+        if ch == '$' && !single && chars.get(index + 1) == Some(&'(') {
             if let Some((_, next_index)) = dollar_command_substitution(chars, index) {
                 index = next_index;
+                if !double {
+                    word.push('\u{1}');
+                    if case_depth > 0 && case_pattern_region {
+                        case_pattern_content = true;
+                        case_in_completed_empty = false;
+                    }
+                }
                 token_boundary = false;
                 continue;
             }
@@ -292,6 +340,7 @@ fn dollar_command_substitution(
         let content_before = case_pattern_content;
         let stage_before = case_in_stage;
         let word_before = word.clone();
+        let sig_before = prev_sig;
         // rubash#2789: note the `in` completion (see the declaration
         // above); the latch itself is applied after the region
         // bookkeeping at the bottom of the loop, so the disarm-clear
@@ -331,7 +380,19 @@ fn dollar_command_substitution(
                         case_in_completed_empty = false;
                     }
                 }
-                ';' => {}
+                ';' => {
+                    // rubash#3306: `;;`/`;&`/`;;&` while the pattern
+                    // region is armed is a clause terminator in pattern
+                    // position — fatal in GNU's grammar (the terminator
+                    // is only legal after a clause body). Latch it: the
+                    // case can never complete, so the next top-level `)`
+                    // closes the substitution for the body verdict.
+                    if case_pattern_paren_depth == 0
+                        && matches!(chars.get(index + 1), Some(';') | Some('&'))
+                    {
+                        case_clause_terminator_in_pattern = true;
+                    }
+                }
                 c if c.is_whitespace() => {}
                 _ => {
                     case_pattern_content = true;
@@ -351,7 +412,33 @@ fn dollar_command_substitution(
             &mut current_word_boundary,
             &mut case_in_stage,
             &mut case_pattern_region,
+            prev_sig,
         );
+        // rubash#380 witness feed (skip.rs:2176 / quotes.rs:1325
+        // convention): only unquoted punctuation updates the previous-
+        // token witness; word chars and whitespace never do. This loop
+        // has no early single/double arm — quoted bytes reach the call
+        // above — so the feed is gated explicitly.
+        if !single && !double && crate::lexer::esac_prev_token_char(ch) {
+            prev_sig = Some(ch);
+        }
+        // `$(` nested inside the case context: its `)` belongs to the
+        // inner substitution, never to the case-close arm below. The
+        // counter is a paren DEPTH inside the nested substitution, so
+        // a subshell group inside it (`$(a (b) c)`) consumes its own
+        // `)` first instead of mis-closing the `$(`.
+        if !single
+            && !double
+            && case_depth > 0
+            && ch == '('
+            && (nested_case_subst > 0 || chars.get(index.wrapping_sub(1)) == Some(&'$'))
+        {
+            nested_case_subst += 1;
+        }
+        let closes_nested_subst = ch == ')' && !single && !double && nested_case_subst > 0;
+        if closes_nested_subst {
+            nested_case_subst -= 1;
+        }
         // rubash#2789: a `)` that cannot close anything inside the
         // case — no pattern content in the armed region (the pattern
         // never started, e.g. right after `in` or after a `;;`), the
@@ -359,14 +446,44 @@ fn dollar_command_substitution(
         // case subject — closes the substitution at the substitution's
         // own depth (parse.y:4519-4521), yielding the truncated body
         // for the body parser's grammar verdict. Pattern closers
-        // (content seen), nested-paren closers and quoted `)` never
-        // reach this arm.
-        let case_close_candidate = ch == ')' && !single && !double && depth == 1 && case_depth > 0;
+        // (content seen), nested-paren closers, nested `$(` closers
+        // and quoted `)` never reach this arm.
+        let case_close_candidate =
+            ch == ')' && !single && !double && depth == 1 && case_depth > 0 && !closes_nested_subst;
         if case_close_candidate
             && ((region_before && !content_before)
                 || (word_before == "in" && stage_before == 2)
                 || (case_in_stage == 2 && !region_before && !word_before.is_empty())
                 || case_in_completed_empty)
+        {
+            let text = chars[start..=index].iter().collect();
+            // rubash#3306: an empty-pattern `()` fire keeps the `)` in
+            // the body source — `case x in ()` parses to the NEAR `)'`
+            // marker GNU's body parser raises on the empty pattern
+            // (the `)` IS the token that offends), where the excluded
+            // form `case x in (` reports a newline offender instead.
+            let source: String = if region_before && !content_before && sig_before == Some('(') {
+                chars[start + 2..=index].iter().collect()
+            } else {
+                chars[start + 2..index].iter().collect()
+            };
+            return Some((
+                command_substitution_node(text, source, false, false, false),
+                index + 1,
+            ));
+        }
+        // rubash#3306: a `)` that GNU's parser takes as the
+        // substitution's shell_eof_token also arrives with the pattern
+        // region disarmed — in a clause body or the `case … in`
+        // preamble — and inside a case already doomed by a
+        // pattern-position clause terminator. Body parens own their
+        // `)` first (case_body_paren_depth); the truncated body
+        // reaches the body parser, whose verdict the read-time screen
+        // reports (parse.y:4519-4521, 6858-6865), instead of the
+        // extractor scanning off the end of the word.
+        if case_close_candidate
+            && case_body_paren_depth == 0
+            && (!region_before || case_clause_terminator_in_pattern)
         {
             let text = chars[start..=index].iter().collect();
             let source = chars[start + 2..index].iter().collect();
@@ -379,6 +496,9 @@ fn dollar_command_substitution(
             '\'' if !double => single = !single,
             '"' if !single => double = !double,
             '(' if !single && !double && case_depth == 0 => depth += 1,
+            '(' if !single && !double && case_depth > 0 && !region_before => {
+                case_body_paren_depth += 1;
+            }
             ')' if !single && !double && case_depth == 0 => {
                 depth = depth.saturating_sub(1);
                 if depth == 0 {
@@ -389,6 +509,9 @@ fn dollar_command_substitution(
                         index + 1,
                     ));
                 }
+            }
+            ')' if !single && !double && case_depth > 0 && !region_before => {
+                case_body_paren_depth = case_body_paren_depth.saturating_sub(1);
             }
             _ => {}
         }
@@ -663,6 +786,7 @@ fn update_command_substitution_case_depth(
     current_word_boundary: &mut bool,
     case_in_stage: &mut u8,
     case_pattern_region: &mut bool,
+    prev_sig: Option<char>,
 ) {
     if single || double {
         word.clear();
@@ -712,14 +836,13 @@ fn update_command_substitution_case_depth(
         *case_in_stage = 2;
     }
     let reserved_word_allows_next = update_command_substitution_reserved_word_depth(
-        chars,
-        index,
         word,
         *current_word_boundary,
         case_depth,
         case_in_stage,
         case_pattern_region,
         completing_after_case,
+        prev_sig,
     );
     if *case_depth > 0 {
         if ch == ')' && *case_pattern_region {
@@ -737,16 +860,30 @@ fn update_command_substitution_case_depth(
 
 #[allow(clippy::too_many_arguments)]
 fn update_command_substitution_reserved_word_depth(
-    chars: &[char],
-    index: usize,
     word: &str,
     word_boundary: bool,
     case_depth: &mut usize,
     case_in_stage: &mut u8,
     case_pattern_region: &mut bool,
     completing_after_case: bool,
+    prev_sig: Option<char>,
 ) -> bool {
     if !word_boundary {
+        // GNU special_case_tokens rule 6 (parse.y:3369-3386): the `in`
+        // after a case subject is IN even off a reserved-word boundary —
+        // the case grammar consumes it there regardless of how the
+        // preceding word ended (a plain subject word never leaves a
+        // separator behind, so `$(case x in ...)` reads its `in` with
+        // word_boundary false). parse.y:3379/3396 arms the pattern
+        // region on that token, which is what the extractor's unclosed-
+        // case close arm needs to judge a later `)` (rubash#3756:
+        // without it `$(case x in a|)` scanned as unclosed and the
+        // read-time body screen never saw the truncated body).
+        if word == "in" && *case_in_stage == 2 {
+            *case_in_stage = 3;
+            *case_pattern_region = true;
+            return true;
+        }
         // Even a non-boundary word ends the empty-case window.
         if !completing_after_case {
             *case_in_stage = 0;
@@ -788,13 +925,28 @@ fn update_command_substitution_reserved_word_depth(
             *case_pattern_region = false;
             true
         }
-        "esac" if !case_pattern_starts_with_esac_chars(chars, index) => {
-            *case_depth = case_depth.saturating_sub(1);
-            *case_in_stage = 0;
-            *case_pattern_region = false;
-            true
+        "esac" => {
+            // rubash#3834 / parse.y:3177-3186 CHECK_FOR_RESERVED_WORD +
+            // 3181/3183 (Posix rules 4): `esac' is pattern text ONLY when
+            // the previous token is `|' or the pattern-list `(' —
+            // witnessed by `prev_sig`, the last significant unquoted
+            // char fed to this machine. Every other boundary `esac'
+            // (after `;;', at a clause-body start, before a construct
+            // outside this case) is the ESAC keyword. This replaces the
+            // `)`-then-evidence FORWARD lookahead, whose evidence could
+            // come from a construct outside the case (`;; esac)` in a
+            // nested comsub) — the same replacement the skip.rs /
+            // embedded_mutations machines already carry (rubash#380).
+            if matches!(prev_sig, Some('|') | Some('(')) {
+                *case_in_stage = 0;
+                false
+            } else {
+                *case_depth = case_depth.saturating_sub(1);
+                *case_in_stage = 0;
+                *case_pattern_region = false;
+                true
+            }
         }
-        "esac" => false,
         "for" | "select" | "while" | "until" | "then" | "do" | "else" | "elif" | "in" | "fi"
         | "done" => {
             *case_in_stage = 0;
@@ -808,80 +960,6 @@ fn update_command_substitution_reserved_word_depth(
         }
     };
     result
-}
-
-fn case_pattern_starts_with_esac_chars(chars: &[char], delimiter_index: usize) -> bool {
-    if !matches!(chars.get(delimiter_index), Some(')' | '|')) {
-        return false;
-    }
-
-    let mut close = delimiter_index;
-    while close < chars.len() {
-        match chars[close] {
-            ')' => break,
-            ';' | '\n' => return false,
-            _ => close += 1,
-        }
-    }
-    if chars.get(close) != Some(&')') {
-        return false;
-    }
-
-    let mut scan = close + 1;
-    let mut word = String::new();
-    let mut word_boundary = true;
-    while scan < chars.len() {
-        let ch = chars[scan];
-        if ch == ';' && chars.get(scan + 1) == Some(&';') {
-            return true;
-        }
-        if ch == '_' || ch.is_ascii_alphanumeric() {
-            word.push(ch);
-            scan += 1;
-            continue;
-        }
-        if word == "esac" && word_boundary {
-            return true;
-        }
-        if ch == ')' {
-            return false;
-        }
-        if word.is_empty() {
-            if command_substitution_separator_allows_reserved_word(ch) {
-                word_boundary = true;
-            } else if !ch.is_whitespace() {
-                word_boundary = false;
-            }
-            scan += 1;
-            continue;
-        }
-        let reserved_word_allows_next =
-            word_boundary && command_substitution_reserved_word_allows_next(&word);
-        word.clear();
-        word_boundary =
-            reserved_word_allows_next || command_substitution_separator_allows_reserved_word(ch);
-        scan += 1;
-    }
-
-    word == "esac" && word_boundary
-}
-
-fn command_substitution_reserved_word_allows_next(word: &str) -> bool {
-    matches!(
-        word,
-        "for"
-            | "select"
-            | "while"
-            | "until"
-            | "then"
-            | "do"
-            | "else"
-            | "elif"
-            | "in"
-            | "fi"
-            | "done"
-            | "esac"
-    )
 }
 
 fn command_substitution_separator_allows_reserved_word(ch: char) -> bool {
@@ -1082,11 +1160,21 @@ mod case_reclassification_tests {
     }
 
     /// Empty case: `esac` is the case's own close; the extractor
-    /// must never truncate at `in` (this scan level finds no span
-    /// for the shape — the tokeniser owns it).
+    /// must never truncate at `in`. With the pattern region armed at
+    /// the `in` token (GNU special_case_tokens rule 6,
+    /// parse.y:3369-3386 — rubash#3756), `esac` is recognized as the
+    /// case close and the body scan completes over the whole span;
+    /// before that the unarmed region made this scan run off the end
+    /// and answer None (the tokeniser still owns the shape and the
+    /// executed result is identical: `echo $(case x in esac)`,
+    /// `x=$(case x in esac); echo $?` and the `v=… w=…` sibling form
+    /// are byte-identical to GNU 5.3.20).
     #[test]
     fn keeps_empty_case_esac_shape() {
-        assert_eq!(extract("$(case x in esac)"), None);
+        assert_eq!(
+            extract("$(case x in esac)").as_deref(),
+            Some("case x in esac")
+        );
     }
 
     /// A parenthesised pattern list: its `)` is the case's, and
@@ -1109,5 +1197,32 @@ mod case_reclassification_tests {
     fn reclassifies_space_variant_via_completion_latch() {
         assert_eq!(extract("$(case x in )").as_deref(), Some("case x in "));
         assert_eq!(extract("$(case x in a)"), None);
+    }
+
+    /// rubash#3605 run-comsub-posix: an unquoted nested `$(` inside a
+    /// case body is a complete word unit (GNU parse.y:4173 hands the
+    /// span to parse_comsub atomically), never fed char-by-char to the
+    /// case word machine — otherwise the inner `)` hits the glued-paren
+    /// close predicate (rubash#2789) and truncates the body at
+    /// `case $(ls`.
+    #[test]
+    fn keeps_comsub_case_subject() {
+        // `esac` right after `in` stays the empty-case shape
+        // (keeps_empty_case_esac_shape), comsub subject or not.
+        assert_eq!(
+            extract("$(case $(ls) in esac)").as_deref(),
+            Some("case $(ls) in esac")
+        );
+        for w in [
+            "$(case $(ls) in *) echo ok;; esac)",
+            "$(case a$(ls)b in *) echo ok;; esac)",
+            "$(case $((1)) in *) echo ok;; esac)",
+            "$(case $(case q in q) echo qq;; esac) in qq) echo n;; esac)",
+            "$(if $(echo true); then echo ok; fi)",
+            "$(for i in $(echo a b); do echo x; done)",
+        ] {
+            let inner = &w[2..w.len() - 1];
+            assert_eq!(extract(w).as_deref(), Some(inner), "input: {w}");
+        }
     }
 }

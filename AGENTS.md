@@ -328,8 +328,13 @@ kills WSL-side test runs, and inflated PASS claims from wrong baselines.
 
 - rustfmt is a pre-commit hook (owner directive 2026-09-26): `git config
   core.hooksPath scripts/git-hooks` is already set repo-side; the hook runs
-  `cargo fmt --check` and rejects unformatted commits. Run `cargo fmt` before
-  committing; do not bypass the hook with --no-verify.
+  `scripts/check-rustfmt.py`, which batches `rustfmt --check` across every
+  workspace-member target found via `cargo metadata` (whole-workspace
+  coverage, not changed-files-only). `cargo fmt --check` itself overflows
+  the Windows command-line limit on this workspace (~1.5k target roots, os
+  error 206), which is why the gate does not call it. Fix reported diffs
+  with `rustfmt --edition <edition> <file>` or `cargo fmt` where it runs;
+  do not bypass the hook with --no-verify.
 
 - Commit discipline: the captain groups and commits per-author, per-family
   changes after WSL-baseline verification. Agents do NOT self-commit; they

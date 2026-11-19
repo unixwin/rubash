@@ -426,7 +426,14 @@ impl OptionsView<'_> {
             self.executor.set_shell_option(name, enabled);
             true
         } else {
-            self.executor.set_shopt_option(name, enabled)
+            let ok = self.executor.set_shopt_option(name, enabled);
+            // rubash#3909: a host arming extdebug through Session::set
+            // before running anything is startup arming (shell.c:576)
+            // — see mark_bash_argv_initialized.
+            if ok && name == "extdebug" && enabled {
+                self.executor.mark_bash_argv_initialized();
+            }
+            ok
         }
     }
 

@@ -42,7 +42,7 @@ fn non_empty(value: Option<String>) -> Option<String> {
 /// BASH_SOURCE[0] face) when present, else the top-level
 /// `__RUBASH_SCRIPT_NAME` — the same pairing the executor's
 /// `current_error_file_name` and `builtins::diagnostic` use.
-fn error_file_name(get: &CarrierGet<'_>) -> Option<String> {
+pub(crate) fn error_file_name(get: &CarrierGet<'_>) -> Option<String> {
     non_empty(get("__RUBASH_CURRENT_FILE")).or_else(|| non_empty(get("__RUBASH_SCRIPT_NAME")))
 }
 

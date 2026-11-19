@@ -5,7 +5,9 @@
 #
 # An entry is allowed ONLY for a stem that is red on master for a
 # recorded reason: a pins-first stem whose fix has not landed yet, or
-# a known-red stem triaged from the first full census. The script fails
+# a known-red stem triaged from the first full census, or a stem that
+# already runs in a dedicated CI lane (ELSEWHERE -- recorded so the
+# widened enumeration does not run it twice). The script fails
 # the job if an entry goes stale (stem renamed or removed), so this file
 # tracks the tree. When the fix for an excluded stem lands, delete its
 # line here in the same PR -- the stem then runs by default.
@@ -86,7 +88,6 @@ issue2578_comp_wordbreaks_regressions PRODUCT: #2578 CLOSED; 1 test fails; compl
 issue2599_procsub_producer_varfd_regressions PRODUCT: #2599 CLOSED; 3 tests fail; procsub producer varfd; fix 1814bb67 landed; stale pin vs regression
 issue2622_fg_bg_group_sigcont_regressions TIMING: #2622 CLOSED; 2 tests fail; PTY fg/bg timed out waiting for stopped-notice line; last touch pin fix b20d2d18; serial re-run (parallel-load timing)
 issue2624_kill_jobspec_group_delivery_regressions TIMING: #2624 CLOSED; 4 tests fail; PTY kill/jobspec timed out waiting for stopped-notice line; last touch fmt 6c31956b; serial re-run (parallel-load timing)
-issue2634_extdebug_bash_argc_sticky PINS-FIRST: #2634 OPEN; 6 tests fail; fix PR #3427 in review, unmerged
 issue2662_read_high_byte_delimiter PRODUCT: #2662 CLOSED; 1 test fails; read -d high-byte delimiter rc; fix 947bbc9f (#3142) landed; stale pin vs regression
 issue2697_subshell_member_death_notice_regressions PINS-FIRST: #2697 OPEN; 2 tests fail; J1 pins-first, jobs-side adjudication owed
 issue2739_continuation_error_attribution_regressions MISMATCH: #2739 CLOSED; 1 test fails; attribution family, F4 fix 30b1b51c landed but cell still fails; fix-vs-pin mismatch, adjudication owed
@@ -134,3 +135,26 @@ issue804_restricted_redirect_command_regressions PRODUCT: #804 CLOSED; 1 test fa
 issue826_compound_redirect_diag_route_regressions PRODUCT: #826 CLOSED; 9 tests fail; compound redirect diag route; fix 5daa47c4 landed; stale pin vs regression
 issue856_script_pua_literal_regressions PRODUCT: #856 CLOSED; 3 tests fail; script PUA literal bytes; fix a692b20c (#946) landed; stale pin vs regression
 issue860_assoc_empty_key_regressions PRODUCT: #860 CLOSED; 11 tests fail; assoc empty key; last touch test correction 66efaa47; product divergence
+
+# --- unixwin/niubash#955: non-issue stems ------------------------------
+# The census enumeration was widened from tests/issue*.rs to tests/*.rs
+# (2026-11-14). A Linux census of the 83 stems this surfaced ran 2721
+# tests: 2567 passed / 154 failed / 36 skipped / 1 exceeded the 90s
+# budget. ELSEWHERE marks stems that already run in a dedicated lane;
+# the rest are red on master for the recorded reason, adjudication owed.
+# executor_tests was additionally re-run serially (52 red of 1561) to
+# separate parallel-load flake from product red.
+cli_tests ELSEWHERE: runs in the dedicated `cli-tests` job (--no-fail-fast; deliberately not a required gate yet, rubash#2176)
+regression ELSEWHERE: runs in the windows-latest `regression` job (GNU goldens/snapshots recorded on Windows)
+marker_leak_golden ELSEWHERE: runs in the named marker-leak lane of the `rust` job
+multi_session_isolation TIMING: single #[test]; serial+concurrent Executor matrix exceeds the 90s per-test budget (>283s observed on Linux, still running); file header documents it as an on-demand run (`cargo test --test multi_session_isolation`); needs bounding or a local-only marking
+executor_tests PRODUCT/ENV: 52 of 1561 tests red on a serial re-run (parallel load inflated to ~106); families: env-bound (GROUPS=1000 vs pinned 0:0:1, compgen user/group/hostname/service sources, DIRSTACK), product (FUNCNAME readonly assignment model, redirect-append faces, process-substitution stdin feed, alias-introduced forms, `time` before function body); adjudication owed per family
+deep_audit_b6_diagnostics PRODUCT: 1 test fails; `times -z` rejected as an invalid option vs pinned diagnostic-prefix wording; stale pin vs product
+oils_spec_arith_regressions PRODUCT: 11 tests fail; oils spec corpus (invalid const/lvalue wording, nounset, double-subscript cells); product divergence vs recorded GNU expectations
+oils_spec_array_regressions PRODUCT: 8 tests fail; oils spec corpus (negative/sparse/multi-subscript cells); product divergence
+oils_spec_assoc_append_regressions PRODUCT: 2 tests fail; append-list + assoc readonly cells; product divergence
+oils_spec_bracket_shift_regressions PRODUCT: 12 tests fail; `[ -ef ]` symlink semantics + `bash:`-vs-$0 diagnostic prefixes; product/stale-pin mix
+parser_tests PRODUCT: 3 tests fail; `time` before function body + coproc time-word cells; product divergence
+parser_coproc_tests PRODUCT: 2 tests fail; coproc time-word + named-coproc function-body parse cells; product divergence
+perf_assoc_element_miss_regressions PRODUCT: 1 test fails; assoc length through nameref reports uni=5 vs pinned 6; product divergence or stale pin
+profiler_regressions PRODUCT: 3 tests fail; committed collapsed fixture lacks the `builtin:[`/`builtin:return` frames the profiler now emits; stale fixture vs product change

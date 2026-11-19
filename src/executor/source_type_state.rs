@@ -189,7 +189,21 @@ impl Executor {
                 return Err(ExecuteError::ExpansionFailure(1));
             }
             if redirect_target_fd(&target).is_none() {
-                self.create_redirect_output_prepared(&target, redirect.clobber)?;
+                // rubash#3828: retain the prepare open — the bind walk
+                // adopts it as this entry's one open (GNU
+                // do_redirections opens each entry once).
+                // rubash#3372: pass the node — the retained open is
+                // adopted as this entry's one open, so a None here
+                // would consult the folded-string record a transport
+                // sibling may own (e.g. `>"$a" 2>"$b"` binds fd 2 to
+                // the raw-byte file and never creates the UTF-8 one).
+                if let Some(file) = self.create_redirect_output_prepared_open_for(
+                    Some(redirect),
+                    &target,
+                    redirect.clobber,
+                )? {
+                    self.retain_prepared_output_file(command, redirect, &target, file);
+                }
             }
         }
         Ok(())
@@ -230,7 +244,18 @@ impl Executor {
                 return Err(ExecuteError::ExpansionFailure(1));
             }
             if redirect_target_fd(&target).is_none() && !is_null_device(&target) {
-                self.create_redirect_output_prepared(&target, redirect.clobber)?;
+                // rubash#3828: retain the prepare open — the bind walk
+                // adopts it as this entry's one open.
+                // rubash#3372: pass the node (see the redirect_out arm
+                // above) — the genuine leg reads a transport sibling's
+                // string record otherwise.
+                if let Some(file) = self.create_redirect_output_prepared_open_for(
+                    Some(redirect),
+                    &target,
+                    redirect.clobber,
+                )? {
+                    self.retain_prepared_output_file(command, redirect, &target, file);
+                }
             }
             // rubash#826: GNU do_redirection_internal (redir.c:767-955)
             // rebinds fd 2 to the opened target at application time, so

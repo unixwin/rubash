@@ -54,6 +54,16 @@ fn write_timestamps_of(executor: &Executor) -> bool {
     executor.get_env("HISTTIMEFORMAT").is_some()
 }
 
+/// variables.c:6168-6177 sv_histtimefmt: history_comment_char is armed
+/// by the first bind that leaves HISTTIMEFORMAT existing and is never
+/// disarmed afterwards — the sticky latch on ShellState, or the
+/// variable existing right now (its bind armed the latch at the latest
+/// by the per-command boundary, but a face running inside that very
+/// command — a prefix bind's own `history -r` — must see it too).
+fn comment_char_armed_of(executor: &Executor) -> bool {
+    executor.shell_state.history_comment_char_armed || write_timestamps_of(executor)
+}
+
 /// GNU's remember_on_history as the `history -s` pop gate in
 /// push_history sees it (builtins/history.def:435-439): the
 /// `set -o history` option, minus every parse unit GNU runs with
@@ -207,6 +217,22 @@ pub(in crate::executor) fn execute_history_session(
         return Ok(1);
     }
 
+    // history.def:169-173: `-c` clears FIRST and, with no remaining
+    // words (list == 0), returns success before the -d arm or any
+    // operand validation runs — `history -c -d bad` clears and never
+    // validates "bad". With words remaining, the CFLAG term in the
+    // display-arm gate `(flags & (AFLAG|RFLAG|NFLAG|WFLAG|CFLAG)) == 0`
+    // (history.def:267) keeps surplus operands out of get_numeric_arg /
+    // no_args while the -s/-p/-d/file arms still run against the
+    // cleared list (`history -c -s two` pushes onto it; `history -c
+    // -d 1 extra` eranges against the now-empty list).
+    if clear {
+        session.borrow_mut().clear();
+        if mode == HistoryMode::List || operands.is_empty() {
+            return Ok(0);
+        }
+    }
+
     // GNU display_history -> get_numeric_arg(list, 0, &limit): the operand
     // is validated as a number first (sh_neednumarg, EX_USAGE), then
     // no_args() rejects any further operands with `too many arguments`.
@@ -247,10 +273,6 @@ pub(in crate::executor) fn execute_history_session(
     let ctx = hist_ctx(executor);
     let histsize = histsize_of(executor);
     let mut shell = session.borrow_mut();
-
-    if clear {
-        shell.clear();
-    }
 
     match mode {
         HistoryMode::Delete => {
@@ -413,7 +435,13 @@ pub(in crate::executor) fn execute_history_session(
             if !operands.is_empty() {
                 let control = executor.get_env("HISTCONTROL").unwrap_or_default();
                 let ignore = executor.get_env("HISTIGNORE").unwrap_or_default();
-                let was_recorded = shell.record(&command, &control, &ignore, histsize);
+                let was_recorded = shell.record(
+                    &command,
+                    &control,
+                    &ignore,
+                    histsize,
+                    comment_char_armed_of(executor),
+                );
                 // push_history goes through check_add_history ->
                 // really_add_history (bashhist.c:961), which sets
                 // hist_last_line_added = 1 for the pushed entry, and
@@ -527,6 +555,16 @@ pub(in crate::executor) fn execute_history_session(
             // before the path translation and every open below
             // (rubash#3076).
             let path = crate::executor::substitution_metadata::fold_literal_char_escapes(&path);
+            // G-02 (rubash#3090): the file faces open the resolved
+            // name in-process; GNU's single cwd is the session cwd
+            // here (builtins/history.def:273 hands the name to
+            // read_history/write_history verbatim), so a relative name
+            // anchors at the session cwd for the opens below. The
+            // diagnostics keep the translated as-typed `path`.
+            let fs_path =
+                crate::executor::path::anchored_file_operand(&path, &executor.shell_state.env_vars)
+                    .to_string_lossy()
+                    .to_string();
             // Translate Git-Bash/POSIX spellings (/c/..., /dev/null) to the
             // Windows forms the file APIs need; children see the same file.
             let path =
@@ -539,19 +577,29 @@ pub(in crate::executor) fn execute_history_session(
             // (rubash#1669).
             let write_ts = write_timestamps_of(executor);
             let outcome = match mode {
-                HistoryMode::Append => shell.append_file(&path, write_ts).map(|_| 0),
+                HistoryMode::Append => shell.append_file(&fs_path, write_ts).map(|_| 0),
                 // GNU builtins/history.def WFLAG branch: write_history
                 // does NOT reset history_lines_this_session — only -a
                 // (maybe_append_history) consumes the session counter.
                 // Resetting here starved the exit-time append in
                 // finish_shell of lines already written by -w
                 // (rubash#1049: GNU re-appends them at exit).
-                HistoryMode::Write => shell.write_file(&path, write_ts).map(|_| 0),
+                HistoryMode::Write => shell.write_file(&fs_path, write_ts).map(|_| 0),
                 HistoryMode::Read => shell
-                    .read_file_with_arming(&path, histsize, write_ts)
+                    .read_file_with_arming(
+                        &fs_path,
+                        histsize,
+                        write_ts,
+                        comment_char_armed_of(executor),
+                    )
                     .map(|_| 0),
                 HistoryMode::ReadNew => shell
-                    .read_new_file_with_arming(&path, histsize, write_ts)
+                    .read_new_file_with_arming(
+                        &fs_path,
+                        histsize,
+                        write_ts,
+                        comment_char_armed_of(executor),
+                    )
                     .map(|_| 0),
                 _ => Ok(0),
             };

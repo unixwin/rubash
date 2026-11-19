@@ -4,11 +4,12 @@ impl Executor {
     pub(in crate::executor) fn expand_braced_pattern_or_transform_parameter(
         &self,
         name: &str,
+        quoted: bool,
     ) -> Option<String> {
         if let Some(value) = self.expand_braced_replacement_parameter(name) {
             return Some(value);
         }
-        if let Some(value) = self.expand_braced_pattern_parameter(name) {
+        if let Some(value) = self.expand_braced_pattern_parameter(name, quoted) {
             return Some(value);
         }
         if let Some(value) = self.expand_braced_transform_parameter(name) {
@@ -17,7 +18,7 @@ impl Executor {
         self.expand_braced_case_parameter(name)
     }
 
-    fn expand_braced_pattern_parameter(&self, name: &str) -> Option<String> {
+    fn expand_braced_pattern_parameter(&self, name: &str, quoted: bool) -> Option<String> {
         let (var_name, pattern, operation) = split_top_level_pattern_operator(name)?;
         // Bash's parameter scanner closes `${...}` at the `}` inside `[}]`.
         // The trailing `]}` is consequently literal text, rather than part
@@ -32,7 +33,7 @@ impl Executor {
         }
         if operation == PatternRemoval::LongestPrefix && pattern == "*/" {
             let basename = self
-                .expand_parameter_pattern_removal(var_name, pattern, operation)
+                .expand_parameter_pattern_removal(var_name, pattern, operation, quoted)
                 .unwrap_or_default();
             return Some(if var_name == "THIS_SH" && basename == "rubash-wrapper" {
                 "bash".to_string()
@@ -47,24 +48,28 @@ impl Executor {
                 pattern,
                 operation,
                 MatchLength::Longest,
+                quoted,
             ),
             PatternRemoval::ShortestPrefix => self.expand_prefix_pattern_parameter(
                 var_name,
                 pattern,
                 operation,
                 MatchLength::Shortest,
+                quoted,
             ),
             PatternRemoval::LongestSuffix => self.expand_suffix_pattern_parameter(
                 var_name,
                 pattern,
                 operation,
                 MatchLength::Longest,
+                quoted,
             ),
             PatternRemoval::ShortestSuffix => self.expand_suffix_pattern_parameter(
                 var_name,
                 pattern,
                 operation,
                 MatchLength::Shortest,
+                quoted,
             ),
         })
     }
@@ -75,8 +80,11 @@ impl Executor {
         pattern: &str,
         operation: PatternRemoval,
         match_length: MatchLength,
+        quoted: bool,
     ) -> String {
-        if let Some(value) = self.expand_parameter_pattern_removal(var_name, pattern, operation) {
+        if let Some(value) =
+            self.expand_parameter_pattern_removal(var_name, pattern, operation, quoted)
+        {
             return value;
         }
         if is_shell_name(var_name) {
@@ -102,8 +110,11 @@ impl Executor {
         pattern: &str,
         operation: PatternRemoval,
         match_length: MatchLength,
+        quoted: bool,
     ) -> String {
-        if let Some(value) = self.expand_parameter_pattern_removal(var_name, pattern, operation) {
+        if let Some(value) =
+            self.expand_parameter_pattern_removal(var_name, pattern, operation, quoted)
+        {
             return value;
         }
         if is_shell_name(var_name) {
@@ -147,14 +158,11 @@ impl Executor {
             return Some(self.parameter_attribute_transform(var_name));
         }
         if matches!(var_name, "@" | "*") {
-            // GNU string_list_pos_params (subst.c:3030): unquoted `*` joins
-            // with dollar_star (IFS[0], empty when IFS is set empty), while
-            // `@` joins with a space (dollar_at).
-            let separator = if var_name == "*" {
-                self.ifs_first_char_separator()
-            } else {
-                " ".to_string()
-            };
+            // GNU string_list_pos_params (subst.c:3030): `*` joins with
+            // dollar_star (IFS[0], empty when IFS is set empty); `@` joins
+            // with a space (dollar_at) — or IFS[0] under PF_ASSIGNRHS
+            // (subst.c:2951-3000, positional_transform_separator).
+            let separator = self.positional_transform_separator(var_name);
             return Some(
                 self.shell_state
                     .positional_window()
@@ -165,6 +173,15 @@ impl Executor {
             );
         }
         if let Ok(index) = var_name.parse::<usize>() {
+            // `0` is the $0 special parameter (script name), never
+            // positional_window[0] — `${0@Q}`/`${!x@Q}` with x=0
+            // transform the script name (subst.c:9424-9428 name lookup
+            // before positional indexing).
+            if index == 0 {
+                return Some(
+                    self.apply_parameter_transform_value(&self.script_name_value(), transform),
+                );
+            }
             return Some(
                 self.shell_state
                     .positional_window()
@@ -208,18 +225,28 @@ impl Executor {
 
     fn expand_braced_case_parameter(&self, name: &str) -> Option<String> {
         let (var_name, operation, pattern) = parse_parameter_case_mod(name)?;
+        // GNU subst.c:9604-9608 parameter_brace_casemod: the same
+        // `if (value == 0) return NULL` gate as patsub — an unset parameter
+        // word never expands its pattern (rubash#3501).
+        if self.pattern_word_is_silent(var_name, false, false) {
+            return Some(String::new());
+        }
         let pattern = self.expand_embedded_parameters(pattern);
         if let Some(value) = self.indirect_case_parameter(var_name, operation, &pattern) {
             return Some(value);
         }
         if matches!(var_name, "@" | "*") {
+            // Same string_list_dollar_* separators as the transform arm
+            // above: `*` joins on IFS[0] (concatenating under a set-empty
+            // IFS — `f=${*,,}` stores `12`, star9), `@` space-joins except
+            // under PF_ASSIGNRHS.
             return Some(
                 self.shell_state
                     .positional_window()
                     .iter()
                     .map(|value| apply_parameter_case_mod(value, operation, &pattern))
                     .collect::<Vec<_>>()
-                    .join(" "),
+                    .join(&self.positional_transform_separator(var_name)),
             );
         }
         if let Ok(index) = var_name.parse::<usize>() {
@@ -275,7 +302,18 @@ impl Executor {
             return Some(apply_parameter_case_mod(&target_name, operation, pattern));
         }
 
-        let target_name = self.shell_state.env_vars.get(indirect_name)?;
+        let target_name = match self.shell_state.env_vars.get(indirect_name) {
+            Some(target_name) => target_name.clone(),
+            // GNU parameter_brace_find_indir (subst.c:7839-7881): a
+            // positional/special source has no env cell; its VALUE (e.g.
+            // $0 for `${!00^}`) is the parameter this operator applies
+            // to (rubash#3784).
+            None if !is_shell_name(indirect_name) => {
+                self.indirect_holder_target_name(indirect_name)?
+            }
+            None => return None,
+        };
+        let target_name = &target_name;
         if let Some(array_expr) = target_name
             .strip_suffix("[@]")
             .or_else(|| target_name.strip_suffix("[*]"))

@@ -282,9 +282,11 @@ impl Executor {
                 // import's verbatim copies of the mirror storage
                 // string (init.rs seeds BASH_VERSINFO / DIRSTACK /
                 // BASH_ALIASES / BASH_CMDS into the table as storage
-                // forms, then VariableStore::from_environment binds
-                // the whole seeded table as exported scalars —
-                // rubash#3083). GNU's import binds only the process
+                // forms, then VariableStore::from_var_table binds
+                // the whole seeded table as scalar cells carrying
+                // the table's per-name attribute provenance
+                // (rubash#3083; exported provenance fixed by
+                // rubash#3108). GNU's import binds only the process
                 // environment's plain scalars (variables.c:368
                 // initialize_shell_variables); its own array cells
                 // are born as ARRAY objects (variables.c:1018
@@ -653,6 +655,10 @@ impl Executor {
             // Same DIRSTACK unbind recording as the unset builtin's
             // leaf sequence (unset_arrays.rs, rubash#2434).
             || (name == "DIRSTACK" && !self.dirstack_shadowed())
+            // rubash#3573: same for the two dynamic assoc variables,
+            // which dynamic_parameter_is_set does not serve
+            // (owner-table-backed, not scalar-registry).
+            || matches!(name, "BASH_ALIASES" | "BASH_CMDS")
         {
             mark_env_name(&mut self.shell_state.env_vars, UNSET_DYNAMIC_VARS, name);
         }

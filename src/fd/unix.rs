@@ -118,6 +118,57 @@ pub fn is_disk_file(h: HANDLE) -> bool {
     }
 }
 
+/// rubash#3432: the (device, inode, mtime seconds, mtime
+/// nanoseconds) of the open file description behind `h`, from
+/// fstat(2) — the identity/mtime the `__RUBASH_FD_STAT_<fd>` mark
+/// carries. GNU's sh_stat (lib/sh/eaccess.c:80) stats the descriptor
+/// the process holds; in GNU the shell's OS fd N IS user fd N, so a
+/// plain stat() of /proc/self/fd/N lands on the bound file, while
+/// here the OS fd namespace is shifted (the cwd anchor holds OS fd
+/// 3) and only the fstat of the fd-table entry's handle names the
+/// same file. None when the descriptor is closed or fstat fails.
+/// The nanosecond arm follows the cp_stat_mtime_nsec idiom in
+/// src/executor/external_file_builtins.rs: the libc crate flattens
+/// the timespec's nanoseconds into their own field on every unix
+/// target the suite builds for, and the remaining targets answer 0.
+pub fn fd_stat_parts(h: HANDLE) -> Option<(u64, u64, i64, i64)> {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(h, &mut st) } != 0 {
+        return None;
+    }
+    Some((
+        st.st_dev as u64,
+        st.st_ino as u64,
+        i64::from(st.st_mtime),
+        stat_mtime_nsec(&st),
+    ))
+}
+
+#[cfg(any(
+    target_os = "android",
+    all(target_os = "linux", target_env = "gnu"),
+    all(target_os = "linux", not(target_env = "gnu")),
+    target_os = "macos",
+    target_os = "ios",
+))]
+fn stat_mtime_nsec(st: &libc::stat) -> i64 {
+    // glibc, musl and bionic flatten the nanoseconds into their own
+    // field; its width follows the target's c_long (i32 on armv7).
+    // Darwin's C header keeps the st_mtimespec pair, but the libc
+    // crate flattens it the same way.
+    i64::from(st.st_mtime_nsec)
+}
+
+#[cfg(not(any(
+    target_os = "android",
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "ios",
+)))]
+fn stat_mtime_nsec(_st: &libc::stat) -> i64 {
+    0
+}
+
 /// S_ISFIFO — the handle refers to a pipe/FIFO. GNU test.c's `-p`
 /// file test on an fd path resolves through the descriptor itself, so
 /// fd slots backed by a real OS pipe (e.g. `exec N< <(...)`, which
@@ -341,6 +392,91 @@ pub fn dup_adopted_fd(fd: u32) -> Option<HANDLE> {
     }
 }
 
+/// GNU general.h:257 HIGH_FD_MAX and general.c:702-733
+/// `move_to_high_fd(fd, check_new=1, maxfd=-1)`: the ceiling a
+/// persistent internal descriptor is moved below — the descriptor
+/// table size capped at 256 (20 when the query fails). bash spends
+/// this on exactly the class the cwd anchor belongs to: fds that must
+/// outlive the shell's own bookkeeping but must not collide with the
+/// low numbers user redirections walk (script fd shell.c:1700,
+/// coproc parent pipe subst.c:6392, saved stdout subst.c:7037).
+pub(crate) const HIGH_FD_MAX: i32 = 256;
+
+/// The scan ceiling of `move_to_high_fd` with maxfd=-1: the live
+/// descriptor-table size (`sysconf(_SC_OPEN_MAX)`, the
+/// getdtablesize(2) equivalent bash's compat layer resolves to),
+/// with 20 substituted when the query fails and capped at
+/// HIGH_FD_MAX — general.c:705-713.
+fn high_fd_ceiling() -> i32 {
+    let n = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) };
+    if n <= 0 {
+        20
+    } else {
+        n.min(HIGH_FD_MAX as libc::c_long) as i32
+    }
+}
+
+/// rubash#3640: GNU general.c:702 `move_to_high_fd` (check_new=1,
+/// maxfd=-1). The session cwd anchor (`ShellState::cwd_anchor`) holds
+/// a directory descriptor open for the session's whole residence in
+/// its cwd so a later deletion still leaves spawns and in-process
+/// opens a live inode to land on (rubash#3198/#3268). Opened plainly,
+/// that descriptor took the lowest free OS fd — 3 in every ordinary
+/// session — shifting the whole user fd space up one kernel
+/// descriptor: `exec 3>file` put the file on OS fd 4 while fd 3 still
+/// read as the cwd in /proc/$$/fd (the #3432 namespace shift this
+/// removes at the root). GNU keeps its own persistent internals out
+/// of the low range with move_to_high_fd; the anchor now takes the
+/// same treatment.
+///
+/// Scans DOWN from ceiling-1 to 4 for the first free descriptor
+/// (general.c:715-719 `for (nfds--; ...; nfds--)`), dup2's `fd` onto
+/// it, closes the original, and returns the new number. dup2 clears
+/// FD_CLOEXEC on the target, so the close-on-exec bit the caller's
+/// open set is re-armed — internal fds must not leak raw into
+/// exec'd children (the anchor is only ever spent pre-exec:
+/// stamp_spawn_cwd/spawn_cwd_stamp fchdir in pre_exec,
+/// fd::spawn_whitelisted's cwd_anchor_fd likewise). When no slot in
+/// (3, ceiling) is free, or the dup fails, `fd` is returned
+/// unchanged — GNU's own fallback (general.c:730-733).
+pub fn move_to_high_fd(fd: HANDLE) -> HANDLE {
+    if fd < 0 {
+        return fd;
+    }
+    let ceiling = high_fd_ceiling();
+    for target in (4..ceiling).rev() {
+        // F_GETFD < 0 means the slot is free (EBADF) — the same probe
+        // GNU's check_new loop runs. `fd` itself is open, so it never
+        // passes this test and can never be dup2'd onto itself.
+        if unsafe { libc::fcntl(target, libc::F_GETFD, 0) } >= 0 {
+            continue;
+        }
+        if unsafe { libc::dup2(fd, target) } < 0 {
+            return fd;
+        }
+        let flags = unsafe { libc::fcntl(target, libc::F_GETFD) };
+        unsafe {
+            libc::fcntl(target, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+            libc::close(fd);
+        }
+        return target;
+    }
+    fd
+}
+
+/// `move_to_high_fd` for an owned `File`: the returned File owns the
+/// relocated descriptor (or the original one when no high slot was
+/// free). Used by the cwd-anchor opens so `CwdAnchor::dir` keeps a
+/// plain `Arc<File>` while its kernel fd sits above the user range.
+pub fn move_file_to_high_fd(file: std::fs::File) -> std::fs::File {
+    use std::os::fd::IntoRawFd;
+    let fd = file.into_raw_fd();
+    // SAFETY: move_to_high_fd either returns `fd` itself (still owned
+    // by nobody — into_raw_fd released it) or a fresh dup2 target it
+    // now owns; from_raw_fd re-adopts exactly one live descriptor.
+    unsafe { std::fs::File::from_raw_fd(move_to_high_fd(fd)) }
+}
+
 fn set_inheritable(fd: HANDLE, on: bool) -> std::io::Result<()> {
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
     if flags < 0 {
@@ -355,6 +491,122 @@ fn set_inheritable(fd: HANDLE, on: bool) -> std::io::Result<()> {
         return Err(std::io::Error::last_os_error());
     }
     Ok(())
+}
+
+/// rubash#3300: decode a 32-hex-char respawn proof nonce into its 16
+/// raw bytes. Shared by the spawner (`mint_respawn_proof`, below) and
+/// the child's entry check (`respawn_proof_validated`, init.rs) so the
+/// two sides can never disagree on the encoding.
+pub(crate) fn respawn_proof_nonce_bytes(hex: &str) -> Option<[u8; 16]> {
+    // Byte arithmetic only — no byte->char widening (the utf8
+    // boundary hygiene script forbids widening a byte that could be
+    // a UTF-8 continuation byte; a nonce is hex ASCII, but the
+    // decode must not assume that before validating).
+    fn hex_val(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        }
+    }
+    let bytes = hex.as_bytes();
+    if bytes.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 16];
+    for i in 0..16 {
+        let hi = hex_val(bytes[2 * i])?;
+        let lo = hex_val(bytes[2 * i + 1])?;
+        out[i] = (hi << 4) | lo;
+    }
+    Some(out)
+}
+
+/// rubash#3300: mint a per-spawn provenance proof for a fork-shaped
+/// respawn child — a fresh anonymous pipe holding a fresh 16-byte
+/// nonce, with the write end already closed (so the child reads nonce
+/// + EOF whenever it runs), and the read end placed at the lowest free
+/// descriptor >= 100 with CLOEXEC cleared so it survives exec.
+///
+/// The nonce is NOT a secret (it rides the environment in the clear
+/// next to the fd number); its job is binding — it ties this pipe to
+/// this spawn, so a coincidental pipe at the same number cannot
+/// validate (2^-128). The unforgeability comes from pipe possession,
+/// not nonce secrecy: env text can be copied, an inherited fd cannot.
+///
+/// Mint failure is fail-open: any failure returns None and the caller
+/// spawns without proof keys, i.e. today's behavior — a spawn must
+/// never fail because the proof could not be minted. The caller closes
+/// the returned fd after the spawn lands (like every other
+/// parent-side dup); the child closes its own copy on successful
+/// validation.
+pub(crate) fn mint_respawn_proof(nonce_hex: &str) -> Option<(RawFd, String)> {
+    let nonce = respawn_proof_nonce_bytes(nonce_hex)?;
+    let mut pipe_fds = [0 as RawFd; 2];
+    if unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    let (read_end, write_end) = (pipe_fds[0], pipe_fds[1]);
+    // Write the nonce, EINTR-tolerant; the 16 bytes always fit the
+    // pipe buffer, so this completes before the write end closes.
+    let mut written = 0;
+    while written < nonce.len() {
+        let n = unsafe {
+            libc::write(
+                write_end,
+                nonce[written..].as_ptr() as *const libc::c_void,
+                nonce.len() - written,
+            )
+        };
+        if n < 0 {
+            if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            unsafe {
+                libc::close(read_end);
+                libc::close(write_end);
+            }
+            return None;
+        }
+        if n == 0 {
+            unsafe {
+                libc::close(read_end);
+                libc::close(write_end);
+            }
+            return None;
+        }
+        written += n as usize;
+    }
+    // Close the write end BEFORE spawn: the pipe now holds nonce +
+    // EOF, so the proof is valid from spawn until consumed regardless
+    // of when the spawner dies — the time-independence the orphan
+    // race needs.
+    unsafe {
+        libc::close(write_end);
+    }
+    // Lowest free descriptor >= 100 (above stdio and the coproc
+    // save-slot scan 10..64; F_DUPFD_CLOEXEC skips open fds, so the
+    // number can never collide with a carrier). CLOEXEC first so a
+    // racing spawn cannot observe it half-staged; cleared below so it
+    // survives exec.
+    let chosen = unsafe { libc::fcntl(read_end, libc::F_DUPFD_CLOEXEC, 100) };
+    if chosen < 0 {
+        unsafe {
+            libc::close(read_end);
+        }
+        return None;
+    }
+    unsafe {
+        libc::close(read_end);
+    }
+    if set_inheritable(chosen, true).is_err() {
+        unsafe {
+            libc::close(chosen);
+        }
+        return None;
+    }
+    Some((chosen, nonce_hex.to_string()))
 }
 
 pub fn handle_to_file(h: HANDLE) -> std::fs::File {

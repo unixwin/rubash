@@ -1137,6 +1137,20 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                         token.position
                     ),
                 );
+                // GNU report_syntax_error echoes the offending line in
+                // every non-interactive near-token report (parse.y:6814);
+                // without the source assignment the executor's NEAR arm
+                // cannot echo it (rubash#3647: `echo hi | ! true` lost
+                // the line echo the `|'-after-`|' shape already had).
+                error.insert_assignment(
+                    "__RUBASH_PARSE_SOURCE__".to_string(),
+                    super::parse_loop::offending_line_text(
+                        tokens,
+                        *i,
+                        state.diagnostic_text.as_deref(),
+                        state.source_line_offset,
+                    ),
+                );
                 abort_parse_at_syntax_error(state, error, tokens[*i].position);
                 return TokenAction::Break;
             }
@@ -1160,10 +1174,10 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                 return TokenAction::Continue;
             }
 
-            if command_is_empty(&state.current_cmd)
+            if command_is_pending_pipeline_prefix(state)
                 && matches!(
                     token.value.as_str(),
-                    "then" | "do" | "else" | "elif" | "fi" | "done" | "esac"
+                    "then" | "do" | "else" | "elif" | "fi" | "done" | "esac" | "in"
                 )
             {
                 // GNU parse.y:469-482 (`error '\n'` → YYABORT when not
@@ -1186,9 +1200,19 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                 return TokenAction::Continue;
             }
 
-            if token.value == "}" && command_is_empty(&state.current_cmd) {
+            if token.value == "}" && command_is_pending_pipeline_prefix(state) {
                 // GNU parse.y: `}' is a reserved word, and at command position
-                // with no open brace group it is a fatal syntax error. A
+                // with no open brace group it is a fatal syntax error. That
+                // holds behind a pending `!' too: a lone `}' is never a valid
+                // command word after BANG (`! }`, `! } { }`, `{ ! } }` are all
+                // `syntax error near unexpected token `}'`, rc 2 -- rubash#3648).
+                // Before this the `!` arm had already toggled `inverted`, so
+                // command_is_empty was false and the `}' fell through to word
+                // handling, ran as a command name, and the `!' flipped the
+                // not-found failure to rc 0. A group-closing `}' never reaches
+                // this arm (parse_brace_group_command consumes it), and a
+                // second `!' toggles the inversion back off, so `! ! }` was
+                // already an error via the empty arm. A
                 // leftover `}' is exactly what parse_matched_pair's
                 // P_FIRSTCLOSE|P_DOLBRACE scan leaves behind when a bare `{`
                 // does not nest inside `${...}` (parse.y:3974-3980), e.g. the
@@ -1716,6 +1740,41 @@ fn time_prefix_word_count(command: &CommandNode) -> usize {
     start
 }
 
+/// Whether `state.current_cmd` has not yet started a command — it is
+/// either empty or holds only `pipeline_command` prefixes (`!` negation
+/// and/or `time` `timespec` heads with their `-p`/`--`/`!` operands,
+/// provided `time` did not follow a pipe).
+///
+/// In GNU `parse.y`, `pipeline_command` derives `BANG pipeline_command`,
+/// `timespec pipeline_command`, or `pipeline`, so a reserved word
+/// (`then`, `do`, `else`, `elif`, `fi`, `done`, `esac`, `}`) immediately
+/// following `!` or `time` is still in reserved-word position and is a
+/// syntax error rather than a command name (rubash#3648, rubash#3833).
+fn command_is_pending_pipeline_prefix(state: &ParseState) -> bool {
+    let cmd = &state.current_cmd;
+    if command_is_empty(cmd) || command_is_pending_inversion(cmd) {
+        return true;
+    }
+    let prefix_count = time_prefix_word_count(cmd);
+    if prefix_count == 0 || prefix_count != cmd.words.len() {
+        return false;
+    }
+    // GNU parse.y:3286 `time_command_acceptable`: `time` after `|` is an
+    // ordinary command word, not a `timespec` prefix.
+    if state
+        .ast
+        .commands
+        .last()
+        .is_some_and(|last| last.pipe.is_some())
+    {
+        return false;
+    }
+    let mut bare = cmd.clone();
+    bare.inverted = false;
+    bare.words.clear();
+    command_is_empty(&bare)
+}
+
 /// Emit the GNU `syntax error near unexpected token `('` parse error for a
 /// `=(` word in a position where assignments are not acceptable. GNU parses
 /// the whole line before executing any of it (same as the `}` case above),
@@ -1759,6 +1818,11 @@ fn reject_compound_assignment_position(
 
 /// Name-side validator for atomic compound assignments: optional
 /// `name[subscript]` head, then identifier rules (GNU arrayfunc.c).
+/// GNU general.c:288 valid_identifier: the FIRST character must be a
+/// legal starter (ASCII letter or `_`) — a digit-leading head such as
+/// `9bad` is not a compound-assignment LHS (rubash#3186), so the word
+/// stays plain and the builtin reports InvalidId on the flat word
+/// instead of the compound arm leaking markers into the diagnostic.
 fn valid_compound_assignment_lhs(lhs: &str) -> bool {
     // GNU general.c:519 assignment(): `name+=` is an assignment word (`+` is
     // valid only immediately before `=`), so `name+=(list)` opens a compound
@@ -1779,6 +1843,7 @@ fn valid_compound_assignment_lhs(lhs: &str) -> bool {
     };
     let bytes = head.as_bytes();
     !bytes.is_empty()
+        && (bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
         && bytes
             .iter()
             .all(|b| b.is_ascii_alphanumeric() || *b == b'_')

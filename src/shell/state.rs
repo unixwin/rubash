@@ -199,8 +199,13 @@ pub struct ShellState {
     /// cd family and the startup funnel maintain this field; other
     /// movers (pushd/popd) do not, so readers must confirm it still
     /// names `cwd` before trusting it and fall back to the derived
-    /// value when it does not. `None` until a session funnel seeds it.
-    /// Like `cwd`, it rides the Clone fork boundary.
+    /// value when it does not. `None` until a session funnel seeds it,
+    /// and `None` again after a failed physical resolution poisons it
+    /// (rubash#3349: GNU builtins/cd.def:183-191 resetpwd frees
+    /// the_current_working_directory, leaving it NULL, so the next
+    /// logical face re-derives through the getcwd gate instead of
+    /// printing the stale value). Like `cwd`, it rides the Clone fork
+    /// boundary.
     pub(crate) logical_cwd: Option<String>,
     /// rubash#618/#616: element writes append one storage segment in O(1)
     /// instead of re-rendering every key, so the storage string accumulates
@@ -244,8 +249,22 @@ pub struct ShellState {
     /// `$-` changes). Like the invocation fields it rides the
     /// Clone fork boundary: a subshell renders the letter too.
     pub(crate) forced_interactive: bool,
+    /// lib/readline/histexpand.c:94 `history_comment_char`, as armed by
+    /// variables.c:6168-6177 sv_histtimefmt: the first bind that leaves
+    /// HISTTIMEFORMAT existing sets it to '#' and NOTHING ever resets
+    /// it — unsetting HISTTIMEFORMAT only clears
+    /// history_write_timestamps. This latch is that process-global's
+    /// port: once true it stays true for the session (rubash#3535).
+    /// It rides the Clone fork boundary like the invocation fields:
+    /// a forked child inherits the parent's comment char.
+    pub(crate) history_comment_char_armed: bool,
     /// alias.c aliases.
     pub(crate) aliases: HashMap<String, Alias>,
+    /// Non-counting newline byte offsets for pre-expanded `$(...)` /
+    /// `${ ... }` comsub bodies (rubash#3838): the pre-pass expands
+    /// comsub bodies at parse time, so runtime `tokenize_comsub_body`
+    /// needs to know which `\n`s were introduced by alias expansion.
+    pub(crate) comsub_alias_newlines: HashMap<String, Vec<usize>>,
     /// variables.c shell_functions.
     pub(crate) functions: HashMap<String, FunctionBody>,
     /// Redirect words parsed at function definition time, applied at call.
@@ -297,6 +316,22 @@ pub struct ShellState {
     /// (get_bashargcv) during a read, where the executor is shared.
     /// None while the arrays have never been initialized.
     pub(crate) bash_arg_bottom: std::cell::RefCell<Option<Vec<String>>>,
+    /// rubash#3909: GNU variables.c `bash_argv_initialized` — the third
+    /// state of the BASH_ARGV/BASH_ARGC bottom frame. `bash_arg_bottom`
+    /// alone cannot tell "never initialized" (None, a top-level read
+    /// must synthesize from the live window) from "initialized with no
+    /// frame" (None, a top-level read must show ()). The flag is set
+    /// exactly where GNU sets it: by `init_bash_argv`
+    /// (variables.c:5640-5650, which sets it even when the push is a
+    /// no-op because the arrays do not exist yet), by the startup
+    /// bind (shell.c:1504-1529 `bind_args` sets it when it pushes a
+    /// frame), and by the startup extdebug arming sites (which run
+    /// before any binding, mirroring run_shopt_alist shell.c:576). It
+    /// is never cleared — not by `shopt -u extdebug`, not by a
+    /// rebind — exactly like GNU's. A Cell because the flag is read
+    /// from shared-executor paths (the getter, function entry) and
+    /// ShellState is already !Sync.
+    pub(crate) bash_argv_initialized: std::cell::Cell<bool>,
     /// rubash#2973: the materialized CELL contents of the getter-
     /// backed dynamic variables (variables.c INIT_DYNAMIC_VAR). GNU
     /// dynamics are real shell_variable cells: a by-name read fires
@@ -579,6 +614,22 @@ pub struct ShellState {
     /// off or inside a subshell, a cleared flag sends the child's stdin to
     /// /dev/null; a set flag inherits the redirected stream instead.
     pub(crate) stdin_redir: Cell<bool>,
+    /// rubash#3605: one-shot `pipe_in != NO_PIPE` marker for a pipeline
+    /// element's own compound dispatch. GNU's element grandchild
+    /// (execute_cmd.c:4570 `stdin_redir |= pipe_in != NO_PIPE`, and the
+    /// execute_in_subshell re-dispatch at :1731-1739/:1759-1764 that
+    /// consumes `command->redirects` before the inner
+    /// execute_command_internal sees them) decides stdin_redir at two
+    /// sites that need this bit: the `( )` assign at :1733
+    /// (`stdin_redirects(own) || pipe_in`) and the :826 control-structure
+    /// assign, which GNU skips for pipe-connected elements because the
+    /// redirects are already NULL there. Set on the compound stage
+    /// clone; consumed (replace(false)) at the element's own compound
+    /// dispatch so nested `( )`/control structures never see it — a
+    /// nested `( )` assigns `own redirects || NO_PIPE` and clears the
+    /// inherited flag, exactly like GNU (`{ ( cat & wait ); } <file`
+    /// feeds the async cat /dev/null, not the file).
+    pub(crate) element_pipe_stdin: Cell<bool>,
     /// jobs.c bookkeeping — the job registry (jobs.c `jobs` array /
     /// `job_table`): bash-observable job identity, pipeline pids, states,
     /// and notification bits. Process handles are Executor resources and
@@ -675,6 +726,19 @@ pub struct ShellState {
     /// substitution's command list, never the enclosing word's command.
     /// TODO: Move to ShellState::clone() for automatic isolation (requires &mut self API change)
     pub(crate) parameter_bad_substitution: Cell<bool>,
+    /// One-shot print budget for the `bad substitution` diagnostic
+    /// (rubash#3499). GNU subst.c:10277-10288 reports the FIRST
+    /// expansion failure of a word list and abandons the rest, so a
+    /// word (or element) expanded on several paths — the pipeline
+    /// scan plus the dispatch arms, a speculative concurrent attempt
+    /// plus the sequential re-expansion — must print the diagnostic
+    /// exactly once per latch lifetime. The verdict latch above still
+    /// sets at every site; only the print is deduplicated. This cell
+    /// rides every boundary the verdict rides (clone, interior
+    /// snapshot, comsub clears, the verdict consumers) so a spent
+    /// budget can neither suppress a later command's diagnostic nor
+    /// re-print inside one command's expansion.
+    pub(crate) bad_substitution_reported: Cell<bool>,
     /// A redirect-target pathname expansion failed under failglob (GNU
     /// subst.c:12668 report_error + exp_jump_to_top_level(DISCARD) inside
     /// redirection_expand -> expand_words_no_vars). The diagnostic prints
@@ -885,6 +949,7 @@ pub(crate) struct InteriorSnapshot {
     conditional_nounset_error: bool,
     arithmetic_last_error_category: Option<crate::executor::arithmetic::ArithmeticErrorCategory>,
     parameter_bad_substitution: bool,
+    bad_substitution_reported: bool,
     redirect_failglob_error: bool,
     redirect_failglob_seen: bool,
     debug_trap_command: Option<String>,
@@ -914,6 +979,13 @@ impl InteriorSnapshot {
 }
 
 impl ShellState {
+    pub(crate) fn record_comsub_alias_newlines(&mut self, records: Vec<(String, Vec<usize>)>) {
+        for (body, marks) in records {
+            if !marks.is_empty() {
+                self.comsub_alias_newlines.insert(body, marks);
+            }
+        }
+    }
     /// Live positional window (`shift`-visible `$1..$#`): the storage tail
     /// starting at `positional_offset`. GNU keeps the whole `list` and
     /// moves `loptend` (bash variables.c); every reader must go through
@@ -956,6 +1028,7 @@ impl ShellState {
             conditional_nounset_error: self.conditional_nounset_error.get(),
             arithmetic_last_error_category: self.arithmetic_last_error_category.get(),
             parameter_bad_substitution: self.parameter_bad_substitution.get(),
+            bad_substitution_reported: self.bad_substitution_reported.get(),
             redirect_failglob_error: self.redirect_failglob_error.get(),
             redirect_failglob_seen: self.redirect_failglob_seen.get(),
             debug_trap_command: self.debug_trap_command.borrow().clone(),
@@ -988,6 +1061,18 @@ impl ShellState {
         // this process, and only a snapshot taken NOW lets the
         // restore put the parent's limits back (see the field docs).
         saved.fork_saved_process_rlimits = crate::builtins::ulimit::snapshot_process_rlimits();
+        // rubash#3387: the fork boundary also snapshots the process's
+        // raw rusage — the child face's `times` reads current minus
+        // this baseline (GNU's forked child starts near zero;
+        // builtins/times.def:65-84). Popped by restore_flat_subshell
+        // (or the direct-assignment restore in external_finish.rs)
+        // when the stack top is this boundary at the same depth;
+        // `saved` carries the entry depth, which is the depth the
+        // boundary was entered from.
+        crate::executor::read_helpers::push_times_baseline(
+            crate::executor::read_helpers::TimesBaselineKind::CloneBoundary,
+            saved.subshell_depth.get(),
+        );
         saved
     }
 
@@ -1016,6 +1101,8 @@ impl ShellState {
             .set(snapshot.arithmetic_last_error_category);
         self.parameter_bad_substitution
             .set(snapshot.parameter_bad_substitution);
+        self.bad_substitution_reported
+            .set(snapshot.bad_substitution_reported);
         self.redirect_failglob_error
             .set(snapshot.redirect_failglob_error);
         self.redirect_failglob_seen
@@ -1048,7 +1135,9 @@ impl Clone for ShellState {
             invocation_interactive: self.invocation_interactive,
             invocation_login: self.invocation_login,
             forced_interactive: self.forced_interactive,
+            history_comment_char_armed: self.history_comment_char_armed,
             aliases: self.aliases.clone(),
+            comsub_alias_newlines: self.comsub_alias_newlines.clone(),
             functions: self.functions.clone(),
             function_definition_redirects: self.function_definition_redirects.clone(),
             function_def_infos: self.function_def_infos.clone(),
@@ -1061,6 +1150,7 @@ impl Clone for ShellState {
             bash_argc_stack: self.bash_argc_stack.clone(),
             bash_argv_stack: self.bash_argv_stack.clone(),
             bash_arg_bottom: self.bash_arg_bottom.clone(),
+            bash_argv_initialized: std::cell::Cell::new(self.bash_argv_initialized.get()),
             dynamic_cells: self.dynamic_cells.clone(),
             bash_lineno_stack: self.bash_lineno_stack.clone(),
             bash_source_stack: self.bash_source_stack.clone(),
@@ -1098,6 +1188,7 @@ impl Clone for ShellState {
             xtrace_suspended: Cell::new(self.xtrace_suspended.get()),
             in_command_substitution: Cell::new(self.in_command_substitution.get()),
             stdin_redir: Cell::new(self.stdin_redir.get()),
+            element_pipe_stdin: Cell::new(self.element_pipe_stdin.get()),
             job_table: self.job_table.clone(),
             last_background_pid: self.last_background_pid,
             last_procsub_pid: self.last_procsub_pid,
@@ -1123,6 +1214,7 @@ impl Clone for ShellState {
             conditional_nounset_error: Cell::new(self.conditional_nounset_error.get()),
             arithmetic_last_error_category: Cell::new(self.arithmetic_last_error_category.get()),
             parameter_bad_substitution: Cell::new(self.parameter_bad_substitution.get()),
+            bad_substitution_reported: Cell::new(self.bad_substitution_reported.get()),
             redirect_failglob_error: Cell::new(self.redirect_failglob_error.get()),
             redirect_failglob_seen: Cell::new(self.redirect_failglob_seen.get()),
             xtrace_fd: Cell::new(self.xtrace_fd.get()),
