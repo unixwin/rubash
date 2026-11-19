@@ -124,8 +124,13 @@ fn exec_input_procsub_body_diag_reports_construction_line_and_name() {
 
 #[test]
 fn conditional_output_procsub_body_diag_reports_construction_line() {
+    // rubash#3917: fd 3's closed premise is established constructively
+    // by the script's first line (`exec 3<&-`) — with fd 3 inherited
+    // open (CI runner shape) the body's `>&3` would write into the
+    // inherited pipe instead of failing, and GNU itself stays silent
+    // in that shape, so the premise must not rely on the harness.
     let script =
-        "echo a\necho b\necho c\n[[ -w >(tr a-z A-Z >&3) ]]\nsleep 0.3\nwait\necho rc=$?\n";
+        "exec 3<&-\necho b\necho c\n[[ -w >(tr a-z A-Z >&3) ]]\nsleep 0.3\nwait\necho rc=$?\n";
     let (_stdout, stderr, _code, path) = run_rubash_file(script, "f4cond");
     assert!(
         stderr.contains(&format!("{path}: line 4: 3: Bad file descriptor")),
