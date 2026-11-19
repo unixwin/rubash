@@ -3725,19 +3725,79 @@ pub enum UnclosedComsubShape {
     /// (evalstring.c:584-600) applies the posix ERREXIT gate — no
     /// unconditional exit.
     MainLevelTokenError { line: usize, token: String },
-    /// A BARE `(` inside a compound-assignment list (`x=((`):
-    /// parse_compound_assignment expects WORDs, so a `(` that no
-    /// word-internal construct consumes is a token error naming itself
-    /// (parse.y:7141-7151, yyerror branch 1 with current_token == '(').
+    /// A non-WORD token at a compound-assignment list's own level:
+    /// parse_compound_assignment reads each element with read_token
+    /// (parse.y:7141-7159) and hands anything that is not a WORD or
+    /// ASSIGNMENT_WORD to yyerror, which names the token itself
+    /// (error_token_from_token, parse.y:6783-6830). The class is every
+    /// token read_token can return there: a BARE `(` that no
+    /// word-internal construct consumes (`x=((`), a separator or pipe
+    /// (`;`, `;;`, `;&`, `;;&`, `&`, `&&`, `|`, `||`, `|&`), or a
+    /// redirect operator (`>`, `>>`, `>|`, `>&`, `<`, `<>`, `<&`, or
+    /// the IO_NUMBER digit run of an fd redirect like `2>`).
     /// Word-internal openers — `$(`, `$((`, `<(`, `>(`, a `${` body's
     /// parens, and a pattern operator's group under the live extglob
     /// gate — are consumed by read_token_word itself (parse.y:5466,
     /// PST_COMPASSIGN) and never become tokens.
+    /// `in_comsub` records whether the list sits inside a command or
+    /// process substitution: the nested parse set shell_eof_token to
+    /// `)' (parse.y:4727, restored at parse.y:4759), so
+    /// report_syntax_error (parse.y:6858-6859) appends
+    /// ` while looking for matching `)''.
     /// Abort: parse.y:7173-7179 — posix non-interactive shells jump
     /// FORCE_EOF with status 1 (no `command' gate; GNU `command eval
     /// 'x=('` posix dies rc 1), otherwise the DISCARD arm contains it and
     /// eval returns 1.
-    CompassignTokenError { line: usize },
+    CompassignTokenError {
+        line: usize,
+        token: String,
+        in_comsub: bool,
+    },
+}
+
+/// Whether a compound-assignment list whose frame is the stack top is
+/// enclosed by a substitution whose nested parse set shell_eof_token
+/// to `)' — a command substitution, or a process substitution (both
+/// are parsed by the matched-pair machinery: parse.y:4727 sets
+/// shell_eof_token = ')' and parse.y:4759 restores it), so
+/// report_syntax_error (parse.y:6858-6859) appends the
+/// ` while looking for matching `)'' suffix to a token error inside
+/// the list. A plain subshell frame does NOT set it (the subshell is
+/// parsed by the same yyparse), so only Comsub frames and
+/// procsub-shaped Plain frames (opener immediately after an unescaped
+/// `<`/`>`) count.
+fn compassign_matching_suffix(chars: &[char], stack: &[(usize, usize, OpenerKind)]) -> bool {
+    stack[..stack.len().saturating_sub(1)]
+        .iter()
+        .any(|&(idx, _, kind)| {
+            kind == OpenerKind::Comsub
+                || (kind == OpenerKind::Plain
+                    && idx > 0
+                    && matches!(chars.get(idx - 1), Some('<' | '>')))
+        })
+}
+
+/// The IO_NUMBER token read_token returns for a redirect whose fd is
+/// written explicitly: a digit run immediately before the `<`/`>` that
+/// starts at a token boundary (the number is the redirect token
+/// itself, and error_token_from_token names the digits — `v=(a 2>x`
+/// reports `2', while `v=(a x2>x` reports `>' because there the run
+/// is the tail of a word). Returns the digit run as the token text.
+fn io_number_token(chars: &[char], redirect_index: usize) -> Option<String> {
+    let mut start = redirect_index;
+    while start > 0 && chars[start - 1].is_ascii_digit() {
+        start -= 1;
+    }
+    if start == redirect_index {
+        return None;
+    }
+    let boundary = start == 0
+        || chars[start - 1].is_whitespace()
+        || matches!(chars[start - 1], '(' | ';' | '&' | '|');
+    if !boundary {
+        return None;
+    }
+    Some(chars[start..redirect_index].iter().collect())
 }
 
 /// Classify the unclosed-paren shape of an eval string the way GNU's parser
@@ -3920,6 +3980,17 @@ pub fn unclosed_comsub_eof_shape(
     // looking for matching `)'" because the in-comment `"' swallowed the
     // newline and the closing `)'.
     let mut token_boundary = true;
+    // rubash#3904 (A29): the first metachar token seen at a compound-
+    // assignment frame's own level — (frame's `(` char index, token
+    // line, token text, matching-suffix state at record time). GNU's
+    // token loop fails on that token before EOF is ever classified,
+    // but only while the list is still open where the input ends: a
+    // list that later closes hands the string back to the real parser,
+    // whose own verdict this scan must not pre-empt. The record is
+    // therefore held and surfaced at EOF (or yielded to by a bare `(`
+    // in the same frame), keyed by the frame's opener index so a
+    // closed frame's record can never fire for a later list.
+    let mut compassign_token_error: Option<(usize, usize, String, bool)> = None;
     while index < chars.len() {
         let ch = chars[index];
         if escaped {
@@ -4032,7 +4103,34 @@ pub fn unclosed_comsub_eof_shape(
                     && !extglob_group
                     && !(!prev_escaped && matches!(prev, Some('$' | '<' | '>')))
                 {
-                    return Some((UnclosedComsubShape::CompassignTokenError { line }, line));
+                    // rubash#3904 (A29): an earlier metachar token at
+                    // this same list level is the loop's first bad
+                    // token — read_token returns it before this `(` —
+                    // so it, not the paren, owns the report
+                    // (`v=(a; (echo` names `;').
+                    if let Some((_, token_line, token, in_comsub)) = compassign_token_error
+                        .as_ref()
+                        .filter(|(frame_idx, ..)| {
+                            stack.last().is_some_and(|&(idx, _, _)| idx == *frame_idx)
+                        })
+                    {
+                        return Some((
+                            UnclosedComsubShape::CompassignTokenError {
+                                line: *token_line,
+                                token: token.clone(),
+                                in_comsub: *in_comsub,
+                            },
+                            *token_line,
+                        ));
+                    }
+                    return Some((
+                        UnclosedComsubShape::CompassignTokenError {
+                            line,
+                            token: "(".to_string(),
+                            in_comsub: compassign_matching_suffix(&chars, &stack),
+                        },
+                        line,
+                    ));
                 }
                 let kind = match top {
                     // Inside an extglob group every further `(` is
@@ -4066,6 +4164,74 @@ pub fn unclosed_comsub_eof_shape(
                 // frame close: `${y:-a)b}` keeps its `)'.
                 if !matches!(stack.last().map(|e| e.2), Some(OpenerKind::Brace)) {
                     stack.pop();
+                }
+            }
+            ';' | '&' | '|' | '<' | '>' => {
+                // rubash#3904 (A29): a metachar at a compound-
+                // assignment frame's own level is a token read_token
+                // returns to parse_compound_assignment's loop, which
+                // yyerrors on it (parse.y:7141-7159) — the token text
+                // is error_token_from_token's (parse.y:6783-6830),
+                // digraphs included, and an fd redirect names its
+                // IO_NUMBER. Record the FIRST one against its frame;
+                // it surfaces only if the frame is still open at EOF
+                // (see the record's declaration). `<(`/`>(` are
+                // process substitutions — word-internal, consumed by
+                // the `(` arm — and `<<` is the heredoc family, whose
+                // inputs this scan's callers never admit.
+                if compassign_token_error.is_none() {
+                    if let Some(&(frame_idx, _, OpenerKind::Compassign)) = stack.last() {
+                        let next = chars.get(index + 1);
+                        let token: Option<String> = match ch {
+                            ';' => Some(
+                                match (next, chars.get(index + 2)) {
+                                    (Some(';'), Some('&')) => ";;&",
+                                    (Some(';'), _) => ";;",
+                                    (Some('&'), _) => ";&",
+                                    _ => ";",
+                                }
+                                .to_string(),
+                            ),
+                            '&' => Some(if next == Some(&'&') { "&&" } else { "&" }.to_string()),
+                            '|' => Some(
+                                match next {
+                                    Some('&') => "|&",
+                                    Some('|') => "||",
+                                    _ => "|",
+                                }
+                                .to_string(),
+                            ),
+                            '<' | '>' => {
+                                if next == Some(&'(') || (ch == '<' && next == Some(&'<')) {
+                                    None
+                                } else if let Some(digits) = io_number_token(&chars, index) {
+                                    Some(digits)
+                                } else {
+                                    Some(
+                                        match (ch, next) {
+                                            ('>', Some('>')) => ">>",
+                                            ('>', Some('|')) => ">|",
+                                            ('>', Some('&')) => ">&",
+                                            ('<', Some('>')) => "<>",
+                                            ('<', Some('&')) => "<&",
+                                            ('<', _) => "<",
+                                            _ => ">",
+                                        }
+                                        .to_string(),
+                                    )
+                                }
+                            }
+                            _ => None,
+                        };
+                        if let Some(token) = token {
+                            compassign_token_error = Some((
+                                frame_idx,
+                                line,
+                                token,
+                                compassign_matching_suffix(&chars, &stack),
+                            ));
+                        }
+                    }
                 }
             }
             '{' => {
@@ -4112,6 +4278,27 @@ pub fn unclosed_comsub_eof_shape(
         token_boundary =
             ch.is_whitespace() || matches!(ch, ';' | '&' | '|' | '(' | ')' | '<' | '>');
         index += 1;
+    }
+    // rubash#3904 (A29): a metachar token recorded at a compound-
+    // assignment frame's own level owns the report when that frame is
+    // still open at EOF — GNU's token loop (parse.y:7141-7159) fails
+    // on the token before EOF is ever classified, so this precedes
+    // every EOF verdict below, including the compound-assignment
+    // deferral.
+    if let Some((frame_idx, token_line, token, in_comsub)) = &compassign_token_error {
+        if stack
+            .iter()
+            .any(|&(idx, _, kind)| idx == *frame_idx && kind == OpenerKind::Compassign)
+        {
+            return Some((
+                UnclosedComsubShape::CompassignTokenError {
+                    line: *token_line,
+                    token: token.clone(),
+                    in_comsub: *in_comsub,
+                },
+                *token_line,
+            ));
+        }
     }
     let &(open_idx, open_line, open_kind) = stack.last()?;
     let newlines = input.matches('\n').count();
