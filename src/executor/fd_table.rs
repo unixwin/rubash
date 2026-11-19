@@ -1539,30 +1539,26 @@ impl FdTable {
                 return (read, write, false);
             }
         }
-        let displaced = if unsafe { libc::fcntl(to, libc::F_GETFD) } >= 0 {
-            let saved = unsafe {
-                libc::fcntl(
-                    to,
-                    libc::F_DUPFD_CLOEXEC,
-                    Self::SHELL_FD_BASE as crate::fd::HANDLE,
-                )
-            };
-            if saved < 0 {
-                return (read, write, false);
-            }
-            Some(saved as crate::fd::HANDLE)
-        } else {
-            None
-        };
+        // rubash#3938: the dup placement lands on a FREE number only.
+        // An occupied number means another descriptor of this very
+        // install chain (or a foreign binding) sits there - the
+        // rubash#2385 complementary-write flow opens the O_WRONLY end
+        // at the slot's number and then adds the read arm through
+        // dup_input; dup2-ing the read source over that number would
+        // destroy the fresh description behind the caller's back and
+        // the kept arm would answer EBADF. GNU's dup2 would replace
+        // the occupant (redir.c:1190); that face stays with the
+        // pre-#3938 virtual model for the dup direction and is
+        // documented in the lane report.
+        if unsafe { libc::fcntl(to, libc::F_GETFD) } >= 0 {
+            return (read, write, false);
+        }
         if unsafe { libc::dup2(source, to) } < 0 {
-            if let Some(saved) = displaced {
-                unsafe { libc::close(saved) };
-            }
             return (read, write, false);
         }
         self.placement_undo.push(PlacementUndo {
             fd: target,
-            displaced,
+            displaced: None,
         });
         unsafe {
             libc::fcntl(to, libc::F_SETFD, libc::FD_CLOEXEC);
@@ -1597,9 +1593,14 @@ impl FdTable {
             return entry;
         }
         // Read arm first, then the write arm. A shared two-arm entry
-        // (both arms name one description) lands once: the write pass
-        // sees the read arm already sitting on the slot's number and
-        // keeps the shared arm untouched.
+        // (both arms name ONE duplicate - a saved `<>` pair is one Rc
+        // across the arms) lands ONCE: the read pass dup2's it onto
+        // the slot, and the write pass - seeing the read arm already
+        // sitting on the slot's number - rebuilds itself on the same
+        // landed descriptor and drops the shared duplicate. Split-model
+        // entries (distinct arm descriptions) land each arm on its own
+        // turn; an arm whose slot number is taken keeps its parked
+        // shape. The landing never clobbers.
         let (read_handle, read_path) = match entry.read.as_ref() {
             Some(FdReadEndpoint::File(f)) => (Some(f.handle), Some(f.path.clone())),
             Some(FdReadEndpoint::CoprocStdout { fd: f, .. }) => {
@@ -1612,10 +1613,10 @@ impl FdTable {
             Some(FdWriteEndpoint::CoprocStdin { fd: f, .. }) => Some(f.handle),
             _ => None,
         };
-        if self
+        let read_landed = self
             .land_handle_onto_slot(fd, read_handle, write_handle)
-            .is_some()
-        {
+            .is_some();
+        if read_landed {
             let landed = Self::landed_file(fd, read_path.unwrap_or_default());
             entry.read = entry.read.take().map(|endpoint| match endpoint {
                 FdReadEndpoint::File(_) => FdReadEndpoint::File(landed.clone()),
@@ -1638,10 +1639,43 @@ impl FdTable {
             }
             _ => None,
         };
-        if self
+        let write_shared_with_landed_read = read_landed && write_handle_now == read_handle;
+        if write_shared_with_landed_read {
+            // The shared duplicate's description now lives at the
+            // slot's number (the read pass landed it); the duplicate
+            // itself is dead weight - close it unless another table
+            // entry still names the number.
+            let still_named = self.entries.values().any(|entry| {
+                entry
+                    .read
+                    .as_ref()
+                    .and_then(|endpoint| match endpoint {
+                        FdReadEndpoint::File(f) | FdReadEndpoint::CoprocStdout { fd: f, .. } => {
+                            Some(f.handle)
+                        }
+                        _ => None,
+                    })
+                    .is_some_and(|h| Some(h) == write_handle_now)
+                    || entry
+                        .write
+                        .as_ref()
+                        .and_then(|endpoint| match endpoint {
+                            FdWriteEndpoint::File(f)
+                            | FdWriteEndpoint::CoprocStdin { fd: f, .. } => Some(f.handle),
+                            _ => None,
+                        })
+                        .is_some_and(|h| Some(h) == write_handle_now)
+            });
+            if !still_named {
+                unsafe {
+                    libc::close(write_handle_now.expect("shared write handle"));
+                }
+            }
+        }
+        let write_landed = self
             .land_handle_onto_slot(fd, write_handle_now, read_handle_now)
-            .is_some()
-        {
+            .is_some();
+        if write_landed || write_shared_with_landed_read {
             let landed = Self::landed_file(fd, write_path.unwrap_or_default());
             entry.write = entry.write.take().map(|endpoint| match endpoint {
                 FdWriteEndpoint::File(_) => FdWriteEndpoint::File(landed),
@@ -1910,6 +1944,24 @@ impl FdTable {
     ) -> (FdReadEndpoint, FdWriteEndpoint, bool) {
         #[cfg(unix)]
         {
+            // rubash#3938: refuse the placement when the OTHER arm's
+            // own kernel handle currently sits ON the target number -
+            // the rubash#2385 complementary write holds its OWN
+            // O_WRONLY handle at the slot's number, and the placement
+            // dup2 (the read arm's description onto that number)
+            // would clobber it: the kept arm would answer EBADF. An
+            // arm parked elsewhere (or the shared one-Rc pair) places
+            // as before.
+            let other_handle_on_target = match (&read, &write) {
+                (FdReadEndpoint::File(read_file), FdWriteEndpoint::File(write_file)) => {
+                    read_file.handle != write_file.handle
+                        && write_file.handle == fd as crate::fd::HANDLE
+                }
+                _ => false,
+            };
+            if other_handle_on_target {
+                return (read, write, false);
+            }
             let file = match &read {
                 FdReadEndpoint::File(file) => file.clone(),
                 _ => match &write {
