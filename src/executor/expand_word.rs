@@ -1460,7 +1460,17 @@ impl Executor {
                 return Some(String::new());
             }
             if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset") {
-                if let Some(name) = arithmetic_unbound_variable(&expression, &overlaid) {
+                // GNU expr.c:1190-1216 expr_streval traps only a name the
+                // evaluator actually reads — never under a noeval
+                // short-circuit (`0 && u`), never an assignment target
+                // (rubash#3496/#3563 row 1). Judge the body with the real
+                // evaluator on a scratch copy (arith_body_nounset_trap),
+                // never with the expression-text scan it replaces: the
+                // scan trapped `u` in `$(( 0 && u ))` on for-list words
+                // and redirect targets, where GNU expands to 0.
+                if let Some(name) =
+                    crate::executor::arithmetic::arith_body_nounset_trap(&expression, &overlaid)
+                {
                     if !self.shell_state.arithmetic_expansion_error.replace(true) {
                         self.write_diagnostic_fd2(
                             format!("{}{}: unbound variable\n", self.error_prefix(), name)
@@ -1496,6 +1506,28 @@ impl Executor {
             self.shell_state
                 .arithmetic_last_error_category
                 .set(actual_category);
+            // GNU expr.c:1190-1216 expr_streval: a body the verdict-only
+            // scan above could not judge (it holds an expansion
+            // character, so arith_body_nounset_trap yields no verdict)
+            // still traps at this real evaluation — report the
+            // evaluator's name and take the nounset fatal class instead
+            // of synthesizing a syntax error from the expression text
+            // (rubash#3563 row 1: the `di=undef+1` face of the same gap
+            // is fixed at eval_integer_assignment_checked).
+            if actual_category
+                == Some(crate::executor::arithmetic::ArithmeticErrorCategory::UnboundVariable)
+            {
+                if let Some(name) = crate::executor::arithmetic::take_arith_unbound_name() {
+                    if !self.shell_state.arithmetic_expansion_error.replace(true) {
+                        self.write_diagnostic_fd2(
+                            format!("{}{}: unbound variable\n", self.error_prefix(), name)
+                                .as_bytes(),
+                        );
+                    }
+                    self.shell_state.arithmetic_nounset_error.set(true);
+                    return Some(String::new());
+                }
+            }
             // Bash reports arithmetic expansion errors (floating point,
             // negative exponent, division by zero, ...) on stderr instead of
             // silently producing nothing, and abandons the enclosing command

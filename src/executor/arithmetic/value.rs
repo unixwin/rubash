@@ -159,6 +159,17 @@ impl ConditionalArithParser<'_> {
     /// assigned empty array (`h=()`) is visible and reads its element
     /// as 0. Returns true (category + name recorded) on a trap.
     fn trap_unbound_variable_cell(&mut self, name: &str) -> bool {
+        self.trap_unbound_variable_cell_reporting(name, name)
+    }
+
+    /// The nounset verdict reads the RESOLVED cell (`name` — GNU
+    /// expr.c:1183-1190 array_variable_part follows the nameref before
+    /// the `v == 0 || invisible_p (v)` check), but err_unboundvar names
+    /// the reference as written (expr.c:1194 array_variable_name(tok)
+    /// cuts the token at `[` without resolving), so `report_name` is
+    /// what gets recorded for the diagnostic (rubash#3563: a read of
+    /// `r[0]` through `declare -n r=zz` reports `r`, not `zz`).
+    fn trap_unbound_variable_cell_reporting(&mut self, name: &str, report_name: &str) -> bool {
         let unbound = match self.env_vars.get(name) {
             None => {
                 super::super::arithmetic_name_is_unbound(name, self.env_vars)
@@ -170,7 +181,7 @@ impl ConditionalArithParser<'_> {
         };
         if unbound && crate::builtins::set::shell_option_enabled(self.env_vars, "nounset") {
             self.error_category = Some(super::super::ArithmeticErrorCategory::UnboundVariable);
-            super::super::record_arith_unbound_name(name.to_string());
+            super::super::record_arith_unbound_name(report_name.to_string());
             return true;
         }
         false
@@ -183,12 +194,12 @@ impl ConditionalArithParser<'_> {
         if self.noeval > 0 {
             return Some(0);
         }
-        if let ArithLValue::Indexed { name, .. }
-        | ArithLValue::IndexedRaw { name, .. }
-        | ArithLValue::Assoc { name, .. }
-        | ArithLValue::AssocEmptyKey { name, .. } = lvalue
+        if let ArithLValue::Indexed { name, written, .. }
+        | ArithLValue::IndexedRaw { name, written, .. }
+        | ArithLValue::Assoc { name, written, .. }
+        | ArithLValue::AssocEmptyKey { name, written, .. } = lvalue
         {
-            if self.trap_unbound_variable_cell(name) {
+            if self.trap_unbound_variable_cell_reporting(name, written) {
                 return None;
             }
         }
@@ -207,7 +218,9 @@ impl ConditionalArithParser<'_> {
                 let value = value.unwrap_or_default();
                 self.evaluate_variable_text(&format!("{name}[{index}]"), &value)
             }
-            ArithLValue::IndexedRaw { name, subscript } => {
+            ArithLValue::IndexedRaw {
+                name, subscript, ..
+            } => {
                 // Read context: GNU expr_streval evaluates the subscript at
                 // STR-token time (expr.c:1183 array_variable_part ->
                 // array_expand_index), once — `a[i++]` reads a[0] and
@@ -256,7 +269,7 @@ impl ConditionalArithParser<'_> {
                 self.record_diag(ArithEvalDiag::BadSubscript(name.clone()));
                 Some(0)
             }
-            ArithLValue::Assoc { name, key } => {
+            ArithLValue::Assoc { name, key, .. } => {
                 // Typed-cell leg, same discipline as indexed_element_text:
                 // a hit answers from the complete cell; a miss keeps the
                 // mirror leg (which also owns mirror-only assoc state).
@@ -848,7 +861,11 @@ impl ConditionalArithParser<'_> {
     /// Non-raw lvalues pass through unchanged.
     fn resolve_raw_subscript(&mut self, lvalue: &ArithLValue) -> Option<ArithLValue> {
         match lvalue {
-            ArithLValue::IndexedRaw { name, subscript } => {
+            ArithLValue::IndexedRaw {
+                name,
+                written,
+                subscript,
+            } => {
                 let index = match self.eval_subscript_index(subscript)? {
                     SubscriptIndex::Value(index) => index,
                     // The bind side of the empty-bracket token: no read
@@ -867,6 +884,7 @@ impl ConditionalArithParser<'_> {
                 Some(ArithLValue::Indexed {
                     bind_display: format!("{name}[{subscript}]"),
                     name: name.clone(),
+                    written: written.clone(),
                     index,
                 })
             }
@@ -950,6 +968,7 @@ impl ConditionalArithParser<'_> {
                 name,
                 index,
                 bind_display,
+                ..
             } => self.set_array_element(name, *index, value, bind_display),
             ArithLValue::IndexedRaw { .. } => {
                 // Should have been resolved by resolve_raw_subscript; no-op.
@@ -973,7 +992,7 @@ impl ConditionalArithParser<'_> {
                 // binds nothing.
                 self.record_diag(ArithEvalDiag::BadSubscript(bind_display.clone()));
             }
-            ArithLValue::Assoc { name, key } => self.set_assoc_element(name, key, value),
+            ArithLValue::Assoc { name, key, .. } => self.set_assoc_element(name, key, value),
         }
         if posix_bind {
             let isset = self.env_vars.contains_key("POSIXLY_CORRECT");

@@ -329,6 +329,14 @@ pub(super) enum ArithLValue {
     },
     Indexed {
         name: String,
+        /// The array name exactly as written in the expression. GNU
+        /// expr.c:1190-1194 checks the RESOLVED cell for the nounset
+        /// verdict (array_variable_part follows the nameref) but the
+        /// diagnostic names the reference as written
+        /// (array_variable_name cuts the token at `[` without resolving),
+        /// so a read through `declare -n r=zz` reports `r`, not `zz`
+        /// (rubash#3563).
+        written: String,
         index: i128,
         /// The full `name[sub]` token text as written, for the bind-time
         /// diagnostic: GNU's assign path reports the lvalue token verbatim
@@ -343,10 +351,14 @@ pub(super) enum ArithLValue {
     /// `a[n]=++n`) are visible to the subscript.
     IndexedRaw {
         name: String,
+        /// The array name exactly as written (see `Indexed::written`).
+        written: String,
         subscript: String,
     },
     Assoc {
         name: String,
+        /// The array name exactly as written (see `Indexed::written`).
+        written: String,
         key: String,
     },
     /// An associative lvalue whose bracket text is NONEMPTY but whose
@@ -359,6 +371,8 @@ pub(super) enum ArithLValue {
     /// nothing (arrayfunc.c:402-407), and the expression value is 0.
     AssocEmptyKey {
         name: String,
+        /// The array name exactly as written (see `Indexed::written`).
+        written: String,
         /// The `name[sub]` token text for the bind-time diagnostic.
         bind_display: String,
     },
@@ -367,16 +381,12 @@ pub(super) enum ArithLValue {
     /// and binds report `` `name[]': not a valid identifier `` while the
     /// expression keeps evaluating (verified GNU 5.3: `(( a[]=24 ))`
     /// reports the diagnostic, assigns nothing, and yields status 0).
-    InvalidElement {
-        display: String,
-    },
+    InvalidElement { display: String },
     /// `name[@]` / `name[*]` on an indexed array in arithmetic context —
     /// GNU array_expand_index (arrayfunc.c) rejects the `@`/`*` subscript
     /// with `name[@]: bad array subscript` and the reference reads as 0;
     /// a bind diagnoses once more and stores nothing (rubash#1136).
-    BadSubscriptElement {
-        display: String,
-    },
+    BadSubscriptElement { display: String },
 }
 
 /// Outcome of evaluating a raw indexed subscript
