@@ -1,3 +1,4 @@
+use super::parse_loop::compound_body_parse_error;
 use super::*;
 use crate::lexer::Token;
 
@@ -25,7 +26,27 @@ pub(super) fn parse_loop_command(
         return None;
     };
 
-    let do_index = find_loop_do(tokens, start + 1)?;
+    let do_index = match find_loop_do(tokens, start + 1) {
+        Some(index) => index,
+        // No `do` at all: the condition list was never parsed, so an
+        // error latched inside it — an argument-position `((`, whose
+        // lexer returns the bare `(` — was never produced, and the
+        // caller would guess the EOF-from-`while' shape. Parse the
+        // remainder as the condition list and surface the first latched
+        // error, the token GNU's yyerror fired at (parse.y:6724 yyerror
+        // -> parse.y:6841 report_syntax_error); with no latched error
+        // keep the None (rubash#3936, #3184 defect B same family).
+        None => {
+            let rest = parse_loop_body_commands(&tokens[start + 1..], source, source_line_offset);
+            if let Some(error) = rest
+                .iter()
+                .find_map(|command| compound_body_parse_error(command).cloned())
+            {
+                return Some((error, tokens.len(), Vec::new()));
+            }
+            return None;
+        }
+    };
     let mut condition =
         parse_loop_body_commands(&tokens[start + 1..do_index], source, source_line_offset);
     if condition.is_empty() {
@@ -75,7 +96,42 @@ pub(super) fn parse_loop_command(
             .collect();
         body_start += lead;
     }
-    let (body, done_index) = parse_loop_body(tokens, body_start, source, source_line_offset)?;
+    let (body, done_index) = match parse_loop_body(tokens, body_start, source, source_line_offset) {
+        Some(parsed) => parsed,
+        None => {
+            // The condition precedes the body in stream order, so its
+            // latched error is the first offender GNU reports — before
+            // the missing `done' mattered (`while echo a ((2)) do echo
+            // hi' names `(`, not the EOF form; rubash#3936).
+            if let Some(error) = condition
+                .iter()
+                .find_map(|command| compound_body_parse_error(command).cloned())
+            {
+                return Some((error, tokens.len(), unclaimed));
+            }
+            // No `done` was reached (input ended inside the body, or a
+            // bare `do` aborted the scan): the body slice was never
+            // parsed, so an error latched inside it — an
+            // argument-position `((`, whose lexer returns the bare `(`
+            // (parse.y:4895 parse_dparen, gated by
+            // reserved_word_acceptable, parse.y:4926) — was never
+            // produced, and the caller would guess the EOF-from-`while'
+            // shape. Parse the remainder and surface the first latched
+            // error, the token GNU's yyerror fired at (parse.y:6724
+            // yyerror -> parse.y:6841 report_syntax_error); with no
+            // latched error keep the None so the caller reports the EOF
+            // / mismatched-closer shape (rubash#3936, #3184 defect B
+            // same family, different file).
+            let rest = parse_loop_body_commands(&tokens[body_start..], source, source_line_offset);
+            if let Some(error) = rest
+                .iter()
+                .find_map(|command| compound_body_parse_error(command).cloned())
+            {
+                return Some((error, tokens.len(), unclaimed));
+            }
+            return None;
+        }
+    };
     // GNU parse.y:867-872: `DO compound_list DONE` — the loop body cannot
     // be empty; `do done` reports near `done', `do ; done' near `;'
     // (rubash#221). parse_loop_body_commands drops separator-only bodies,
