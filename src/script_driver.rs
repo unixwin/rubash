@@ -3762,6 +3762,23 @@ fn command_paren_verdict_disproved_by_parser(
     if crate::lexer::dparen_arith_group_never_closes(input, open_line) {
         return false;
     }
+    // rubash#3904 (A29): when the shape scan positively identifies a
+    // token error at a compound-assignment list's own level, the real
+    // parser's pre-EOF event marker for the never-closed list
+    // (__RUBASH_PARSE_ERROR_EOF_PAREN__, rubash#413) is NOT the first
+    // error event — GNU's token loop fails on the token before EOF is
+    // classified (parse.y:7141-7159) — so the verdict is not disproved
+    // by any marker the parser raises for the list's EOF. Let the
+    // unclosed route run and print the token error.
+    if matches!(
+        crate::lexer::unclosed_comsub_eof_shape(input, crate::lexer::parse_extended_glob()),
+        Some((
+            crate::lexer::UnclosedComsubShape::CompassignTokenError { .. },
+            _
+        ))
+    ) {
+        return false;
+    }
     let tokens = tokenize_with_initial_posix(input, parse_posix);
     if crate::lexer::heredoc_overflow_line().is_some() {
         if std::env::var_os("RUBASH_DBG_543").is_some() {
