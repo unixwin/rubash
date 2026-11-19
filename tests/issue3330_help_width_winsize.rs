@@ -223,7 +223,10 @@ fn help_width_follows_winsize_120_when_columns_unset() {
     assert_rows(&rows, EXPECTED_C_120, "winsize 120, COLUMNS unset");
     assert_ne!(
         rows,
-        EXPECTED_C_80.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        EXPECTED_C_80
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>(),
         "120-wide window must not render the 80-column fallback grid"
     );
 }
@@ -238,7 +241,10 @@ fn help_width_follows_winsize_100_when_columns_unset() {
     assert_rows(&rows, EXPECTED_C_100, "winsize 100, COLUMNS unset");
     assert_ne!(
         rows,
-        EXPECTED_C_80.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        EXPECTED_C_80
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>(),
         "100-wide window must not render the 80-column fallback grid"
     );
 }
