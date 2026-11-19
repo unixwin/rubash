@@ -126,8 +126,24 @@ fn rubash_c_with_fds(dir: &Path, script: &str, fds: &[(u32, i32)]) -> Run {
 #[cfg(unix)]
 fn cloexec_pipe() -> (i32, i32) {
     let mut fds = [0i32; 2];
+    // libc::pipe2 is glibc/musl-only; Darwin exposes pipe + fcntl instead
+    // (same pattern as fd/unix.rs create_capture_pipe).
+    #[cfg(target_os = "linux")]
     let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
-    assert_eq!(rc, 0, "pipe2: {}", std::io::Error::last_os_error());
+    #[cfg(not(target_os = "linux"))]
+    let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    assert_eq!(rc, 0, "pipe: {}", std::io::Error::last_os_error());
+    #[cfg(not(target_os = "linux"))]
+    for fd in fds {
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        assert!(
+            flags >= 0,
+            "fcntl F_GETFD: {}",
+            std::io::Error::last_os_error()
+        );
+        let rc2 = unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) };
+        assert_eq!(rc2, 0, "fcntl F_SETFD: {}", std::io::Error::last_os_error());
+    }
     (fds[0], fds[1])
 }
 
