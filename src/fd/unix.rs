@@ -1143,6 +1143,30 @@ pub fn spawn_whitelisted(spec: &WhitelistedSpawn) -> std::io::Result<SpawnedChil
     // (the inheritable-duplicate effect).
     let extras = spec.extra_handles.clone();
     let new_process_group = spec.new_process_group;
+    // rubash#3917 (round 5, follow-up): the whitelist contract above
+    // ("dup2 each spec fd onto its own number, then close everything
+    // else") was only half implemented — the close half was missing, so
+    // a runtime descriptor leaked into every respawned child and was
+    // adopted there as a user fd, resurrecting a number the user had
+    // explicitly closed (`exec N<&-`, issue1184 f4cond S1/S2). The leak
+    // is the signal self-pipe socketpair: installed lazily on the first
+    // Handler wish (kill.rs install), its ends land on the lowest free
+    // fds — fd 3 once the close above freed it — and, being non-CLOEXEC,
+    // survive execve into the child because this spawn never closed
+    // them. Highest fd the close loop must cover: every fd the parent
+    // holds, floored at 1024 (the spawn_async_direct floor).
+    let mut max_fd: libc::c_int = 1024;
+    for &extra in &extras {
+        max_fd = max_fd.max(extra);
+    }
+    // The cwd anchor is spent by the fchdir pre_exec above (registered
+    // first, so it runs first); keep it out of the close loop as
+    // belt-and-braces against hook ordering. It is a high directory fd
+    // (#3640 move_to_high_fd), not a user-visible low number.
+    let anchor_fd = spec.cwd_anchor_fd;
+    if let Some(anchor) = anchor_fd {
+        max_fd = max_fd.max(anchor);
+    }
     unsafe {
         use std::os::unix::process::CommandExt;
         cmd.pre_exec(move || {
@@ -1152,6 +1176,23 @@ pub fn spawn_whitelisted(spec: &WhitelistedSpawn) -> std::io::Result<SpawnedChil
                 if libc::dup2(fd, fd) < 0 {
                     return Err(std::io::Error::last_os_error());
                 }
+            }
+            // Close everything else above fd 2: stdio (0,1,2) was already
+            // arranged by std before pre_exec, the extras above were just
+            // pinned to their numbers, and the cwd anchor is excluded (see
+            // above). Every other inherited descriptor — the signal
+            // self-pipe included — dies here, so the child's startup
+            // adoption can only see what the parent's table stamped.
+            // Async-signal-safe: close(2) only, no allocation (the keep
+            // check is a linear scan of the already-moved extras).
+            for fd in 3..=max_fd {
+                if extras.contains(&fd) {
+                    continue;
+                }
+                if Some(fd) == anchor_fd {
+                    continue;
+                }
+                unsafe { libc::close(fd) };
             }
             // GNU's forked children restore the entry signal dispositions
             // between fork and exec (trap.c:1489 restore_original_signals,
