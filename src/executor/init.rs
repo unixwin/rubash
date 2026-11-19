@@ -1811,6 +1811,7 @@ impl Executor {
                 Rc::new(FileFd {
                     handle: restore_handle(handle),
                     closed: std::cell::Cell::new(false),
+                    adopted: false,
                     path: path.clone(),
                 })
             });
@@ -1822,6 +1823,7 @@ impl Executor {
                     _ => Some(Rc::new(FileFd {
                         handle: restore_handle(handle),
                         closed: std::cell::Cell::new(false),
+                        adopted: false,
                         path: path.clone(),
                     })),
                 },

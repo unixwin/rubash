@@ -821,6 +821,7 @@ fn coproc_spec_binding(spec: &CoprocFdSpec, path: &Option<PathBuf>) -> Option<Co
                 file: Rc::new(FileFd {
                     handle: crate::fd::into_handle(cloned),
                     closed: std::cell::Cell::new(false),
+                    adopted: false,
                     path: path.clone().unwrap_or_default(),
                 }),
                 read: false,
@@ -834,6 +835,7 @@ fn coproc_spec_binding(spec: &CoprocFdSpec, path: &Option<PathBuf>) -> Option<Co
                 file: Rc::new(FileFd {
                     handle: crate::fd::into_handle(cloned),
                     closed: std::cell::Cell::new(false),
+                    adopted: false,
                     path: PathBuf::from("coproc:pipe"),
                 }),
                 read: false,
@@ -6155,11 +6157,13 @@ impl Executor {
                     let coproc_write_file = Rc::new(FileFd {
                         handle: crate::fd::into_handle(stdin_writer),
                         closed: std::cell::Cell::new(false),
+                        adopted: false,
                         path: std::path::PathBuf::from(format!("coproc:{pid}:stdin")),
                     });
                     let coproc_read_file = Rc::new(FileFd {
                         handle: crate::fd::into_handle(stdout_reader),
                         closed: std::cell::Cell::new(false),
+                        adopted: false,
                         path: std::path::PathBuf::from(format!("coproc:{pid}:stdout")),
                     });
                     let (coproc_read_fd, coproc_write_fd) = self.allocate_coproc_fds();
@@ -6618,6 +6622,7 @@ impl Executor {
                                     file: Rc::new(FileFd {
                                         handle: crate::fd::into_handle(file),
                                         closed: std::cell::Cell::new(false),
+                                        adopted: false,
                                         path: self.session_path(shell_path_to_windows(
                                             &target,
                                             &self.shell_state.env_vars,
@@ -6656,6 +6661,7 @@ impl Executor {
                                     file: Rc::new(FileFd {
                                         handle: crate::fd::into_handle(file),
                                         closed: std::cell::Cell::new(false),
+                                        adopted: false,
                                         path: session_target,
                                     }),
                                     read: false,
@@ -6981,6 +6987,7 @@ impl Executor {
                                     file: Rc::new(FileFd {
                                         handle: crate::fd::into_handle(file),
                                         closed: std::cell::Cell::new(false),
+                                        adopted: false,
                                         path: self.session_path(shell_path_to_windows(
                                             &target,
                                             &self.shell_state.env_vars,
@@ -7012,6 +7019,7 @@ impl Executor {
                                 file: Rc::new(FileFd {
                                     handle: crate::fd::into_handle(file),
                                     closed: std::cell::Cell::new(false),
+                                    adopted: false,
                                     path: session_target,
                                 }),
                                 read: true,

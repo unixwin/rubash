@@ -110,6 +110,24 @@ pub(crate) struct FileFd {
     /// leaking the number into /proc/$$/fd. The flag also keeps a
     /// stale holder's later Drop from re-closing a recycled number.
     pub(crate) closed: std::cell::Cell<bool>,
+    /// rubash#3917: this handle is a startup-adopted copy of an
+    /// inherited descriptor (see register_inherited_process_fds).
+    /// The copy is the executor's private duplicate (rubash#1838),
+    /// parked on whatever kernel number the adoption dup landed
+    /// on — a number the shell never promised to keep. When a
+    /// materialization or placement needs that exact number, the
+    /// copy is relocated out of the way (evict_adopted_copy_from)
+    /// instead of refusing the bind: GNU has no such copy at all
+    /// (its table names the inherited descriptor by its own
+    /// number, redir.c:1160), and GNU itself relocates internal
+    /// descriptors that would collide with a needed number
+    /// (move_to_high_fd, general.c:702). Only adopted copies are
+    /// evictable; a real binding's handle is never relocated. The
+    /// copy is relocated, never borrowed: the table never names a
+    /// descriptor it does not own, so no engine lifecycle can
+    /// close a host or sibling-session descriptor by number
+    /// (rubash#1838).
+    pub(crate) adopted: bool,
     pub(crate) path: PathBuf,
 }
 
@@ -119,6 +137,7 @@ impl FileFd {
             Rc::new(Self {
                 handle,
                 closed: std::cell::Cell::new(false),
+                adopted: false,
                 path,
             })
         })
@@ -139,6 +158,7 @@ impl FileFd {
         Ok(Rc::new(Self {
             handle,
             closed: std::cell::Cell::new(false),
+            adopted: false,
             path,
         }))
     }
@@ -148,6 +168,7 @@ impl FileFd {
             Rc::new(Self {
                 handle,
                 closed: std::cell::Cell::new(false),
+                adopted: false,
                 path,
             })
         })
@@ -172,11 +193,13 @@ impl FileFd {
                 Rc::new(Self {
                     handle: read,
                     closed: std::cell::Cell::new(false),
+                    adopted: false,
                     path: path.clone(),
                 }),
                 Rc::new(Self {
                     handle: write,
                     closed: std::cell::Cell::new(false),
+                    adopted: false,
                     path,
                 }),
             ));
@@ -220,6 +243,7 @@ impl FileFd {
         Rc::new(Self {
             handle,
             closed: std::cell::Cell::new(false),
+            adopted: false,
             path,
         })
     }
@@ -283,6 +307,7 @@ impl FileFd {
         Ok(Rc::new(Self {
             handle,
             closed: std::cell::Cell::new(false),
+            adopted: false,
             path: self.path.clone(),
         }))
     }
@@ -951,6 +976,7 @@ impl FdTable {
                     let file = Rc::new(FileFd {
                         handle,
                         closed: std::cell::Cell::new(false),
+                        adopted: true,
                         path: crate::fd::inherited_fd_path(0),
                     });
                     // rubash#3655: the adopted write arm joins the
@@ -979,6 +1005,7 @@ impl FdTable {
             let file = Rc::new(FileFd {
                 handle,
                 closed: std::cell::Cell::new(false),
+                adopted: true,
                 path: crate::fd::inherited_fd_path(fd),
             });
             if readable && writable {
@@ -1133,7 +1160,11 @@ impl FdTable {
     /// endpoint must stay virtual: the number is already occupied
     /// in this process (another entry's raw handle, an inherited
     /// descriptor, a transient spawn pipe) or the dup fails — never
-    /// clobber a live descriptor.
+    /// clobber a live descriptor. Callers first relocate any
+    /// startup-adopted copy parked on the number
+    /// (evict_adopted_copy_from): the copy is the executor's own
+    /// private duplicate, never a binding, so it yields the
+    /// number instead of refusing the bind.
     #[cfg(unix)]
     fn materialized_handle(fd: u32, raw: crate::fd::HANDLE) -> Option<crate::fd::HANDLE> {
         let target = fd as crate::fd::HANDLE;
@@ -1147,6 +1178,92 @@ impl FdTable {
             return None;
         }
         Some(target)
+    }
+
+    /// rubash#3917: relocate every startup-adopted copy parked on
+    /// kernel descriptor `target` to a fresh descriptor at or
+    /// above SHELL_FD_BASE, updating the table entries that name
+    /// it. Returns true when at least one copy was relocated.
+    ///
+    /// The adopted copy is a phantom occupant: GNU's table names
+    /// the inherited descriptor by its own number (redir.c:1160),
+    /// so no GNU number is ever blocked by bookkeeping; the copy
+    /// exists only to keep the executor from closing host
+    /// descriptors (rubash#1838). Blocking a materialization on
+    /// it inverts that purpose — the pin face it produced was a
+    /// {var} fd staying virtual because an adopted copy of an
+    /// inherited pipe sat on the var's number. Relocation is a
+    /// plain F_DUPFD_CLOEXEC of the copy (the same primitive GNU
+    /// uses for its saves, redir.c:965/:1082/:1144, and the same
+    /// idea as move_to_high_fd, general.c:702): the inherited
+    /// descriptor itself, on its own number, is never touched.
+    /// The victim FileFd then drops like any replaced endpoint
+    /// and closes the now-redundant copy on the number, while
+    /// the description it carried lives on at the relocated
+    /// number under the replacement entry — the same replacement
+    /// semantics materialize_read_endpoint already relies on.
+    /// The copy is relocated, never borrowed: the table never
+    /// names a descriptor it does not own, so no engine
+    /// lifecycle can close a host or sibling-session descriptor
+    /// by number (rubash#1838).
+    #[cfg(unix)]
+    fn evict_adopted_copy_from(&mut self, target: crate::fd::HANDLE) -> bool {
+        let mut victims: Vec<Rc<FileFd>> = Vec::new();
+        for entry in self.entries.values() {
+            for file in [
+                match &entry.read {
+                    Some(FdReadEndpoint::File(f)) => Some(f),
+                    _ => None,
+                },
+                match &entry.write {
+                    Some(FdWriteEndpoint::File(f)) => Some(f),
+                    _ => None,
+                },
+            ] {
+                if let Some(f) = file {
+                    if f.adopted
+                        && !f.is_retired()
+                        && f.handle == target
+                        && !victims.iter().any(|v| Rc::ptr_eq(v, f))
+                    {
+                        victims.push(f.clone());
+                    }
+                }
+            }
+        }
+        let mut relocated_any = false;
+        for victim in victims {
+            let relocated = unsafe {
+                libc::fcntl(
+                    target,
+                    libc::F_DUPFD_CLOEXEC,
+                    Self::SHELL_FD_BASE as libc::c_int,
+                )
+            };
+            if relocated < 0 {
+                continue;
+            }
+            let replacement = Rc::new(FileFd {
+                handle: relocated,
+                closed: std::cell::Cell::new(victim.closed.get()),
+                adopted: true,
+                path: victim.path.clone(),
+            });
+            for entry in self.entries.values_mut() {
+                if let Some(FdReadEndpoint::File(f)) = &mut entry.read {
+                    if Rc::ptr_eq(f, &victim) {
+                        *f = replacement.clone();
+                    }
+                }
+                if let Some(FdWriteEndpoint::File(f)) = &mut entry.write {
+                    if Rc::ptr_eq(f, &victim) {
+                        *f = replacement.clone();
+                    }
+                }
+            }
+            relocated_any = true;
+        }
+        relocated_any
     }
 
     /// rubash#3917: dup `file`'s handle onto kernel descriptor `fd`
@@ -1179,6 +1296,10 @@ impl FdTable {
         if file.handle == target {
             return None;
         }
+        // A startup-adopted copy parked on this number is not a
+        // holder: relocate it first (see evict_adopted_copy_from),
+        // so the held scan below only sees real bindings.
+        self.evict_adopted_copy_from(target);
         // Another live entry's handle on this number: never clobber.
         let held = self.entries.iter().any(|(other, entry)| {
             *other != fd
@@ -1250,6 +1371,7 @@ impl FdTable {
         Some(Rc::new(FileFd {
             handle: target,
             closed: std::cell::Cell::new(false),
+            adopted: false,
             path: file.path.clone(),
         }))
     }
@@ -1474,23 +1596,39 @@ impl FdTable {
             }
             return match endpoint {
                 FdReadEndpoint::File(file) => match Self::materialized_handle(fd, file.handle) {
-                    Some(handle) => FdReadEndpoint::File(Rc::new(FileFd {
-                        handle,
-                        closed: std::cell::Cell::new(false),
-                        path: file.path.clone(),
-                    })),
+                    Some(handle) => {
+                        // rubash#3917: when the descriptor already
+                        // sat on its number (raw == target — a dup
+                        // of an adopted copy onto the copy's own
+                        // parking number is the live case), the
+                        // replacement below owns that number now;
+                        // the source object must not close it on
+                        // drop.
+                        Self::mark_displaced_by_dup2(&file, fd);
+                        FdReadEndpoint::File(Rc::new(FileFd {
+                            handle,
+                            closed: std::cell::Cell::new(false),
+                            adopted: false,
+                            path: file.path.clone(),
+                        }))
+                    }
                     None => FdReadEndpoint::File(file),
                 },
                 FdReadEndpoint::CoprocStdout { pid, fd: file } => {
                     match Self::materialized_handle(fd, file.handle) {
-                        Some(handle) => FdReadEndpoint::CoprocStdout {
-                            pid,
-                            fd: Rc::new(FileFd {
-                                handle,
-                                closed: std::cell::Cell::new(false),
-                                path: file.path.clone(),
-                            }),
-                        },
+                        Some(handle) => {
+                            // rubash#3917: see the File arm above.
+                            Self::mark_displaced_by_dup2(&file, fd);
+                            FdReadEndpoint::CoprocStdout {
+                                pid,
+                                fd: Rc::new(FileFd {
+                                    handle,
+                                    closed: std::cell::Cell::new(false),
+                                    adopted: false,
+                                    path: file.path.clone(),
+                                }),
+                            }
+                        }
                         None => FdReadEndpoint::CoprocStdout { pid, fd: file },
                     }
                 }
@@ -1514,23 +1652,33 @@ impl FdTable {
             }
             return match endpoint {
                 FdWriteEndpoint::File(file) => match Self::materialized_handle(fd, file.handle) {
-                    Some(handle) => FdWriteEndpoint::File(Rc::new(FileFd {
-                        handle,
-                        closed: std::cell::Cell::new(false),
-                        path: file.path.clone(),
-                    })),
+                    Some(handle) => {
+                        // rubash#3917: see materialize_read_endpoint.
+                        Self::mark_displaced_by_dup2(&file, fd);
+                        FdWriteEndpoint::File(Rc::new(FileFd {
+                            handle,
+                            closed: std::cell::Cell::new(false),
+                            adopted: false,
+                            path: file.path.clone(),
+                        }))
+                    }
                     None => FdWriteEndpoint::File(file),
                 },
                 FdWriteEndpoint::CoprocStdin { pid, fd: file } => {
                     match Self::materialized_handle(fd, file.handle) {
-                        Some(handle) => FdWriteEndpoint::CoprocStdin {
-                            pid,
-                            fd: Rc::new(FileFd {
-                                handle,
-                                closed: std::cell::Cell::new(false),
-                                path: file.path.clone(),
-                            }),
-                        },
+                        Some(handle) => {
+                            // rubash#3917: see materialize_read_endpoint.
+                            Self::mark_displaced_by_dup2(&file, fd);
+                            FdWriteEndpoint::CoprocStdin {
+                                pid,
+                                fd: Rc::new(FileFd {
+                                    handle,
+                                    closed: std::cell::Cell::new(false),
+                                    adopted: false,
+                                    path: file.path.clone(),
+                                }),
+                            }
+                        }
                         None => FdWriteEndpoint::CoprocStdin { pid, fd: file },
                     }
                 }
@@ -1697,6 +1845,13 @@ impl FdTable {
         // placement scans the table, so it cannot run under the
         // entry_mut borrow below).
         let (endpoint, placed) = self.place_persistent_read_endpoint(fd, endpoint);
+        // rubash#3917: a startup-adopted copy parked on this
+        // number yields it before materialization consults the
+        // kernel (see evict_adopted_copy_from).
+        #[cfg(unix)]
+        if fd >= Self::SHELL_FD_BASE {
+            self.evict_adopted_copy_from(fd as crate::fd::HANDLE);
+        }
         let (outgoing_read, outgoing_write);
         {
             let entry = self.entry_mut(fd, dynamic);
@@ -1739,6 +1894,11 @@ impl FdTable {
         // persistent redirect BEFORE the entry is swapped (see
         // open_input).
         let (endpoint, placed) = self.place_persistent_write_endpoint(fd, endpoint);
+        // rubash#3917: see open_input.
+        #[cfg(unix)]
+        if fd >= Self::SHELL_FD_BASE {
+            self.evict_adopted_copy_from(fd as crate::fd::HANDLE);
+        }
         let (outgoing_read, outgoing_write);
         {
             let entry = self.entry_mut(fd, dynamic);
@@ -1789,6 +1949,11 @@ impl FdTable {
         // number for a persistent redirect BEFORE the entry is
         // swapped (see open_input).
         let (read, write, placed) = self.place_persistent_readwrite_endpoint(fd, read, write);
+        // rubash#3917: see open_input.
+        #[cfg(unix)]
+        if fd >= Self::SHELL_FD_BASE {
+            self.evict_adopted_copy_from(fd as crate::fd::HANDLE);
+        }
         let (outgoing_read, outgoing_write);
         {
             let entry = self.entry_mut(fd, dynamic);
@@ -1864,6 +2029,13 @@ impl FdTable {
             }
         } else {
             self.stdout_alias_generation.remove(&target);
+        }
+        // rubash#3917: see open_input — the dup target's number
+        // is yielded by any adopted copy parked on it before the
+        // copies below materialize.
+        #[cfg(unix)]
+        if target >= Self::SHELL_FD_BASE {
+            self.evict_adopted_copy_from(target as crate::fd::HANDLE);
         }
         let dynamic = self.is_dynamic(target);
         let (outgoing_read, outgoing_write);
