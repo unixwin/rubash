@@ -3397,6 +3397,24 @@ fn if_frame_offender(region: &[Token]) -> Option<usize> {
         }
         if token.kind == TokenKind::Keyword {
             let value = token.value.trim_end();
+            // A folded arithmetic command is a COMMAND, never a phase
+            // keyword: the parse_dparen fold keeps the whole `((…))' in
+            // a single Keyword token (the same shape
+            // push_unexpected_token_error_named special-cases for
+            // rubash#3204), and GNU's grammar accepts it wherever a
+            // command is accepted (parse.y:1203 arith_command). The
+            // phase-keyword legality check below would otherwise blame
+            // it as the offender — `if ((1))' at EOF named `((1))'
+            // instead of the `if' EOF report (rubash#3184). At our own
+            // frame level it plays the word token's role: the phase's
+            // command.
+            if token.value.starts_with("((") && token.value.ends_with("))") {
+                if stack.len() == 1 {
+                    expect_command = false;
+                    phase_has_command = true;
+                }
+                continue;
+            }
             // A compound command opener at our own frame level starts a
             // command (`if (x); fi` ⇒ the missing `then` blames `fi`).
             if stack.len() == 1 {

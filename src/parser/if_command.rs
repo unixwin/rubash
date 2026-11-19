@@ -44,7 +44,21 @@ pub(super) fn parse_if_command(
         // The condition errored before its `then`; the cold scanner
         // recovers the boundary the slice parse would have used.
         SectionOutcome::Errored { body } => {
-            let then_index = find_if_then(tokens, start + 1)?;
+            let Some(then_index) = find_if_then(tokens, start + 1) else {
+                // No `then` boundary to recover: a parse error latched
+                // inside the condition is itself the report — GNU
+                // yyerror fires at the first offending token, so
+                // `if echo a ((2))' names `(', not the missing-`then'
+                // EOF form the caller's resync would guess
+                // (rubash#3184).
+                if let Some(error) = body
+                    .iter()
+                    .find_map(|command| compound_body_parse_error(command).cloned())
+                {
+                    return Some((error, tokens.len()));
+                }
+                return None;
+            };
             let condition = non_empty_body(body);
             let keyword_metadata = build_keyword_metadata(&tokens[start]);
             let then_keyword = tokens[then_index].value.clone();
@@ -125,6 +139,19 @@ fn parse_if_command_after_condition(
     let section = parse_if_section_inline(tokens, index, state);
     condition = state.heredoc_frames.pop().unwrap_or_default();
     let (then_body, boundary) = section?;
+    // A body error the boundary scan could not place (boundary ==
+    // tokens.len() is parse_if_section_inline's unrecovered-error
+    // signal) is the report: GNU yyerror fired at that token, before
+    // the missing `fi' mattered (rubash#3184: `if ((0)) then echo a
+    // ((2))' names `(', not the condition's `((0))').
+    if boundary >= tokens.len() {
+        if let Some(error) = then_body
+            .iter()
+            .find_map(|command| compound_body_parse_error(command).cloned())
+        {
+            return Some((error, tokens.len()));
+        }
+    }
     // GNU parse.y: `then`/`elif`/`else` bodies are non-empty command lists.
     if then_body.is_empty() {
         // An error already latched inside the CONDITION is the report
@@ -152,8 +179,22 @@ fn parse_if_command_after_condition(
                     body,
                     index: elif_then,
                 } => Some((non_empty_body(body), elif_then)),
-                SectionOutcome::Errored { body } => find_if_then(tokens, index + 1)
-                    .map(|elif_then| (non_empty_body(body), elif_then)),
+                SectionOutcome::Errored { body } => match find_if_then(tokens, index + 1) {
+                    Some(elif_then) => Some((non_empty_body(body), elif_then)),
+                    None => {
+                        // Same first-offender rule as the main
+                        // condition (rubash#3184): with no `then'
+                        // boundary to recover, the condition's latched
+                        // error is the report.
+                        if let Some(error) = body
+                            .iter()
+                            .find_map(|command| compound_body_parse_error(command).cloned())
+                        {
+                            return Some((error, tokens.len()));
+                        }
+                        None
+                    }
+                },
                 SectionOutcome::Eof { .. } | SectionOutcome::AbortedThen { .. } => None,
             };
         let Some((mut condition, elif_then)) = elif_condition else {
@@ -169,6 +210,16 @@ fn parse_if_command_after_condition(
         let section = parse_if_section_inline(tokens, elif_then + 1, state);
         condition = state.heredoc_frames.pop().unwrap_or_default();
         let (body, next_boundary) = section?;
+        // Same unrecovered-body-error rule as the then body
+        // (rubash#3184).
+        if next_boundary >= tokens.len() {
+            if let Some(error) = body
+                .iter()
+                .find_map(|command| compound_body_parse_error(command).cloned())
+            {
+                return Some((error, tokens.len()));
+            }
+        }
         if body.is_empty() {
             return None;
         }
@@ -189,6 +240,16 @@ fn parse_if_command_after_condition(
         let else_keyword = tokens[index].value.clone();
         let else_keyword_metadata = build_keyword_metadata(&tokens[index]);
         let (body, next_boundary) = parse_if_section_inline(tokens, index + 1, state)?;
+        // Same unrecovered-body-error rule as the then body
+        // (rubash#3184).
+        if next_boundary >= tokens.len() {
+            if let Some(error) = body
+                .iter()
+                .find_map(|command| compound_body_parse_error(command).cloned())
+            {
+                return Some((error, tokens.len()));
+            }
+        }
         if body.is_empty() {
             return None;
         }
@@ -305,8 +366,24 @@ fn parse_if_section_inline(
         // the enclosing parse discards the construct via
         // compound_body_parse_error anyway).
         SectionOutcome::Errored { body } => {
-            let index = scan_if_section_end(tokens, start)?;
-            Some((non_empty_body(body), index))
+            let body = non_empty_body(body);
+            match scan_if_section_end(tokens, start) {
+                Some(index) => Some((body, index)),
+                // The scanner cannot place a boundary (input ran out,
+                // or a `then' aborts its walk), but the body already
+                // carries the parse error GNU's yyerror fired at — the
+                // first offending token in stream order. Discarding it
+                // let the caller's resync blame another token
+                // (rubash#3184). Surface the body at end-of-input; the
+                // caller returns the latched error itself.
+                None if body
+                    .iter()
+                    .any(|command| compound_body_parse_error(command).is_some()) =>
+                {
+                    Some((body, tokens.len()))
+                }
+                None => None,
+            }
         }
     }
 }

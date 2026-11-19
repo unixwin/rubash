@@ -577,15 +577,24 @@ fn push_replacement_literal(marked: &mut String, ch: char) {
 /// (rubash#1927: `${v/b/<U+E312>x}` printed U+E400 U+E312 x). An existing
 /// pair is already-escaped user data — copy it as a unit, the same
 /// verbatim rule push_single_quoted_replacement_char applies to decoded
-/// ANSI-C text. The E400 + E000 pair is NOT taken: U+E000 owns the
-/// raw-byte pair protocol (push_replacement_literal copies it verbatim)
-/// and its pair form here is that protocol, not the literal escape.
+/// ANSI-C text.
+///
+/// The E400 + E000 pair IS taken, like every other E400 pair: in
+/// transport text an E400-first pair is always the literal-char escape
+/// (a typed U+E000 user glyph, entry-escaped once), never the raw-byte
+/// pair protocol — raw-byte pairs are E000-FIRST (E000 + E001..E100
+/// payload) and cannot start with E400. Excluding E000 here made the
+/// mark pass re-escape the pair (E400 -> E400 E400, E000 verbatim), so
+/// a typed `${v/b/\u{E000}x}` replacement came out double-escaped
+/// (rubash#1927: `literal_typed_e000_unchanged` printed U+E400 U+E000
+/// x). A bare E000 (a genuine raw-byte introducer) still rides
+/// push_replacement_literal's verbatim arm — this helper only fires on
+/// E400-first pairs, so raw-byte pairs are untouched.
 fn push_existing_literal_pair(marked: &mut String, chars: &[char], index: usize) -> Option<usize> {
     if chars.get(index).copied() == Some(crate::executor::markers::LITERAL_CHAR_ESCAPE)
-        && chars.get(index + 1).is_some_and(|next| {
-            crate::executor::markers::is_marker_zone_char(*next)
-                && *next as u32 != crate::executor::markers::RAW_BYTE_MARKER_ESCAPE
-        })
+        && chars
+            .get(index + 1)
+            .is_some_and(|next| crate::executor::markers::is_marker_zone_char(*next))
     {
         marked.push(chars[index]);
         marked.push(chars[index + 1]);

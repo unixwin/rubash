@@ -689,17 +689,14 @@ impl Executor {
                 // push when debugging — the first materialization
                 // installs the bottom frame from the CURRENT positional
                 // parameters (the caller's context), which then persists
-                // for the shell's lifetime (rubash#1051).
-                if self.shell_state.bash_arg_bottom.borrow().is_none() {
-                    *self.shell_state.bash_arg_bottom.borrow_mut() = Some(
-                        self.shell_state
-                            .positional_window()
-                            .iter()
-                            .rev()
-                            .cloned()
-                            .collect(),
-                    );
-                }
+                // for the shell's lifetime (rubash#1051). rubash#3909:
+                // call the shared init, not an inline latch — it is a
+                // no-op once bash_argv_initialized is set (startup
+                // arming with no args must not install a frame here;
+                // oracle: `-O extdebug -c 'shopt -u extdebug; shopt -s
+                // extdebug; f(){ declare -p BASH_ARGC; }; f a'` ->
+                // ([0]="1") with no bottom frame).
+                self.init_bash_argv();
                 self.shell_state
                     .bash_argc_stack
                     .insert(0, args.len().to_string());
@@ -708,6 +705,7 @@ impl Executor {
                 }
             } else if crate::builtins::shopt::compatibility_level(&self.shell_state.env_vars) <= 44
                 && self.shell_state.bash_arg_bottom.borrow().is_none()
+                && !self.shell_state.bash_argv_initialized.get()
             {
                 // rubash#1110 item 4 / rubash#1051 integration: GNU
                 // execute_cmd.c:5337-5339 runs init_bash_argv at
@@ -725,6 +723,12 @@ impl Executor {
                 // earlier (startup, extdebug enable, or a top-level
                 // read via variables.c get_bashargcv). Once installed,
                 // the frame persists for later reads at any level.
+                // rubash#3909: unless bash_argv_initialized is
+                // already set (startup arming): GNU's entry-time init
+                // is then a no-op and no empty frame appears (oracle:
+                // `-O extdebug -c 'shopt -u extdebug; shopt -s
+                // compat44; f(){ declare -p BASH_ARGC; }; f a'` ->
+                // ()), hence the flag guard on this branch.
                 *self.shell_state.bash_arg_bottom.borrow_mut() = Some(Vec::new());
             }
             self.set_positional_params(args.to_vec());
@@ -1573,7 +1577,13 @@ impl Executor {
                             || call_cmd
                                 .heredoc_redirects
                                 .iter()
-                                .any(|redirect| redirect.fd.is_none() || redirect.fd == Some(0))
+                                // rubash#3894: a `{var}<<` twin binds an
+                                // allocated fd, never fd 0 — it is not
+                                // an fd-0 stdin body of the call.
+                                .any(|redirect| {
+                                    redirect.fd_var.is_none()
+                                        && (redirect.fd.is_none() || redirect.fd == Some(0))
+                                })
                     }
                 };
             if !call_has_own_stdin_body

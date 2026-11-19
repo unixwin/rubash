@@ -307,7 +307,21 @@ fn unicode_escape_text(codepoint: u32) -> String {
     // rubash#2979: u32cconv converts in the shell's CURRENT locale —
     // ask the active (guard) locale, not the process environment.
     if codepoint <= 0x7F || crate::locale::is_multi_byte_active() {
-        return crate::executor::substitution_metadata::u32cconv_utf8_text(codepoint);
+        let text = crate::executor::substitution_metadata::u32cconv_utf8_text(codepoint);
+        // rubash#3921 (D2): a genuine scalar in the marker zone
+        // (U+E000..=U+E401) returns as a lone char, and the printf
+        // output path runs `raw_bytes` (shell_text_to_raw_bytes) over
+        // the segment — a lone U+E000 + payload pair folds to a NUL
+        // byte. E400-escape a single-char result so raw_bytes restores
+        // the char; multi-char results are raw-byte marker pairs (the
+        // 5/6-byte forms, the control-carrier arm) and already are
+        // transport, so they pass through untouched. Never touch
+        // u32cconv_utf8_text itself — IFS needs the bare char there
+        // (glob2.sub uses IFS=$'\u3b1').
+        if text.chars().count() == 1 {
+            return crate::executor::substitution_metadata::escape_marker_zone_chars(&text);
+        }
+        return text;
     }
     // Emit the escape literally: backslash + u/U + canonical hex. The
     // backslash is built from its code point so the format strings below stay

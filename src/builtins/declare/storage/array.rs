@@ -365,7 +365,15 @@ pub(in crate::builtins) fn fold_indexed_storage_dupes(value: &str, rendered: &st
     // The display string is user-visible text, so the pair resolves to the
     // char itself here — a cell-side decode would violate the
     // transport-text parity the typed-read debug_assert checks.
-    crate::executor::markers::decode_bare_sentinels(rendered, &[])
+    // rubash#3921: resolve ONLY pairs outside the raw-byte marker range.
+    // A blanket decode turns `E400 E000 E400 E001` into a lone
+    // U+E000+payload pair, and the flush's exactly-once decode folds it
+    // to a NUL byte; keeping the pair lets the flush resolve it exactly
+    // once to the literal char. Pairs outside the range (U+E314) must
+    // still resolve here — the flush only decodes when U+E000 is
+    // present, so an unresolved `E400 + E314` would print the
+    // introducer verbatim.
+    crate::executor::markers::decode_bare_sentinels_keep_raw_byte_pairs(rendered, &[])
 }
 
 fn array_assignment_index(left: &str, entries: &BTreeMap<usize, String>) -> ArrayAssignmentIndex {

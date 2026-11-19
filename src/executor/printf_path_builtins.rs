@@ -54,7 +54,12 @@ impl Executor {
         // shapes; the single-arg case it pinned still holds, since
         // the diagnostic for a conversion precedes that conversion's
         // own value).
-        let log = super::trap_stack_builtins::OrderedOutputLog::new();
+        let mut log = super::trap_stack_builtins::OrderedOutputLog::new();
+        // rubash#3921 (D1): printf's Text segments are final bytes
+        // (raw_bytes inside the builtin), so the direct flush must not
+        // decode the fd-1 chunks a second time. Stderr diagnostics stay
+        // transport text and still decode.
+        log.mark_stdout_final_bytes();
         // rubash#3453: tag each rendering pass boundary into the log —
         // the chunk route drops the passes GNU's printf.def:819
         // ferror abort never renders once an fd-1 write fails.
