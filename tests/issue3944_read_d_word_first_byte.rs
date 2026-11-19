@@ -50,7 +50,7 @@ fn hex_pipeline(script: &str, locale: &str) -> String {
 #[test]
 fn ff_delimiter_first_record_succeeds() {
     let stdout = hex_pipeline(
-        "printf 'a\\377b\\377c' > \"$TMPDIR/f\"; exec 3< \"$TMPDIR/f\"; read -d $'\\377' -u 3 x; \
+        "printf 'a\\377b\\377c' > f; exec 3< f; read -d $'\\377' -u 3 x; \
          rc=$?; echo \"rc=$rc x=[$(hex \"$x\")]\"\n",
         "C.UTF-8",
     );
@@ -60,7 +60,7 @@ fn ff_delimiter_first_record_succeeds() {
 #[test]
 fn ff_delimiter_second_record_keeps_offset() {
     let stdout = hex_pipeline(
-        "printf 'a\\377b\\377c' > \"$TMPDIR/f\"; exec 3< \"$TMPDIR/f\"; read -d $'\\377' -u 3 x; \
+        "printf 'a\\377b\\377c' > f; exec 3< f; read -d $'\\377' -u 3 x; \
          read -d $'\\377' -u 3 y; rc=$?; echo \"rc=$rc y=[$(hex \"$y\")]\"\n",
         "C.UTF-8",
     );
@@ -70,7 +70,7 @@ fn ff_delimiter_second_record_keeps_offset() {
 #[test]
 fn byte_word_82_via_u_fd() {
     let stdout = hex_pipeline(
-        "printf 'a\\202b\\202c' > \"$TMPDIR/f\"; exec 3< \"$TMPDIR/f\"; read -d $'\\202' -u 3 x; \
+        "printf 'a\\202b\\202c' > f; exec 3< f; read -d $'\\202' -u 3 x; \
          rc=$?; echo \"rc=$rc x=[$(hex \"$x\")]\"\n",
         "C.UTF-8",
     );
@@ -80,7 +80,7 @@ fn byte_word_82_via_u_fd() {
 #[test]
 fn byte_word_fe_via_u_fd() {
     let stdout = hex_pipeline(
-        "printf 'a\\376b\\376c' > \"$TMPDIR/f\"; exec 3< \"$TMPDIR/f\"; read -d $'\\376' -u 3 x; \
+        "printf 'a\\376b\\376c' > f; exec 3< f; read -d $'\\376' -u 3 x; \
          rc=$?; echo \"rc=$rc x=[$(hex \"$x\")]\"\n",
         "C.UTF-8",
     );
@@ -90,7 +90,7 @@ fn byte_word_fe_via_u_fd() {
 #[test]
 fn delimiter_at_end_of_input_succeeds() {
     let stdout = hex_pipeline(
-        "printf 'ab\\202' > \"$TMPDIR/f\"; exec 3< \"$TMPDIR/f\"; read -d $'\\202' -u 3 x; \
+        "printf 'ab\\202' > f; exec 3< f; read -d $'\\202' -u 3 x; \
          rc=$?; echo \"rc=$rc x=[$(hex \"$x\")]\"\n",
         "C.UTF-8",
     );
@@ -102,7 +102,7 @@ fn c3_control_still_works_end_to_end() {
     // 0xC3 is the one byte whose widened char's encoding starts with the
     // byte itself — the historical passing control.
     let stdout = hex_pipeline(
-        "printf 'a\\303b\\303c' > \"$TMPDIR/f\"; exec 3< \"$TMPDIR/f\"; read -d $'\\303' -u 3 x; \
+        "printf 'a\\303b\\303c' > f; exec 3< f; read -d $'\\303' -u 3 x; \
          rc=$?; echo \"rc=$rc x=[$(hex \"$x\")]\"\n",
         "C.UTF-8",
     );
@@ -112,8 +112,8 @@ fn c3_control_still_works_end_to_end() {
 #[test]
 fn while_loop_over_file_reads_both_records() {
     let stdout = hex_pipeline(
-        "printf 'a\\377b\\377c' > \"$TMPDIR/f\"; out=''; \
-         while IFS= read -rd $'\\377' s; do out=\"$out<$(hex \"$s\")>\"; done < \"$TMPDIR/f\"; \
+        "printf 'a\\377b\\377c' > f; out=''; \
+         while IFS= read -rd $'\\377' s; do out=\"$out<$(hex \"$s\")>\"; done < f; \
          echo \"$out\"\n",
         "C.UTF-8",
     );
@@ -123,7 +123,7 @@ fn while_loop_over_file_reads_both_records() {
 #[test]
 fn c_locale_face_unchanged() {
     let stdout = hex_pipeline(
-        "printf 'a\\377b\\377c' > \"$TMPDIR/f\"; exec 3< \"$TMPDIR/f\"; read -d $'\\377' -u 3 x; \
+        "printf 'a\\377b\\377c' > f; exec 3< f; read -d $'\\377' -u 3 x; \
          rc=$?; echo \"rc=$rc x=[$(hex \"$x\")]\"\n",
         "C",
     );
