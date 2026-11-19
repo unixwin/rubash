@@ -252,7 +252,7 @@ fn issue3348_comsub_pwd_invalid_option_reports_usage() {
     assert_eq!(code, Some(0));
     assert_eq!(stdout, "status=2 out=[]\n");
     assert!(stderr.contains("pwd: -x: invalid option"), "{stderr}");
-    assert!(stderr.contains("pwd: usage: pwd [-LP]"), "{stderr}");
+    assert!(stderr.contains("pwd: usage: pwd [-LPW]"), "{stderr}");
 }
 
 #[test]
@@ -266,7 +266,7 @@ fn issue3348_comsub_pwd_invalid_option_under_bogus_pwd() {
     assert_eq!(code, Some(0));
     assert_eq!(stdout, "status=2 out=[]\n");
     assert!(stderr.contains("pwd: -x: invalid option"), "{stderr}");
-    assert!(stderr.contains("pwd: usage: pwd [-LP]"), "{stderr}");
+    assert!(stderr.contains("pwd: usage: pwd [-LPW]"), "{stderr}");
 }
 
 #[test]
@@ -295,7 +295,7 @@ fn issue3348_comsub_pwd_help_word_prints_long_help() {
     let (stdout, stderr, code) = run_script_in(&tree.base, &script);
     assert_eq!(code, Some(0));
     assert_eq!(stderr, "");
-    assert!(stdout.starts_with("pwd: pwd [-LP]\n"), "{stdout}");
+    assert!(stdout.starts_with("pwd: pwd [-LPW]\n"), "{stdout}");
     assert!(
         stdout.contains("print the value of $PWD if it names the current working"),
         "{stdout}"
