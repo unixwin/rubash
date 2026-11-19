@@ -365,8 +365,23 @@ pub fn duplicate_handle(h: HANDLE) -> std::io::Result<HANDLE> {
 
 /// dup + FD_CLOEXEC: the Unix analogue of "inheritable duplicate" -- the
 /// duplicate survives into children spawned by the shell.
+///
+/// rubash#3917 round 6 (f4cond S1): the duplicate is requested at or
+/// above SHELL_FD_BASE (10, redir.c:86) — NEVER the lowest free number.
+/// A plain dup lands on the lowest free descriptor, which can be a user
+/// fd the shell considers CLOSED (e.g. 3 after `exec 3<&-`); made
+/// inheritable and inherited by a plain-spawn child (the `>(...)` body,
+/// which takes no pre_exec close-all), it resurrects that number in the
+/// child's fd table, so the body's `>&3` succeeds where GNU reports
+/// `Bad file descriptor`. The number itself is only a transport key —
+/// every consumer re-dups it onto its target number at restore
+/// (init.rs) or takes it as a stdio slot — so the floor costs nothing
+/// and matches dup_adopted_fd's floor below.
 pub fn duplicate_handle_inheritable(h: HANDLE) -> std::io::Result<HANDLE> {
-    let n = duplicate_handle(h)?;
+    let n = unsafe { libc::fcntl(h, libc::F_DUPFD_CLOEXEC, 10) };
+    if n < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
     set_inheritable(n, true)?;
     Ok(n)
 }
