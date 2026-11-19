@@ -305,6 +305,11 @@ impl Executor {
         if self.read_source_is_pipe(cmd, read_fd) {
             self.note_foreground_wait();
         }
+        // rubash#3944: mirror the `-d` word's first byte (read.def:385)
+        // onto the fd table for the record scanners, and retire it with
+        // this acquisition — a serve outside a `read` (`select`) must
+        // never key on a stale delimiter byte.
+        self.fd_table.read_delim_word_byte = self.read_delim_word_byte;
         // GNU builtins/read.def: NUL bytes in the input are skipped as
         // the record is read — they never reach the assigned value,
         // the IFS field splitting, or a -a array (rubash#1419:
@@ -322,7 +327,9 @@ impl Executor {
             exact_char_limit,
             escape_aware,
             raw,
-        )?;
+        );
+        self.fd_table.read_delim_word_byte = None;
+        let line = line?;
         // A record WAS served (possibly by a fallback transport after a
         // probed endpoint failed): any recorded hard read error belongs
         // to the abandoned probe, not to this read (rubash#1495).
@@ -1877,7 +1884,13 @@ impl Executor {
         // the delimiter's lead byte inside the record, cut -n units at an
         // invalid sequence's first byte, and let a continuation-byte
         // delimiter fire mid-character.
-        let mut scan = FdRecordScan::new(delimiter, char_limit, exact_char_limit, raw);
+        let mut scan = FdRecordScan::new(
+            delimiter,
+            self.fd_table.read_delim_word_byte,
+            char_limit,
+            exact_char_limit,
+            raw,
+        );
         let _ = escape_aware;
 
         // Bash keeps the coprocess descriptor open across read builtin calls.

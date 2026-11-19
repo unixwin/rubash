@@ -2239,6 +2239,14 @@ pub struct Executor {
     /// set only by read_inherited_process_stdin's EOF-with-nothing
     /// return, never by a timeout/interrupt break.
     pub(crate) read_process_stdin_eof: bool,
+    /// rubash#3944: the `-d` option word's FIRST RAW BYTE (read.def:385
+    /// `delim = (unsigned char)*list_optarg`). The delimiter char widened
+    /// from a byte word (`-d $'\351'`, `-d $'\377'`) is indistinguishable
+    /// from the same typed Latin-1 character, whose UTF-8 encoding starts
+    /// with a DIFFERENT byte — the record scanners key on the word's byte,
+    /// never on the char's encoding. `None` unless `-d` was given (a
+    /// fresh `read` clears it beside the `delimiter` init).
+    pub(crate) read_delim_word_byte: Option<u8>,
     /// rubash#2339: `read -e`/`-E` was given (builtins/read.def:321-328:
     /// both set `edit`; -E adds bash's completion flavor). Derived from
     /// the option words in execute_read beside the `silent` derivation

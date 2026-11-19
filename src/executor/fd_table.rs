@@ -565,6 +565,12 @@ pub(crate) struct FdTable {
     /// treating it as plain EOF made `read x < dir` silent
     /// (rubash#1495). Cleared at the top of every record read.
     pub(crate) read_error: Option<String>,
+    /// rubash#3944: the live `read`'s `-d` option word first raw byte
+    /// (read.def:385), mirrored from the executor beside
+    /// `read_delim_word_byte` when the read acquisition begins. The
+    /// fd-table record scanners key their byte compare on it; serves
+    /// outside a `read` (`select`) leave it `None`.
+    pub(crate) read_delim_word_byte: Option<u8>,
     /// dup2 snapshots for `FdWriteEndpoint::Stdout` markers (rubash#223):
     /// `N>&1` hands fd N the stdout OBJECT fd 1 held at dup time — the
     /// active capture buffer's generation when one was active, or the real
@@ -744,11 +750,26 @@ pub(crate) struct FdRecordScan {
 }
 
 impl FdRecordScan {
-    pub(crate) fn new(delimiter: char, char_limit: Option<usize>, exact: bool, raw: bool) -> Self {
+    pub(crate) fn new(
+        delimiter: char,
+        word_first_byte: Option<u8>,
+        char_limit: Option<usize>,
+        exact: bool,
+        raw: bool,
+    ) -> Self {
         let multi_byte = crate::locale::is_multi_byte();
         FdRecordScan {
-            first_byte: multi_byte
-                .then(|| super::read_helpers::delimiter_stream_byte(delimiter, true)),
+            // rubash#3944: the operative delimiter byte is the `-d` WORD's
+            // first raw byte (read.def:385 `delim = (unsigned char)
+            // *list_optarg`), not the first byte of the widened char's
+            // UTF-8 encoding — a byte word (`-d $'\377'`) widens to a
+            // Latin-1 char whose encoding starts with 0xC3, a byte GNU
+            // never compares. Callers without the word (select, mapfile
+            // serves) pass None and keep the derived form.
+            first_byte: multi_byte.then(|| {
+                word_first_byte
+                    .unwrap_or_else(|| super::read_helpers::delimiter_stream_byte(delimiter, true))
+            }),
             seqs: read_delimiter_seqs(delimiter),
             char_limit,
             exact,
@@ -869,6 +890,7 @@ impl FdTable {
             read_timed_out: false,
             read_eof_no_delimiter: false,
             read_error: None,
+            read_delim_word_byte: None,
             stdout_alias_generation: std::collections::HashMap::new(),
             kernel_place_persistent: false,
             kernel_close_persistent: false,
@@ -2301,7 +2323,8 @@ impl FdTable {
         // FdRecordScan replay of the GNU read loop (unit consumption,
         // first-byte delimiter compare, post-escape budget).
         let scan = |slice: &[u8]| -> (usize, bool, usize, bool, usize) {
-            let mut scan = FdRecordScan::new(delimiter, char_limit, exact, raw);
+            let mut scan =
+                FdRecordScan::new(delimiter, self.read_delim_word_byte, char_limit, exact, raw);
             let mut consumed = 0;
             let mut delimiter_found = false;
             let mut delimiter_len = 0usize;
@@ -2460,7 +2483,8 @@ impl FdTable {
         // The shared FdRecordScan replay of the GNU read loop (unit
         // consumption, first-byte delimiter compare, post-escape
         // budget), as in read_bytes.
-        let mut scan = FdRecordScan::new(delimiter, char_limit, exact, raw);
+        let mut scan =
+            FdRecordScan::new(delimiter, self.read_delim_word_byte, char_limit, exact, raw);
         loop {
             // read.def check_read_timeout + shtimer_select: each byte read
             // is bounded by the remaining deadline.
@@ -2551,7 +2575,8 @@ impl FdTable {
         let mut rewind: Option<u64> = None;
         // The shared FdRecordScan replay of the GNU read loop;
         // persists across chunk boundaries.
-        let mut scan = FdRecordScan::new(delimiter, char_limit, exact, raw);
+        let mut scan =
+            FdRecordScan::new(delimiter, self.read_delim_word_byte, char_limit, exact, raw);
         'chunks: loop {
             let scanned_from = buffer.len();
             match crate::fd::read_some(file.handle, 8192) {
