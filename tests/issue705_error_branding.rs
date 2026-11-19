@@ -392,7 +392,7 @@ fn issue705_pwd_export_invalid_option_shape() {
     assert_eq!(code, 2);
     assert_eq!(
         stderr,
-        "bash: line 1: pwd: -Q: invalid option\npwd: usage: pwd [-LP]\n"
+        "bash: line 1: pwd: -Q: invalid option\npwd: usage: pwd [-LPW]\n"
     );
     let (code, _, stderr) = run(&dir, &["-c", "export -Q"]);
     assert_eq!(code, 2);
