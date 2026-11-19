@@ -21,6 +21,11 @@
 //! Base-tree behaviour pinned against: width was hardcoded to 40
 //! (COLUMNS ignored) and the single-byte dispcolumn cell form was
 //! never used (the multibyte form was applied in every locale).
+//!
+//! rubash#3918: the `pwd [-LPW]` row is the deliberate MSYS `-W`
+//! extension (#3716, niubash#993 §6), not a drift back to GNU's
+//! `pwd [-LP]`; the four grids were regenerated over the current
+//! table with the generator in ~/workspace/fix-3918/gen_expected_3918.py.
 
 use std::process::Command;
 
@@ -78,7 +83,7 @@ const EXPECTED_C_80: &[&str] = &[
     " bind [-lpsvPSVX] [-m keymap] [-f file>  popd [-n] [+N | -N]",
     " break [n]                               printf [-v var] format [arguments]",
     " builtin [shell-builtin [arg ...]]       pushd [-n] [+N | -N | dir]",
-    " caller [expr]                           pwd [-LP]",
+    " caller [expr]                           pwd [-LPW]",
     " case WORD in [PATTERN [| PATTERN]...)>  read [-Eers] [-a array] [-d delim] [>",
     " cd [-L|[-P [-e]]] [-@] [dir]            readarray [-d delim] [-n count] [-O >",
     " command [-pVv] command [arg ...]        readonly [-aAf] [name[=value] ...] o>",
@@ -119,7 +124,7 @@ const EXPECTED_C_120: &[&str] = &[
     " bind [-lpsvPSVX] [-m keymap] [-f filename] [-q name] [-u >  popd [-n] [+N | -N]",
     " break [n]                                                   printf [-v var] format [arguments]",
     " builtin [shell-builtin [arg ...]]                           pushd [-n] [+N | -N | dir]",
-    " caller [expr]                                               pwd [-LP]",
+    " caller [expr]                                               pwd [-LPW]",
     " case WORD in [PATTERN [| PATTERN]...) COMMANDS ;;]... esa>  read [-Eers] [-a array] [-d delim] [-i text] [-n nchars]>",
     " cd [-L|[-P [-e]]] [-@] [dir]                                readarray [-d delim] [-n count] [-O origin] [-s count] [>",
     " command [-pVv] command [arg ...]                            readonly [-aAf] [name[=value] ...] or readonly -p",
@@ -160,7 +165,7 @@ const EXPECTED_UTF8_80: &[&str] = &[
     " bind [-lpsvPSVX] [-m keymap] [-f file>  popd [-n] [+N | -N]",
     " break [n]                               printf [-v var] format [arguments]",
     " builtin [shell-builtin [arg ...]]       pushd [-n] [+N | -N | dir]",
-    " caller [expr]                           pwd [-LP]",
+    " caller [expr]                           pwd [-LPW]",
     " case WORD in [PATTERN [| PATTERN]...)>  read [-Eers] [-a array] [-d delim] [>",
     " cd [-L|[-P [-e]]] [-@] [dir]            readarray [-d delim] [-n count] [-O >",
     " command [-pVv] command [arg ...]        readonly [-aAf] [name[=value] ...] o>",
@@ -201,7 +206,7 @@ const EXPECTED_UTF8_120: &[&str] = &[
     " bind [-lpsvPSVX] [-m keymap] [-f filename] [-q name] [-u >  popd [-n] [+N | -N]",
     " break [n]                                                   printf [-v var] format [arguments]",
     " builtin [shell-builtin [arg ...]]                           pushd [-n] [+N | -N | dir]",
-    " caller [expr]                                               pwd [-LP]",
+    " caller [expr]                                               pwd [-LPW]",
     " case WORD in [PATTERN [| PATTERN]...) COMMANDS ;;]... esa>  read [-Eers] [-a array] [-d delim] [-i text] [-n nchars]>",
     " cd [-L|[-P [-e]]] [-@] [dir]                                readarray [-d delim] [-n count] [-O origin] [-s count] [>",
     " command [-pVv] command [arg ...]                            readonly [-aAf] [name[=value] ...] or readonly -p",
