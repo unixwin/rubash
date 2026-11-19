@@ -1234,7 +1234,7 @@ impl Executor {
                                 let prefix = self.parser_error_prefix_for_line(report);
                                 let offending =
                                     source.lines().nth(line - 1).unwrap_or_default().to_string();
-                                let suffix = if in_comsub {
+                                let suffix = if *in_comsub {
                                     " while looking for matching `)'"
                                 } else {
                                     ""
