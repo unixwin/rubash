@@ -6380,7 +6380,7 @@ impl Executor {
         let mut bound_fd_var_heredoc_twins: std::collections::HashSet<usize> =
             std::collections::HashSet::new();
         let mut heredoc_twins = cmd.heredoc_redirects.iter().enumerate();
-        for redirect in &cmd.redirects {
+        for (position, redirect) in cmd.redirects.iter().enumerate() {
             if let Some(fd) = redirect.fd {
                 occupied_slots.insert(fd);
             }
@@ -6398,6 +6398,20 @@ impl Executor {
                 ambient.insert(fd, target);
                 continue;
             }
+            // rubash#3917 (round 4): consume the pregate probe's
+            // retained preopened File for this position BEFORE the
+            // application below opens the target again — otherwise
+            // the probe's FileFd still names the target number when
+            // the persistent placement dup2's onto it, and its later
+            // Drop closes the placed descriptor (GNU opens each entry
+            // once, redir.c:237 do_redirections; the probe + re-open
+            // is already two opens — dropping the probe handle here
+            // costs only a re-open, never a wrong bind, per the
+            // #3828 clear invariant). Concretely `exec 3<>file` left
+            // fd 3 closed when fd 3 started closed: the probe held
+            // fd 3, the application opened fd 4, the placement
+            // dup2'd 4 onto 3, and the probe FileFd's Drop closed 3.
+            drop(self.take_pending_preopened(position, &target));
             // Mark the redirect as handled before dispatching: every arm
             // below ends in a `continue`, which would otherwise bypass a
             // bottom-of-loop flag and make `exec >&file` fall through to
