@@ -3666,8 +3666,7 @@ impl Executor {
         use crate::executor::expand_braced_indices::ScanSimValue;
         let before = env_vars.get(name).map(String::as_str).unwrap_or("");
         if is_marked_var(env_vars, ASSOC_VARS, name) {
-            let before_entries =
-                crate::executor::assignment_helpers::assoc_entries(before);
+            let before_entries = crate::executor::assignment_helpers::assoc_entries(before);
             for (key, value) in crate::executor::assignment_helpers::assoc_entries(after) {
                 let prior = before_entries
                     .iter()

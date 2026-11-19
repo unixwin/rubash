@@ -74,18 +74,8 @@ fn expect_unbound(script: &str, name: &str) {
 
 #[test]
 fn cond_arith_noeval_operand_never_traps() {
-    expect(
-        "set -u; [[ 0 -eq '0 && u' ]]; echo rc=$?",
-        "rc=0\n",
-        "",
-        0,
-    );
-    expect(
-        "set -u; [[ 1 -eq '0 && u' ]]; echo rc=$?",
-        "rc=1\n",
-        "",
-        0,
-    );
+    expect("set -u; [[ 0 -eq '0 && u' ]]; echo rc=$?", "rc=0\n", "", 0);
+    expect("set -u; [[ 1 -eq '0 && u' ]]; echo rc=$?", "rc=1\n", "", 0);
 }
 
 #[test]
@@ -136,15 +126,17 @@ fn nameref_unbound_reports_reference_name() {
     // reference. A bare scalar read follows the nameref and names the
     // target instead (verified GNU 5.3.20: `zz: unbound variable`).
     expect_unbound("set -u; declare -n r=zz; echo $(( r[0] )); echo rc=$?", "r");
-    expect_unbound(
-        "set -u; declare -n r=zz; echo $(( r )); echo rc=$?",
-        "zz",
-    );
+    expect_unbound("set -u; declare -n r=zz; echo $(( r )); echo rc=$?", "zz");
 }
 
 #[test]
 fn nameref_bound_read_still_works() {
-    expect("set -u; zz=5; declare -n r=zz; echo $(( r[0] ))", "5\n", "", 0);
+    expect(
+        "set -u; zz=5; declare -n r=zz; echo $(( r[0] ))",
+        "5\n",
+        "",
+        0,
+    );
     expect(
         "set -u; declare -n r=zz; zz=7; echo $(( r )); echo $(( r+1 ))",
         "7\n8\n",

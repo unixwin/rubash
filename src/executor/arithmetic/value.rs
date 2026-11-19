@@ -194,18 +194,10 @@ impl ConditionalArithParser<'_> {
         if self.noeval > 0 {
             return Some(0);
         }
-        if let ArithLValue::Indexed {
-            name, written, ..
-        }
-        | ArithLValue::IndexedRaw {
-            name, written, ..
-        }
-        | ArithLValue::Assoc {
-            name, written, ..
-        }
-        | ArithLValue::AssocEmptyKey {
-            name, written, ..
-        } = lvalue
+        if let ArithLValue::Indexed { name, written, .. }
+        | ArithLValue::IndexedRaw { name, written, .. }
+        | ArithLValue::Assoc { name, written, .. }
+        | ArithLValue::AssocEmptyKey { name, written, .. } = lvalue
         {
             if self.trap_unbound_variable_cell_reporting(name, written) {
                 return None;

@@ -381,16 +381,12 @@ pub(super) enum ArithLValue {
     /// and binds report `` `name[]': not a valid identifier `` while the
     /// expression keeps evaluating (verified GNU 5.3: `(( a[]=24 ))`
     /// reports the diagnostic, assigns nothing, and yields status 0).
-    InvalidElement {
-        display: String,
-    },
+    InvalidElement { display: String },
     /// `name[@]` / `name[*]` on an indexed array in arithmetic context —
     /// GNU array_expand_index (arrayfunc.c) rejects the `@`/`*` subscript
     /// with `name[@]: bad array subscript` and the reference reads as 0;
     /// a bind diagnoses once more and stores nothing (rubash#1136).
-    BadSubscriptElement {
-        display: String,
-    },
+    BadSubscriptElement { display: String },
 }
 
 /// Outcome of evaluating a raw indexed subscript

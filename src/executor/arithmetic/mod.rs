@@ -2877,8 +2877,24 @@ pub(in crate::executor) fn arith_body_nounset_trap(
     body: &str,
     env_vars: &crate::shell::var_table::VarTable,
 ) -> Option<String> {
+    arith_body_nounset_verdict(body, env_vars).0
+}
+
+/// [`arith_body_nounset_trap`] plus the body's write set: when the
+/// scratch evaluation does not trap, its assignments are real binds
+/// for every later word of the command (GNU's walk binds as it
+/// expands, subst.c:11229 — rubash#3563 rows 2-3), so the caller
+/// records the scratch table's diff against `env_vars` in its
+/// simulated bindings, the same diff
+/// `eval_conditional_arith_value_categorized_with_writes` computes.
+/// A trapped body reports no writes: the command dies at the trap,
+/// so no later word is ever judged.
+pub(in crate::executor) fn arith_body_nounset_verdict(
+    body: &str,
+    env_vars: &crate::shell::var_table::VarTable,
+) -> (Option<String>, Vec<(String, String)>) {
     if arith_expansion_char_present(body) || body.trim().is_empty() {
-        return None;
+        return (None, Vec::new());
     }
     let saved_error = take_arith_eval_error();
     let saved_events = take_arith_eval_events();
@@ -2893,9 +2909,15 @@ pub(in crate::executor) fn arith_body_nounset_trap(
     ARITH_WRITES.with(|log| *log.borrow_mut() = saved_writes);
     ARITH_UNBOUND_NAME.with(|slot| *slot.borrow_mut() = saved_name);
     if category == Some(ArithmeticErrorCategory::UnboundVariable) {
-        trapped
+        (trapped, Vec::new())
     } else {
-        None
+        let writes = scratch
+            .iter()
+            .filter(|(name, _)| name.as_str() != "__RUBASH_ARITH_SUBSCRIPT_EXPR")
+            .filter(|(name, new_value)| env_vars.get(name.as_str()) != Some(new_value))
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+        (None, writes)
     }
 }
 
@@ -3281,8 +3303,8 @@ fn mask_unquoted_context_spans(bytes: &[u8], masked: &mut [u8], start: usize, en
                 }
                 Some(b'{') => index = end,
                 Some(b'\'') | Some(b'"') => {
-                    index = skip_arith_quoted_span(bytes, index + 1, bytes[index + 1], true)
-                        .min(end)
+                    index =
+                        skip_arith_quoted_span(bytes, index + 1, bytes[index + 1], true).min(end)
                 }
                 _ => index += 1,
             },
