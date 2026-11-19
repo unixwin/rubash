@@ -1992,6 +1992,21 @@ impl Executor {
                     subshell.shell_state.env_vars.get("__RUBASH_TRAP_RESET")
                 );
             }
+            // rubash#3932: GNU runs the substitution body through
+            // parse_and_execute in the forked child, whose single plain
+            // command takes the fork-suppression mark
+            // (evalstring.c:532-536 should_suppress_fork) and exports
+            // live-1 (execute_cmd.c:5816-5817). The child's trap table
+            // was reset above (reset_for_subshell_child, trap.c
+            // reset_or_restore_signal_handlers), so a parent-set trap
+            // does not block the mark while one armed inside the body
+            // does — the seam re-checks at spawn time. Redirects block:
+            // the comsub face passes subshell==0 to should_optimize_fork
+            // (should_suppress_fork, evalstring.c:126).
+            subshell.nofork_spawn_face_allows_redirects.set(false);
+            subshell.nofork_spawn_body_candidate_pending.set(
+                super::Executor::nofork_spawn_body_tail_ok(&ast.commands, false),
+            );
             let result = if posix_mode || inherit_errexit {
                 subshell.execute_ast(&ast)
             } else {
@@ -2271,6 +2286,15 @@ impl Executor {
             exec_replace_stamp_counter: Cell::new(0),
             exec_replace_stamp_hold: Cell::new(0),
             exec_replace_shlvl_snapshot: Cell::new(None),
+            nofork_spawn_dispatch_stamp: Cell::new(0),
+            nofork_spawn_stamp_counter: Cell::new(0),
+            nofork_spawn_stamp_hold: Cell::new(0),
+            nofork_spawn_body_candidate_pending: Cell::new(false),
+            nofork_spawn_body_candidate: Cell::new(false),
+            nofork_spawn_face_allows_redirects: Cell::new(false),
+            nofork_spawn_face_unconditional: Cell::new(false),
+            nofork_spawn_face_child_trap_reset: Cell::new(false),
+            respawn_payload_face: Cell::new(0),
             line_lex_locales: std::cell::RefCell::new(HashMap::new()),
             unit_lex_locale: std::cell::RefCell::new(None),
             line_lex_extquotes: std::cell::RefCell::new(HashMap::new()),

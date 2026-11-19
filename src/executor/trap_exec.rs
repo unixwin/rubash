@@ -1240,9 +1240,7 @@ impl Executor {
                                     ""
                                 };
                                 self.record_run_diagnostic(
-                                    format!(
-                                        "syntax error near unexpected token `{token}'{suffix}"
-                                    ),
+                                    format!("syntax error near unexpected token `{token}'{suffix}"),
                                     Some(report),
                                 );
                                 format!(
@@ -5908,6 +5906,16 @@ impl Executor {
             super::RESPAWN_SPAWNER_PID_KEY.to_string(),
             super::spawner_stamp_value(),
         ));
+        // rubash#3932: the producer is GNU's forked process_substitute
+        // child (subst.c:6362) — its -c body's single plain command takes
+        // the fork-suppression mark with the PROCSUB redirect relaxation
+        // (evalstring.c:106-117) and exports live-1 (execute_cmd.c
+        // 5816-5817). Consumed by the child's init under the provenance
+        // gate.
+        env_entries.push((
+            crate::builtins::kill::BACKGROUND_WRAPPER_PAYLOAD_FACE_KEY.to_string(),
+            "procsub".to_string(),
+        ));
         // rubash#3300: the per-spawn proof pair (fd number + nonce).
         // Per-spawn, never forwarded — NOT in FORK_TRANSPORT_KEYS /
         // rubash_spawn_inherited_state. Never appended to
@@ -8004,7 +8012,22 @@ impl Executor {
         self.shell_state
             .env_vars
             .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
+        // rubash#3932: the input process-substitution body runs
+        // parse_and_execute in GNU's forked child
+        // (subst.c:6362 process_substitute), whose single plain command
+        // takes the fork-suppression mark (evalstring.c:532
+        // should_suppress_fork, with the PROCSUB bit relaxing the
+        // redirect arm) and exports live-1 (execute_cmd.c:5816-5817).
+        // This port runs the body in place on this executor, so the
+        // seam's trap gate evaluates against the reset-child shape the
+        // fork would see (nofork_spawn_face_child_trap_reset).
+        self.nofork_spawn_face_allows_redirects.set(true);
+        self.nofork_spawn_face_child_trap_reset.set(true);
+        self.nofork_spawn_body_candidate_pending.set(
+            crate::executor::Executor::nofork_spawn_body_tail_ok(&ast.commands, true),
+        );
         let result = self.execute_ast(&ast);
+        self.nofork_spawn_face_child_trap_reset.set(false);
         match old_fd0 {
             Some(entry) => {
                 self.fd_table.entries.insert(0, entry);

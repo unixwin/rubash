@@ -4108,6 +4108,17 @@ pub fn release_fg_sigint() {
 /// scrubbed from the process environment at startup.
 pub const BACKGROUND_WRAPPER_ENV_KEY: &str = "__RUBASH_BACKGROUND_WRAPPER";
 
+/// rubash#3932: the background payload's form, transported to the wrapper
+/// respawn child so its async arm knows which GNU face governs the unit's
+/// tail (`simple`: the forked async child's unconditional CMD_NO_FORK,
+/// execute_cmd.c:4553; `subshell`: an absorbed `( list )` body whose mark
+/// consults should_optimize_fork — redirects block, traps gate at spawn,
+/// execute_cmd.c:1799-1806; `compound`: a group/for/if/... body that GNU
+/// never marks, execute_cmd.c:1756 requiring cm_simple — the child keeps
+/// the live level). Handshake-gated like the role nonce: a user-forged
+/// value arms nothing.
+pub const BACKGROUND_WRAPPER_PAYLOAD_FACE_KEY: &str = "__RUBASH_BG_PAYLOAD_FACE";
+
 /// rubash#866: the internal argv flag carrying the handshake nonce. Like the
 /// other `--internal-*` faces it is consumed by the host CLI's startup
 /// consume call before any option parser ever sees it; the wrapper role arms
@@ -4262,6 +4273,13 @@ pub(crate) fn consume_background_wrapper_handshake(args: &mut Vec<String>) {
 #[cfg(unix)]
 pub fn background_wrapper_role_armed() -> bool {
     BACKGROUND_WRAPPER_ROLE.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// rubash#3932: non-unix builds never interpose the wrapper role, so the
+/// -c tail exec-replacement face is never suppressed there.
+#[cfg(not(unix))]
+pub fn background_wrapper_role_armed() -> bool {
+    false
 }
 
 /// ------------------------------------------------------------------

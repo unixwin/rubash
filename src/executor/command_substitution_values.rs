@@ -987,6 +987,24 @@ impl Executor {
         );
 
         self.apply_child_environment(&mut process);
+        // rubash#3932: the substitution body's single plain command takes
+        // GNU's fork-suppression mark (evalstring.c:532 should_suppress_fork
+        // in the forked comsub child) and exports live-1
+        // (execute_cmd.c:5816-5817, adjust_shell_level variables.c:849-892:
+        // reads the CURRENT variable, clamps at 0, rebinds + auto-exports).
+        // Redirects block the mark (should_suppress_fork passes
+        // subshell==0 for a comsub, so should_optimize_fork's
+        // redirects==0 arm holds), and the trap gate evaluates against
+        // the reset child table (the forked child does not inherit trap
+        // dispositions, trap.c:1458-1464). The adjustment rebinds even
+        // when the shell's own SHLVL is absent or unexported.
+        if stdio.stdin_path.is_none()
+            && stdio.stdout_redirect.is_none()
+            && stdio.stderr_redirect.is_none()
+            && self.nofork_spawn_traps_allow_for_subshell_child()
+        {
+            process.env("SHLVL", self.nofork_spawn_adjusted_shlvl());
+        }
         // GNU subst.c:7143 command_substitute forks sharing the parent's
         // fd 0: feed the child the unread tail of FUNCTION_STDIN and, after
         // it runs, drain the caller's cursor to EOF.

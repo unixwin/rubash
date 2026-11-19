@@ -2055,6 +2055,19 @@ impl Executor {
             crate::executor::read_helpers::TimesBaselineKind::ComsubBody,
             subshell.shell_state.subshell_depth.get(),
         );
+        // rubash#3932: the process-substitution body runs parse_and_execute
+        // in the forked child (subst.c:6362 process_substitute ->
+        // parse_and_execute "process substitution"), and
+        // should_suppress_fork passes the SUBSHELL_PROCSUB bit to
+        // should_optimize_fork (evalstring.c:106-117: `subshell ||`
+        // relaxes the redirects==0 arm) — so the body's single plain
+        // command exports live-1 even carrying redirects (GNU 5.3.20:
+        // `cat <(printenv SHLVL >/tmp/f)` still reads 5). The trap gate
+        // is re-checked at the spawn seam.
+        subshell.nofork_spawn_face_allows_redirects.set(true);
+        subshell.nofork_spawn_body_candidate_pending.set(
+            crate::executor::Executor::nofork_spawn_body_tail_ok(&ast.commands, true),
+        );
         let (thread_captured, result) =
             crate::executor::shell_options::capture_stdout(|| subshell.execute_ast(&ast));
         crate::executor::shell_options::end_capture_timing();

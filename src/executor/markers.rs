@@ -626,6 +626,7 @@ pub(crate) const HASH_ENV_FIELD_SEP: char = SUBSCRIPT_CARRIER;
 // EXACT __RUBASH_BACKGROUND_WRAPPER - state key (background wrapper) - serialized across the respawn/subshell boundary; see the owning subsystem
 // EXACT __RUBASH_BG_BASHPID_BASE - state key (bg bashpid base) - serialized across the respawn/subshell boundary; see the owning subsystem
 // EXACT __RUBASH_BG_DEPTH - state key (bg depth) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_BG_PAYLOAD_FACE - respawn payload face (rubash#3932): which GNU nofork face governs a respawned child's -c body (simple/subshell/procsub), consumed at init under the provenance gate
 // EXACT __RUBASH_CA1__ - RETIRED string spelling of the compound-assignment marker; typeable user text since retirement - do not re-register
 // EXACT __RUBASH_CAPCASE_VARS - serialized variable-name set (capcase) for child/subshell state transfer
 // EXACT __RUBASH_CMD_FILE - state key (cmd file) - serialized across the respawn/subshell boundary; see the owning subsystem

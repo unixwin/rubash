@@ -533,6 +533,26 @@ impl Executor {
             spawner_stamp,
             respawn_proof_validated(),
         );
+        // rubash#3932: the respawn payload face — the -c body's GNU
+        // nofork face (simple async / subshell body / process-substitution
+        // body) the spawn site transported. Consumed only by a validated
+        // internal respawn; stripped unconditionally so a forged ambient
+        // key arms nothing and never surfaces as a variable or export.
+        let respawn_payload_face = if internal_respawn {
+            match raw_env
+                .get(crate::builtins::kill::BACKGROUND_WRAPPER_PAYLOAD_FACE_KEY)
+                .map(String::as_str)
+            {
+                Some("simple") => 1u8,
+                Some("subshell") => 2u8,
+                Some("procsub") => 3u8,
+                _ => 0,
+            }
+        } else {
+            0
+        };
+        raw_env.remove(crate::builtins::kill::BACKGROUND_WRAPPER_PAYLOAD_FACE_KEY);
+        mirror_env_remove(crate::builtins::kill::BACKGROUND_WRAPPER_PAYLOAD_FACE_KEY);
         if !internal_respawn {
             let foreign: Vec<String> = raw_env
                 .keys()
@@ -1688,6 +1708,15 @@ impl Executor {
             exec_replace_stamp_counter: Cell::new(0),
             exec_replace_stamp_hold: Cell::new(0),
             exec_replace_shlvl_snapshot: Cell::new(None),
+            nofork_spawn_dispatch_stamp: Cell::new(0),
+            nofork_spawn_stamp_counter: Cell::new(0),
+            nofork_spawn_stamp_hold: Cell::new(0),
+            nofork_spawn_body_candidate_pending: Cell::new(false),
+            nofork_spawn_body_candidate: Cell::new(false),
+            nofork_spawn_face_allows_redirects: Cell::new(false),
+            nofork_spawn_face_unconditional: Cell::new(false),
+            nofork_spawn_face_child_trap_reset: Cell::new(false),
+            respawn_payload_face: Cell::new(respawn_payload_face),
             line_lex_locales: std::cell::RefCell::new(HashMap::new()),
             unit_lex_locale: std::cell::RefCell::new(None),
             line_lex_extquotes: std::cell::RefCell::new(HashMap::new()),

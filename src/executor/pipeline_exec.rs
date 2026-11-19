@@ -923,6 +923,16 @@ impl Executor {
                     self.exec_replace_shlvl_snapshot
                         .set(Some(self.current_shlvl_value()));
                 }
+                // rubash#3932: the nofork spawn stamp rides the same
+                // one-shot hold — GNU's optimize_connection_fork
+                // (execute_cmd.c:2886/2956) marks the connection's second
+                // operand in the caller's frame, and the seam re-checks
+                // the trap state at spawn time, which is when the mark's
+                // conditions are evaluated for a paren body's and_or
+                // tail.
+                if self.nofork_spawn_dispatch_stamp.get() != 0 {
+                    self.nofork_spawn_stamp_hold.set(1);
+                }
                 self.execute_ast(&commands)?;
             }
         }
@@ -9378,8 +9388,7 @@ impl Executor {
                 // rubash#3894: a `{var}<<` twin binds an allocated fd,
                 // never fd 0 — it is not an fd-0 stdin body.
                 .any(|redirect| {
-                    redirect.fd_var.is_none()
-                        && (redirect.fd.is_none() || redirect.fd == Some(0))
+                    redirect.fd_var.is_none() && (redirect.fd.is_none() || redirect.fd == Some(0))
                 })
         {
             return false;
