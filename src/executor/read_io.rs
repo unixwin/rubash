@@ -778,6 +778,7 @@ impl Executor {
                 let (record, eof_no_delimiter) = slurped_record(
                     input,
                     delimiter,
+                    self.read_delim_word_byte,
                     char_limit,
                     exact_char_limit,
                     escape_aware,
@@ -791,6 +792,7 @@ impl Executor {
                 let (record, eof_no_delimiter) = slurped_record(
                     input,
                     delimiter,
+                    self.read_delim_word_byte,
                     char_limit,
                     exact_char_limit,
                     escape_aware,
@@ -878,6 +880,7 @@ impl Executor {
                 return Some(trim_read_input(
                     output,
                     delimiter,
+                    self.read_delim_word_byte,
                     char_limit,
                     exact_char_limit,
                     escape_aware,
@@ -1007,6 +1010,7 @@ impl Executor {
                             Some(line) => trim_read_input(
                                 line,
                                 delimiter,
+                                self.read_delim_word_byte,
                                 char_limit,
                                 exact_char_limit,
                                 escape_aware,
@@ -1050,6 +1054,7 @@ impl Executor {
                             Some(line) => trim_read_input(
                                 line,
                                 delimiter,
+                                self.read_delim_word_byte,
                                 char_limit,
                                 exact_char_limit,
                                 escape_aware,
@@ -1071,6 +1076,7 @@ impl Executor {
                     let (record, eof_no_delimiter) = slurped_record(
                         output,
                         delimiter,
+                        self.read_delim_word_byte,
                         char_limit,
                         exact_char_limit,
                         escape_aware,
@@ -1162,6 +1168,7 @@ impl Executor {
                                     Some(line) => trim_read_input(
                                         line,
                                         delimiter,
+                                        self.read_delim_word_byte,
                                         char_limit,
                                         exact_char_limit,
                                         escape_aware,
@@ -1247,6 +1254,7 @@ impl Executor {
                 let (record, eof_no_delimiter) = slurped_record(
                     input,
                     delimiter,
+                    self.read_delim_word_byte,
                     char_limit,
                     exact_char_limit,
                     escape_aware,
@@ -1522,6 +1530,7 @@ impl Executor {
                                 Some(line) => trim_read_input(
                                     line,
                                     delimiter,
+                                    self.read_delim_word_byte,
                                     char_limit,
                                     exact_char_limit,
                                     escape_aware,
@@ -1600,6 +1609,7 @@ impl Executor {
             let (record, eof_no_delimiter) = slurped_record(
                 input,
                 delimiter,
+                self.read_delim_word_byte,
                 char_limit,
                 exact_char_limit,
                 escape_aware,
@@ -1631,6 +1641,7 @@ impl Executor {
                 let (record, eof_no_delimiter) = slurped_record(
                     line,
                     delimiter,
+                    self.read_delim_word_byte,
                     char_limit,
                     exact_char_limit,
                     escape_aware,
@@ -1810,6 +1821,7 @@ impl Executor {
             self.read_deadline,
             silent,
             delimiter,
+            self.read_delim_word_byte,
             char_limit,
             exact_char_limit,
             self.read_sigint_guard_armed,
@@ -1953,6 +1965,7 @@ impl Executor {
         Some(trim_read_input(
             bytes_to_shell_text(&bytes),
             delimiter,
+            self.read_delim_word_byte,
             char_limit,
             exact_char_limit,
             escape_aware,
@@ -2135,6 +2148,7 @@ impl Executor {
                 return Some(trim_read_input(
                     line,
                     delimiter,
+                    self.read_delim_word_byte,
                     char_limit,
                     exact_char_limit,
                     escape_aware,
@@ -2267,7 +2281,7 @@ impl Executor {
             .get(FUNCTION_STDIN)
             .map(|input| input[offset..].to_string())
         {
-            if joined_delimiter_scan_applies(&slice, delimiter)
+            if joined_delimiter_scan_applies(&slice, delimiter, self.read_delim_word_byte)
                 || byte_unit_scan_applies(&slice, char_limit)
             {
                 let input = self
@@ -2280,6 +2294,7 @@ impl Executor {
                 let scan = scan_text_record_bytes(
                     &slice,
                     delimiter,
+                    self.read_delim_word_byte,
                     char_limit,
                     exact_char_limit,
                     escape_aware,
@@ -2311,6 +2326,7 @@ impl Executor {
                             let partial = scan_text_record_bytes(
                                 &input[offset..available_end],
                                 delimiter,
+                                self.read_delim_word_byte,
                                 char_limit,
                                 exact_char_limit,
                                 escape_aware,
@@ -2340,6 +2356,7 @@ impl Executor {
                     return Some(trim_read_input(
                         record,
                         delimiter,
+                        self.read_delim_word_byte,
                         char_limit,
                         exact_char_limit,
                         escape_aware,
@@ -2366,6 +2383,7 @@ impl Executor {
                 return Some(trim_read_input(
                     record,
                     delimiter,
+                    self.read_delim_word_byte,
                     char_limit,
                     exact_char_limit,
                     escape_aware,
@@ -2389,7 +2407,7 @@ impl Executor {
             // of the raw byte itself (rubash#2662) — match every form
             // and advance by the form that matched.
             let delimiter_needle = read_delimiter_needle(delimiter);
-            let delimiter_single = read_delimiter_single_form(delimiter);
+            let delimiter_single = read_delimiter_single_form(delimiter, self.read_delim_word_byte);
             // Count *decoded* units, not transport chars: a raw-byte marker
             // pair (E000 + E001..=E100) is ONE input byte and consumes ONE
             // unit of the -n/-N budget, and the pair is emitted whole so a
@@ -2521,6 +2539,7 @@ impl Executor {
         Some(trim_read_input(
             output,
             delimiter,
+            self.read_delim_word_byte,
             char_limit,
             exact_char_limit,
             escape_aware,
@@ -2684,7 +2703,7 @@ impl Executor {
             if !exact_char_limit
                 && !escaped
                 && !(escape_aware && matches!(unit, StdinUnit::Char('\\')))
-                && stdin_unit_is_delimiter(&unit, delimiter)
+                && stdin_unit_is_delimiter(&unit, delimiter, self.read_delim_word_byte)
             {
                 delimiter_found = true;
                 break;
@@ -2746,6 +2765,7 @@ impl Executor {
         Some(trim_read_input(
             output,
             delimiter,
+            self.read_delim_word_byte,
             char_limit,
             exact_char_limit,
             escape_aware,

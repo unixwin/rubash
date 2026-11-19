@@ -123,6 +123,7 @@ impl Executor {
                         Some(line) => trim_read_input(
                             line,
                             delimiter,
+                            self.read_delim_word_byte,
                             char_limit,
                             exact_char_limit,
                             escape_aware,
@@ -141,6 +142,7 @@ impl Executor {
             let (record, eof_no_delimiter) = slurped_record(
                 output,
                 delimiter,
+                self.read_delim_word_byte,
                 char_limit,
                 exact_char_limit,
                 escape_aware,
@@ -199,6 +201,7 @@ impl Executor {
                         Some(line) => trim_read_input(
                             line,
                             delimiter,
+                            self.read_delim_word_byte,
                             char_limit,
                             exact_char_limit,
                             escape_aware,
@@ -244,6 +247,7 @@ impl Executor {
             let (record, eof_no_delimiter) = slurped_record(
                 input,
                 delimiter,
+                self.read_delim_word_byte,
                 char_limit,
                 exact_char_limit,
                 escape_aware,
@@ -261,6 +265,7 @@ impl Executor {
         let (record, eof_no_delimiter) = slurped_record(
             input,
             delimiter,
+            self.read_delim_word_byte,
             char_limit,
             exact_char_limit,
             escape_aware,
@@ -357,6 +362,7 @@ impl Executor {
                 let (record, eof_no_delimiter) = slurped_record(
                     input,
                     delimiter,
+                    self.read_delim_word_byte,
                     char_limit,
                     exact_char_limit,
                     escape_aware,
@@ -373,6 +379,7 @@ impl Executor {
             let (record, eof_no_delimiter) = slurped_record(
                 input,
                 delimiter,
+                self.read_delim_word_byte,
                 char_limit,
                 exact_char_limit,
                 escape_aware,
@@ -389,6 +396,7 @@ impl Executor {
         let (record, eof_no_delimiter) = slurped_record(
             input,
             delimiter,
+            self.read_delim_word_byte,
             char_limit,
             exact_char_limit,
             escape_aware,
@@ -727,6 +735,7 @@ impl Executor {
             trim_read_input(
                 output,
                 delimiter,
+                self.read_delim_word_byte,
                 char_limit,
                 exact_char_limit,
                 escape_aware,

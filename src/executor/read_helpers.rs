@@ -775,11 +775,23 @@ pub(in crate::executor) fn read_delimiter_needle(delimiter: char) -> String {
 /// text-domain scan that never tests this form never sees the
 /// delimiter: the read runs to EOF and the record is lost
 /// (rubash#2662).
-pub(in crate::executor) fn read_delimiter_single_form(delimiter: char) -> Option<String> {
+///
+/// rubash#3943: the byte is the `-d` WORD's first raw byte whenever the
+/// caller holds it — a widened byte word and a typed Latin-1 char widen
+/// to the same char, but GNU compares the word's byte (`-d é` keys on
+/// 0xC3, `-d $'\xe9'` keys on 0xE9), never the char's codepoint.
+/// Without the word the codepoint byte stays the derivation (byte-locale
+/// delimiters, serves that never see the option word).
+pub(in crate::executor) fn read_delimiter_single_form(
+    delimiter: char,
+    word_first_byte: Option<u8>,
+) -> Option<String> {
     let code = delimiter as u32;
-    (0x80..=0xFF)
-        .contains(&code)
-        .then(|| substitution_metadata::bytes_to_shell_text(&[code as u8]))
+    if !(0x80..=0xFF).contains(&code) {
+        return None;
+    }
+    let byte = word_first_byte.unwrap_or(code as u8);
+    Some(substitution_metadata::bytes_to_shell_text(&[byte]))
 }
 
 /// Byte length of the delimiter form matching at the START of `text`:
@@ -816,6 +828,11 @@ pub(in crate::executor) fn read_delimiter_match_len(
 /// e.g. `-d $'\351'` inside a multibyte locale, is indistinguishable
 /// from the same widened char at this layer; the whole
 /// read_delimiter_char contract carries that conflation.)
+///
+/// rubash#3944: the conflation is resolved by
+/// [`read_delimiter_first_byte`] — callers holding the `-d` word pass
+/// its byte directly and this derivation stays only for serves that
+/// never see the option word.
 pub(in crate::executor) fn delimiter_stream_byte(delimiter: char, multi_byte: bool) -> u8 {
     if multi_byte {
         let mut buf = [0u8; 4];
@@ -857,7 +874,11 @@ pub(in crate::executor) fn read_delimiter_first_byte(word: &str) -> u8 {
 /// character split there leaves the character's tail bytes to the
 /// NEXT record (GNU consumed only the first byte), which only the
 /// mirror serve can observe.
-pub(in crate::executor) fn joined_delimiter_scan_applies(text: &str, delimiter: char) -> bool {
+pub(in crate::executor) fn joined_delimiter_scan_applies(
+    text: &str,
+    delimiter: char,
+    word_first_byte: Option<u8>,
+) -> bool {
     if (delimiter as u32) <= 0x7F {
         return false;
     }
@@ -865,12 +886,12 @@ pub(in crate::executor) fn joined_delimiter_scan_applies(text: &str, delimiter: 
         // Byte locale: only a literal multibyte character can hide the
         // delimiter byte or a budget cut; raw-byte marker pairs are
         // single bytes the historical forms already match exactly.
-        return read_delimiter_single_form(delimiter).is_some()
+        return read_delimiter_single_form(delimiter, word_first_byte).is_some()
             && text.chars().any(|ch| {
                 (ch as u32) > 0x7F && !crate::executor::markers::is_marker_zone_char(ch)
             });
     }
-    let delim_byte = delimiter_stream_byte(delimiter, true);
+    let delim_byte = word_first_byte.unwrap_or_else(|| delimiter_stream_byte(delimiter, true));
     let mut units = text.char_indices().peekable();
     while let Some((_, ch)) = units.next() {
         if ch as u32 == RAW_BYTE_MARKER_ESCAPE {
@@ -1109,6 +1130,7 @@ pub(in crate::executor) fn byte_unit_scan_applies(text: &str, char_limit: Option
 pub(in crate::executor) fn scan_text_record_bytes(
     text: &str,
     delimiter: char,
+    word_first_byte: Option<u8>,
     char_limit: Option<usize>,
     exact_char_limit: bool,
     escape_aware: bool,
@@ -1116,7 +1138,7 @@ pub(in crate::executor) fn scan_text_record_bytes(
 ) -> ByteRecordScan {
     let multi_byte = crate::locale::is_multi_byte();
     let bytes = substitution_metadata::decode_raw_byte_markers(text.as_bytes());
-    let delim = delimiter_stream_byte(delimiter, multi_byte);
+    let delim = word_first_byte.unwrap_or_else(|| delimiter_stream_byte(delimiter, multi_byte));
     let mut index = 0usize;
     let mut units = 0usize;
     let mut escaped = false;
@@ -1173,15 +1195,17 @@ pub(in crate::executor) fn scan_text_record_bytes(
 pub(in crate::executor) fn slurped_record(
     input: String,
     delimiter: char,
+    word_first_byte: Option<u8>,
     char_limit: Option<usize>,
     exact_char_limit: bool,
     escape_aware: bool,
     raw: bool,
 ) -> (String, bool) {
-    if joined_delimiter_scan_applies(&input, delimiter) {
+    if joined_delimiter_scan_applies(&input, delimiter, word_first_byte) {
         let scan = scan_text_record_bytes(
             &input,
             delimiter,
+            word_first_byte,
             char_limit,
             exact_char_limit,
             escape_aware,
@@ -1192,6 +1216,7 @@ pub(in crate::executor) fn slurped_record(
             trim_read_input(
                 scan.record,
                 delimiter,
+                word_first_byte,
                 char_limit,
                 exact_char_limit,
                 escape_aware,
@@ -1203,6 +1228,7 @@ pub(in crate::executor) fn slurped_record(
     let eof_no_delimiter = slurped_record_eof_no_delimiter(
         &input,
         delimiter,
+        word_first_byte,
         char_limit,
         exact_char_limit,
         escape_aware,
@@ -1212,6 +1238,7 @@ pub(in crate::executor) fn slurped_record(
         trim_read_input(
             input,
             delimiter,
+            word_first_byte,
             char_limit,
             exact_char_limit,
             escape_aware,
@@ -1231,15 +1258,16 @@ pub(in crate::executor) fn slurped_record(
 pub(in crate::executor) fn record_contains_delimiter(
     text: &str,
     delimiter: char,
+    word_first_byte: Option<u8>,
     escape_aware: bool,
 ) -> bool {
     if escape_aware {
-        return unescaped_delimiter_index(text, delimiter).is_some();
+        return unescaped_delimiter_index(text, delimiter, word_first_byte).is_some();
     }
     if text.contains(delimiter) || text.contains(&read_delimiter_needle(delimiter)) {
         return true;
     }
-    if let Some(single) = read_delimiter_single_form(delimiter) {
+    if let Some(single) = read_delimiter_single_form(delimiter, word_first_byte) {
         return text.contains(&single);
     }
     false
@@ -1268,13 +1296,14 @@ pub(in crate::executor) fn record_contains_delimiter(
 pub(in crate::executor) fn slurped_record_eof_no_delimiter(
     input: &str,
     delimiter: char,
+    word_first_byte: Option<u8>,
     char_limit: Option<usize>,
     exact_char_limit: bool,
     escape_aware: bool,
     raw: bool,
 ) -> bool {
     let needle = read_delimiter_needle(delimiter);
-    let single = read_delimiter_single_form(delimiter);
+    let single = read_delimiter_single_form(delimiter, word_first_byte);
     let chars: Vec<(usize, char)> = input.char_indices().collect();
     let mut cursor = 0usize;
     let mut units = 0usize;
@@ -1386,9 +1415,13 @@ pub(in crate::executor) fn slurped_record_eof_no_delimiter(
 /// can never be the delimiter — rubash#1300). Matches the same forms
 /// as record_contains_delimiter: the marker needle, the literal char,
 /// and the single-byte marker form of a U+0080..=U+00FF delimiter.
-pub(in crate::executor) fn unescaped_delimiter_index(text: &str, delimiter: char) -> Option<usize> {
+pub(in crate::executor) fn unescaped_delimiter_index(
+    text: &str,
+    delimiter: char,
+    word_first_byte: Option<u8>,
+) -> Option<usize> {
     let needle = read_delimiter_needle(delimiter);
-    let single = read_delimiter_single_form(delimiter);
+    let single = read_delimiter_single_form(delimiter, word_first_byte);
     let mut escaped = false;
     for (index, ch) in text.char_indices() {
         if escaped {
@@ -1444,19 +1477,38 @@ pub(in crate::executor) fn tag_read_carrier_text(input: &str) -> String {
 /// character (rubash#1062: -d é is U+00E9) it is the first byte of its
 /// UTF-8 encoding — the byte GNU's readchar comparison keys on before
 /// the buffered readers hand the record to the character-level trim.
-pub(in crate::executor) fn delimiter_byte_matches(byte: u8, delimiter: char) -> bool {
-    if byte == delimiter as u8 {
-        return true;
+///
+/// rubash#3943: with the `-d` word's first byte the match is EXACTLY
+/// that byte (read.def:385+834) — the old `delimiter as u8` arm compared
+/// the char's codepoint truncated to a byte, so a typed ð (U+00F0)
+/// stopped on every stream byte 0xF0, an emoji lead byte included, and
+/// a typed é stopped on a lone 0xE9 GNU reads straight through.
+pub(in crate::executor) fn delimiter_byte_matches(
+    byte: u8,
+    delimiter: char,
+    word_first_byte: Option<u8>,
+) -> bool {
+    match word_first_byte {
+        Some(word_byte) => byte == word_byte,
+        None => {
+            if byte == delimiter as u8 {
+                return true;
+            }
+            let mut encoded = [0u8; 4];
+            byte == delimiter.encode_utf8(&mut encoded).as_bytes()[0]
+        }
     }
-    let mut encoded = [0u8; 4];
-    byte == delimiter.encode_utf8(&mut encoded).as_bytes()[0]
 }
 
 /// True when a decoded stdin unit is the delimiter byte (GNU read.def
 /// compares `c == delim` on input bytes). Raw bytes surface as RawByte
 /// marker units; a multibyte char is compared by its first byte, matching
 /// GNU's byte-level `readchar` semantics.
-pub(in crate::executor) fn stdin_unit_is_delimiter(unit: &StdinUnit, delimiter: char) -> bool {
+pub(in crate::executor) fn stdin_unit_is_delimiter(
+    unit: &StdinUnit,
+    delimiter: char,
+    word_first_byte: Option<u8>,
+) -> bool {
     let byte = match unit {
         StdinUnit::Char(ch) => {
             let mut encoded = [0u8; 4];
@@ -1469,7 +1521,7 @@ pub(in crate::executor) fn stdin_unit_is_delimiter(unit: &StdinUnit, delimiter: 
             }
         }
     };
-    delimiter_byte_matches(byte, delimiter)
+    delimiter_byte_matches(byte, delimiter, word_first_byte)
 }
 
 /// rubash#1250: poll the pending-signal mailbox for an untrapped
@@ -1530,6 +1582,7 @@ pub(in crate::executor) fn read_stdin_until(
     deadline: Option<std::time::Instant>,
     silent: bool,
     delimiter: char,
+    word_first_byte: Option<u8>,
     char_limit: Option<usize>,
     exact_char_limit: bool,
     poll_sigint_abort: bool,
@@ -1725,7 +1778,7 @@ pub(in crate::executor) fn read_stdin_until(
         if !exact_char_limit
             && !escaped
             && !is_introducer
-            && stdin_unit_is_delimiter(&unit, delimiter)
+            && stdin_unit_is_delimiter(&unit, delimiter, word_first_byte)
         {
             break;
         }
@@ -1771,6 +1824,7 @@ pub(in crate::executor) fn read_stdin_until(
         trim_read_input(
             output,
             delimiter,
+            word_first_byte,
             char_limit,
             exact_char_limit,
             escape_aware,
@@ -1793,8 +1847,9 @@ fn find_unescaped_read_delimiter<'a>(
     input: &'a str,
     needle: &str,
     delimiter: char,
+    word_first_byte: Option<u8>,
 ) -> Option<&'a str> {
-    let single = read_delimiter_single_form(delimiter);
+    let single = read_delimiter_single_form(delimiter, word_first_byte);
     let literal = delimiter.to_string();
     let scan = |form: &str| -> Option<usize> {
         let mut escaped = false;
@@ -1822,6 +1877,7 @@ fn find_unescaped_read_delimiter<'a>(
 pub(in crate::executor) fn trim_read_input(
     mut input: String,
     delimiter: char,
+    word_first_byte: Option<u8>,
     char_limit: Option<usize>,
     exact_char_limit: bool,
     escape_aware: bool,
@@ -1833,6 +1889,7 @@ pub(in crate::executor) fn trim_read_input(
     let trimmed = trim_read_input_literal(
         input,
         delimiter,
+        word_first_byte,
         char_limit,
         exact_char_limit,
         escape_aware,
@@ -1844,6 +1901,7 @@ pub(in crate::executor) fn trim_read_input(
 fn trim_read_input_literal(
     mut input: String,
     delimiter: char,
+    word_first_byte: Option<u8>,
     char_limit: Option<usize>,
     exact_char_limit: bool,
     escape_aware: bool,
@@ -1865,7 +1923,7 @@ fn trim_read_input_literal(
         // (rubash#1300) and for the newline continuation alike
         // (rubash#1328: the naive split cut `a\\<LF>zz<LF>` to `a\\`).
         let needle = read_delimiter_needle(delimiter);
-        let single = read_delimiter_single_form(delimiter);
+        let single = read_delimiter_single_form(delimiter, word_first_byte);
         let split_at = if raw {
             input
                 .split_once(&needle)
@@ -1873,7 +1931,8 @@ fn trim_read_input_literal(
                 .or_else(|| input.split_once(delimiter))
                 .map(|(before, _)| before.len())
         } else {
-            find_unescaped_read_delimiter(&input, &needle, delimiter).map(|before| before.len())
+            find_unescaped_read_delimiter(&input, &needle, delimiter, word_first_byte)
+                .map(|before| before.len())
         };
         if let Some(at) = split_at {
             input = if cfg!(windows) {
