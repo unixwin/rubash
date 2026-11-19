@@ -84,6 +84,7 @@ impl ConditionalArithParser<'_> {
                 ParsedAssocSubscript::Key(key) => {
                     return Some(ArithLValue::Assoc {
                         name: resolved_name,
+                        written: name.to_string(),
                         key,
                     });
                 }
@@ -91,6 +92,7 @@ impl ConditionalArithParser<'_> {
                     return Some(ArithLValue::AssocEmptyKey {
                         bind_display: format!("{resolved_name}[{token}]"),
                         name: resolved_name,
+                        written: name.to_string(),
                     });
                 }
                 ParsedAssocSubscript::Invalid => {
@@ -133,6 +135,7 @@ impl ConditionalArithParser<'_> {
         match assignment_operator_at(self.input, op_pos) {
             Some("=") => Some(ArithLValue::IndexedRaw {
                 name: resolved_name,
+                written: name.to_string(),
                 subscript,
             }),
             _ => {
@@ -154,6 +157,7 @@ impl ConditionalArithParser<'_> {
                 Some(ArithLValue::Indexed {
                     bind_display: format!("{resolved_name}[{subscript}]"),
                     name: resolved_name,
+                    written: name.to_string(),
                     index,
                 })
             }
@@ -229,6 +233,7 @@ impl ConditionalArithParser<'_> {
                 ParsedAssocSubscript::Key(key) => {
                     return Some(ArithLValue::Assoc {
                         name: resolved_name,
+                        written: name.to_string(),
                         key,
                     });
                 }
@@ -236,6 +241,7 @@ impl ConditionalArithParser<'_> {
                     return Some(ArithLValue::AssocEmptyKey {
                         bind_display: format!("{resolved_name}[{token}]"),
                         name: resolved_name,
+                        written: name.to_string(),
                     });
                 }
                 ParsedAssocSubscript::Invalid => {
@@ -282,6 +288,7 @@ impl ConditionalArithParser<'_> {
         }
         Some(ArithLValue::IndexedRaw {
             name: resolved_name,
+            written: name.to_string(),
             subscript,
         })
     }

@@ -3634,10 +3634,68 @@ impl Executor {
             crate::executor::expand_braced_indices::env_vars_with_pending_subscript_writes(
                 &self.shell_state.env_vars,
             );
-        (
-            crate::executor::arithmetic::arith_body_nounset_trap(body, &overlaid),
-            bodies,
-        )
+        let (trap, writes) =
+            crate::executor::arithmetic::arith_body_nounset_verdict(body, &overlaid);
+        if trap.is_none() {
+            // GNU's walk binds as it expands (subst.c:11229), so the
+            // body's assignments are bound for every later word of this
+            // command — record them in the simulated bindings the same
+            // way `scan_record_assignment` records a `${...:=}` bind
+            // (rubash#3563 rows 2-3: `echo $(( k=1 )) $k` prints `1 1`,
+            // `echo $(( h[k]=4 )) ${h[k]}` prints `4 4`).
+            for (name, value) in &writes {
+                self.scan_sim_record_arith_write(name, value, &overlaid);
+            }
+        }
+        (trap, bodies)
+    }
+
+    /// Record one arithmetic-body write in the scan's simulated
+    /// bindings. Array writes are recorded per changed ELEMENT under
+    /// the full `name[key]` spelling — the shape `scan_sim_value`
+    /// answers element reads from (and the shape `scan_record_assignment`
+    /// records for `${name[key]:=}`) — never under the bare array name:
+    /// a base entry would answer element 0 of an indexed array from the
+    /// whole-array serialization. Scalar writes record under the name.
+    fn scan_sim_record_arith_write(
+        &self,
+        name: &str,
+        after: &str,
+        env_vars: &crate::shell::var_table::VarTable,
+    ) {
+        use crate::executor::expand_braced_indices::ScanSimValue;
+        let before = env_vars.get(name).map(String::as_str).unwrap_or("");
+        if is_marked_var(env_vars, ASSOC_VARS, name) {
+            let before_entries =
+                crate::executor::assignment_helpers::assoc_entries(before);
+            for (key, value) in crate::executor::assignment_helpers::assoc_entries(after) {
+                let prior = before_entries
+                    .iter()
+                    .find(|(prior_key, _)| *prior_key == key)
+                    .map(|(_, prior_value)| prior_value);
+                if prior != Some(&value) {
+                    crate::executor::expand_braced_indices::scan_sim_record(
+                        format!("{name}[{key}]"),
+                        ScanSimValue::Exact(value),
+                    );
+                }
+            }
+        } else if self.parameter_is_array_variable(name) {
+            let before_entries = crate::executor::arrays::indexed_array_entries(before);
+            for (index, value) in crate::executor::arrays::indexed_array_entries(after) {
+                if before_entries.get(&index) != Some(&value) {
+                    crate::executor::expand_braced_indices::scan_sim_record(
+                        format!("{name}[{index}]"),
+                        ScanSimValue::Exact(value),
+                    );
+                }
+            }
+        } else {
+            crate::executor::expand_braced_indices::scan_sim_record(
+                name.to_string(),
+                ScanSimValue::Exact(after.to_string()),
+            );
+        }
     }
 
     /// Boundness of the parameter an indirect source names (GNU

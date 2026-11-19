@@ -1211,11 +1211,34 @@ impl Executor {
         &mut self,
         value: &str,
     ) -> Option<i128> {
-        if let Some(result) = crate::executor::arithmetic::eval_conditional_arith_value(
-            value,
-            &self.shell_state.env_vars,
-        ) {
+        let (result, _writes, category) =
+            crate::executor::arithmetic::eval_conditional_arith_value_categorized_with_writes(
+                value,
+                &self.shell_state.env_vars,
+            );
+        if let Some(result) = result {
             return Some(result);
+        }
+        // GNU variables.c:2905 make_variable_value: the att_integer RHS
+        // goes through the real evalexp, whose expr_streval read points
+        // own the nounset verdict — an unbound read is err_unboundvar +
+        // jump_to_top_level(FORCE_EOF) (expr.c:1190-1216), NOT an
+        // evalerror. The value-only evaluation discarded the category,
+        // so `declare -i di; di=undef+1` fell into the synthesized
+        // "operand expected" text below (rubash#3563). Report the trap
+        // and arm the nounset FORCE_EOF rails instead of the DISCARD.
+        if category == Some(crate::executor::arithmetic::ArithmeticErrorCategory::UnboundVariable) {
+            if let Some(name) = crate::executor::arithmetic::take_arith_unbound_name() {
+                let line = format!(
+                    "{}{}: unbound variable\n",
+                    self.assignment_error_prefix(),
+                    name
+                );
+                self.emit_assignment_diag(line);
+            }
+            self.shell_state.arithmetic_nounset_error.set(true);
+            self.raise_nounset_subscript_abort();
+            return None;
         }
         let message =
             crate::executor::arithmetic::take_arith_eval_error().map(|record| record.render());
