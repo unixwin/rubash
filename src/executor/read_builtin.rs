@@ -2957,6 +2957,7 @@ impl Executor {
                     self.read_deadline,
                     silent,
                     delimiter,
+                    self.read_delim_word_byte,
                     char_limit,
                     exact_char_limit,
                     poll_sigint,
