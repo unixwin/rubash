@@ -1789,7 +1789,7 @@ impl Executor {
         // this_command_name = "[[" for the whole conditional; the
         // arithcomp evalexp diagnostics carry that label
         // (rubash#3295).
-        let (left_val, left_category) = ({
+        let (left_val, left_category) = {
             let _arith_label =
                 crate::executor::arithmetic::arith_eval_label_scope(Some("[[".to_string()));
             eval_mutable_arith_value_with_random_flags(
@@ -1805,7 +1805,7 @@ impl Executor {
                 true,
                 Some(&self.shell_state.variables),
             )
-        });
+        };
         let Some(left_val) = left_val else {
             if left_category
                 == Some(crate::executor::arithmetic::ArithmeticErrorCategory::UnboundVariable)
@@ -1828,7 +1828,7 @@ impl Executor {
         super::arithmetic::sync_arith_writes(self);
         let right_eval = self.expand_arith_indexed_subscripts(&right_expanded);
         let right_dynamic = self.arith_dynamic_context();
-        let (right_val, right_category) = ({
+        let (right_val, right_category) = {
             let _arith_label =
                 crate::executor::arithmetic::arith_eval_label_scope(Some("[[".to_string()));
             eval_mutable_arith_value_with_random_flags(
@@ -1842,7 +1842,7 @@ impl Executor {
                 true,
                 Some(&self.shell_state.variables),
             )
-        });
+        };
         let Some(right_val) = right_val else {
             if right_category
                 == Some(crate::executor::arithmetic::ArithmeticErrorCategory::UnboundVariable)
