@@ -4478,7 +4478,29 @@ impl Executor {
         let ifs_first = ifs_chars.chars().next().unwrap_or(' ').to_string();
         match token {
             "$@" | "${@}" => self.shell_state.positional_window_cloned(),
-            "$*" | "${*}" => vec![self.shell_state.positional_window().join(&ifs_first)],
+            "$*" | "${*}" => {
+                if quoted {
+                    // Quoted `"$*"` joins with $IFS's first char; a
+                    // set-but-null IFS concatenates (ifs_is_null,
+                    // subst.c:3031-3040 list_string joiner), an unset
+                    // IFS falls back to ' ' (ifs_chars is " \t\n" here).
+                    let joiner = if ifs_chars.is_empty() {
+                        String::new()
+                    } else {
+                        ifs_first.clone()
+                    };
+                    vec![self.shell_state.positional_window().join(&joiner)]
+                } else if ifs_chars.is_empty() {
+                    // Unquoted `$*` under a set-but-null IFS carries
+                    // W_SPLITSPACE (subst.c:10207; accumulated at
+                    // :11535, whole-word split on ' ' at :12103-12107):
+                    // element text is protected so each positional is
+                    // its own field — observably the $@ element list.
+                    self.shell_state.positional_window_cloned()
+                } else {
+                    vec![self.shell_state.positional_window().join(&ifs_first)]
+                }
+            }
             _ => {
                 if let Some(base) = token
                     .strip_prefix("${")
@@ -4504,7 +4526,24 @@ impl Executor {
                             .map(normalize_array_expanded_value)
                             .collect();
                         return if star {
-                            vec![values.join(&ifs_first)]
+                            if quoted {
+                                // Quoted `"${name[*]}"` joins with
+                                // $IFS's first char; a set-but-null IFS
+                                // concatenates (ifs_is_null,
+                                // subst.c:3031-3040).
+                                let joiner = if ifs_chars.is_empty() {
+                                    String::new()
+                                } else {
+                                    ifs_first.clone()
+                                };
+                                vec![values.join(&joiner)]
+                            } else if ifs_chars.is_empty() {
+                                // Same W_SPLITSPACE as unquoted `$*`
+                                // (subst.c:10207): per-element fields.
+                                values
+                            } else {
+                                vec![values.join(&ifs_first)]
+                            }
                         } else {
                             values
                         };

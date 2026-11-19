@@ -724,6 +724,27 @@ impl Executor {
                 output.push(ch);
                 continue;
             }
+            // GNU subst.c:11939-11949 (case ' ' of expand_word_internal):
+            // a LITERAL ' ' in the word text is CTLESC-protected whenever
+            // IFS is set-but-null or the word already carries
+            // W_SPLITSPACE, so the deferred split on " "
+            // (subst.c:12103-12107) fires only at the $* join bytes and
+            // affix/rhs spaces stay glued (`a${0+ $* }b` -> `a X Y` `Z b`,
+            // not `a` `X Y` `Z` `b`).
+            if alternate
+                && !in_double
+                && ch == ' '
+                && (self
+                    .shell_state
+                    .env_vars
+                    .get("IFS")
+                    .is_some_and(|ifs| ifs.is_empty())
+                    || crate::executor::markers::contains_split_on_spaces_sentinel(&output))
+            {
+                output.push(crate::executor::markers::IFS_GLUE);
+                output.push(ch);
+                continue;
+            }
             if ch == crate::executor::markers::DATA_BACKTICK {
                 output.push('`');
                 continue;
