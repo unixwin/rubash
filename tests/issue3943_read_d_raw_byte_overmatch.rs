@@ -89,7 +89,7 @@ fn eth_delimiter_reads_through_emoji_on_stdin() {
 
 #[test]
 fn ydieresis_delimiter_reads_through_lone_ff_byte() {
-    let script = "printf 'ab\\377c' > f; exec 3< f; read -d $'\\303\\277' -n 5 -u 3 x; \
+    let script = "printf 'ab\\377c' > \"$TMPDIR/f\"; exec 3< \"$TMPDIR/f\"; read -d $'\\303\\277' -n 5 -u 3 x; \
                   rc=$?; echo \"rc=$rc $(printf '%s' \"$x\" | od -An -tx1 | tr -d ' \\n')\"\n";
     let stdout = hex_pipeline(script);
     // GNU: reads through the raw 0xFF byte; rc 1 because -n 5 counts only
@@ -99,7 +99,7 @@ fn ydieresis_delimiter_reads_through_lone_ff_byte() {
 
 #[test]
 fn u0080_delimiter_reads_through_lone_80_byte() {
-    let script = "printf 'ab\\200cd' > f; exec 3< f; read -d $'\\302\\200' -n 5 -u 3 x; \
+    let script = "printf 'ab\\200cd' > \"$TMPDIR/f\"; exec 3< \"$TMPDIR/f\"; read -d $'\\302\\200' -n 5 -u 3 x; \
                   rc=$?; echo \"rc=$rc $(printf '%s' \"$x\" | od -An -tx1 | tr -d ' \\n')\"\n";
     let stdout = hex_pipeline(script);
     assert_eq!(stdout, "rc=0 6162806364\n");
@@ -107,7 +107,7 @@ fn u0080_delimiter_reads_through_lone_80_byte() {
 
 #[test]
 fn eacute_delimiter_reads_through_lone_e9_byte() {
-    let script = "printf 'ab\\351cd' > f; exec 3< f; read -d $'\\303\\251' -n 5 -u 3 x; \
+    let script = "printf 'ab\\351cd' > \"$TMPDIR/f\"; exec 3< \"$TMPDIR/f\"; read -d $'\\303\\251' -n 5 -u 3 x; \
                   rc=$?; echo \"rc=$rc $(printf '%s' \"$x\" | od -An -tx1 | tr -d ' \\n')\"\n";
     let stdout = hex_pipeline(script);
     // GNU: the invalid lead byte does not count toward -n, so 4 of 5
@@ -117,7 +117,7 @@ fn eacute_delimiter_reads_through_lone_e9_byte() {
 
 #[test]
 fn eth_delimiter_reads_through_lone_f0_byte() {
-    let script = "printf 'ab\\360x' > f; exec 3< f; read -d $'\\303\\260' -n 5 -u 3 x; \
+    let script = "printf 'ab\\360x' > \"$TMPDIR/f\"; exec 3< \"$TMPDIR/f\"; read -d $'\\303\\260' -n 5 -u 3 x; \
                   rc=$?; echo \"rc=$rc $(printf '%s' \"$x\" | od -An -tx1 | tr -d ' \\n')\"\n";
     let stdout = hex_pipeline(script);
     assert_eq!(stdout, "rc=1 6162f078\n");
@@ -127,7 +127,7 @@ fn eth_delimiter_reads_through_lone_f0_byte() {
 fn eacute_stops_on_first_byte_c3() {
     // Control: a lone 0xC3 byte IS the delimiter's first byte — both
     // shells stop there.
-    let script = "printf 'ab\\303(cd' > f; exec 3< f; read -d $'\\303\\251' -n 5 -u 3 x; \
+    let script = "printf 'ab\\303(cd' > \"$TMPDIR/f\"; exec 3< \"$TMPDIR/f\"; read -d $'\\303\\251' -n 5 -u 3 x; \
                   echo \"x=[$x] rc=$?\"\n";
     let stdout = hex_pipeline(script);
     assert_eq!(stdout, "x=[ab] rc=0\n");
@@ -135,7 +135,7 @@ fn eacute_stops_on_first_byte_c3() {
 
 #[test]
 fn euro_delimiter_stops_on_first_byte_e2() {
-    let script = "printf 'ab\\342' > f; exec 3< f; read -d $'\\342\\202\\254' -n 5 -u 3 x; \
+    let script = "printf 'ab\\342' > \"$TMPDIR/f\"; exec 3< \"$TMPDIR/f\"; read -d $'\\342\\202\\254' -n 5 -u 3 x; \
                   echo \"x=[$x] rc=$?\"\n";
     let stdout = hex_pipeline(script);
     assert_eq!(stdout, "x=[ab] rc=0\n");
@@ -143,7 +143,7 @@ fn euro_delimiter_stops_on_first_byte_e2() {
 
 #[test]
 fn proper_eacute_stops_both_faces() {
-    let script = "printf 'ab\\303\\251cd' > f; exec 3< f; read -d $'\\303\\251' -n 5 -u 3 x; \
+    let script = "printf 'ab\\303\\251cd' > \"$TMPDIR/f\"; exec 3< \"$TMPDIR/f\"; read -d $'\\303\\251' -n 5 -u 3 x; \
                   echo \"x=[$x] rc=$?\"\n";
     let stdout = hex_pipeline(script);
     assert_eq!(stdout, "x=[ab] rc=0\n");

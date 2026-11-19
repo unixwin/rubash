@@ -43,7 +43,7 @@ fn run_script(script: &str) -> (String, String, Option<i32>) {
 fn t0_regular_file_is_always_readable_and_consumes_nothing() {
     // read.def input_avail: a regular file (even empty, even at EOF) is
     // readable to poll(), so -t 0 succeeds — and consumes nothing.
-    let script = "printf 'hello\\n' > f; exec 0< f; read -t 0 x; rc=$?; \
+    let script = "printf 'hello\\n' > \"$TMPDIR/f\"; exec 0< \"$TMPDIR/f\"; read -t 0 x; rc=$?; \
                   read y; printf 'rc=%d y=[%s]\\n' \"$rc\" \"$y\"\n";
     let (stdout, _, code) = run_script(script);
     assert_eq!(code, Some(0));
