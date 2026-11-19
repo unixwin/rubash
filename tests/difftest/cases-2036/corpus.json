@@ -37,7 +37,7 @@
   {
    "id": "env-basic",
    "name": "env",
-   "face": "builtin",
+   "face": "emulated",
    "status": "gnu",
    "ref": "audit section 3.2 measured GNU-equal",
    "path": "system",
@@ -50,7 +50,7 @@
   {
    "id": "env-u-path",
    "name": "env",
-   "face": "builtin",
+   "face": "emulated",
    "status": "gnu",
    "ref": "#2046 B2 (ruled align GNU/WinuxCmd, DECISIONS 2026-10-29; fixed S6: PATH absent from the composed env resolves through the execvp default path)",
    "path": "system",

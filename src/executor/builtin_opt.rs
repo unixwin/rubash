@@ -1007,7 +1007,7 @@ mod tests {
     #[test]
     fn grammar_and_noscan_rows_do_not_scan() {
         for name in [
-            "test", "[", "kill", "let", "env", ":", "echo", "break", "exit",
+            "test", "[", "kill", "let", ":", "echo", "break", "exit",
         ] {
             let mut sink = Vec::new();
             let mut diag = diag_for(name, &mut sink);

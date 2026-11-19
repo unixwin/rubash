@@ -541,7 +541,7 @@ const fn keyword(name: &'static str, impls: &'static [ImplRef]) -> CommandRow {
 /// (keyword count, the second reserved-word table), the code won and
 /// the difference is recorded in the S1 report.
 pub(crate) const COMMAND_REGISTRY: &[CommandRow] = &[
-    // -- true builtins (BUILTIN_NAMES, 62) --
+    // -- true builtins (BUILTIN_NAMES, 61) --
     builtin(".", &[ImplRef::new(Entry::SimpPrimary, "command_dispatch_primary"), ImplRef::new(Entry::CmdPrimary, "command_no_alias"), ImplRef::new(Entry::PipelineStage, "pipeline_exec stage restricted-shell refusal guard")], FunctionShadow::PosixSpecialBlock),
     builtin(":", &[ImplRef::new(Entry::SimpPrimary, "command_dispatch_primary"), ImplRef::new(Entry::CmdPrimary, "command_no_alias"), ImplRef::new(Entry::PipelineStage, "pipeline_exec stage arm"), ImplRef::new(Entry::TimedProducer, "pipeline_exec::timed_pipeline_step"), ImplRef::new(Entry::TimedFollowup, "pipeline_exec::timed_followup_keeps_stream"), ImplRef::new(Entry::ComsubWord, "command_substitution word arm"), ImplRef::new(Entry::ComsubTimed, "command_substitution_pipelines timed arm")], FunctionShadow::PosixSpecialBlock),
     builtin("[", &[ImplRef::new(Entry::SimpLate, "command_dispatch_late"), ImplRef::new(Entry::CmdLate, "command_no_alias_late")], FunctionShadow::Allow),
@@ -562,7 +562,6 @@ pub(crate) const COMMAND_REGISTRY: &[CommandRow] = &[
     builtin("disown", &[ImplRef::new(Entry::SimpLate, "command_dispatch_late"), ImplRef::new(Entry::CmdLate, "command_no_alias_late")], FunctionShadow::Allow),
     builtin_redirect("echo", &[ImplRef::new(Entry::SimpPrimary, "command_dispatch_primary"), ImplRef::new(Entry::CmdPrimary, "command_no_alias"), ImplRef::new(Entry::PipelineStage, "pipeline_exec stage arm"), ImplRef::new(Entry::TimedProducer, "pipeline_exec::timed_pipeline_step"), ImplRef::new(Entry::TimedFollowup, "pipeline_exec::timed_followup_keeps_stream"), ImplRef::new(Entry::ComsubWord, "command_substitution word arm"), ImplRef::new(Entry::ComsubTimed, "command_substitution_pipelines timed arm")], FunctionShadow::Allow, &[SlashForm::new("/bin/echo", SlashKind::RedirectToBuiltin), SlashForm::new("/usr/bin/echo", SlashKind::RedirectToBuiltin)]),
     builtin("enable", &[ImplRef::new(Entry::SimpPrimary, "command_dispatch_primary"), ImplRef::new(Entry::CmdPrimary, "command_no_alias")], FunctionShadow::Allow),
-    builtin("env", &[ImplRef::new(Entry::SimpPrimary, "command_dispatch_primary -> external_inner::execute_env_command")], FunctionShadow::Allow),
     builtin("eval", &[ImplRef::new(Entry::SimpPrimary, "command_dispatch_primary"), ImplRef::new(Entry::CmdPrimary, "command_no_alias")], FunctionShadow::PosixSpecialBlock),
     builtin("exec", &[ImplRef::new(Entry::SimpPrimary, "command_dispatch_primary"), ImplRef::new(Entry::CmdPrimary, "command_no_alias"), ImplRef::new(Entry::PipelineStage, "pipeline_exec stage restricted-shell refusal guard")], FunctionShadow::PosixSpecialBlock),
     builtin("exit", &[ImplRef::new(Entry::SimpPrimary, "command_dispatch_primary"), ImplRef::new(Entry::CmdPrimary, "command_no_alias")], FunctionShadow::PosixSpecialBlock),
@@ -803,6 +802,37 @@ pub(crate) const COMMAND_REGISTRY: &[CommandRow] = &[
         slash_forms: &[],
         sync_ref: "WinuxCmd cp OPTION table; GNU coreutils 9.4 cp",
         doc_id: "builtins.md §4.1",
+    },
+    // rubash#3951: `env` is NOT a builtin — GNU bash has no `env`
+    // builtin (no builtins/env.def; env is a coreutils program).
+    // The row was `builtin(...)` until #3951 (the #2036 S2/KD-1
+    // unified projection, completed by the #2581 dispatch arm);
+    // the issue showed the registration leaking into every builtin
+    // face (`compgen -A builtin` / `-A enabled`, `enable -n`,
+    // `builtin env`, `hash -t`) while execution already treated
+    // env as external. The in-process coreutils-env implementation
+    // (external_inner::execute_env_command) stays: it is the only
+    // env on platforms without /usr/bin/env, and the simple-command
+    // face answers with it unconditionally — resolvable axis
+    // Replace (the emulation replaces the resolved /usr/bin/env),
+    // unresolvable axis NotApplicable (the face never consults
+    // resolution). Unlike its neighbours here it is NOT gated by
+    // the external-file-builtins host flag and records no hash
+    // entry: the emulation lives in external_inner, not the layer.
+    CommandRow {
+        name: "env",
+        class: ClaimClass::EmulatedExternal,
+        impls: &[ImplRef::new(Entry::SimpPrimary, "command_dispatch_primary -> external_inner::execute_env_command")],
+        admission: Admission::Full,
+        stand_down: StandDown::new(ResolvablePolicy::Replace, UnresolvablePolicy::NotApplicable),
+        function_shadow: FunctionShadow::Allow,
+        enable_n: EnableN::NotApplicable,
+        introspection: Introspection::Emulated,
+        cfg: CfgGate::AllPlatforms,
+        hash_record: HashRecord::No,
+        slash_forms: &[],
+        sync_ref: "GNU coreutils 9.4 env; WinuxCmd env OPTION table",
+        doc_id: "builtins.md §3",
     },
     CommandRow {
         name: "mkdir",
@@ -1136,8 +1166,9 @@ pub(crate) fn is_special_builtin(name: &str) -> bool {
 /// The builtin name list every introspection face projects (registry
 /// rows whose introspection answer is Builtin), in registry order —
 /// the order BUILTIN_NAMES, the old complete.rs SHELL_BUILTINS and
-/// the old enable.rs ALL_BUILTINS all agreed on (KD-1: the copies
-/// lacked `env`; the projection includes it).
+/// the old enable.rs ALL_BUILTINS all agreed on. Since rubash#3951
+/// the projection is GNU's 61 names exactly: `env` is an emulated
+/// external, not a builtin row.
 pub(crate) fn introspection_builtin_names() -> Vec<&'static str> {
     COMMAND_REGISTRY
         .iter()
@@ -2266,12 +2297,12 @@ mod registry_consistency {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        assert_eq!(table.len(), 62);
+        assert_eq!(table.len(), 61);
         assert_eq!(class_rows(ClaimClass::Builtin), table);
     }
 
     #[test]
-    fn shell_builtins_drift_is_exactly_env() {
+    fn shell_builtins_projection_is_gnu_61() {
         // KD-1 / KD-2, closed on the report side by S2 (this test was
         // the drift pin in S1; it now pins the unified projection).
         //
@@ -2281,6 +2312,9 @@ mod registry_consistency {
         // faces project from the registry. The source scans below keep
         // a hand copy from silently returning, and the runtime checks
         // pin the completion face's accessors to the registry order.
+        // rubash#3951 closed the drift the other way: `env` left the
+        // projection entirely (it is an emulated external now, not a
+        // builtin), so the projection is GNU's 61 names exactly.
         for (src, marker) in [
             (SRC_COMPLETE, "const SHELL_BUILTINS"),
             (SRC_COMPLETE, "const SHELL_KEYWORDS"),
@@ -2298,10 +2332,11 @@ mod registry_consistency {
             crate::builtins::complete::shell_keyword_names(),
             introspection_keyword_names()
         );
-        // `env` is in the projection (the KD-1 fix): 62 names.
+        // rubash#3951: `env` is not a builtin — the projection is
+        // GNU's 61 names, with no extension row.
         let projection = introspection_builtin_names();
-        assert_eq!(projection.len(), 62);
-        assert!(projection.contains(&"env"));
+        assert_eq!(projection.len(), 61);
+        assert!(!projection.contains(&"env"));
 
         // KD-2: the registry's special-builtin set is GNU's 16-name
         // table (mkbuiltins.c:148-154; `enable -s` measurement on GNU
@@ -2346,7 +2381,7 @@ mod registry_consistency {
             emulated,
             set(&[
                 "uname", "arch", "stty", "sleep", "dirname", "basename", "cat", "chmod", "cp",
-                "mkdir", "mkfifo", "rm", "rmdir", "sed", "touch", "tty", "tput",
+                "env", "mkdir", "mkfifo", "rm", "rmdir", "sed", "touch", "tty", "tput",
             ])
         );
         for row in COMMAND_REGISTRY {
@@ -2377,12 +2412,14 @@ mod registry_consistency {
         // The help face's topic set is prose data (help_texts.rs) and
         // cannot be generated from the registry, so it is pinned
         // against the projection instead: every builtin row is a
-        // topic (S2 added the missing `env` topic — env was a builtin
-        // with no help face), the keyword topics are the head words
-        // GNU has topics for, and the only non-registry topics are
-        // the four measured GNU extras. GNU bash 5.3.20 measurements:
-        // `compgen -A helptopic` lists exactly this equation's
-        // GNU part (77 names), and `help then|fi|esac|do|in|]]|}`
+        // topic, the keyword topics are the head words GNU has topics
+        // for, and the only non-registry topics are the four measured
+        // GNU extras — plus `env`, kept deliberately (rubash#3951:
+        // `env` is no longer a builtin, but its help topic stays by
+        // user ruling — the extra `help` entry is an intentional
+        // deviation, not a registration). GNU bash 5.3.20
+        // measurements: `compgen -A helptopic` lists exactly this
+        // equation's GNU part (77 names), and `help then|fi|esac|do|in|]]|}`
         // each fail with "no help topics match" — the closing words
         // of compound commands are not topics in GNU either.
         let topics = crate::builtins::help::help_topic_names();
@@ -2405,7 +2442,7 @@ mod registry_consistency {
         ] {
             expected.insert(head.to_string());
         }
-        for extra in ["%", "(( ... ))", "for ((", "variables"] {
+        for extra in ["%", "(( ... ))", "for ((", "variables", "env"] {
             expected.insert(extra.to_string());
         }
         assert_eq!(topic_set, expected);
@@ -2929,7 +2966,8 @@ mod registry_consistency {
         // echo (via its RedirectToBuiltin slash forms), cat (the
         // hash/checkhash special case, a registered ExternalShortcut
         // face), diff (the shebang shortcut row), env (the impl home
-        // of the env builtin, registered on env's row).
+        // of the emulated-external env command, registered on env's
+        // row — rubash#3951).
         let scanned = only_registered(normalized(claim_literals(SRC_EXTERNAL_INNER)));
         assert_eq!(scanned, set(&["cat", "diff", "echo", "env"]));
         assert_eq!(claims(Entry::ExternalShortcut), set(&["cat", "diff"]));

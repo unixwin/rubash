@@ -19,9 +19,17 @@
 //!
 //! #2642 completes #2514 for that one row, describe-only: off
 //! Windows the describe faces fall through to the PATH branch.
-//! Dispatch routing, `enable -n env`, `compgen -b`, `builtin env`
-//! and the `help env` topic keep the unified projection and are
-//! pinned as unchanged below. This battery is therefore unix-only.
+//!
+//! rubash#3951 then removed `env` from the builtin registration
+//! entirely (it is an emulated external command now): `enable -n
+//! env`, `compgen -b` and `builtin env` no longer treat it as a
+//! builtin — those faces are pinned by `issue3951_env_not_a_builtin`
+//! and the rewritten #2581 battery. What stays pinned here: the
+//! describe faces still report the PATH file, the bare name still
+//! runs the in-process emulation, and `enable -n env` (now refused)
+//! can no longer divert the bare name to the PATH body. The `help
+//! env` topic stays by user ruling. This battery is therefore
+//! unix-only.
 //!
 //! Before the fix, `command -v env` printed the bare name `env` and
 //! `command -V env` printed `env is a shell builtin`.
@@ -191,8 +199,10 @@ fn issue2642_command_v_env_not_found_on_empty_path() {
 }
 
 /// Dispatch is untouched by the fix: the bare name still runs the
-/// in-process env (print mode, assignment form, `builtin env`),
-/// while the `command` prefix still reaches the disk file.
+/// in-process env (print mode, assignment form), while the `command`
+/// prefix still reaches the disk file. `builtin env` is no longer a
+/// dispatch at all (rubash#3951: `env` is not a builtin), so it
+/// fails and prints nothing.
 #[test]
 fn issue2642_env_dispatch_still_in_process() {
     let root = scratch("dispatch");
@@ -206,12 +216,12 @@ fn issue2642_env_dispatch_still_in_process() {
         fake_path,
         "export MARKER2642=present; out=$(env); case \"$out\" in *MARKER2642=present*) echo print-ok;; *) echo print-miss;; esac; \
          out=$(env FOO2642=zzz env); case \"$out\" in *FOO2642=zzz*) echo assign-ok;; *) echo assign-miss;; esac; \
-         out=$(builtin env); case \"$out\" in *MARKER2642=present*) echo builtin-ok;; *) echo builtin-miss;; esac; \
+         out=$(builtin env 2>/dev/null); case \"$out\" in *MARKER2642=present*) echo builtin-ok;; *) echo builtin-miss;; esac; \
          echo disk=$(command env)",
     );
     assert!(out.stdout.contains("print-ok"), "{}", out.stdout);
     assert!(out.stdout.contains("assign-ok"), "{}", out.stdout);
-    assert!(out.stdout.contains("builtin-ok"), "{}", out.stdout);
+    assert!(out.stdout.contains("builtin-miss"), "{}", out.stdout);
     assert!(
         out.stdout.contains("disk=FAKE-env"),
         "`command env` must reach the disk file: {}",
@@ -219,11 +229,12 @@ fn issue2642_env_dispatch_still_in_process() {
     );
 }
 
-/// `enable -n env` still disables the in-process implementation to
-/// the PATH body (pinned by issue2036 §3.1; guarded here so the
-/// describe gate cannot silently break the disable path).
+/// `enable -n env` is refused (rubash#3951: `env` is not a builtin,
+/// so enable cannot manage it) and the refusal cannot divert the
+/// bare name: the in-process emulation still answers it, never the
+/// PATH body.
 #[test]
-fn issue2642_enable_n_env_still_disables_to_path() {
+fn issue2642_enable_n_env_refused_emulation_kept() {
     let root = scratch("disable");
     let fakebin = root.join("fakebin");
     fs::create_dir_all(&fakebin).expect("fakebin dir");
@@ -233,9 +244,14 @@ fn issue2642_enable_n_env_still_disables_to_path() {
     let out = run(
         &root,
         fake_path,
-        "enable -n env; echo envn_rc=$?; echo t=$(type -t env); echo off=$(env)",
+        "export MARKER2642=present; enable -n env; echo envn_rc=$?; echo t=$(type -t env); out=$(env); case \"$out\" in *MARKER2642=present*) echo off=in-process;; *) echo off=other;; esac",
     );
-    assert!(out.stdout.contains("envn_rc=0"), "{}", out.stdout);
+    assert!(out.stdout.contains("envn_rc=1"), "{}", out.stdout);
     assert!(out.stdout.contains("t=file"), "{}", out.stdout);
-    assert!(out.stdout.contains("off=FAKE-env"), "{}", out.stdout);
+    assert!(out.stdout.contains("off=in-process"), "{}", out.stdout);
+    assert!(
+        out.stderr.contains("not a shell builtin"),
+        "{}",
+        out.stderr
+    );
 }

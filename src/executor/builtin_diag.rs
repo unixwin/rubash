@@ -696,7 +696,7 @@ mod tests {
     }
 
     #[test]
-    fn usage_has_no_prolog_and_env_prints_nothing() {
+    fn usage_has_no_prolog() {
         let mut sink = Vec::new();
         let mut diag = Diag::new(cd_row(), &mut sink);
         diag.usage();
@@ -705,11 +705,6 @@ mod tests {
             String::from_utf8(sink).unwrap(),
             "cd: usage: cd [-L|[-P [-e]]] [-@] [dir]\n"
         );
-        let mut sink = Vec::new();
-        let mut diag = Diag::new(builtin_table_row("env").unwrap(), &mut sink);
-        diag.usage();
-        diag.flush_with(|| prolog_script());
-        assert!(sink.is_empty(), "env has no short doc to print");
     }
 
     #[test]

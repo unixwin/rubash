@@ -3244,10 +3244,8 @@ fn shift_bad_operand_status_matches_gnu() {
 /// answer. After the removal `setopt x` is command-not-found (127),
 /// `builtin setopt x` is not-a-shell-builtin (1), and `enable -a` lists
 /// no zsh-ism. The list itself is the unified registry projection
-/// (#2036 S2): GNU's 61 names plus rubash's one extension builtin
-/// `env` = 62. (The count was 61 while enable's hand-maintained list
-/// lacked env — the KD-1 drift; GNU's own 61 excludes env because GNU
-/// has no env builtin.)
+/// (#2036 S2): GNU's 61 names, no extension row since rubash#3951
+/// (the count was 62 while `env` was still registered as a builtin).
 /// GNU 5.3.0 differential (WSL stdin probe 2026-10-18):
 ///   command -v setopt    -> rc 1, no output   (was "setopt", rc 0)
 ///   command -v unsetopt  -> rc 1, no output   (was "unsetopt", rc 0)
@@ -3271,10 +3269,10 @@ fn zsh_option_builtins_are_gone() {
     let rest = stdout.lines().skip(2).collect::<Vec<_>>().join("\n");
     let listed = rest.lines().filter(|line| !line.trim().is_empty()).count();
     assert_eq!(
-        listed, 62,
-        "enable -a must list the 62-name registry projection (GNU 61 + env): {stdout}"
+        listed, 61,
+        "enable -a must list the 61-name registry projection (GNU 61, no env builtin): {stdout}"
     );
-    assert!(rest.contains("enable env\n"), "env listed: {stdout}");
+    assert!(!rest.contains("enable env\n"), "env not listed: {stdout}");
     assert!(!rest.contains("setopt"), "no zsh-isms listed: {stdout}");
 
     let out = run_rubash_in(

@@ -665,9 +665,11 @@ pub(crate) static HELP_TOPICS_TABLE: &[HelpTopic] = &[
         ],
         trailing_newline: false,
     },
-    // env: rubash extension builtin (no GNU .def ancestor — GNU bash
-    // has no env builtin). Added by #2036 S2: env was the one builtin
-    // with no help topic, so the help face contradicted `type env`.
+    // env: emulated external command (no GNU .def ancestor — GNU bash
+    // has no env builtin). Added by #2036 S2, when env was the one
+    // builtin with no help topic; kept by rubash#3951, when env left
+    // the builtin registration — the extra `help` entry is a
+    // user-ruled intentional deviation, not a registration.
     HelpTopic {
         name: "env",
         short_doc: "env [-i] [-u name] [name=value ...] [command [argument ...]]",
@@ -676,9 +678,9 @@ pub(crate) static HELP_TOPICS_TABLE: &[HelpTopic] = &[
             "",
             "With no COMMAND, print the resulting environment.",
             "",
-            "`env' is a rubash extension builtin implementing the coreutils",
-            "env semantics in-process; it shadows the disk command for the",
-            "bare name. `command env' and pathname forms (e.g. /usr/bin/env)",
+            "`env' is a rubash emulated external command implementing the coreutils",
+            "env semantics in-process; it answers the bare name instead of",
+            "the disk command. `command env' and pathname forms (e.g. /usr/bin/env)",
             "run the disk command instead.",
             "",
             "Options:",
