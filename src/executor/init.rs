@@ -1181,6 +1181,10 @@ impl Executor {
         let mut respawn_root_line_spans: Option<(usize, Vec<crate::parser::CommandLineSpan>)> =
             None;
         let mut respawn_argv_bottom: Option<Vec<String>> = None;
+        // rubash#3909: the bash_argv_initialized flag from the
+        // __RUBASH_FORK_BASH_ARGV_INITIALIZED stamp; false unless the
+        // parent stamped it (see the transport doc).
+        let mut respawn_bash_argv_initialized: bool = false;
         let mut respawn_pipestatus: Option<(
             crate::shell::state::PipestatusShape,
             Vec<(i64, i32)>,
@@ -1209,6 +1213,11 @@ impl Executor {
             // materialized empty frame, absent is unmaterialized.
             if let Some(value) = env_vars.get(super::compound_exec::FORK_ARGV_BOTTOM_TRANSPORT) {
                 respawn_argv_bottom = Some(array_values(value));
+            }
+            // rubash#3909: presence is the flag bit (see the
+            // FORK_BASH_ARGV_INITIALIZED_TRANSPORT doc).
+            if env_vars.contains_key(super::compound_exec::FORK_BASH_ARGV_INITIALIZED_TRANSPORT) {
+                respawn_bash_argv_initialized = true;
             }
             if let Some(value) = env_vars.get(super::compound_exec::FORK_PIPESTATUS_TRANSPORT) {
                 respawn_pipestatus = crate::shell::state::decode_pipestatus_state(value);
@@ -1439,6 +1448,10 @@ impl Executor {
                 // respawn verbatim; None keeps the arrays unmaterialized
                 // exactly as the parent's fork left them.
                 bash_arg_bottom: std::cell::RefCell::new(respawn_argv_bottom),
+                // rubash#3909: the flag crosses with the frame — a
+                // flag-set/bottom-None parent must not become a
+                // synthesizing child (see the transport doc).
+                bash_argv_initialized: std::cell::Cell::new(respawn_bash_argv_initialized),
                 dynamic_cells: std::cell::RefCell::new(
                     crate::shell::state::DynamicCellState::default(),
                 ),
