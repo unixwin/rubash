@@ -715,6 +715,11 @@ impl Executor {
         for saved in saved {
             match saved.entry {
                 Some(entry) => {
+                    // rubash#3938 face C: land the saved entry back
+                    // onto its kernel number (GNU's undo replays a
+                    // r_move record: dup2 the save back, close it —
+                    // redir.c:1399 add_undo_fd_redirect).
+                    let entry = self.fd_table.land_restored_entry(saved.fd, entry);
                     self.fd_table.entries.insert(saved.fd, entry);
                 }
                 None => {
@@ -1777,6 +1782,11 @@ impl Executor {
         for saved in saved {
             match saved.entry {
                 Some(entry) => {
+                    // rubash#3938 face C: land the saved entry back
+                    // onto its kernel number (GNU's undo replays a
+                    // r_move record: dup2 the save back, close it —
+                    // redir.c:1399 add_undo_fd_redirect).
+                    let entry = self.fd_table.land_restored_entry(saved.fd, entry);
                     self.fd_table.entries.insert(saved.fd, entry);
                 }
                 None => {
@@ -2401,6 +2411,11 @@ impl Executor {
         for saved in saved {
             match saved.entry {
                 Some(entry) => {
+                    // rubash#3938 face C: land the saved entry back
+                    // onto its kernel number (GNU's undo replays a
+                    // r_move record: dup2 the save back, close it —
+                    // redir.c:1399 add_undo_fd_redirect).
+                    let entry = self.fd_table.land_restored_entry(saved.fd, entry);
                     self.fd_table.entries.insert(saved.fd, entry);
                 }
                 None => {
