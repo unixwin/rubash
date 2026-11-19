@@ -183,6 +183,21 @@ impl TimedInput {
         end
     }
 
+    /// rubash#3945: input_avail's virtual-clock half (the `read -t 0`
+    /// readiness check). True when at least one byte past `offset` had
+    /// arrived by virtual GNU time now — wall time since production start,
+    /// minus the materialization skew, plus the virtual waits earlier
+    /// reads accounted. Read-only: GNU's select(0) inside input_avail
+    /// waits nothing, so `skipped_wait` does not advance; the wall clock
+    /// alone keeps a later deadline-carrying read honest.
+    pub(crate) fn available_now(&self, offset: usize) -> bool {
+        let g = std::time::Instant::now()
+            .saturating_duration_since(self.started)
+            .saturating_sub(self.duration)
+            + self.skipped_wait;
+        self.available_end(g) > offset
+    }
+
     /// Judge one record read. `record_end` is the absolute end offset of
     /// the record the reader would serve from the full buffer, or `None`
     /// when the reader hit EOF. `current_offset` is the reader's stream

@@ -2998,6 +2998,25 @@ impl FdReadEndpoint {
         }
     }
 
+    /// rubash#3945: zero-timeout readiness of a materialized text stream.
+    /// A stream carrying a production schedule stands for GNU's live pipe
+    /// (rubash#1141): ready only once a byte past the stream's own offset
+    /// has arrived on the schedule's virtual clock. An unscheduled stream
+    /// is fully materialized — the temp-file shape GNU reads heredocs and
+    /// herestrings from — and always ready. `None` for every non-text
+    /// endpoint: the caller polls those kernel objects directly.
+    pub(crate) fn timed_text_stream_ready(&self) -> Option<bool> {
+        match self {
+            Self::Text(input) | Self::ProcessSubstitution(input) => {
+                let input = input.borrow();
+                let timing = input.timing.clone()?;
+                let ready = timing.borrow().available_now(input.offset);
+                Some(ready)
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn text(input: impl Into<String>) -> Self {
         Self::bytes(input.into().into_bytes())
     }
