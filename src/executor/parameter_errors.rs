@@ -2523,6 +2523,34 @@ impl Executor {
             // word. An unterminated unit consumes the rest of the word; the
             // arithmetic expansion family owns that diagnostic.
             if let Some(len) = Self::arithmetic_unit_prefix_span(rest) {
+                // rubash#3563 rows 2-3: the nounset section above records
+                // a `$((...))` body's assignments, then restores them away
+                // so this walk re-records every fragment in order (the
+                // `:?` ordering rule — a `:?` earlier in the list must
+                // not see a later fragment's bind). The walk re-records
+                // `:=` binds as it reaches them; it must re-record
+                // arithmetic binds the same way, or a later word's `$k` /
+                // `${h[k]}` is judged against a table that never saw the
+                // bind (GNU binds as it expands, subst.c:11229). The
+                // trap itself was already judged by the nounset section,
+                // so only the write set is re-recorded here.
+                if rest.starts_with("$((") {
+                    let chars: Vec<char> = rest.chars().collect();
+                    if let Some((body, _end)) = arith_expansion_body_at(&chars, 1) {
+                        let overlaid = crate::executor::expand_braced_indices::env_vars_with_pending_subscript_writes(
+                            &self.shell_state.env_vars,
+                        );
+                        let (trap, writes) =
+                            crate::executor::arithmetic::arith_body_nounset_verdict(
+                                &body, &overlaid,
+                            );
+                        if trap.is_none() {
+                            for (name, value) in &writes {
+                                self.scan_sim_record_arith_write(name, value, &overlaid);
+                            }
+                        }
+                    }
+                }
                 rest = &rest[len..];
                 continue;
             }
