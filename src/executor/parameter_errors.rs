@@ -2533,13 +2533,15 @@ impl Executor {
                 // `${h[k]}` is judged against a table that never saw the
                 // bind (GNU binds as it expands, subst.c:11229). The
                 // trap itself was already judged by the nounset section,
-                // so only the write set is re-recorded here.
+                // so only the write set is re-recorded here — against
+                // the evolved state (scan_evolved_env_vars), so a unit
+                // that READS an earlier unit's bind (`$(( j+=1 ))`
+                // after `$(( j=2 ))`) still yields its write set
+                // instead of a phantom trap skipping the re-record.
                 if rest.starts_with("$((") {
                     let chars: Vec<char> = rest.chars().collect();
                     if let Some((body, _end)) = arith_expansion_body_at(&chars, 1) {
-                        let overlaid = crate::executor::expand_braced_indices::env_vars_with_pending_subscript_writes(
-                            &self.shell_state.env_vars,
-                        );
+                        let overlaid = self.scan_evolved_env_vars();
                         let (trap, writes) =
                             crate::executor::arithmetic::arith_body_nounset_verdict(
                                 &body, &overlaid,
@@ -3644,6 +3646,100 @@ impl Executor {
         (None, comsubs)
     }
 
+    /// The variable state an arithmetic verdict must judge against at
+    /// this point of the scan walk: the live table, the scan's
+    /// deferred subscript writes, and the simulated bindings the walk
+    /// has recorded so far, applied in that order. GNU performs ONE
+    /// left-to-right walk (subst.c:13219 expand_word_list_internal ->
+    /// subst.c:11229 expand_word_internal), and each `$((...))` is
+    /// expanded and evaluated as the walk reaches it (subst.c:10868
+    /// expand_arith_string, subst.c:10877 evalexp) against every bind
+    /// the walk has already made — a verdict taken against the
+    /// pre-command table alone traps a name an earlier unit of the
+    /// same command legitimately bound (rubash#3563 rows 2-3, the
+    /// arith-to-arith face: `echo $(( j=2 )) $(( j+1 ))` prints
+    /// `2 3`). Simulated element records land on the storage of their
+    /// base (assoc entries by key, indexed entries by literal index —
+    /// a scalar base converts, as an element assignment converts it
+    /// in GNU); a record whose subscript text this pass cannot
+    /// resolve (`${a[$k]:=}`) is not materialized — no verdict body
+    /// can reference it either, since a body holding `$` gets no
+    /// verdict — and stays answered by the simulated table alone.
+    fn scan_evolved_env_vars(&self) -> crate::shell::var_table::VarTable {
+        let mut env =
+            crate::executor::expand_braced_indices::env_vars_with_pending_subscript_writes(
+                &self.shell_state.env_vars,
+            )
+            .into_owned();
+        let records = crate::executor::expand_braced_indices::scan_sim_snapshot();
+        if records.is_empty() {
+            return env;
+        }
+        use crate::executor::expand_braced_indices::ScanSimValue;
+        // Bare-name records first, element records second: an element
+        // record is the more specific statement about its cell (the
+        // precedence scan_sim_value applies), so it lands on top of
+        // any whole-name record for its base.
+        let mut elements: Vec<(&String, &ScanSimValue)> = Vec::new();
+        for (name, value) in &records {
+            if parse_array_subscript(name).is_some() {
+                elements.push((name, value));
+                continue;
+            }
+            match value {
+                ScanSimValue::Exact(bound) => {
+                    env.insert(name.clone(), bound.clone());
+                }
+                ScanSimValue::SetUnknown => {
+                    // Bound, value unknown to the scan: the entry must
+                    // exist so a read does not trap; the empty value
+                    // stands in for the unknowable one.
+                    if env.get(name).is_none() {
+                        env.insert(name.clone(), String::new());
+                    }
+                }
+            }
+        }
+        for (name, value) in elements {
+            let Some((base, key)) = parse_array_subscript(name) else {
+                continue;
+            };
+            if key == "@" || key == "*" {
+                continue;
+            }
+            let bound = match value {
+                ScanSimValue::Exact(bound) => bound.clone(),
+                ScanSimValue::SetUnknown => String::new(),
+            };
+            if is_marked_var(&env, ASSOC_VARS, base) {
+                let mut entries = crate::executor::assignment_helpers::assoc_entries(
+                    env.get(base).map(String::as_str).unwrap_or(""),
+                );
+                if let Some(slot) = entries.iter_mut().find(|(prior, _)| prior.as_str() == key) {
+                    slot.1 = bound;
+                } else {
+                    entries.push((key.to_string(), bound));
+                }
+                env.insert(
+                    base.to_string(),
+                    crate::executor::assignment_helpers::format_assoc_storage(entries),
+                );
+            } else if let Some(index) =
+                clean_integer_literal_subscript(key).and_then(|raw| usize::try_from(raw).ok())
+            {
+                let mut entries = crate::executor::arrays::indexed_array_entries(
+                    env.get(base).map(String::as_str).unwrap_or(""),
+                );
+                entries.insert(index, bound);
+                env.insert(
+                    base.to_string(),
+                    crate::executor::arrays::format_indexed_array_storage(entries),
+                );
+            }
+        }
+        env
+    }
+
     /// rubash#3498: the nounset verdict of one `$((body))` the word
     /// pre-scan reaches. GNU expands the arithmetic text first
     /// (subst.c:3981 expand_arith_string — its `$` reads trap at
@@ -3658,10 +3754,10 @@ impl Executor {
         if unbound.is_some() {
             return (unbound, bodies);
         }
-        let overlaid =
-            crate::executor::expand_braced_indices::env_vars_with_pending_subscript_writes(
-                &self.shell_state.env_vars,
-            );
+        // Judge against the walk's evolved state, not the pre-command
+        // table: an earlier `$((...))` of this same command may have
+        // bound the very name this body reads (scan_evolved_env_vars).
+        let overlaid = self.scan_evolved_env_vars();
         let (trap, writes) =
             crate::executor::arithmetic::arith_body_nounset_verdict(body, &overlaid);
         if trap.is_none() {
