@@ -87,6 +87,9 @@ impl Executor {
         let mut stderr = Vec::new();
         let mut array_name = None;
         let mut delimiter = '\n';
+        // rubash#3944: a fresh `read` clears the `-d` word byte; only an
+        // option word this parse accepts re-arms it.
+        self.read_delim_word_byte = None;
         let mut char_limit = None;
         let mut exact_char_limit = false;
         let mut raw = false;
@@ -607,7 +610,7 @@ impl Executor {
                     let Some(delimiter_word) = cmd.words.get(index + 1) else {
                         return self.read_missing_argument(cmd, &mut stderr, 'd');
                     };
-                    delimiter = read_delimiter_char(delimiter_word);
+                    delimiter = self.read_delimiter_word(delimiter_word);
                     index += 2;
                 }
                 "-n" => {
@@ -1300,13 +1303,13 @@ impl Executor {
                     delimiter = cmd
                         .words
                         .get(index + 1)
-                        .map(|word| read_delimiter_char(word))
+                        .map(|word| self.read_delimiter_word(word))
                         .unwrap_or('\u{0}');
                     initial_text = cmd.words.get(index + 2).cloned();
                     index += 3;
                 }
                 word if word.starts_with("-edi") && word.len() > 4 => {
-                    delimiter = read_delimiter_char(&word[3..]);
+                    delimiter = self.read_delimiter_word(&word[3..]);
                     initial_text = Some(word[4..].to_string());
                     index += 1;
                 }
@@ -1314,13 +1317,13 @@ impl Executor {
                     delimiter = cmd
                         .words
                         .get(index + 1)
-                        .map(|word| read_delimiter_char(word))
+                        .map(|word| self.read_delimiter_word(word))
                         .unwrap_or('\u{0}');
                     initial_text = cmd.words.get(index + 2).cloned();
                     index += 3;
                 }
                 word if word.starts_with("-dei") && word.len() > 4 => {
-                    delimiter = read_delimiter_char(&word[3..]);
+                    delimiter = self.read_delimiter_word(&word[3..]);
                     initial_text = Some(word[4..].to_string());
                     index += 1;
                 }
@@ -1328,11 +1331,11 @@ impl Executor {
                     let Some(delimiter_word) = cmd.words.get(index + 1) else {
                         return self.read_missing_argument(cmd, &mut stderr, 'd');
                     };
-                    delimiter = read_delimiter_char(delimiter_word);
+                    delimiter = self.read_delimiter_word(delimiter_word);
                     index += 2;
                 }
                 word if word.starts_with("-ed") && word.len() > 3 => {
-                    delimiter = read_delimiter_char(&word[3..]);
+                    delimiter = self.read_delimiter_word(&word[3..]);
                     index += 1;
                 }
                 "-red" | "-erd" => {
@@ -1340,14 +1343,14 @@ impl Executor {
                     let Some(delimiter_word) = cmd.words.get(index + 1) else {
                         return self.read_missing_argument(cmd, &mut stderr, 'd');
                     };
-                    delimiter = read_delimiter_char(delimiter_word);
+                    delimiter = self.read_delimiter_word(delimiter_word);
                     index += 2;
                 }
                 word if (word.starts_with("-red") || word.starts_with("-erd"))
                     && word.len() > 4 =>
                 {
                     raw = true;
-                    delimiter = read_delimiter_char(&word[4..]);
+                    delimiter = self.read_delimiter_word(&word[4..]);
                     index += 1;
                 }
                 "-st" => {
@@ -1436,11 +1439,11 @@ impl Executor {
                     let Some(delimiter_word) = cmd.words.get(index + 1) else {
                         return self.read_missing_argument(cmd, &mut stderr, 'd');
                     };
-                    delimiter = read_delimiter_char(delimiter_word);
+                    delimiter = self.read_delimiter_word(delimiter_word);
                     index += 2;
                 }
                 word if word.starts_with("-sd") && word.len() > 3 => {
-                    delimiter = read_delimiter_char(&word[3..]);
+                    delimiter = self.read_delimiter_word(&word[3..]);
                     index += 1;
                 }
                 word if word.starts_with('-')
@@ -1453,7 +1456,7 @@ impl Executor {
                     index += 1;
                 }
                 word if word.starts_with("-d") && word.len() > 2 => {
-                    delimiter = read_delimiter_char(&word[2..]);
+                    delimiter = self.read_delimiter_word(&word[2..]);
                     index += 1;
                 }
                 "-rd" => {
@@ -1461,12 +1464,12 @@ impl Executor {
                     let Some(delimiter_word) = cmd.words.get(index + 1) else {
                         return self.read_missing_argument(cmd, &mut stderr, 'd');
                     };
-                    delimiter = read_delimiter_char(delimiter_word);
+                    delimiter = self.read_delimiter_word(delimiter_word);
                     index += 2;
                 }
                 word if word.starts_with("-rd") && word.len() > 3 => {
                     raw = true;
-                    delimiter = read_delimiter_char(&word[3..]);
+                    delimiter = self.read_delimiter_word(&word[3..]);
                     index += 1;
                 }
                 "-rsd" | "-srd" => {
@@ -1474,14 +1477,14 @@ impl Executor {
                     let Some(delimiter_word) = cmd.words.get(index + 1) else {
                         return self.read_missing_argument(cmd, &mut stderr, 'd');
                     };
-                    delimiter = read_delimiter_char(delimiter_word);
+                    delimiter = self.read_delimiter_word(delimiter_word);
                     index += 2;
                 }
                 word if (word.starts_with("-rsd") || word.starts_with("-srd"))
                     && word.len() > 4 =>
                 {
                     raw = true;
-                    delimiter = read_delimiter_char(&word[4..]);
+                    delimiter = self.read_delimiter_word(&word[4..]);
                     index += 1;
                 }
                 "-ersd" | "-esrd" | "-resd" | "-rsed" | "-serd" | "-sred" => {
@@ -1489,7 +1492,7 @@ impl Executor {
                     let Some(delimiter_word) = cmd.words.get(index + 1) else {
                         return self.read_missing_argument(cmd, &mut stderr, 'd');
                     };
-                    delimiter = read_delimiter_char(delimiter_word);
+                    delimiter = self.read_delimiter_word(delimiter_word);
                     index += 2;
                 }
                 word if (word.starts_with("-ersd")
@@ -1501,7 +1504,7 @@ impl Executor {
                     && word.len() > 5 =>
                 {
                     raw = true;
-                    delimiter = read_delimiter_char(&word[5..]);
+                    delimiter = self.read_delimiter_word(&word[5..]);
                     index += 1;
                 }
                 "-rsn" | "-srn" => {
@@ -3435,6 +3438,17 @@ impl Executor {
             }
         }
         false
+    }
+
+    /// rubash#3944: accept one `-d` option word. GNU read.def:385 takes
+    /// the delimiter as the word's FIRST RAW BYTE (`delim = (unsigned
+    /// char)*list_optarg`) — record it beside the widened char, whose
+    /// own UTF-8 encoding starts with a different byte whenever the word
+    /// is a lone byte >= 0x80 (the scanners must key on the word's byte,
+    /// never the char's).
+    fn read_delimiter_word(&mut self, word: &str) -> char {
+        self.read_delim_word_byte = Some(super::read_helpers::read_delimiter_first_byte(word));
+        read_delimiter_char(word)
     }
 }
 

@@ -1754,6 +1754,7 @@ impl Executor {
             read_sigint_guard_armed: false,
             read_eof_no_delimiter: false,
             read_process_stdin_eof: false,
+            read_delim_word_byte: None,
             read_edit_armed: false,
             read_edit_initial_text: None,
             read_edit_prompt: None,

@@ -825,6 +825,19 @@ pub(in crate::executor) fn delimiter_stream_byte(delimiter: char, multi_byte: bo
     }
 }
 
+/// rubash#3944: the `-d` option word's FIRST RAW BYTE — GNU
+/// builtins/read.def:385 `delim = (unsigned char)*list_optarg`, the
+/// byte the record scan compares stream unit-start bytes against
+/// (read.def:834), in every locale. The widened delimiter char loses
+/// this for a lone-byte word (`-d $'\377'` widens to U+00FF whose
+/// UTF-8 encoding starts with 0xC3); the raw word carries it.
+pub(in crate::executor) fn read_delimiter_first_byte(word: &str) -> u8 {
+    substitution_metadata::shell_text_to_raw_bytes(word)
+        .first()
+        .copied()
+        .unwrap_or(0)
+}
+
 /// Whether the byte-domain record scan (`scan_text_record_bytes`) must
 /// serve `text` for `delimiter` because the character-domain walkers
 /// cannot see the delimiter byte: the canonical storage encoder stores
