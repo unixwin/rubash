@@ -85,7 +85,10 @@ fn timed_followup_keeps_stream(command: &CommandNode, name: &str) -> bool {
         || command.heredoc.is_some()
         || command.here_string.is_some()
         || command.redirects.iter().any(|redirect| {
-            (redirect.fd.is_none() || redirect.fd == Some(0))
+            // rubash#3894: a `{var}` entry binds an allocated fd,
+            // never fd 0 — it does not rebind the command's stdin.
+            redirect.fd_var.is_none()
+                && (redirect.fd.is_none() || redirect.fd == Some(0))
                 && matches!(
                     redirect.kind,
                     crate::parser::RedirectKind::Input
@@ -9372,7 +9375,12 @@ impl Executor {
             || command
                 .heredoc_redirects
                 .iter()
-                .any(|redirect| redirect.fd.is_none() || redirect.fd == Some(0))
+                // rubash#3894: a `{var}<<` twin binds an allocated fd,
+                // never fd 0 — it is not an fd-0 stdin body.
+                .any(|redirect| {
+                    redirect.fd_var.is_none()
+                        && (redirect.fd.is_none() || redirect.fd == Some(0))
+                })
         {
             return false;
         }

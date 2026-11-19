@@ -1509,6 +1509,53 @@ pub(crate) fn decode_bare_sentinels(value: &str, rules: &[(char, &str)]) -> Stri
     output
 }
 
+/// Decode-side sibling of [`decode_bare_sentinels`] for display strings
+/// that still cross the exactly-once marker decode (the array storage
+/// mirror's verbatim print path, rubash#3921): `E400 + c` resolves to
+/// `c` — EXCEPT when `c` is in the raw-byte marker range
+/// (U+E000..=U+E100), where the pair stays transport. A decoded lone
+/// U+E000 followed by a payload char re-forms a raw-byte pair, and the
+/// flush's decode then folds it to a byte (`a=($'\ue000\ue001')`
+/// printed NUL); keeping the pair lets the flush resolve it exactly
+/// once to the literal char. Pairs outside the range resolve here
+/// because the flush only decodes when U+E000 is present — a lone
+/// U+E314 left as `E400 + E314` would print the introducer verbatim.
+/// A decoded lone `E400` is safe at the flush: `E400` alone is emitted
+/// literally, and `E400` before the next pair's introducer resolves to
+/// the literal char (the flush decoder is pair-greedy).
+pub(crate) fn decode_bare_sentinels_keep_raw_byte_pairs(
+    value: &str,
+    rules: &[(char, &str)],
+) -> String {
+    if !value.contains(LITERAL_CHAR_ESCAPE)
+        && rules.iter().all(|(sentinel, _)| !value.contains(*sentinel))
+    {
+        return value.to_string();
+    }
+    let mut output = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(ch) = chars.next() {
+        if ch == LITERAL_CHAR_ESCAPE {
+            match chars.next() {
+                Some(next)
+                    if (RAW_BYTE_MARKER_ESCAPE..=RAW_BYTE_MARKER_LAST).contains(&(next as u32)) =>
+                {
+                    output.push(ch);
+                    output.push(next);
+                }
+                Some(next) => output.push(next),
+                None => output.push(ch),
+            }
+            continue;
+        }
+        match rules.iter().find(|(sentinel, _)| *sentinel == ch) {
+            Some((_, replacement)) => output.push_str(replacement),
+            None => output.push(ch),
+        }
+    }
+    output
+}
+
 /// E400-aware `str::trim_end_matches`: strips the trailing run of BARE
 /// `sentinel`s only. `trim_end_matches` (and `trim_matches`) reads the
 /// escaped member of a trailing `E400 + sentinel` pair as a bare sentinel

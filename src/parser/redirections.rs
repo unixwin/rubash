@@ -1026,7 +1026,18 @@ pub(super) fn fill_pending_heredoc_body(
     redirect.body = Some(body.clone());
     redirect.gather_line = Some(gather_line);
     if redirect.fd.is_none() {
-        cmd.heredoc = Some(body);
+        // GNU redir.c REDIR_VARASSIGN (redir_varassign): a `{var}<<`
+        // body binds the freshly allocated descriptor, never fd 0, so
+        // it must not take the fd-0 stdin mirror (`cmd.heredoc`) — or
+        // every stdin consumer would feed it to the command as if it
+        // were a plain `<<` body (rubash#3894). The delimiter/gather/
+        // end-line fields below still record it: the EOF warning is
+        // about the gather, not fd 0, and GNU warns for `{var}<<` too.
+        // (Precedent: `{var}<<<` already skips the `here_string`
+        // mirror in assign_here_string_redirect_raw.)
+        if redirect.fd_var.is_none() {
+            cmd.heredoc = Some(body);
+        }
         // GNU stores the dequoted delimiter (`here_doc_eof = redir_word`),
         // so no carrier bytes may reach the warning text either.
         cmd.heredoc_delimiter = Some(heredoc_delimiter_text(&redirect.delimiter));

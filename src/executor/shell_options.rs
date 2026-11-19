@@ -3981,10 +3981,18 @@ impl Executor {
                 && !cmd
                     .heredoc_redirects
                     .iter()
-                    .any(|r| !r.here_string && (r.fd.is_none() || r.fd == Some(0))));
+                    .any(|r| {
+                        !r.here_string
+                            && r.fd_var.is_none()
+                            && (r.fd.is_none() || r.fd == Some(0))
+                    }));
         if !wants_here_string {
             if let Some(redirect) = cmd.heredoc_redirects.iter().rev().find(|redirect| {
-                !redirect.here_string && (redirect.fd.is_none() || redirect.fd == Some(0))
+                // rubash#3894: a `{var}<<` twin binds an allocated fd,
+                // never fd 0 — it is not an fd-0 stdin body.
+                !redirect.here_string
+                    && redirect.fd_var.is_none()
+                    && (redirect.fd.is_none() || redirect.fd == Some(0))
             }) {
                 if redirect.body_carrier.is_some() {
                     return Some(self.expand_heredoc_body_mut_from_carrier(&redirect.body_carrier));
@@ -4125,7 +4133,11 @@ impl Executor {
         match last_fd0.as_ref() {
             Some(crate::parser::RedirectKind::HereDoc) => {
                 if let Some(redirect) = cmd.heredoc_redirects.iter().rev().find(|redirect| {
-                    !redirect.here_string && (redirect.fd.is_none() || redirect.fd == Some(0))
+                    // rubash#3894: a `{var}<<` twin binds an allocated fd,
+                    // never fd 0 — it is not an fd-0 stdin body.
+                    !redirect.here_string
+                        && redirect.fd_var.is_none()
+                        && (redirect.fd.is_none() || redirect.fd == Some(0))
                 }) {
                     if redirect.body_carrier.is_some() {
                         return Some(
@@ -4205,7 +4217,11 @@ impl Executor {
             // body-first behavior.
             None => {
                 if let Some(redirect) = cmd.heredoc_redirects.iter().rev().find(|redirect| {
-                    !redirect.here_string && (redirect.fd.is_none() || redirect.fd == Some(0))
+                    // rubash#3894: a `{var}<<` twin binds an allocated fd,
+                    // never fd 0 — it is not an fd-0 stdin body.
+                    !redirect.here_string
+                        && redirect.fd_var.is_none()
+                        && (redirect.fd.is_none() || redirect.fd == Some(0))
                 }) {
                     if let Some(carrier) = &redirect.body_carrier {
                         if let crate::parser::StdinBody::Preexpanded(text) = carrier {
@@ -4673,7 +4689,13 @@ pub(in crate::executor) fn fd0_stdin_redirect_winner(
         .iter()
         .rev()
         .find(|redirect| {
-            redirect.fd.unwrap_or(0) == 0
+            // GNU redir.c:963-968 (REDIR_VARASSIGN): a `{var}` entry
+            // binds a freshly allocated descriptor, never fd 0 — it
+            // can never win the fd-0 stdin decision (rubash#3894).
+            // Same exclusion the sibling
+            // fd0_stdin_redirect_winner_redirect already carries (#2131).
+            redirect.fd_var.is_none()
+                && redirect.fd.unwrap_or(0) == 0
                 && matches!(
                     redirect.kind,
                     crate::parser::RedirectKind::Input

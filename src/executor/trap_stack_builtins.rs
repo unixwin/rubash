@@ -29,13 +29,33 @@ fn decode_raw_byte_marker_bytes(bytes: &[u8]) -> Vec<u8> {
 /// so the log preserves the production order across both fds.
 pub(in crate::executor) struct OrderedOutputLog {
     chunks: std::rc::Rc<std::cell::RefCell<Vec<(u8, Vec<u8>)>>>,
+    // rubash#3921 (D1): printf's fd-1 chunks are FINAL bytes — its Text
+    // segments already passed through `escape::raw_bytes`
+    // (shell_text_to_raw_bytes) inside the builtin — so the direct flush
+    // must NOT run the marker decode over them again (a literal U+E000
+    // + payload pair would fold to a NUL byte on the second decode).
+    // Every other log writer stores transport text and leaves this
+    // false, so their chunks still decode exactly once. Stderr chunks
+    // are transport text even for printf (diagnostics are written
+    // verbatim) and always decode.
+    stdout_final_bytes: bool,
 }
 
 impl OrderedOutputLog {
     pub(in crate::executor) fn new() -> Self {
         OrderedOutputLog {
             chunks: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+            stdout_final_bytes: false,
         }
+    }
+
+    /// Mark this log's fd-1 chunks as final bytes (printf only).
+    pub(in crate::executor) fn mark_stdout_final_bytes(&mut self) {
+        self.stdout_final_bytes = true;
+    }
+
+    pub(in crate::executor) fn stdout_is_final_bytes(&self) -> bool {
+        self.stdout_final_bytes
     }
 
     pub(in crate::executor) fn stdout_writer(&self) -> OrderedChunkWriter {
@@ -230,7 +250,17 @@ impl Executor {
         let decoded: Vec<(u8, Vec<u8>)> = log
             .chunks()
             .iter()
-            .map(|(fd, bytes)| (*fd, decode_raw_byte_marker_bytes(bytes)))
+            .map(|(fd, bytes)| {
+                // rubash#3921 (D1): a log whose fd-1 chunks are already
+                // final bytes (printf's Text segments) skips the decode
+                // on fd 1 only — stderr chunks are transport text and
+                // still decode exactly once.
+                if *fd == 1 && log.stdout_is_final_bytes() {
+                    (*fd, bytes.clone())
+                } else {
+                    (*fd, decode_raw_byte_marker_bytes(bytes))
+                }
+            })
             .collect();
         if self.route_builtin_buffered_output_chunks(cmd, &decoded, false)? {
             return Ok(());
