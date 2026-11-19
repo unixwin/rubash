@@ -1650,6 +1650,67 @@ pub struct Executor {
     /// so the spawn-site read must use this pre-commit snapshot, not
     /// the live variable.
     pub(crate) exec_replace_shlvl_snapshot: Cell<Option<i64>>,
+    /// rubash#3932: nonzero while a GNU nofork-face spawn is armed on this
+    /// executor — the external spawn seam folds adjust_shell_level(-1)
+    /// into the child environment while it stands (GNU execute_cmd.c
+    /// 5813-5819: on the nofork path execute_disk_command decrements the
+    /// level and rebuilds the export environment before execve). Armed by
+    /// the user-subshell / command-substitution / process-substitution
+    /// body dispatch (execute_cmd.c:1756 optimize_subshell_command,
+    /// evalstring.c:532 should_suppress_fork in the forked child) and by
+    /// the async faces (execute_cmd.c:4553 in the forked async child,
+    /// :5562 for the wrapper respawn); consumed only as a spawn-time
+    /// predicate, restored by the walk frame that armed it.
+    pub(crate) nofork_spawn_dispatch_stamp: Cell<u64>,
+    /// rubash#3932: monotonic source for nofork_spawn_dispatch_stamp.
+    pub(crate) nofork_spawn_stamp_counter: Cell<u64>,
+    /// rubash#3932: one-shot pass letting an and_or_list's last element
+    /// keep the nofork spawn stamp across its execute_ast wrapper —
+    /// mirrors exec_replace_stamp_hold (GNU execute_cmd.c:2886
+    /// optimize_connection_fork marks the connection's second operand,
+    /// which this port dispatches through its own execute_ast walk).
+    pub(crate) nofork_spawn_stamp_hold: Cell<u32>,
+    /// rubash#3932: set by the paren/comsub/procsub body dispatch right
+    /// before its execute_ast call; execute_ast_inner consumes it for
+    /// that one walk (pending one-shot) so the walk's loop arms the spawn
+    /// stamp exactly at the body's last node — GNU marks the subshell
+    /// body's qualifying command before it dispatches
+    /// (execute_cmd.c:1799-1806), and an earlier body node's plain spawn
+    /// must take the forked face (live level), never the marked face.
+    pub(crate) nofork_spawn_body_candidate_pending: Cell<bool>,
+    /// rubash#3932: the consumed candidate flag for the walk in flight
+    /// (see nofork_spawn_body_candidate_pending).
+    pub(crate) nofork_spawn_body_candidate: Cell<bool>,
+    /// rubash#3932: whether the armed face admits command redirects —
+    /// false for the paren/comsub faces (should_optimize_fork's
+    /// redirects==0 arm, evalstring.c:106-117 with subshell==0) and true
+    /// for the procsub face (should_suppress_fork passes the PROCSUB
+    /// bit, which relaxes the redirect check) and the async faces
+    /// (execute_cmd.c:4553 sets CMD_NO_FORK unconditionally).
+    pub(crate) nofork_spawn_face_allows_redirects: Cell<bool>,
+    /// rubash#3932: true for the async faces — GNU's forked async child
+    /// marks CMD_NO_FORK without consulting should_optimize_fork
+    /// (execute_cmd.c:4553), so a parent-set EXIT/ERR trap must not
+    /// block the seam adjustment (a parent `trap 'true' EXIT` with
+    /// `printenv & wait` still exports live-1).
+    pub(crate) nofork_spawn_face_unconditional: Cell<bool>,
+    /// rubash#3932: the payload face a validated respawn transports for
+    /// its `-c` body (Executor::new consumes BACKGROUND_WRAPPER_PAYLOAD_
+    /// FACE_KEY under the internal-respawn provenance gate): 0 none,
+    /// 1 simple (the forked async child's unconditional mark,
+    /// execute_cmd.c:4553), 2 subshell body (the paren-face replay,
+    /// execute_cmd.c:1799-1806, trap-gated + redirects block),
+    /// 3 process-substitution body (should_suppress_fork with the
+    /// PROCSUB bit, evalstring.c:106-117 — trap-gated, redirects ride).
+    /// The -c arming consults it; a forged ambient key arms nothing
+    /// (consumed only for a validated internal respawn, then stripped).
+    pub(crate) respawn_payload_face: Cell<u8>,
+    /// rubash#3932: true for the input-process-substitution face — the
+    /// body runs IN-PROCESS on this executor (GNU forks a child whose
+    /// trap table was reset, trap.c reset_or_restore_signal_handlers),
+    /// so the seam gate evaluates against the reset-child shape
+    /// (parent-set traps invisible) instead of the live table.
+    pub(crate) nofork_spawn_face_child_trap_reset: Cell<bool>,
     /// rubash#353: locale in effect when each SOURCE LINE was first reached
     /// at reader level — the locale GNU's parser would decode that line's
     /// `$'...'` backslash-u escapes under (GNU reads a newline-terminated

@@ -3073,6 +3073,16 @@ impl Executor {
             .env_vars
             .insert("__RUBASH_COMSUB_BODY".to_string(), "1".to_string());
         let mut trap_status: Option<i32> = None;
+        // rubash#3932: the body's single plain command takes GNU's
+        // fork-suppression mark (evalstring.c:532 should_suppress_fork in
+        // the forked comsub child) and exports live-1 (execute_cmd.c
+        // 5816-5817). Redirects block (the comsub face passes
+        // subshell==0 to should_optimize_fork); the trap gate is
+        // re-checked at the spawn seam against this child's reset table.
+        self.nofork_spawn_face_allows_redirects.set(false);
+        self.nofork_spawn_body_candidate_pending.set(
+            crate::executor::Executor::nofork_spawn_body_tail_ok(&commands.commands, false),
+        );
         let (thread_captured, result) = crate::executor::shell_options::capture_stdout(|| {
             // GNU subst.c:7413 parse_and_execute ("command substitution") →
             // evalstring.c:348 indirection_level++: the body's traces render

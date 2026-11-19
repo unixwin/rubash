@@ -81,10 +81,8 @@ fn varassign_heredoc_does_not_feed_external_stdin_here_string() {
 
 #[test]
 fn varassign_here_string_does_not_feed_builtin_read() {
-    let (stdout, _stderr, code) = run_file(
-        "read x {v}<<<hello\necho \"x=$x v=$v rc=$?\"\n",
-        "read-hs",
-    );
+    let (stdout, _stderr, code) =
+        run_file("read x {v}<<<hello\necho \"x=$x v=$v rc=$?\"\n", "read-hs");
     assert_eq!(stdout, "x= v=10 rc=1\n");
     assert_eq!(code, 0);
 }
@@ -175,10 +173,8 @@ fn varassign_heredoc_does_not_feed_if_condition_read() {
 fn varassign_heredoc_does_not_override_pipeline_stdin() {
     // GNU: the stage keeps the pipe as its stdin (prints "hi"); a
     // plain `<<` still overrides the pipe (prints the body).
-    let (stdout, _stderr, code) = run_file(
-        "echo hi | cat {v}<<A\nbody\nA\necho \"v=$v\"\n",
-        "pipe-var",
-    );
+    let (stdout, _stderr, code) =
+        run_file("echo hi | cat {v}<<A\nbody\nA\necho \"v=$v\"\n", "pipe-var");
     assert_eq!(stdout, "hi\nv=\n");
     assert_eq!(code, 0);
     let (stdout, _stderr, code) = run_file("echo hi | cat <<A\nbody\nA\n", "pipe-plain");
@@ -196,10 +192,8 @@ fn numbered_and_plain_heredoc_controls_still_feed() {
     let (stdout, _stderr, code) = run_file("cat <<A\nplain\nA\necho done\n", "ctl-plain");
     assert_eq!(stdout, "plain\ndone\n");
     assert_eq!(code, 0);
-    let (stdout, _stderr, code) = run_file(
-        "read x <<A\nhello\nA\necho \"x=$x rc=$?\"\n",
-        "ctl-read",
-    );
+    let (stdout, _stderr, code) =
+        run_file("read x <<A\nhello\nA\necho \"x=$x rc=$?\"\n", "ctl-read");
     assert_eq!(stdout, "x=hello rc=0\n");
     assert_eq!(code, 0);
 }

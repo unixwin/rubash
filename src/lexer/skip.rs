@@ -4108,9 +4108,8 @@ pub fn unclosed_comsub_eof_shape(
                     // token — read_token returns it before this `(` —
                     // so it, not the paren, owns the report
                     // (`v=(a; (echo` names `;').
-                    if let Some((_, token_line, token, in_comsub)) = compassign_token_error
-                        .as_ref()
-                        .filter(|(frame_idx, ..)| {
+                    if let Some((_, token_line, token, in_comsub)) =
+                        compassign_token_error.as_ref().filter(|(frame_idx, ..)| {
                             stack.last().is_some_and(|&(idx, _, _)| idx == *frame_idx)
                         })
                     {

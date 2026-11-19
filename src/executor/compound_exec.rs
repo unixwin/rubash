@@ -1402,6 +1402,44 @@ impl Executor {
         &mut self,
         background_command: &BackgroundCommand,
     ) -> Result<(), ExecuteError> {
+        // rubash#3932 async face: GNU's forked async child marks
+        // CMD_NO_FORK unconditionally (execute_cmd.c:4553 sets it in the
+        // make_child child half, no shape or trap consult), so the plain
+        // external this dispatch runs exports live-1 — redirects travel
+        // (resolved into the fork's stdio) and a parent-set EXIT/ERR
+        // trap does not block. Arm for the simple-command shapes only:
+        // compounds re-mark through their own faces (the in-process
+        // paren body walk, the wrapper respawn child) and pipeline
+        // members keep the forked face (SUBSHELL_PIPE, execute_cmd.c
+        // 5816). Saved and restored so the arm never leaks past this
+        // dispatch — the wrapper fallback respawns a child that arms
+        // through its own wrapper-role face.
+        let saved_stamp = self.nofork_spawn_dispatch_stamp.get();
+        let saved_unconditional = self.nofork_spawn_face_unconditional.get();
+        let saved_allows_redirects = self.nofork_spawn_face_allows_redirects.get();
+        if Self::nofork_spawn_async_simple_shape_ok(&background_command.command) {
+            let stamp = self.nofork_spawn_stamp_counter.get() + 1;
+            self.nofork_spawn_stamp_counter.set(stamp);
+            self.nofork_spawn_dispatch_stamp.set(stamp);
+            self.nofork_spawn_face_unconditional.set(true);
+            self.nofork_spawn_face_allows_redirects.set(true);
+        } else {
+            self.nofork_spawn_dispatch_stamp.set(0);
+            self.nofork_spawn_face_unconditional.set(false);
+        }
+        let result = self.execute_background_ast_command_inner(background_command);
+        self.nofork_spawn_dispatch_stamp.set(saved_stamp);
+        self.nofork_spawn_face_unconditional
+            .set(saved_unconditional);
+        self.nofork_spawn_face_allows_redirects
+            .set(saved_allows_redirects);
+        result
+    }
+
+    fn execute_background_ast_command_inner(
+        &mut self,
+        background_command: &BackgroundCommand,
+    ) -> Result<(), ExecuteError> {
         // GNU execute_simple_command runs run_debug_trap (execute_cmd.c:4506)
         // BEFORE make_child forks the async child (~4550), so `true &` reports
         // `DBG:true` from the parent. A compound async body ({ ...; } &,
@@ -1521,6 +1559,22 @@ impl Executor {
                 // (exported shell vars; no assignments exist at this gate).
                 let env_pairs =
                     self.compose_external_environment(&background_command.command, &program);
+                // rubash#3932: the direct async spawn is GNU's forked
+                // async child (execute_cmd.c:4553 CMD_NO_FORK, :5816
+                // adjust_shell_level(-1) before maybe_make_export_env) —
+                // export live-1 in its environment. The async arm above
+                // unconditional: no trap gate applies.
+                let env_pairs = if self.nofork_spawn_adjust_allowed() {
+                    let mut pairs = env_pairs;
+                    crate::executor::readonly_functions::env_pair_supercede(
+                        &mut pairs,
+                        "SHLVL".to_string(),
+                        self.nofork_spawn_adjusted_shlvl(),
+                    );
+                    pairs
+                } else {
+                    env_pairs
+                };
                 self.spawn_async_direct(
                     exec_path,
                     &argv,
@@ -1555,6 +1609,11 @@ impl Executor {
                     &mut process,
                     &program,
                 );
+                // rubash#3932: the direct async spawn exports live-1
+                // (execute_cmd.c:4553/5816) — same fold as the unix twin.
+                if self.nofork_spawn_adjust_allowed() {
+                    process.env("SHLVL", self.nofork_spawn_adjusted_shlvl());
+                }
                 self.stamp_spawn_cwd(&mut process);
                 suppress_orphan_console(&mut process);
                 process.spawn().map(crate::fd::SpawnedChild::from)
@@ -1624,6 +1683,30 @@ impl Executor {
                     !key.starts_with("__RUBASH_") || rubash_spawn_inherited_state(key)
                 })
                 .collect();
+        // rubash#3932: the wrapper child replays the GNU face its payload
+        // carries — a simple command rides the forked async child's
+        // unconditional mark (execute_cmd.c:4553), an absorbed `( list )`
+        // body replays the subshell mark (execute_cmd.c:1799-1806, trap
+        // and redirect gated), and any other compound body keeps the
+        // live level (optimize_subshell_command requires cm_simple,
+        // execute_cmd.c:1756). The key rides the validated nonce
+        // handshake; a forged ambient value arms nothing.
+        {
+            let payload_face =
+                if Self::nofork_spawn_async_simple_shape_ok(&background_command.command) {
+                    "simple"
+                } else if background_command.command.subshell_command.is_some()
+                    || background_command.command.subshell
+                {
+                    "subshell"
+                } else {
+                    "compound"
+                };
+            env_map.insert(
+                crate::builtins::kill::BACKGROUND_WRAPPER_PAYLOAD_FACE_KEY.to_string(),
+                payload_face.to_string(),
+            );
+        }
         // rubash#2486: iterate the SNAPSHOT, not the live table. The
         // VarTable is write-behind for the attribute keys (#916): the
         // serialized `__RUBASH_*_VARS` strings inside it are stale/absent
@@ -4752,6 +4835,25 @@ impl Executor {
                     // spans the EXIT trap too — GNU runs it inside the
                     // forked child.
                     let _profiler_subshell = super::profiler::enter_subshell();
+                    // rubash#3932: GNU marks the subshell body's
+                    // qualifying command before dispatching it
+                    // (execute_cmd.c:1756 optimize_subshell_command ->
+                    // :1803 CMD_NO_FORK), so the body's tail plain spawn
+                    // exports live-1 while earlier body nodes keep the
+                    // forked face. The walk consumes the candidate
+                    // one-shot and arms the spawn stamp at the tail's
+                    // dispatch; the seam re-checks the trap state at
+                    // spawn time (the forked child reset the parent's
+                    // traps, trap.c:1480, and traps armed inside the
+                    // body block the mark). Redirects block the mark:
+                    // optimize_subshell_command consults
+                    // should_optimize_fork with subshell==0, whose
+                    // redirects==0 arm holds (evalstring.c:106-117).
+                    executor.nofork_spawn_face_allows_redirects.set(false);
+                    let timed_free = executor.timed_dispatch_depth.get() == 0;
+                    executor
+                        .nofork_spawn_body_candidate_pending
+                        .set(timed_free && Self::nofork_spawn_body_tail_ok(body, false));
                     let body_result = executor.execute_ast_inner(body);
                     // GNU execute_cmd.c execute_in_subshell: expr.c
                     // evalerror's jump_to_top_level(DISCARD) reaches only the

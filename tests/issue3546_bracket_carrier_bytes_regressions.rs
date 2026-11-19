@@ -30,7 +30,8 @@
 use std::process::{Command, Stdio};
 
 fn run_file(script: &str, tag: &str) -> (String, String, i32) {
-    let path = std::env::temp_dir().join(format!("i3546_bracket_{}_{}.sh", tag, std::process::id()));
+    let path =
+        std::env::temp_dir().join(format!("i3546_bracket_{}_{}.sh", tag, std::process::id()));
     std::fs::write(&path, script).expect("write probe script");
     let child = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg(&path)

@@ -1228,6 +1228,25 @@ impl Executor {
                 env_vars.push(("SHLVL".to_string(), adjusted));
             }
         }
+        // rubash#3932: the same fold for the nofork faces — GNU adjusts
+        // before building the environment env receives regardless of
+        // which nofork route marked the command (a paren body's
+        // `env printenv SHLVL` is the marked simple command just like an
+        // exec-replace tail). The read is the CURRENT variable: the
+        // forked-child faces bind the command's prefix temp assignments
+        // into the child's table before the adjustment (GNU
+        // `SHLVL=9 ( env printenv SHLVL )` exports 8, not 5).
+        #[cfg(unix)]
+        if !config.ignore_environment && self.nofork_spawn_adjust_allowed() {
+            let adjusted = self.nofork_spawn_adjusted_shlvl();
+            if ordered_env_contains(&env_vars, "SHLVL") {
+                ordered_env_insert(&mut env_vars, "SHLVL".to_string(), adjusted);
+            } else if let Some(pos) = env_vars.iter().position(|(name, _)| name == "_") {
+                env_vars.insert(pos, ("SHLVL".to_string(), adjusted));
+            } else {
+                env_vars.push(("SHLVL".to_string(), adjusted));
+            }
+        }
 
         if let Some(file) = &config.file {
             match fs::read_to_string(shell_path_to_windows(file, &self.shell_state.env_vars)) {
@@ -2492,7 +2511,36 @@ impl Executor {
         {
             return false;
         }
-        let env = &self.shell_state.env_vars;
+        self.nofork_spawn_traps_allow()
+    }
+
+    /// rubash#3932: the trap gate GNU's should_optimize_fork applies
+    /// (builtins/evalstring.c:106-117): EXIT/ERROR trap presence blocks
+    /// (`trap '' EXIT` counts — trap.c signal_is_trapped), and any real
+    /// signal trap blocks via any_signals_trapped (trap.c:650, which
+    /// skips ignored dispositions and the pseudo-signal slots); the
+    /// DEBUG/RETURN pseudo traps do not block (a forked child's
+    /// reset_or_restore_signal_handlers clears them without functrace,
+    /// trap.c:1458-1464). get_trap_action is reset-aware, so a
+    /// parent-set trap inside a reset subshell child reads as unset —
+    /// exactly the child-side state the mark consults.
+    pub(in crate::executor) fn nofork_spawn_traps_allow(&self) -> bool {
+        Self::nofork_spawn_traps_allow_in(&self.shell_state.env_vars)
+    }
+
+    /// rubash#3932: the same gate evaluated against the shape the forked
+    /// comsub child would see — the shortcut spawner runs at expansion
+    /// time on the parent executor, but GNU consults should_suppress_fork
+    /// in the forked child whose trap table was reset
+    /// (trap.c reset_or_restore_signal_handlers), so a parent-set trap
+    /// must not block while one armed inside the body would.
+    pub(in crate::executor) fn nofork_spawn_traps_allow_for_subshell_child(&self) -> bool {
+        let mut child_table = self.shell_state.env_vars.clone();
+        crate::builtins::trap::reset_for_subshell_child(&mut child_table);
+        Self::nofork_spawn_traps_allow_in(&child_table)
+    }
+
+    fn nofork_spawn_traps_allow_in(env: &crate::shell::var_table::VarTable) -> bool {
         // EXIT and ERR traps block by presence (GNU signal_is_trapped
         // counts `trap ''` too); get_trap_action is reset-aware.
         if crate::builtins::trap::get_trap_action(env, "EXIT").is_some()
@@ -2514,10 +2562,64 @@ impl Executor {
             match signal {
                 "EXIT" | "ERR" | "ERROR" | "DEBUG" | "RETURN" | "RESET" | "ORIG_IGN" => {}
                 _ if reset.split(':').any(|name| name == signal) => {}
+                // GNU excludes ignored signals from any_signals_trapped
+                // (trap.c:655 `(sigmodes[i] & SIG_IGNORED) == 0`): an
+                // empty trap action — `trap '' SIG`, or the async child's
+                // SIGINT/SIGQUIT disposition bookkeeping — is an ignored
+                // signal, not a user trap, and must not block the mark.
+                _ if env.get(key).is_some_and(|action| action.is_empty()) => {}
                 _ => return false,
             }
         }
         true
+    }
+
+    /// rubash#3932: whether the armed nofork face may adjust the child's
+    /// SHLVL at this spawn — the trap-gated faces consult the live trap
+    /// state (GNU re-consults should_optimize_fork for a paren body's
+    /// connection tail at execute_connection time, execute_cmd.c
+    /// 2886/2956, so a trap an earlier body command armed blocks); the
+    /// async faces are unconditional (execute_cmd.c:4553 marks
+    /// CMD_NO_FORK in the forked async child without a shape or trap
+    /// consult).
+    pub(in crate::executor) fn nofork_spawn_adjust_allowed(&self) -> bool {
+        if self.nofork_spawn_dispatch_stamp.get() == 0 {
+            return false;
+        }
+        if self.nofork_spawn_face_unconditional.get() {
+            return true;
+        }
+        if self.nofork_spawn_face_child_trap_reset.get() {
+            return self.nofork_spawn_traps_allow_for_subshell_child();
+        }
+        self.nofork_spawn_traps_allow()
+    }
+
+    /// rubash#3932: the exported level for a nofork-face spawn — GNU
+    /// adjust_shell_level(-1) reads the CURRENT SHLVL variable and
+    /// clamps at 0 (variables.c:849-892); in the forked child faces the
+    /// command's own prefix temp assignments are already bound into the
+    /// child's variable table, so the current value is the one the
+    /// adjustment reads (GNU `SHLVL=9 ( printenv SHLVL )` exports 8).
+    pub(in crate::executor) fn nofork_spawn_adjusted_shlvl(&self) -> String {
+        self.current_shlvl_value()
+            .saturating_sub(1)
+            .max(0)
+            .to_string()
+    }
+
+    /// rubash#3932: platform-neutral form of the exec-replace tail state
+    /// gate (the -c tail stamp's interactive/trap/FUNCTION_STDIN
+    /// conditions) for the plain-spawn seam; unix-only because the -c
+    /// exec replacement itself is.
+    #[cfg(unix)]
+    fn exec_replace_tail_state_ready_any(&self) -> bool {
+        self.exec_replace_tail_state_ready()
+    }
+
+    #[cfg(not(unix))]
+    fn exec_replace_tail_state_ready_any(&self) -> bool {
+        false
     }
 
     #[cfg(unix)]
@@ -2569,6 +2671,17 @@ impl Executor {
             .get("SHLVL")
             .and_then(|value| value.trim().parse().ok())
             .unwrap_or(0)
+    }
+
+    #[cfg(not(unix))]
+    fn exec_replace_adjusted_shlvl(&self) -> String {
+        // The -c tail exec replacement is unix-only (rubash#1497); on
+        // non-unix the -c tail stamp never arms, so this read is a
+        // defensive fallback that mirrors the unix adjustment.
+        self.current_shlvl_value()
+            .saturating_sub(1)
+            .max(0)
+            .to_string()
     }
 
     #[cfg(unix)]
@@ -5192,6 +5305,40 @@ impl Executor {
         {
             Err(std::io::Error::from_raw_os_error(8))
         } else {
+            // rubash#3932: a nofork-face spawn exports live-1 — GNU's
+            // execute_disk_command decrements the level and rebuilds the
+            // export environment on the nofork path (execute_cmd.c
+            // 5813-5819, adjust_shell_level variables.c:849-892). The
+            // adjustment reads the CURRENT variable (the forked-child
+            // faces bind the command's prefix temp assignments first),
+            // clamps at 0, and rebinds + auto-exports, so the entry is
+            // written even when the shell's own SHLVL is absent or
+            // unexported. An env-emulation process composed its child
+            // environment to finality (the `env` builtin folds the
+            // adjustment itself under the same face); stamping here
+            // would resurrect an entry env's -i/-u removed.
+            //
+            // The -c tail stamp joins it for spawn shapes the exec
+            // replacement itself refuses (rubash#1497): a respawned
+            // child's captured -c tail — the process-substitution and
+            // coproc producer children run `-c <body>` with their
+            // stdout on the capture pipe, and GNU still marks that
+            // body's single plain command (should_suppress_fork consults
+            // no capture state), so the plain spawn carries the same
+            // adjusted level the replaced process would have. The
+            // state gate is the exec-replace face's own (interactive,
+            // traps, FUNCTION_STDIN); the capture/refusal gates stay
+            // exec-specific.
+            let exec_replace_face = self.exec_replace_dispatch_stamp.get() != 0
+                && self.exec_replace_tail_state_ready_any();
+            if !env_composed_final && (self.nofork_spawn_adjust_allowed() || exec_replace_face) {
+                let adjusted = if self.nofork_spawn_dispatch_stamp.get() != 0 {
+                    self.nofork_spawn_adjusted_shlvl()
+                } else {
+                    self.exec_replace_adjusted_shlvl()
+                };
+                process.env("SHLVL", adjusted);
+            }
             process.spawn()
         };
         // Drop the Command NOW: std retains every `Stdio::from(..)` it was

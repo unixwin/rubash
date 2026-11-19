@@ -195,11 +195,23 @@ impl Executor {
         // for the -c string's last top-level command.
         let saved_exec_replace_stamp = self.exec_replace_dispatch_stamp.get();
         let saved_exec_replace_shlvl = self.exec_replace_shlvl_snapshot.get();
+        // rubash#3932: the nofork spawn stamp follows the same frame
+        // discipline — kept across this walk only through the one-shot
+        // hold (an and_or tail operand's wrapper), cleared for every
+        // other nested walk. The pending candidate flag is consumed
+        // exactly once, by the walk the body dispatch armed it for.
+        let saved_nofork_spawn_stamp = self.nofork_spawn_dispatch_stamp.get();
+        let saved_nofork_spawn_candidate = self
+            .nofork_spawn_body_candidate
+            .replace(self.nofork_spawn_body_candidate_pending.take());
         if self.exec_replace_stamp_hold.replace(0) == 0
             && !(self.exec_replace_final_frame.get() && self.evalerror_exec_depth.get() == 1)
         {
             self.exec_replace_dispatch_stamp.set(0);
             self.exec_replace_shlvl_snapshot.set(None);
+        }
+        if self.nofork_spawn_stamp_hold.replace(0) == 0 {
+            self.nofork_spawn_dispatch_stamp.set(0);
         }
         let result = self.execute_ast_inner_body(commands);
         *self.alias_select_scan_memo.borrow_mut() = saved_alias_select_scan_memo;
@@ -207,6 +219,10 @@ impl Executor {
             .set(saved_exec_replace_stamp);
         self.exec_replace_shlvl_snapshot
             .set(saved_exec_replace_shlvl);
+        self.nofork_spawn_dispatch_stamp
+            .set(saved_nofork_spawn_stamp);
+        self.nofork_spawn_body_candidate
+            .set(saved_nofork_spawn_candidate);
         self.err_trap_armed_sample.set(saved_err_trap_sample);
         self.evalerror_exec_depth
             .set(self.evalerror_exec_depth.get().saturating_sub(1));
@@ -367,9 +383,20 @@ impl Executor {
     /// exactly as in the fork path. A folded &&/|| list qualifies
     /// through its last element, mirroring optimize_connection_fork
     /// (builtins/evalstring.c:148).
-    fn exec_replace_shape_ok(command: &CommandNode) -> bool {
+    ///
+    /// rubash#3932: `single_command_unit` mirrors GNU's parse shape —
+    /// can_optimize_connection (evalstring.c:143-151) inspects the UNIT's
+    /// top tree, whose `second` is directly cm_simple only when the whole
+    /// unit is one and_or tree (`true && cmd`); in a multi-command unit
+    /// (`true; true && cmd`) the top second is itself a connection
+    /// (bash's compound_list grammar groups each and_or first, then joins
+    /// with `;`), so no TRY lands and the tail keeps the forked face
+    /// (GNU 5.3.20: `bash -c 'true; true && printenv SHLVL'` exports the
+    /// live level, `bash -c 'true && printenv SHLVL'` live-1).
+    fn exec_replace_shape_ok(command: &CommandNode, single_command_unit: bool) -> bool {
         if let Some(list) = &command.and_or_list {
-            return !command.background
+            return single_command_unit
+                && !command.background
                 && command.redirects.is_empty()
                 && command.redirect_in.is_none()
                 && command.redirect_out.is_none()
@@ -385,6 +412,117 @@ impl Executor {
                     .is_some_and(Self::exec_replace_simple_shape_ok);
         }
         Self::exec_replace_simple_shape_ok(command)
+    }
+
+    /// rubash#3932: should_optimize_fork's command shape
+    /// (builtins/evalstring.c:106-117) — a plain simple command, no
+    /// compound forms, no pipeline membership, not timed or inverted.
+    /// `allow_redirects` is false for the paren/comsub faces
+    /// (subshell==0: redirects==0 required) and true for the procsub face
+    /// (should_suppress_fork passes the SUBSHELL_PROCSUB bit, which
+    /// relaxes the redirect check) and the async face (execute_cmd.c:4553
+    /// sets CMD_NO_FORK after the early fork without a shape consult).
+    pub(in crate::executor) fn nofork_spawn_simple_shape_ok(
+        command: &CommandNode,
+        allow_redirects: bool,
+    ) -> bool {
+        let redirects_absent = command.redirects.is_empty()
+            && command.redirect_in.is_none()
+            && command.redirect_out.is_none()
+            && command.redirect_err.is_none()
+            && command.append.is_none()
+            && command.redirect_err_append.is_none()
+            && command.heredoc.is_none()
+            && command.heredoc_body.is_none()
+            && command.here_string.is_none()
+            && command.heredoc_redirects.is_empty();
+        if allow_redirects {
+            !command.words.is_empty()
+                && command.pipeline_command.is_none()
+                && command.and_or_list.is_none()
+                && command.time_command.is_none()
+                && command.background_command.is_none()
+                && command.inverted_command.is_none()
+                && command.coproc_command.is_none()
+                && command.for_command.is_none()
+                && command.arithmetic_command.is_none()
+                && command.if_command.is_none()
+                && command.loop_command.is_none()
+                && command.conditional_command.is_none()
+                && command.subshell_command.is_none()
+                && command.case_command.is_none()
+                && command.select_command.is_none()
+                && command.function_command.is_none()
+                && command.brace_group.is_none()
+                && command.pipe.is_none()
+                && command.and_or.is_none()
+                && !command.background
+                && !command.inverted
+                && !command.subshell
+                && !command.subshell_end
+        } else {
+            Self::exec_replace_simple_shape_ok(command)
+        }
+    }
+
+    /// rubash#3932: the qualifying tail of a walk-armed body (paren,
+    /// comsub, procsub). GNU's mark lands on the body tree's `second` —
+    /// directly cm_simple only. A single-unit body resolves through its
+    /// and_or tree (`( true && cmd )` marks the tail element — GNU
+    /// optimize_connection_fork, execute_cmd.c:2886, via the SUBSHELL_PAREN
+    /// arm), while a multi-unit body's last `;` unit must itself be the
+    /// plain simple command (`( true; cmd )` marks, `( true; true && cmd )`
+    /// does not — GNU 5.3.20 exports the live level there: the body tree's
+    /// second is itself a connection, so optimize_subshell_command's
+    /// else-branch sets no TRY and the connection arm cannot fire).
+    pub(in crate::executor) fn nofork_spawn_body_tail_ok(
+        body: &[CommandNode],
+        allow_redirects: bool,
+    ) -> bool {
+        let Some(command) = body.last() else {
+            return false;
+        };
+        if body.len() == 1 {
+            if let Some(list) = &command.and_or_list {
+                return !command.background
+                    && list.commands.last().is_some_and(|element| {
+                        Self::nofork_spawn_simple_shape_ok(element, allow_redirects)
+                    });
+            }
+        }
+        Self::nofork_spawn_simple_shape_ok(command, allow_redirects)
+    }
+
+    /// rubash#3932: the wrapper-respawn child's async face — GNU's forked
+    /// async child marks CMD_NO_FORK unconditionally (execute_cmd.c:4553),
+    /// so the shape gate only excludes non-simple forms (compounds,
+    /// pipelines, nested async); redirects and the `!` invert travel
+    /// (execute_simple_command applies the tempenv and runs
+    /// execute_disk_command in the child, redirects already consumed into
+    /// the fork's stdio).
+    pub(in crate::executor) fn nofork_spawn_async_simple_shape_ok(command: &CommandNode) -> bool {
+        !command.words.is_empty()
+            && command.pipeline_command.is_none()
+            && command.and_or_list.is_none()
+            && command.time_command.is_none()
+            && command.background_command.is_none()
+            && command.inverted_command.is_none()
+            && command.coproc_command.is_none()
+            && command.for_command.is_none()
+            && command.arithmetic_command.is_none()
+            && command.if_command.is_none()
+            && command.loop_command.is_none()
+            && command.conditional_command.is_none()
+            && command.subshell_command.is_none()
+            && command.case_command.is_none()
+            && command.select_command.is_none()
+            && command.function_command.is_none()
+            && command.brace_group.is_none()
+            && command.pipe.is_none()
+            && command.and_or.is_none()
+            && !command.background
+            && !command.subshell
+            && !command.subshell_end
     }
 
     fn exec_replace_simple_shape_ok(command: &CommandNode) -> bool {
@@ -763,10 +901,18 @@ impl Executor {
             // is a plain external command). The stamp is consumed at
             // the spawn site; nested walks clear it (execute_ast_inner),
             // so only this node's own spawn can observe it.
-            if self.exec_replace_final_frame.get() && self.evalerror_exec_depth.get() == 1 {
+            // rubash#3932: a background-wrapper respawn child is GNU's
+            // async fork child — execute_cmd.c:4553 marks CMD_NO_FORK
+            // there unconditionally and an async command never takes
+            // the exec-replacement face — so the -c tail stamp stays
+            // disarmed and the async arm below governs the seam.
+            if self.exec_replace_final_frame.get()
+                && self.evalerror_exec_depth.get() == 1
+                && !crate::builtins::kill::background_wrapper_role_armed()
+            {
                 let armed = index + 1 == commands.len()
                     && subshell_state.is_none()
-                    && Self::exec_replace_shape_ok(command);
+                    && Self::exec_replace_shape_ok(command, commands.len() == 1);
                 if armed {
                     let stamp = self.exec_replace_stamp_counter.get() + 1;
                     self.exec_replace_stamp_counter.set(stamp);
@@ -780,6 +926,84 @@ impl Executor {
                 } else {
                     self.exec_replace_dispatch_stamp.set(0);
                     self.exec_replace_shlvl_snapshot.set(None);
+                }
+            }
+            // rubash#3932: arm the nofork-face spawn stamp at the walk's
+            // qualifying tail — GNU marks the subshell body's command
+            // before it dispatches (execute_cmd.c:1799-1806), and an
+            // earlier body node's plain spawn takes the forked face
+            // (live level), so the stamp disarms at every non-tail node.
+            // The seam applies the trap gate at spawn time, which is
+            // exactly when GNU's optimize_connection_fork re-consults
+            // should_suppress_fork for a connection's second operand
+            // (execute_cmd.c:2886/2956): a trap armed by an earlier body
+            // command blocks the mark (a `trap 'x' EXIT` inside the body
+            // keeps the live level; a parent-set trap is invisible — the
+            // forked child reset it, trap.c:1480 reset_signal_handlers).
+            if self.nofork_spawn_body_candidate.get() {
+                let is_tail = index + 1 == commands.len();
+                let allows_redirects = self.nofork_spawn_face_allows_redirects.get();
+                let qualifies = if commands.len() == 1 {
+                    Self::nofork_spawn_body_tail_ok(commands, allows_redirects)
+                } else {
+                    Self::nofork_spawn_simple_shape_ok(command, allows_redirects)
+                };
+                if is_tail && qualifies {
+                    let stamp = self.nofork_spawn_stamp_counter.get() + 1;
+                    self.nofork_spawn_stamp_counter.set(stamp);
+                    self.nofork_spawn_dispatch_stamp.set(stamp);
+                } else {
+                    self.nofork_spawn_dispatch_stamp.set(0);
+                }
+            }
+            // rubash#3932: the wrapper respawn child replays the face its
+            // payload transported (see the spawn site's
+            // BACKGROUND_WRAPPER_PAYLOAD_FACE_KEY). `simple`: GNU's
+            // forked async child marks CMD_NO_FORK unconditionally
+            // (execute_cmd.c:4553) — redirects ride the resolved stdio
+            // and no trap gate applies. `subshell`: an absorbed
+            // `( list )` body replays the subshell mark
+            // (execute_cmd.c:1799-1806) — redirects block and the seam
+            // re-checks the trap state at spawn (the wrapper child's own
+            // trap table carries the fork reset, trap.c
+            // reset_or_restore_signal_handlers). `compound`: a group /
+            // for / if body GNU never marks (optimize_subshell_command
+            // requires cm_simple, execute_cmd.c:1756) — the live level.
+            let payload_face = self.respawn_payload_face.get();
+            if payload_face != 0 {
+                let is_tail = index + 1 == commands.len() && subshell_state.is_none();
+                let qualifies = match payload_face {
+                    // simple: the forked async child's unconditional mark
+                    // (execute_cmd.c:4553) — redirects ride the resolved
+                    // stdio, no trap gate.
+                    1 => {
+                        self.nofork_spawn_face_unconditional.set(is_tail);
+                        self.nofork_spawn_face_allows_redirects.set(true);
+                        is_tail && Self::nofork_spawn_async_simple_shape_ok(command)
+                    }
+                    // subshell: the absorbed `( list )` body replays the
+                    // paren face (execute_cmd.c:1799-1806) — redirects
+                    // block, the seam re-checks traps at spawn.
+                    2 => {
+                        self.nofork_spawn_face_unconditional.set(false);
+                        self.nofork_spawn_face_allows_redirects.set(false);
+                        is_tail && Self::nofork_spawn_body_tail_ok(commands, false)
+                    }
+                    // procsub: should_suppress_fork passes the PROCSUB
+                    // bit (evalstring.c:106-117), so redirects ride.
+                    3 => {
+                        self.nofork_spawn_face_unconditional.set(false);
+                        self.nofork_spawn_face_allows_redirects.set(true);
+                        is_tail && Self::nofork_spawn_body_tail_ok(commands, true)
+                    }
+                    _ => false,
+                };
+                if is_tail && qualifies {
+                    let stamp = self.nofork_spawn_stamp_counter.get() + 1;
+                    self.nofork_spawn_stamp_counter.set(stamp);
+                    self.nofork_spawn_dispatch_stamp.set(stamp);
+                } else {
+                    self.nofork_spawn_dispatch_stamp.set(0);
                 }
             }
             // GNU parse.y/eval.c: a syntax error inside a command

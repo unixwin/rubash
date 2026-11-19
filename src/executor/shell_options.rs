@@ -3978,14 +3978,9 @@ impl Executor {
         let wants_here_string = stdin_body_kind == Some(crate::parser::RedirectKind::HereString)
             || (stdin_body_kind.is_none()
                 && cmd.heredoc.is_none()
-                && !cmd
-                    .heredoc_redirects
-                    .iter()
-                    .any(|r| {
-                        !r.here_string
-                            && r.fd_var.is_none()
-                            && (r.fd.is_none() || r.fd == Some(0))
-                    }));
+                && !cmd.heredoc_redirects.iter().any(|r| {
+                    !r.here_string && r.fd_var.is_none() && (r.fd.is_none() || r.fd == Some(0))
+                }));
         if !wants_here_string {
             if let Some(redirect) = cmd.heredoc_redirects.iter().rev().find(|redirect| {
                 // rubash#3894: a `{var}<<` twin binds an allocated fd,
