@@ -75,10 +75,7 @@ fn compassign_bare_paren_token_error() {
             stderr.contains(&format!("`{offending}'")),
             "{tag}: {stderr:?}"
         );
-        assert!(
-            !stderr.contains("unexpected EOF"),
-            "{tag}: {stderr:?}"
-        );
+        assert!(!stderr.contains("unexpected EOF"), "{tag}: {stderr:?}");
         assert!(
             !stderr.contains("while looking for matching"),
             "{tag}: {stderr:?}"
@@ -115,10 +112,7 @@ fn compassign_metachar_token_names() {
         assert_eq!(got, 1, "{tag}: {script:?} -> {stderr:?}");
         let needle = format!("line 1: syntax error near unexpected token `{token}'");
         assert!(stderr.contains(&needle), "{tag}: {stderr:?}");
-        assert!(
-            !stderr.contains("unexpected EOF"),
-            "{tag}: {stderr:?}"
-        );
+        assert!(!stderr.contains("unexpected EOF"), "{tag}: {stderr:?}");
     }
 }
 
@@ -134,7 +128,8 @@ fn compassign_token_error_matching_suffix() {
         let (_stdout, stderr, got) = run_file(script, tag);
         assert_eq!(got, 1, "{tag}: {script:?} -> {stderr:?}");
         assert!(
-            stderr.contains("syntax error near unexpected token `(' while looking for matching `)'")
+            stderr
+                .contains("syntax error near unexpected token `(' while looking for matching `)'")
                 || stderr.contains(
                     "syntax error near unexpected token `;' while looking for matching `)'"
                 ),
@@ -145,9 +140,7 @@ fn compassign_token_error_matching_suffix() {
     let (_stdout, stderr, got) = run_file("eval 'echo $(v=(a (echo'", "eval_comsub");
     assert_eq!(got, 1, "eval_comsub: {stderr:?}");
     assert!(
-        stderr.contains(
-            "syntax error near unexpected token `(' while looking for matching `)'"
-        ),
+        stderr.contains("syntax error near unexpected token `(' while looking for matching `)'"),
         "eval_comsub: {stderr:?}"
     );
 }

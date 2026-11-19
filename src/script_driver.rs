@@ -4992,9 +4992,7 @@ fn run_source_impl_inner_body(
                         ),
                         Some((
                             crate::lexer::UnclosedComsubShape::ComsubBodyTokenError { .. }
-                                | crate::lexer::UnclosedComsubShape::CompassignTokenError {
-                                    ..
-                                },
+                                | crate::lexer::UnclosedComsubShape::CompassignTokenError { .. },
                             _
                         ))
                     )
