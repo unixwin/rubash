@@ -4612,7 +4612,28 @@ impl Executor {
         if self.exec_has_no_command_operand_after_expansion(cmd) {
             let saved_env_vars = self.shell_state.env_vars.clone();
             let saved_fd_table = self.fd_table.saved_table();
-            self.execute_stdio_only_exec_redirect_scoped(cmd)?;
+            // rubash#3917 (PR #3930 review): when the walk would arm
+            // kernel placement (the true persistent scope), run it
+            // directly and hold the placement undo open across
+            // execute_with_io — the scoped entry settles (commits)
+            // its placements when the walk returns, which would
+            // close the saved displaced occupants before the
+            // option-parse verdict is known. GNU keeps the exec
+            // undo list until the parse outcome is fixed (redir.c
+            // exec_redirection_undo_list): EX_BADUSAGE rolls the
+            // redirections — kernel placements included — back; a
+            // clean parse commits them.
+            let placement_mark = if self.builtin_wrapper_depth == 0
+                && self.shell_state.subshell_depth.get() == 0
+                && self.compound_redirect_scope_depth == 0
+            {
+                let mark = self.fd_table.placement_mark();
+                self.execute_stdio_only_exec_redirect(cmd, true)?;
+                Some(mark)
+            } else {
+                self.execute_stdio_only_exec_redirect_scoped(cmd)?;
+                None
+            };
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
             // rubash#3401 (face 3): the simulated-exec wait takes the
@@ -4621,7 +4642,7 @@ impl Executor {
             // `&self.shell_state.*` borrows.
             let exec_env_vars = self.shell_state.env_vars.clone();
             let exec_cwd = self.shell_state.cwd.clone();
-            let status = crate::builtins::exec::execute_with_io(
+            let status = match crate::builtins::exec::execute_with_io(
                 Some(&mut *self),
                 &cmd.words[1..],
                 &exec_env_vars,
@@ -4633,7 +4654,18 @@ impl Executor {
                 // the no-op value.
                 Stdio::inherit(),
                 &crate::executor::ChildFdSetup::default(),
-            )?;
+            ) {
+                Ok(status) => status,
+                Err(err) => {
+                    // An internal failure must not leave the
+                    // process's descriptors placed behind a table
+                    // the caller is about to abandon.
+                    if let Some(mark) = placement_mark {
+                        self.fd_table.rollback_placements(mark);
+                    }
+                    return Err(err);
+                }
+            };
             // GNU exec.def reports option errors through builtin_error,
             // which carries the script:line context prefix
             // (redir.tests:53: "./redir.tests: line 53: exec: -1: invalid
@@ -4649,8 +4681,20 @@ impl Executor {
             // targets), then undo them if the exec failed.
             self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
             if status == 2 {
+                // Roll the kernel placements back BEFORE the
+                // snapshot table replaces the live one: the
+                // snapshot knows nothing of the dup2s, so without
+                // this the process's descriptor stays redirected
+                // behind the restored table (the fd_redirects CLI
+                // cell: `exec $fd>file` with fd=-1 must keep the
+                // shell's original stdout).
+                if let Some(mark) = placement_mark {
+                    self.fd_table.rollback_placements(mark);
+                }
                 self.shell_state.env_vars = saved_env_vars;
                 self.fd_table = saved_fd_table;
+            } else if let Some(mark) = placement_mark {
+                self.fd_table.commit_placements(mark);
             }
             return Ok(status);
         }
@@ -6215,7 +6259,17 @@ impl Executor {
         cmd: &CommandNode,
     ) -> Result<Option<i32>, ExecuteError> {
         if self.builtin_wrapper_depth == 0 {
-            return self.execute_stdio_only_exec_redirect(cmd);
+            // rubash#3917: the bare top-level `exec` persists its
+            // redirects (execute_cmd.c exec_builtin) — place its
+            // files onto their kernel descriptors. The installs
+            // stand whether the walk reports a status or an error,
+            // so settle the placement undo log either way: the
+            // saved displaced occupants are closed here (GNU
+            // disposes the exec undo list when the exec stands).
+            let mark = self.fd_table.placement_mark();
+            let result = self.execute_stdio_only_exec_redirect(cmd, true);
+            self.fd_table.commit_placements(mark);
+            return result;
         }
         let saved_fd_table = self.fd_table.saved_table();
         let mut saved_env: Vec<(String, Option<String>)> = Vec::new();
@@ -6249,7 +6303,11 @@ impl Executor {
             let value = self.shell_state.env_vars.get(&name).cloned();
             saved_env.push((name, value));
         }
-        let result = self.execute_stdio_only_exec_redirect(cmd);
+        // rubash#3917: the scoped walk undoes its installs by
+        // restoring the saved table — it must NOT place files onto
+        // kernel descriptors (a scoped dup2 would lose the foreign
+        // occupant the restore cannot bring back).
+        let result = self.execute_stdio_only_exec_redirect(cmd, false);
         self.fd_table = saved_fd_table;
         for (key, value) in saved_env {
             match value {
@@ -6265,6 +6323,45 @@ impl Executor {
     }
 
     fn execute_stdio_only_exec_redirect(
+        &mut self,
+        cmd: &CommandNode,
+        place_persistent: bool,
+    ) -> Result<Option<i32>, ExecuteError> {
+        // rubash#3917: arm the persistent-placement flag for the
+        // walk (see FdTable::kernel_place_persistent) and clear it
+        // on every exit path — the inner body returns Result, so a
+        // single wrapper covers all early returns. The flag is
+        // restored to its previous value (never assumed false) so a
+        // nested walk keeps the outer walk's arming. rubash#3930
+        // (round 5): the persistent-close flag
+        // (FdTable::kernel_close_persistent) is armed here with
+        // the same gate — see close_adopted_process_fd.
+        //
+        // The arming is narrowed to the true persistent scope
+        // (captain review of PR #3930): GNU's dup2 (redir.c:1017)
+        // is process state, and GNU runs a subshell body or a
+        // compound command's body in a FORK — the parent's
+        // descriptors never move. This executor is in-process:
+        // inside a subshell scope (subshell_depth > 0) or a
+        // compound command's redirect bracket
+        // (compound_redirect_scope_depth > 0) the scope restores
+        // the fd TABLE only, so a kernel placement would leak past
+        // the restore and corrupt the outer scope's descriptors
+        // (the issue2690/issue726/issue3403 census regressions).
+        // Over-suppression is safe: an unplaced install stays
+        // virtual, exactly the pre-#3917 model.
+        let arm = place_persistent
+            && self.shell_state.subshell_depth.get() == 0
+            && self.compound_redirect_scope_depth == 0;
+        let prev = std::mem::replace(&mut self.fd_table.kernel_place_persistent, arm);
+        let prev_close = std::mem::replace(&mut self.fd_table.kernel_close_persistent, arm);
+        let result = self.execute_stdio_only_exec_redirect_inner(cmd);
+        self.fd_table.kernel_place_persistent = prev;
+        self.fd_table.kernel_close_persistent = prev_close;
+        result
+    }
+
+    fn execute_stdio_only_exec_redirect_inner(
         &mut self,
         cmd: &CommandNode,
     ) -> Result<Option<i32>, ExecuteError> {
@@ -6304,7 +6401,7 @@ impl Executor {
         let mut bound_fd_var_heredoc_twins: std::collections::HashSet<usize> =
             std::collections::HashSet::new();
         let mut heredoc_twins = cmd.heredoc_redirects.iter().enumerate();
-        for redirect in &cmd.redirects {
+        for (position, redirect) in cmd.redirects.iter().enumerate() {
             if let Some(fd) = redirect.fd {
                 occupied_slots.insert(fd);
             }
@@ -6322,6 +6419,20 @@ impl Executor {
                 ambient.insert(fd, target);
                 continue;
             }
+            // rubash#3917 (round 4): consume the pregate probe's
+            // retained preopened File for this position BEFORE the
+            // application below opens the target again — otherwise
+            // the probe's FileFd still names the target number when
+            // the persistent placement dup2's onto it, and its later
+            // Drop closes the placed descriptor (GNU opens each entry
+            // once, redir.c:237 do_redirections; the probe + re-open
+            // is already two opens — dropping the probe handle here
+            // costs only a re-open, never a wrong bind, per the
+            // #3828 clear invariant). Concretely `exec 3<>file` left
+            // fd 3 closed when fd 3 started closed: the probe held
+            // fd 3, the application opened fd 4, the placement
+            // dup2'd 4 onto 3, and the probe FileFd's Drop closed 3.
+            drop(self.take_pending_preopened(position, &target));
             // Mark the redirect as handled before dispatching: every arm
             // below ends in a `continue`, which would otherwise bypass a
             // bottom-of-loop flag and make `exec >&file` fall through to
@@ -7897,6 +8008,16 @@ impl Executor {
     }
 
     fn close_persistent_fd(&mut self, fd: u32) -> Result<(), ExecuteError> {
+        // rubash#3930 (round 5): capture the adopted copy's fstat
+        // identity BEFORE the entry is removed — the entry holds
+        // the Rc, so the copy's handle is live here. Only when the
+        // persistent-close flag is armed (the exec walk); otherwise
+        // no fstat is spent and the identity stays None.
+        let adopted_identity = if self.fd_table.kernel_close_persistent {
+            self.adopted_close_identity(fd)
+        } else {
+            None
+        };
         self.close_persistent_output_fd(fd)?;
         self.close_persistent_input_fd(fd);
         self.fd_table.close(fd);
@@ -7911,6 +8032,9 @@ impl Executor {
         // Close it only when it is genuinely orphaned: still open and
         // not the backing of another live table entry.
         self.close_orphaned_process_fd(fd);
+        // rubash#3930 (round 5): land the persistent close on the
+        // kernel for an adopted entry (see close_adopted_process_fd).
+        self.close_adopted_process_fd(fd, adopted_identity);
         self.shell_state
             .env_vars
             .insert(fd_closed_key(fd), "1".to_string());
@@ -7955,6 +8079,96 @@ impl Executor {
 
     #[cfg(not(unix))]
     fn close_orphaned_process_fd(&self, fd: u32) {
+        let _ = fd;
+    }
+
+    /// rubash#3930 (round 5): the fstat identity of the adopted copy
+    /// backing logical fd `fd` — (dev, ino, mtime, mtime_nsec) of
+    /// the copy's handle, for close_adopted_process_fd to compare
+    /// against kernel fd `fd`. None when the entry is not adopted,
+    /// the copy is retired (its handle is dead — fstat would be
+    /// untrustworthy, so the close is skipped rather than risked),
+    /// or fstat fails. Computed BEFORE fd_table.close(fd) removes
+    /// the entry; the entry holds the Rc, so the handle is live here.
+    #[cfg(unix)]
+    fn adopted_close_identity(&self, fd: u32) -> Option<(u64, u64, i64, i64)> {
+        let file = self.fd_table.adopted_file(fd)?;
+        if file.is_retired() {
+            return None;
+        }
+        crate::fd::fd_stat_parts(file.handle)
+    }
+
+    #[cfg(not(unix))]
+    fn adopted_close_identity(&self, _fd: u32) -> Option<(u64, u64, i64, i64)> {
+        None
+    }
+
+    /// rubash#3930 (round 5): land a persistent `exec N<&-` /
+    /// `N>&-` (or move-source) close on the kernel descriptor when
+    /// the removed entry was an adopted copy of an inherited
+    /// descriptor AND kernel fd N is that same description (fstat
+    /// identity match — see adopted_close_identity). GNU
+    /// redir.c:1239 case r_close_this, redir.c:1267
+    /// close_buffered_fd (redirector): the close drops the
+    /// descriptor at the redirector's number, not just the table
+    /// entry. Without this the inherited descriptor survives the
+    /// close, a respawned child re-adopts it, and the body's `>&N`
+    /// succeeds after the parent's own `>&N` already failed.
+    ///
+    /// The gate is threefold, and each arm excludes a real
+    /// mis-close: (1) fd >= 3 — the stdio slots are owned by
+    /// close_orphaned_process_fd above, so the two kernel-close
+    /// sites can never double-close the same number (a second
+    /// close after the number was recycled would kill an
+    /// unrelated file); (2) the persistent-close flag is armed —
+    /// only the exec walk at true persistent scope (never the
+    /// scoped walk, a subshell, or a compound bracket, where the
+    /// scope restore replays only the table); (3) the fstat
+    /// identity matches — a dup-shared adopted Rc names another
+    /// fd's description, and a runtime pipe may sit on the number
+    /// (both stay with #3938's dup-placement face). A defensive
+    /// "no live entry still names kernel fd N" scan mirrors the
+    /// orphan guard; adopted copies are named by their own
+    /// handles, so it should never fire.
+    #[cfg(unix)]
+    fn close_adopted_process_fd(&self, fd: u32, adopted_identity: Option<(u64, u64, i64, i64)>) {
+        if fd < 3 || !self.fd_table.kernel_close_persistent {
+            return;
+        }
+        let Some((dev, ino, _, _)) = adopted_identity else {
+            return;
+        };
+        let Some((kdev, kino, _, _)) = crate::fd::fd_stat_parts(fd as crate::fd::HANDLE) else {
+            return;
+        };
+        if (kdev, kino) != (dev, ino) {
+            return;
+        }
+        let target = fd as crate::fd::HANDLE;
+        let referenced = self.fd_table.entries.values().any(|entry| {
+            !entry.closed
+                && (entry
+                    .read
+                    .as_ref()
+                    .and_then(read_endpoint_os_handle)
+                    .is_some_and(|handle| handle == target)
+                    || entry
+                        .write
+                        .as_ref()
+                        .and_then(write_endpoint_os_handle)
+                        .is_some_and(|handle| handle == target))
+        });
+        if referenced {
+            return;
+        }
+        unsafe {
+            libc::close(target);
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn close_adopted_process_fd(&self, fd: u32, _adopted_identity: Option<(u64, u64, i64, i64)>) {
         let _ = fd;
     }
 

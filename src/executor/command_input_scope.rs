@@ -568,7 +568,21 @@ impl Executor {
                 inserted_saves.push((*slot, entry.clone()));
             }
         }
+        // rubash#3917: the body runs inside this command's redirect
+        // bracket — mark it so a persistent `exec` in the body does
+        // not place files onto kernel descriptors the bracket's
+        // table-only restore cannot undo (see the field doc). A
+        // compound carrying no redirections applies and restores
+        // nothing, so its body is not a bracket: a bare group is no
+        // fork in GNU either, and an `exec` inside one persists.
+        let bracket_active = !cmd.redirects.is_empty() || !cmd.heredoc_redirects.is_empty();
+        if bracket_active {
+            self.compound_redirect_scope_depth += 1;
+        }
         let result = self.with_command_input_redirects_inner(cmd, execute);
+        if bracket_active {
+            self.compound_redirect_scope_depth -= 1;
+        }
         // The saves die with the command's redirections: remove
         // exactly the entries still holding the inserted clone (a
         // body that rebound the slot owns its binding now).

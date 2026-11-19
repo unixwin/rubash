@@ -4934,6 +4934,7 @@ impl Executor {
                 read: Some(FdReadEndpoint::File(std::rc::Rc::new(FileFd {
                     handle: tail_handle,
                     closed: std::cell::Cell::new(false),
+                    adopted: false,
                     path: std::path::PathBuf::from("<rubash-pipeline-stdin>"),
                 }))),
                 write: None,
@@ -5438,6 +5439,7 @@ impl Executor {
                 read: Some(FdReadEndpoint::File(std::rc::Rc::new(FileFd {
                     handle: stage_handle,
                     closed: std::cell::Cell::new(false),
+                    adopted: false,
                     path: std::path::PathBuf::from("<rubash-pipeline-stdin>"),
                 }))),
                 write: None,

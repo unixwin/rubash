@@ -1606,6 +1606,7 @@ impl Executor {
             parse_and_execute_frames: Vec::new(),
             command_builtin_depth: 0,
             builtin_wrapper_depth: 0,
+            compound_redirect_scope_depth: 0,
             standard_path_scope: None,
             debug_trap_running: false,
             debug_action_running: false,
@@ -1823,6 +1824,7 @@ impl Executor {
                 Rc::new(FileFd {
                     handle: restore_handle(handle),
                     closed: std::cell::Cell::new(false),
+                    adopted: false,
                     path: path.clone(),
                 })
             });
@@ -1834,6 +1836,7 @@ impl Executor {
                     _ => Some(Rc::new(FileFd {
                         handle: restore_handle(handle),
                         closed: std::cell::Cell::new(false),
+                        adopted: false,
                         path: path.clone(),
                     })),
                 },

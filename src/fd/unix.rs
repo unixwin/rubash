@@ -365,8 +365,23 @@ pub fn duplicate_handle(h: HANDLE) -> std::io::Result<HANDLE> {
 
 /// dup + FD_CLOEXEC: the Unix analogue of "inheritable duplicate" -- the
 /// duplicate survives into children spawned by the shell.
+///
+/// rubash#3917 round 6 (f4cond S1): the duplicate is requested at or
+/// above SHELL_FD_BASE (10, redir.c:86) — NEVER the lowest free number.
+/// A plain dup lands on the lowest free descriptor, which can be a user
+/// fd the shell considers CLOSED (e.g. 3 after `exec 3<&-`); made
+/// inheritable and inherited by a plain-spawn child (the `>(...)` body,
+/// which takes no pre_exec close-all), it resurrects that number in the
+/// child's fd table, so the body's `>&3` succeeds where GNU reports
+/// `Bad file descriptor`. The number itself is only a transport key —
+/// every consumer re-dups it onto its target number at restore
+/// (init.rs) or takes it as a stdio slot — so the floor costs nothing
+/// and matches dup_adopted_fd's floor below.
 pub fn duplicate_handle_inheritable(h: HANDLE) -> std::io::Result<HANDLE> {
-    let n = duplicate_handle(h)?;
+    let n = unsafe { libc::fcntl(h, libc::F_DUPFD_CLOEXEC, 10) };
+    if n < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
     set_inheritable(n, true)?;
     Ok(n)
 }
@@ -383,8 +398,20 @@ pub fn duplicate_handle_inheritable(h: HANDLE) -> std::io::Result<HANDLE> {
 /// F_DUPFD_CLOEXEC matches this module's other executor-owned
 /// descriptors — the spawn path arranges child layouts explicitly, so
 /// table handles are never inherited raw.
+///
+/// The duplicate is requested at or above SHELL_FD_BASE (10,
+/// redir.c:86) — the floor GNU's own descriptor saves use
+/// (redir.c:940). The adopted duplicate is an executor-internal
+/// handle; the low numbers are the user's redirection space. Parking
+/// the duplicate on a free low number makes it a phantom occupant of
+/// that number: /proc/$$/fd names it there, and the persistent-exec
+/// placement (FdTable::place_persistent_file) mistakes the adoption
+/// entry holding it for a live binding on the number and refuses the
+/// unconditional dup2 GNU performs (redir.c:1017/:1120) — so
+/// `exec N>file` stayed virtual whenever an inherited descriptor's
+/// adoption had landed on N first (rubash#3917).
 pub fn dup_adopted_fd(fd: u32) -> Option<HANDLE> {
-    let n = unsafe { libc::fcntl(fd as HANDLE, libc::F_DUPFD_CLOEXEC, 0) };
+    let n = unsafe { libc::fcntl(fd as HANDLE, libc::F_DUPFD_CLOEXEC, 10) };
     if n < 0 {
         None
     } else {
@@ -640,7 +667,15 @@ pub fn create_capture_pipe() -> std::io::Result<(HANDLE, HANDLE)> {
         let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
         unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) };
     }
-    Ok((fds[0], fds[1]))
+    // rubash#3917: keep internal plumbing out of the user range — a
+    // persistent `exec N>file` now dup2's onto its kernel number,
+    // and a capture pipe sitting on a low number would be the
+    // descriptor it displaces. move_to_high_fd returns the fd
+    // unchanged when no high slot is free (GNU's own fallback,
+    // general.c:730-733), so this never fails the pipe.
+    let read_end = move_to_high_fd(fds[0]);
+    let write_end = move_to_high_fd(fds[1]);
+    Ok((read_end, write_end))
 }
 
 /// Read all bytes currently available without blocking (rubash#169
@@ -1123,6 +1158,30 @@ pub fn spawn_whitelisted(spec: &WhitelistedSpawn) -> std::io::Result<SpawnedChil
     // (the inheritable-duplicate effect).
     let extras = spec.extra_handles.clone();
     let new_process_group = spec.new_process_group;
+    // rubash#3917 (round 5, follow-up): the whitelist contract above
+    // ("dup2 each spec fd onto its own number, then close everything
+    // else") was only half implemented — the close half was missing, so
+    // a runtime descriptor leaked into every respawned child and was
+    // adopted there as a user fd, resurrecting a number the user had
+    // explicitly closed (`exec N<&-`, issue1184 f4cond S1/S2). The leak
+    // is the signal self-pipe socketpair: installed lazily on the first
+    // Handler wish (kill.rs install), its ends land on the lowest free
+    // fds — fd 3 once the close above freed it — and, being non-CLOEXEC,
+    // survive execve into the child because this spawn never closed
+    // them. Highest fd the close loop must cover: every fd the parent
+    // holds, floored at 1024 (the spawn_async_direct floor).
+    let mut max_fd: libc::c_int = 1024;
+    for &extra in &extras {
+        max_fd = max_fd.max(extra);
+    }
+    // The cwd anchor is spent by the fchdir pre_exec above (registered
+    // first, so it runs first); keep it out of the close loop as
+    // belt-and-braces against hook ordering. It is a high directory fd
+    // (#3640 move_to_high_fd), not a user-visible low number.
+    let anchor_fd = spec.cwd_anchor_fd;
+    if let Some(anchor) = anchor_fd {
+        max_fd = max_fd.max(anchor);
+    }
     unsafe {
         use std::os::unix::process::CommandExt;
         cmd.pre_exec(move || {
@@ -1132,6 +1191,25 @@ pub fn spawn_whitelisted(spec: &WhitelistedSpawn) -> std::io::Result<SpawnedChil
                 if libc::dup2(fd, fd) < 0 {
                     return Err(std::io::Error::last_os_error());
                 }
+            }
+            // Close everything else above fd 2: stdio (0,1,2) was already
+            // arranged by std before pre_exec, the extras above were just
+            // pinned to their numbers, and the cwd anchor is excluded (see
+            // above). Every other inherited descriptor — the signal
+            // self-pipe included — dies here, so the child's startup
+            // adoption can only see what the parent's table stamped.
+            // Async-signal-safe: close(2) only, no allocation (the keep
+            // check is a linear scan of the already-moved extras).
+            for fd in 3..=max_fd {
+                if extras.contains(&fd) {
+                    continue;
+                }
+                if Some(fd) == anchor_fd {
+                    continue;
+                }
+                // The whole pre_exec closure body is one unsafe block,
+                // so close() needs no nested unsafe of its own.
+                libc::close(fd);
             }
             // GNU's forked children restore the entry signal dispositions
             // between fork and exec (trap.c:1489 restore_original_signals,
@@ -1231,11 +1309,18 @@ mod tests {
         // __RUBASH_FD_HANDLE_{fd} env keys replayed in init.rs name these
         // numbers, so a spawn that renumbers them breaks fd>=3 inheritance.
         let mut child = spawn_whitelisted(&WhitelistedSpawn {
-            program: "sh".into(),
+            // bash, not POSIX sh: the SHELL_FD_BASE floor puts the extra
+            // at >= 10 and dash rejects a multi-digit dup target outright
+            // ("sh: 1: Syntax error: Bad fd number" for <&10 under dash
+            // 0.5.12 — verified: the literal AND the variable-expanded
+            // form are both refused, left side included). The fd-number
+            // contract under test cannot be expressed in the dash lexer
+            // past fd 9, so the numeric-dup probe needs bash; the
+            // /proc/self/fd alternative stays rejected because macOS has
+            // no /proc.
+            program: "bash".into(),
             args: vec![
                 "-c".to_string(),
-                // POSIX sh numeric dup rather than /proc/self/fd: macOS has
-                // no /proc, and the fd-number contract is what is under test.
                 format!("exec grep -q rubash-extra-probe <&{extra}"),
             ],
             env: Vec::new(),

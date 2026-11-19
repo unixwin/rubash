@@ -999,6 +999,17 @@ pub struct Executor {
     /// `command` arms; execute_exec snapshots and restores the fd state
     /// for its no-operand paths while it is non-zero.
     builtin_wrapper_depth: usize,
+    /// rubash#3917: non-zero while a compound command's redirect
+    /// bracket (with_command_input_redirects_scoped) is executing
+    /// its body. GNU runs such a body with the compound's
+    /// redirections applied and undoes them when the command
+    /// finishes (RX_UNDOABLE); this executor restores the fd TABLE
+    /// only, so a persistent `exec` inside the body must not place
+    /// files onto kernel descriptors — the placement would outlive
+    /// the bracket and corrupt the outer scope (PR #3930 review:
+    /// the issue3403 census regressions). Consulted by the
+    /// placement arming guard in execute_stdio_only_exec_redirect.
+    compound_redirect_scope_depth: usize,
     /// GNU `command -p` (builtins/command.def CDESC_STDPATH): the
     /// standard path for the re-dispatched command's OWN lookup only.
     /// Set for the duration of the re-dispatch and consulted by the
