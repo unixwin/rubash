@@ -2991,14 +2991,47 @@ pub(in crate::executor) fn arith_body_expansion_reads(body: &str) -> std::borrow
 /// ([`first_unbound_dollar_read_subscript`]); the expansion itself
 /// handles the quotes natively.
 fn unquoted_subscript_single_quotes_as_data(raw: &str) -> String {
+    unquoted_subscript_single_quotes_as_data_inner(raw, false)
+}
+
+fn unquoted_subscript_single_quotes_as_data_inner(raw: &str, preserve_quotes: bool) -> String {
     let bytes = raw.as_bytes();
     let mut output = String::with_capacity(raw.len() + 4);
     let mut index = 0usize;
     let mut in_double = false;
     while index < bytes.len() {
         let ch = bytes[index];
-        if ch == b'`' || (ch == b'$' && matches!(bytes.get(index + 1), Some(b'(') | Some(b'{'))) {
+        if ch == b'`' || (ch == b'$' && bytes.get(index + 1) == Some(&b'(')) {
             let end = assoc_skip_substitution(bytes, index).min(bytes.len());
+            output.push_str(&raw[index..end]);
+            index = end;
+            continue;
+        }
+        if ch == b'$' && bytes.get(index + 1) == Some(&b'{') {
+            let end = assoc_skip_substitution(bytes, index).min(bytes.len());
+            if end > index + 2 && bytes.get(end - 1) == Some(&b'}') {
+                // The substitution's interior is part of this subscript's
+                // unquoted text (subst.c:11147): a single-quoted span
+                // inside it is data, not a parameter read — mask it the
+                // same way instead of copying the whole span verbatim
+                // (rubash#3563 row 4: `${undef:-'$q'}` must reach evalexp
+                // as `$q`, an operand error, never a nounset read of `q`).
+                // Command substitutions stay verbatim: their bodies run
+                // in a forked child, whose reads are the child's own.
+                // Inside `${...}` the quotes are KEPT (preserve_quotes):
+                // dropping them would bare structural bytes such as a
+                // `}` inside the quoted span and break brace matching —
+                // only the `$` is neutralized, to the literal-dollar
+                // carrier the expander decodes back.
+                output.push_str("${");
+                output.push_str(&unquoted_subscript_single_quotes_as_data_inner(
+                    &raw[index + 2..end - 1],
+                    true,
+                ));
+                output.push('}');
+                index = end;
+                continue;
+            }
             output.push_str(&raw[index..end]);
             index = end;
             continue;
@@ -3027,17 +3060,33 @@ fn unquoted_subscript_single_quotes_as_data(raw: &str) -> String {
                     output.push_str(&raw[index..]);
                     break;
                 };
-                for body_ch in raw[index + 1..close].chars() {
-                    match body_ch {
-                        // The expander's literal-dollar carrier (decoded
-                        // back to `$` by expand_arithmetic_special_parameters),
-                        // so no backslash pairing can re-arm it.
-                        '$' => output.push(DATA_DOLLAR),
-                        '`' | '"' => {
-                            output.push('\\');
+                if preserve_quotes {
+                    // Quotes stay: only the `$` is neutralized. The
+                    // backslash-escaping of the quote-dropping arm below
+                    // would be wrong here — inside the kept quotes a
+                    // backtick is literal data, not an active character.
+                    output.push('\'');
+                    for body_ch in raw[index + 1..close].chars() {
+                        if body_ch == '$' {
+                            output.push(DATA_DOLLAR);
+                        } else {
                             output.push(body_ch);
                         }
-                        _ => output.push(body_ch),
+                    }
+                    output.push('\'');
+                } else {
+                    for body_ch in raw[index + 1..close].chars() {
+                        match body_ch {
+                            // The expander's literal-dollar carrier (decoded
+                            // back to `$` by expand_arithmetic_special_parameters),
+                            // so no backslash pairing can re-arm it.
+                            '$' => output.push(DATA_DOLLAR),
+                            '`' | '"' => {
+                                output.push('\\');
+                                output.push(body_ch);
+                            }
+                            _ => output.push(body_ch),
+                        }
                     }
                 }
                 index = close + 1;
