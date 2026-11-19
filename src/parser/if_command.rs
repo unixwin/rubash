@@ -186,9 +186,10 @@ fn parse_if_command_after_condition(
                         // condition (rubash#3184): with no `then'
                         // boundary to recover, the condition's latched
                         // error is the report.
-                        if let Some(error) = body.iter().find_map(|command| {
-                            compound_body_parse_error(command).cloned()
-                        }) {
+                        if let Some(error) = body
+                            .iter()
+                            .find_map(|command| compound_body_parse_error(command).cloned())
+                        {
                             return Some((error, tokens.len()));
                         }
                         None

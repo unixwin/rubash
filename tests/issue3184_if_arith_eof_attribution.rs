@@ -212,8 +212,7 @@ fn closed_if_arith_condition_and_body_still_runs() {
 
 #[test]
 fn closed_if_elif_arith_still_runs() {
-    let (stdout, stderr, code) =
-        rubash_file("if ((0)) then echo a; elif ((2)) then echo b; fi\n");
+    let (stdout, stderr, code) = rubash_file("if ((0)) then echo a; elif ((2)) then echo b; fi\n");
     assert_eq!(code, Some(0), "stderr: {stderr}");
     assert_eq!(stdout, "b\n");
     assert_eq!(stderr, "");
