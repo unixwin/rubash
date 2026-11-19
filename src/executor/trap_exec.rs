@@ -1218,19 +1218,35 @@ impl Executor {
                                     "{prefix}syntax error near unexpected token `{token}'\n{prefix}`{offending}'\n"
                                 )
                             }
-                            crate::lexer::UnclosedComsubShape::CompassignTokenError { line } => {
-                                // parse.y:7141-7151: the compound-assignment
-                                // word list rejects the `(' itself.
+                            crate::lexer::UnclosedComsubShape::CompassignTokenError {
+                                line,
+                                token,
+                                in_comsub,
+                            } => {
+                                // parse.y:7141-7159: the compound-assignment
+                                // token loop rejects the first non-WORD
+                                // token at the list's own level;
+                                // report_syntax_error (parse.y:6858-6859)
+                                // appends the matching suffix when the
+                                // list sits inside a command/process
+                                // substitution (shell_eof_token `)').
                                 let report = caller_line + line - 1;
                                 let prefix = self.parser_error_prefix_for_line(report);
                                 let offending =
                                     source.lines().nth(line - 1).unwrap_or_default().to_string();
+                                let suffix = if *in_comsub {
+                                    " while looking for matching `)'"
+                                } else {
+                                    ""
+                                };
                                 self.record_run_diagnostic(
-                                    "syntax error near unexpected token `('".to_string(),
+                                    format!(
+                                        "syntax error near unexpected token `{token}'{suffix}"
+                                    ),
                                     Some(report),
                                 );
                                 format!(
-                                    "{prefix}syntax error near unexpected token `('\n{prefix}`{offending}'\n"
+                                    "{prefix}syntax error near unexpected token `{token}'{suffix}\n{prefix}`{offending}'\n"
                                 )
                             }
                         };

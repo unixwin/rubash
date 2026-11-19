@@ -3762,6 +3762,23 @@ fn command_paren_verdict_disproved_by_parser(
     if crate::lexer::dparen_arith_group_never_closes(input, open_line) {
         return false;
     }
+    // rubash#3904 (A29): when the shape scan positively identifies a
+    // token error at a compound-assignment list's own level, the real
+    // parser's pre-EOF event marker for the never-closed list
+    // (__RUBASH_PARSE_ERROR_EOF_PAREN__, rubash#413) is NOT the first
+    // error event — GNU's token loop fails on the token before EOF is
+    // classified (parse.y:7141-7159) — so the verdict is not disproved
+    // by any marker the parser raises for the list's EOF. Let the
+    // unclosed route run and print the token error.
+    if matches!(
+        crate::lexer::unclosed_comsub_eof_shape(input, crate::lexer::parse_extended_glob()),
+        Some((
+            crate::lexer::UnclosedComsubShape::CompassignTokenError { .. },
+            _
+        ))
+    ) {
+        return false;
+    }
     let tokens = tokenize_with_initial_posix(input, parse_posix);
     if crate::lexer::heredoc_overflow_line().is_some() {
         if std::env::var_os("RUBASH_DBG_543").is_some() {
@@ -4959,6 +4976,13 @@ fn run_source_impl_inner_body(
                 // `((` arithmetic root, `for ((` pair) already keep
                 // those families out of the ComsubBodyTokenError class,
                 // so only genuine body token errors defer.
+                // rubash#3904 (A29): the same deferral for a token
+                // error at a compound-assignment list's own level —
+                // inside an enclosing subshell (`(v=(a (echo`) the
+                // command-position branch's fallthrough would report
+                // the subshell's EOF, but GNU's parse fails on the
+                // list's token first; the CompassignTokenError arm
+                // below renders it.
                 if close == ')'
                     && command
                     && !matches!(
@@ -4967,7 +4991,10 @@ fn run_source_impl_inner_body(
                             crate::lexer::parse_extended_glob()
                         ),
                         Some((
-                            crate::lexer::UnclosedComsubShape::ComsubBodyTokenError { .. },
+                            crate::lexer::UnclosedComsubShape::ComsubBodyTokenError { .. }
+                                | crate::lexer::UnclosedComsubShape::CompassignTokenError {
+                                    ..
+                                },
                             _
                         ))
                     )
@@ -5121,6 +5148,63 @@ fn run_source_impl_inner_body(
                     executor.errexit_live_at_diagnostic();
                     executor.set_last_exit_code(2);
                     return 2;
+                } else if let Some((
+                    crate::lexer::UnclosedComsubShape::CompassignTokenError {
+                        line,
+                        token,
+                        in_comsub,
+                    },
+                    _,
+                )) = crate::lexer::unclosed_comsub_eof_shape(
+                    input,
+                    crate::lexer::parse_extended_glob(),
+                ) {
+                    // rubash#3904 (A29): a non-WORD token at a compound-
+                    // assignment list's own level — a bare `(` or the
+                    // first metachar token — is a yyerror token error,
+                    // not an EOF diagnostic: parse_compound_assignment's
+                    // token loop (parse.y:7141-7159) hands it to
+                    // report_syntax_error (parse.y:6833-6865), which
+                    // names the token (with the matching suffix when the
+                    // list sits inside a command/process substitution,
+                    // parse.y:6858-6859) and echoes the offending line.
+                    // Status follows the loop's own
+                    // set_exit_status(EXECUTION_FAILURE)
+                    // (parse.y:7167-7169): 1, or 2 when parser_error's
+                    // exit_immediately_on_error tail fires under live
+                    // errexit (error.c:324-327) — which is also why the
+                    // offending line is NOT echoed then: parser_error
+                    // exits before print_offending_line runs
+                    // (parse.y:6863-6865).
+                    let report = line + line_offset;
+                    let prefix = executor.parser_error_prefix_for_line(report);
+                    let suffix = if in_comsub {
+                        " while looking for matching `)'"
+                    } else {
+                        ""
+                    };
+                    unclosed_report!(
+                        "{prefix}syntax error near unexpected token `{token}'{suffix}"
+                    );
+                    if !suppress_unclosed_diagnostic {
+                        executor.record_run_diagnostic(
+                            format!("syntax error near unexpected token `{token}'{suffix}"),
+                            Some(report),
+                        );
+                    }
+                    if executor.errexit_live_at_diagnostic() {
+                        executor.set_last_exit_code(2);
+                        return 2;
+                    }
+                    if !executor.invocation_interactive() {
+                        let offending = input
+                            .lines()
+                            .nth(line.saturating_sub(1))
+                            .unwrap_or_default();
+                        unclosed_report!("{prefix}`{offending}'");
+                    }
+                    executor.set_last_exit_code(1);
+                    return 1;
                 } else {
                     let reported = if report_open { global_open } else { global_eof };
                     unclosed_report!(
