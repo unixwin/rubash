@@ -37,8 +37,7 @@ pub(super) fn parse_loop_command(
         // -> parse.y:6841 report_syntax_error); with no latched error
         // keep the None (rubash#3936, #3184 defect B same family).
         None => {
-            let rest =
-                parse_loop_body_commands(&tokens[start + 1..], source, source_line_offset);
+            let rest = parse_loop_body_commands(&tokens[start + 1..], source, source_line_offset);
             if let Some(error) = rest
                 .iter()
                 .find_map(|command| compound_body_parse_error(command).cloned())
@@ -97,8 +96,7 @@ pub(super) fn parse_loop_command(
             .collect();
         body_start += lead;
     }
-    let (body, done_index) = match parse_loop_body(tokens, body_start, source, source_line_offset)
-    {
+    let (body, done_index) = match parse_loop_body(tokens, body_start, source, source_line_offset) {
         Some(parsed) => parsed,
         None => {
             // The condition precedes the body in stream order, so its
@@ -124,8 +122,7 @@ pub(super) fn parse_loop_command(
             // latched error keep the None so the caller reports the EOF
             // / mismatched-closer shape (rubash#3936, #3184 defect B
             // same family, different file).
-            let rest =
-                parse_loop_body_commands(&tokens[body_start..], source, source_line_offset);
+            let rest = parse_loop_body_commands(&tokens[body_start..], source, source_line_offset);
             if let Some(error) = rest
                 .iter()
                 .find_map(|command| compound_body_parse_error(command).cloned())
