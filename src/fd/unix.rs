@@ -383,8 +383,20 @@ pub fn duplicate_handle_inheritable(h: HANDLE) -> std::io::Result<HANDLE> {
 /// F_DUPFD_CLOEXEC matches this module's other executor-owned
 /// descriptors — the spawn path arranges child layouts explicitly, so
 /// table handles are never inherited raw.
+///
+/// The duplicate is requested at or above SHELL_FD_BASE (10,
+/// redir.c:86) — the floor GNU's own descriptor saves use
+/// (redir.c:940). The adopted duplicate is an executor-internal
+/// handle; the low numbers are the user's redirection space. Parking
+/// the duplicate on a free low number makes it a phantom occupant of
+/// that number: /proc/$$/fd names it there, and the persistent-exec
+/// placement (FdTable::place_persistent_file) mistakes the adoption
+/// entry holding it for a live binding on the number and refuses the
+/// unconditional dup2 GNU performs (redir.c:1017/:1120) — so
+/// `exec N>file` stayed virtual whenever an inherited descriptor's
+/// adoption had landed on N first (rubash#3917).
 pub fn dup_adopted_fd(fd: u32) -> Option<HANDLE> {
-    let n = unsafe { libc::fcntl(fd as HANDLE, libc::F_DUPFD_CLOEXEC, 0) };
+    let n = unsafe { libc::fcntl(fd as HANDLE, libc::F_DUPFD_CLOEXEC, 10) };
     if n < 0 {
         None
     } else {

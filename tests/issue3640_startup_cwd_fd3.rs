@@ -78,6 +78,66 @@ fn stdout_trimmed(run: &Run) -> &str {
     run.stdout.trim()
 }
 
+/// Spawn rubash on `script` inside `dir` with real inherited
+/// descriptors installed in the child: each `(target, src_fd)` pair
+/// is dup2'd onto `target` in pre_exec (dup2 clears CLOEXEC, so the
+/// descriptor survives the exec exactly as a parent's hand-off
+/// would). Mirrors `rubash_c`'s environment; the pattern follows
+/// tests/issue1557_inherited_fd_regressions.rs.
+#[cfg(unix)]
+fn rubash_c_with_fds(dir: &Path, script: &str, fds: &[(u32, i32)]) -> Run {
+    use std::os::unix::process::CommandExt;
+    let raw: Vec<(i32, i32)> = fds.iter().map(|(t, s)| (*t as i32, *s)).collect();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rubash"));
+    cmd.args(["-c", script])
+        .current_dir(dir)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    unsafe {
+        cmd.pre_exec(move || {
+            for &(target, src) in &raw {
+                if src == target {
+                    if libc::fcntl(src, libc::F_SETFD, 0) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                } else if libc::dup2(src, target) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
+    let output = cmd.output().expect("run rubash");
+    Run {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        code: output.status.code(),
+    }
+}
+
+/// A pipe born CLOEXEC: the ends stay in this test process and reach
+/// a spawned child only through `rubash_c_with_fds`' pre_exec dup2,
+/// never by plain inheritance — sibling cells' shells must not see
+/// them.
+#[cfg(unix)]
+fn cloexec_pipe() -> (i32, i32) {
+    let mut fds = [0i32; 2];
+    let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+    assert_eq!(rc, 0, "pipe2: {}", std::io::Error::last_os_error());
+    (fds[0], fds[1])
+}
+
+#[cfg(unix)]
+fn close_fd(fd: i32) {
+    unsafe {
+        libc::close(fd);
+    }
+}
+
 /// Seed check 1 (rewritten, rubash#3917): no low descriptor names the
 /// startup cwd. The original form — `t=$(readlink /proc/$$/fd/3)`
 /// classified as a pipe — was vacuous: a free fd 3 makes the probe's
@@ -137,6 +197,71 @@ fn issue3640_exec_4_file_lands_on_fd4_control() {
     assert_eq!(
         stdout_trimmed(&run),
         "fd4-is-file",
+        "stderr: {}",
+        run.stderr
+    );
+}
+
+/// rubash#3917 (round 2): the shell adopts each inherited
+/// descriptor into its fd table over its own duplicate
+/// (`crate::fd::dup_adopted_fd`). With fd 4 free, a lowest-free
+/// adoption duplicate of inherited fd 3 parks ON fd 4, and the
+/// persistent-exec placement then mistook the adoption entry for a
+/// live binding on 4 and refused GNU's unconditional dup2
+/// (redir.c:1017/:1120) — `exec 4>file` stayed virtual and
+/// /proc/$$/fd/4 kept naming the pipe. This is the CI census shape:
+/// the runner chain hands the shell inherited descriptors whose
+/// adoptions land on the exec targets. Adoption duplicates are
+/// executor-internal handles and must live at or above
+/// SHELL_FD_BASE (redir.c:86), like GNU's own descriptor saves
+/// (redir.c:940). Here only fd 3 is inherited (a pipe read end) and
+/// fd 4 is free in the child.
+#[cfg(unix)]
+#[test]
+fn issue3640_exec_4_lands_with_adopted_inherited_fd3() {
+    let dir = scratch("exec4-adopt");
+    let (read_end, write_end) = cloexec_pipe();
+    let run = rubash_c_with_fds(
+        &dir.0,
+        "exec 4>out2.txt; [ \"$(readlink /proc/$$/fd/4)\" = \"$PWD/out2.txt\" ] && echo fd4-is-file || echo fd4-not-file",
+        &[(3, read_end)],
+    );
+    close_fd(read_end);
+    close_fd(write_end);
+    assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
+    assert_eq!(
+        stdout_trimmed(&run),
+        "fd4-is-file",
+        "stderr: {}",
+        run.stderr
+    );
+}
+
+/// rubash#3917 (round 2), the mirror image: the inherited
+/// descriptors sit HIGH (fds 5 and 6) and fds 3/4 are both free, so
+/// lowest-free adoption duplicates park on 3 and 4 — the exec
+/// target 3 is then "held" by an adoption entry and `exec 3>file`
+/// stays virtual. Same fix: adoption duplicates belong at or above
+/// SHELL_FD_BASE.
+#[cfg(unix)]
+#[test]
+fn issue3640_exec_3_lands_with_adopted_inherited_fds_high() {
+    let dir = scratch("exec3-adopt");
+    let (read_a, write_a) = cloexec_pipe();
+    let (read_b, write_b) = cloexec_pipe();
+    let run = rubash_c_with_fds(
+        &dir.0,
+        "exec 3>out.txt; [ \"$(readlink /proc/$$/fd/3)\" = \"$PWD/out.txt\" ] && echo fd3-is-file || echo fd3-not-file",
+        &[(5, read_a), (6, write_b)],
+    );
+    close_fd(read_a);
+    close_fd(write_a);
+    close_fd(read_b);
+    close_fd(write_b);
+    assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
+    assert_eq!(
+        stdout_trimmed(&run),
+        "fd3-is-file",
         "stderr: {}",
         run.stderr
     );

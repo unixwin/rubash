@@ -259,7 +259,20 @@ impl FileFd {
     pub(crate) fn duplicate(&self) -> std::io::Result<Rc<Self>> {
         #[cfg(unix)]
         let handle = {
-            let n = unsafe { libc::fcntl(self.handle, libc::F_DUPFD_CLOEXEC, 0) };
+            // The SHELL_FD_BASE floor the doc comment above cites is
+            // load-bearing, not cosmetic: a save parked on a free low
+            // number is a phantom occupant of that number — the
+            // persistent-exec placement mistakes the snapshot entry
+            // holding it for a live binding there and refuses GNU's
+            // unconditional dup2 (see crate::fd::dup_adopted_fd,
+            // rubash#3917).
+            let n = unsafe {
+                libc::fcntl(
+                    self.handle,
+                    libc::F_DUPFD_CLOEXEC,
+                    FdTable::SHELL_FD_BASE as libc::c_int,
+                )
+            };
             if n < 0 {
                 return Err(std::io::Error::last_os_error());
             }
