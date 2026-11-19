@@ -1207,7 +1207,9 @@ pub fn spawn_whitelisted(spec: &WhitelistedSpawn) -> std::io::Result<SpawnedChil
                 if Some(fd) == anchor_fd {
                     continue;
                 }
-                unsafe { libc::close(fd) };
+                // The whole pre_exec closure body is one unsafe block,
+                // so close() needs no nested unsafe of its own.
+                libc::close(fd);
             }
             // GNU's forked children restore the entry signal dispositions
             // between fork and exec (trap.c:1489 restore_original_signals,
@@ -1307,11 +1309,18 @@ mod tests {
         // __RUBASH_FD_HANDLE_{fd} env keys replayed in init.rs name these
         // numbers, so a spawn that renumbers them breaks fd>=3 inheritance.
         let mut child = spawn_whitelisted(&WhitelistedSpawn {
-            program: "sh".into(),
+            // bash, not POSIX sh: the SHELL_FD_BASE floor puts the extra
+            // at >= 10 and dash rejects a multi-digit dup target outright
+            // ("sh: 1: Syntax error: Bad fd number" for <&10 under dash
+            // 0.5.12 — verified: the literal AND the variable-expanded
+            // form are both refused, left side included). The fd-number
+            // contract under test cannot be expressed in the dash lexer
+            // past fd 9, so the numeric-dup probe needs bash; the
+            // /proc/self/fd alternative stays rejected because macOS has
+            // no /proc.
+            program: "bash".into(),
             args: vec![
                 "-c".to_string(),
-                // POSIX sh numeric dup rather than /proc/self/fd: macOS has
-                // no /proc, and the fd-number contract is what is under test.
                 format!("exec grep -q rubash-extra-probe <&{extra}"),
             ],
             env: Vec::new(),
