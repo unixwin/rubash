@@ -6316,7 +6316,10 @@ impl Executor {
         // on every exit path — the inner body returns Result, so a
         // single wrapper covers all early returns. The flag is
         // restored to its previous value (never assumed false) so a
-        // nested walk keeps the outer walk's arming.
+        // nested walk keeps the outer walk's arming. rubash#3930
+        // (round 5): the persistent-close flag
+        // (FdTable::kernel_close_persistent) is armed here with
+        // the same gate — see close_adopted_process_fd.
         //
         // The arming is narrowed to the true persistent scope
         // (captain review of PR #3930): GNU's dup2 (redir.c:1017)
@@ -6335,8 +6338,10 @@ impl Executor {
             && self.shell_state.subshell_depth.get() == 0
             && self.compound_redirect_scope_depth == 0;
         let prev = std::mem::replace(&mut self.fd_table.kernel_place_persistent, arm);
+        let prev_close = std::mem::replace(&mut self.fd_table.kernel_close_persistent, arm);
         let result = self.execute_stdio_only_exec_redirect_inner(cmd);
         self.fd_table.kernel_place_persistent = prev;
+        self.fd_table.kernel_close_persistent = prev_close;
         result
     }
 
@@ -7987,6 +7992,16 @@ impl Executor {
     }
 
     fn close_persistent_fd(&mut self, fd: u32) -> Result<(), ExecuteError> {
+        // rubash#3930 (round 5): capture the adopted copy's fstat
+        // identity BEFORE the entry is removed — the entry holds
+        // the Rc, so the copy's handle is live here. Only when the
+        // persistent-close flag is armed (the exec walk); otherwise
+        // no fstat is spent and the identity stays None.
+        let adopted_identity = if self.fd_table.kernel_close_persistent {
+            self.adopted_close_identity(fd)
+        } else {
+            None
+        };
         self.close_persistent_output_fd(fd)?;
         self.close_persistent_input_fd(fd);
         self.fd_table.close(fd);
@@ -8001,6 +8016,9 @@ impl Executor {
         // Close it only when it is genuinely orphaned: still open and
         // not the backing of another live table entry.
         self.close_orphaned_process_fd(fd);
+        // rubash#3930 (round 5): land the persistent close on the
+        // kernel for an adopted entry (see close_adopted_process_fd).
+        self.close_adopted_process_fd(fd, adopted_identity);
         self.shell_state
             .env_vars
             .insert(fd_closed_key(fd), "1".to_string());
@@ -8045,6 +8063,96 @@ impl Executor {
 
     #[cfg(not(unix))]
     fn close_orphaned_process_fd(&self, fd: u32) {
+        let _ = fd;
+    }
+
+    /// rubash#3930 (round 5): the fstat identity of the adopted copy
+    /// backing logical fd `fd` — (dev, ino, mtime, mtime_nsec) of
+    /// the copy's handle, for close_adopted_process_fd to compare
+    /// against kernel fd `fd`. None when the entry is not adopted,
+    /// the copy is retired (its handle is dead — fstat would be
+    /// untrustworthy, so the close is skipped rather than risked),
+    /// or fstat fails. Computed BEFORE fd_table.close(fd) removes
+    /// the entry; the entry holds the Rc, so the handle is live here.
+    #[cfg(unix)]
+    fn adopted_close_identity(&self, fd: u32) -> Option<(u64, u64, i64, i64)> {
+        let file = self.fd_table.adopted_file(fd)?;
+        if file.is_retired() {
+            return None;
+        }
+        crate::fd::fd_stat_parts(file.handle)
+    }
+
+    #[cfg(not(unix))]
+    fn adopted_close_identity(&self, _fd: u32) -> Option<(u64, u64, i64, i64)> {
+        None
+    }
+
+    /// rubash#3930 (round 5): land a persistent `exec N<&-` /
+    /// `N>&-` (or move-source) close on the kernel descriptor when
+    /// the removed entry was an adopted copy of an inherited
+    /// descriptor AND kernel fd N is that same description (fstat
+    /// identity match — see adopted_close_identity). GNU
+    /// redir.c:1239 case r_close_this, redir.c:1267
+    /// close_buffered_fd (redirector): the close drops the
+    /// descriptor at the redirector's number, not just the table
+    /// entry. Without this the inherited descriptor survives the
+    /// close, a respawned child re-adopts it, and the body's `>&N`
+    /// succeeds after the parent's own `>&N` already failed.
+    ///
+    /// The gate is threefold, and each arm excludes a real
+    /// mis-close: (1) fd >= 3 — the stdio slots are owned by
+    /// close_orphaned_process_fd above, so the two kernel-close
+    /// sites can never double-close the same number (a second
+    /// close after the number was recycled would kill an
+    /// unrelated file); (2) the persistent-close flag is armed —
+    /// only the exec walk at true persistent scope (never the
+    /// scoped walk, a subshell, or a compound bracket, where the
+    /// scope restore replays only the table); (3) the fstat
+    /// identity matches — a dup-shared adopted Rc names another
+    /// fd's description, and a runtime pipe may sit on the number
+    /// (both stay with #3938's dup-placement face). A defensive
+    /// "no live entry still names kernel fd N" scan mirrors the
+    /// orphan guard; adopted copies are named by their own
+    /// handles, so it should never fire.
+    #[cfg(unix)]
+    fn close_adopted_process_fd(&self, fd: u32, adopted_identity: Option<(u64, u64, i64, i64)>) {
+        if fd < 3 || !self.fd_table.kernel_close_persistent {
+            return;
+        }
+        let Some((dev, ino, _, _)) = adopted_identity else {
+            return;
+        };
+        let Some((kdev, kino, _, _)) = crate::fd::fd_stat_parts(fd as crate::fd::HANDLE) else {
+            return;
+        };
+        if (kdev, kino) != (dev, ino) {
+            return;
+        }
+        let target = fd as crate::fd::HANDLE;
+        let referenced = self.fd_table.entries.values().any(|entry| {
+            !entry.closed
+                && (entry
+                    .read
+                    .as_ref()
+                    .and_then(read_endpoint_os_handle)
+                    .is_some_and(|handle| handle == target)
+                    || entry
+                        .write
+                        .as_ref()
+                        .and_then(write_endpoint_os_handle)
+                        .is_some_and(|handle| handle == target))
+        });
+        if referenced {
+            return;
+        }
+        unsafe {
+            libc::close(target);
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn close_adopted_process_fd(&self, fd: u32, _adopted_identity: Option<(u64, u64, i64, i64)>) {
         let _ = fd;
     }
 

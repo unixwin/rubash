@@ -586,6 +586,19 @@ pub(crate) struct FdTable {
     /// replays the table, not the kernel descriptor). Off Unix the
     /// flag is inert (no kernel placement exists).
     pub(crate) kernel_place_persistent: bool,
+    /// rubash#3930 (round 5): the persistent-close analogue of
+    /// `kernel_place_persistent` — armed only by the `exec`
+    /// wrapper (execute_stdio_only_exec_redirect) at true
+    /// persistent scope, so a persistent `exec N<&-` / `N>&-`
+    /// (or move-source) close of an adopted entry also closes
+    /// the inherited kernel descriptor N (GNU redir.c:1239 case
+    /// r_close_this, redir.c:1267 close_buffered_fd). Scoped
+    /// closes, subshells and compound brackets never set this:
+    /// the scope restore only replays the table, and a kernel
+    /// close is irreversible — landing it there would corrupt
+    /// the outer scope's descriptors. Off Unix the flag is inert
+    /// (no kernel close exists).
+    pub(crate) kernel_close_persistent: bool,
     /// rubash#3917: the placement undo log — GNU's undo list
     /// (redir.c add_undo_redirect) ported: before a placement dup2
     /// replaces a kernel descriptor, the displaced occupant is
@@ -858,6 +871,7 @@ impl FdTable {
             read_error: None,
             stdout_alias_generation: std::collections::HashMap::new(),
             kernel_place_persistent: false,
+            kernel_close_persistent: false,
             placement_undo: Vec::new(),
         };
         table.entries.insert(
@@ -1178,6 +1192,33 @@ impl FdTable {
             return None;
         }
         Some(target)
+    }
+
+    /// rubash#3930 (round 5): the adopted `FileFd` backing logical
+    /// fd `fd`, if either arm is a startup-adopted copy of an
+    /// inherited descriptor (see register_inherited_process_fds).
+    /// Read arm first, then write — a `<>` pair shares one Rc,
+    /// and the fd-0 write arm is the only split case; coproc arms
+    /// are shell-created, never adopted, so they are not consulted.
+    /// A dup shares the source's Rc, so a dup'd entry reports the
+    /// SOURCE's adopted copy — the caller must not assume the copy
+    /// came from `fd` itself; the fstat identity check in
+    /// close_adopted_process_fd is what proves kernel fd `fd` is
+    /// that description.
+    #[cfg(unix)]
+    pub(crate) fn adopted_file(&self, fd: u32) -> Option<Rc<FileFd>> {
+        let entry = self.entries.get(&fd)?;
+        if let Some(FdReadEndpoint::File(file)) = &entry.read {
+            if file.adopted {
+                return Some(file.clone());
+            }
+        }
+        if let Some(FdWriteEndpoint::File(file)) = &entry.write {
+            if file.adopted {
+                return Some(file.clone());
+            }
+        }
+        None
     }
 
     /// rubash#3917: relocate every startup-adopted copy parked on
@@ -1827,6 +1868,11 @@ impl FdTable {
         // ordinary redirect opens would dup2 the process's
         // descriptors.
         table.kernel_place_persistent = false;
+        // rubash#3930 (round 5): the close arming belongs to the
+        // live walk exactly like the placement arming above — a
+        // snapshot must not inherit it, or the clone's closes
+        // would land on the kernel.
+        table.kernel_close_persistent = false;
         table
     }
 
