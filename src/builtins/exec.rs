@@ -233,6 +233,11 @@ pub(crate) fn replace_process_image(
         use std::os::unix::process::CommandExt;
         process.pre_exec(crate::builtins::kill::child_pre_exec_reset);
     }
+    // rubash#3219: an exec issued inside an in-process fork region
+    // hands the new image the region's recorded ulimit pairs — GNU's
+    // subshell fork already carries them in the process itself (see
+    // builtins/ulimit.rs emulated_limit_pairs). No-op outside regions.
+    crate::builtins::ulimit::arm_emulated_limits(&mut process, env_vars);
     let _ = io::stdout().flush();
     let _ = io::stderr().flush();
     let error = {
@@ -1196,6 +1201,12 @@ fn external_exec_process(
             process.env("SHLVL", exec_decremented_shlvl(env_vars));
         }
     }
+    // rubash#3219: an exec simulation born inside an in-process fork
+    // region hands the child the region's recorded ulimit pairs —
+    // GNU's exec'd image inherits the forked subshell's own rlimit
+    // pair (see builtins/ulimit.rs emulated_limit_pairs). No-op when
+    // no emulated-limit cells exist (every top-level exec).
+    crate::builtins::ulimit::arm_emulated_limits(&mut process, env_vars);
     crate::executor::path::suppress_orphan_console(&mut process);
     process
 }

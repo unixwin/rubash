@@ -5142,6 +5142,11 @@ impl Executor {
             )
         })?;
 
+        // rubash#3219: the emulated-limit pairs a child born inside
+        // an in-process fork region must carry (empty outside one);
+        // applied in the child's tail before execve.
+        let limit_pairs = crate::builtins::ulimit::emulated_limit_pairs(&self.shell_state.env_vars);
+
         // ---- fork: the parent returns the pid at once, no sync. ----
         let pid = unsafe { libc::fork() };
         if pid < 0 {
@@ -5165,6 +5170,7 @@ impl Executor {
                     &fail_prefix_c,
                     &fail_enoent_c,
                     enoent_status,
+                    &limit_pairs,
                 );
             }
         }
@@ -5237,6 +5243,14 @@ impl Executor {
             use std::os::unix::process::CommandExt;
             process.pre_exec(crate::builtins::kill::child_pre_exec_reset);
         }
+        // rubash#3219: a child born inside an in-process fork region
+        // also takes the region's recorded ulimit pairs — the
+        // virtualized set moved only this process's soft side, so
+        // without this the child inherits the parent's hard limit
+        // where GNU's forked child carries the region's pair
+        // (builtins/ulimit.rs emulated_limit_pairs). No-op when no
+        // cells exist (every top-level spawn).
+        crate::builtins::ulimit::arm_emulated_limits(&mut process, &self.shell_state.env_vars);
         // rubash#2398: a job-control foreground child leads its own
         // process group (jobs.c:2390 make_child setpgid; a one-process
         // job's pipeline_pgrp is the child's own pid, jobs.c:2446) so
@@ -6592,6 +6606,7 @@ unsafe fn raw_fork_async_child(
     fail_prefix_c: &std::ffi::CString,
     fail_enoent_c: &std::ffi::CString,
     enoent_status: i32,
+    limit_pairs: &[(char, u64, u64)],
 ) -> ! {
     // rubash#3420: seat the child in the session cwd. GNU's child
     // inherits the process cwd across fork (execute_cmd.c:5771
@@ -6683,6 +6698,12 @@ unsafe fn raw_fork_async_child(
             libc::_exit(126);
         }
     }
+    // rubash#3219: take the spawning region's recorded ulimit pairs
+    // (computed parent-side from the emulated-limit cells; the
+    // virtualized set moved only the parent process's soft side, so
+    // the hard side must land here). Empty slice — the common
+    // no-region spawn — is a no-op.
+    crate::builtins::ulimit::apply_emulated_limits_in_child(limit_pairs);
     unsafe { libc::execve(exec_c.as_ptr(), argv_p, env_p) };
     // execve failed (TOCTOU — the gate resolved the program moments
     // earlier): diagnose per the spawn classifier and exit.

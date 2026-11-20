@@ -6450,8 +6450,9 @@ impl Executor {
             // setpgid; the trap.c:1489 restore runs first so the stage
             // does not inherit the interactive shell's SIG_IGN for the
             // stop signals). Stage 0 leads the group; later stages join
-            // the leader's pid. No other pre_exec exists on this loop's
-            // Command, so there is nothing to compose with.
+            // the leader's pid. The only other pre_exec on this loop's
+            // Command is the rubash#3219 emulated-limits arm below,
+            // which touches disjoint state (rlimits, not signals).
             #[cfg(unix)]
             if job_control {
                 use std::os::unix::process::CommandExt;
@@ -6471,6 +6472,11 @@ impl Executor {
                     },
                 }
             }
+            // rubash#3219: a stage spawned from inside an in-process
+            // fork region takes the region's recorded ulimit pairs at
+            // birth (see spawn_external_process's arm). No-op when no
+            // emulated-limit cells exist.
+            crate::builtins::ulimit::arm_emulated_limits(&mut process, &self.shell_state.env_vars);
             // rubash#3456: a fatal arithmetic error in this member's
             // prefix was already diagnosed once by the composition
             // above; GNU discards the whole element, so the child must

@@ -142,6 +142,85 @@ pub(crate) fn emulated_cells_restore(env_vars: &mut VarTable, saved: &[(String, 
     }
 }
 
+/// rubash#3219: the emulated-limit cells as spawn-ready
+/// (option, soft, hard) triples. Inside an in-process fork region the
+/// virtualized set (plat::set) records the pair in the cells and moves
+/// only the SOFT side of this process — the hard side never touches
+/// the shared kernel pair, so the parent's read-back is safe, but a
+/// real child born inside the region would inherit the parent's hard
+/// limit where GNU's forked child (and everything it spawns) carries
+/// the region's pair. Spawn sites close that last face by applying
+/// these pairs to the child between fork and exec
+/// (arm_emulated_limits / apply_emulated_limits_in_child).
+#[cfg(unix)]
+pub(crate) fn emulated_limit_pairs(env_vars: &VarTable) -> Vec<(char, u64, u64)> {
+    LIMITS
+        .iter()
+        // 'p' (pipe size) is a fixed fiction with no backing rlimit —
+        // the same exclusion snapshot_process_rlimits makes.
+        .filter(|spec| spec.option != 'p')
+        .filter_map(|spec| {
+            env_vars.get(&key(spec.option)).map(|cell| {
+                let (soft, hard) = parse_limit_cell(cell);
+                (spec.option, soft, hard)
+            })
+        })
+        .collect()
+}
+
+/// The same pairs, extracted from a composed spawn environment (the
+/// raw-fork and whitelisted spawn routes carry the child's env as
+/// pairs, not as a VarTable).
+#[cfg(unix)]
+pub(crate) fn emulated_limit_pairs_from_env(env: &[(String, String)]) -> Vec<(char, u64, u64)> {
+    LIMITS
+        .iter()
+        .filter(|spec| spec.option != 'p')
+        .filter_map(|spec| {
+            let cell_key = key(spec.option);
+            env.iter()
+                .find(|(name, _)| *name == cell_key)
+                .map(|(_, cell)| {
+                    let (soft, hard) = parse_limit_cell(cell);
+                    (spec.option, soft, hard)
+                })
+        })
+        .collect()
+}
+
+/// rubash#3219: arm a `Command` to apply the emulated-limit pairs
+/// between fork and exec (see emulated_limit_pairs). No cells — the
+/// common case outside any region, and every top-level spawn — arms
+/// nothing, so ordinary spawns pay no extra pre_exec. Idempotent:
+/// sites whose Command already passed an arming funnel may arm again;
+/// the pairs applied are the same values.
+#[cfg(unix)]
+pub(crate) fn arm_emulated_limits(command: &mut std::process::Command, env_vars: &VarTable) {
+    let pairs = emulated_limit_pairs(env_vars);
+    if pairs.is_empty() {
+        return;
+    }
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        command.pre_exec(move || {
+            apply_emulated_limits_in_child(&pairs);
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn arm_emulated_limits(_command: &mut std::process::Command, _env_vars: &VarTable) {}
+
+/// rubash#3219: the post-fork half of the spawn application — put
+/// each recorded pair into THIS (child) process. Runs between fork
+/// and exec: libc calls only, no allocation. Best effort per
+/// resource and never a raise (see plat::apply_emulated_limits_in_child).
+#[cfg(unix)]
+pub(crate) fn apply_emulated_limits_in_child(pairs: &[(char, u64, u64)]) {
+    plat::apply_emulated_limits_in_child(pairs);
+}
+
 // ---- limits[] (ulimit.def:239-298) ----------------------------------------
 
 /// Block scaling (ulimit.def:208-212): POSIXBLK is 512 in posix mode and
@@ -563,6 +642,40 @@ mod plat {
                 unsafe {
                     libc::setrlimit(res, &fallback);
                 }
+            }
+        }
+    }
+
+    /// rubash#3219: the post-fork half of the emulated-limit spawn
+    /// application — put each recorded pair into THIS (child)
+    /// process. GNU needs no such step: a subshell there is a real
+    /// fork (execute_cmd.c make_child), so the region's setrlimit
+    /// pair is simply inherited by the child. The flat model's
+    /// region lives in this shared process, whose hard side never
+    /// moved, so the recorded pair is applied here, between fork
+    /// and exec. Best effort per resource and never a raise: a cell
+    /// hard above the real hard (the root pure-cell raise model in
+    /// set) clamps to the real hard, and the soft clamps to the
+    /// resulting hard, so the submitted pair is always kernel-valid.
+    /// Post-fork context: libc calls only, no allocation.
+    pub(super) fn apply_emulated_limits_in_child(pairs: &[(char, u64, u64)]) {
+        for &(option, soft, hard) in pairs {
+            if option == 'p' {
+                continue;
+            }
+            let res = resource(option);
+            let mut current: libc::rlimit = unsafe { std::mem::zeroed() };
+            if unsafe { libc::getrlimit(res, &mut current) } < 0 {
+                continue;
+            }
+            let current_hard = norm_in(current.rlim_max);
+            let new_hard = hard.min(current_hard);
+            let new_soft = soft.min(new_hard);
+            let mut limit: libc::rlimit = unsafe { std::mem::zeroed() };
+            limit.rlim_cur = to_rlim_t(new_soft);
+            limit.rlim_max = to_rlim_t(new_hard);
+            unsafe {
+                libc::setrlimit(res, &limit);
             }
         }
     }
