@@ -1245,6 +1245,10 @@ impl Executor {
                     // apply_external_stdout_target's arm).
                 } else if self.has_output_fd_target(&target) {
                     process.stdout(Stdio::from(self.open_output_fd_append(&target)?));
+                } else if let Some(source) = self.writeless_dup_source(&target) {
+                    // rubash#3941: append form of the write-less dup
+                    // arm in apply_external_stdout_target.
+                    return Err(Self::bad_fd_dup_error(source));
                 } else if redirect_target_fd(&target).is_none() {
                     // The append open classifies through the registry
                     // (rubash#1964): a net target connects, synthetic
@@ -1343,6 +1347,45 @@ impl Executor {
         Ok(true)
     }
 
+    /// rubash#3941: an output dup target (`>&N` / `N>&M`, plain or
+    /// append form) whose source slot is OPEN but has no write
+    /// endpoint — a read-only description, e.g. an inherited
+    /// input-only slot or a procsub body's plan-restored fd. The
+    /// stdio planner declines the shape (its dup resolution finds
+    /// no write slot) and the legacy chains below have no arm for
+    /// it either: they fell through with the child's stdio
+    /// untouched, so the child silently inherited the ambient
+    /// stream and a procsub body's bytes leaked onto the shell's
+    /// stdout instead of failing EBADF. The routing walk models
+    /// the same source as write-less and fails the redirect
+    /// (redirection.rs `ListBound::ReadOnly`); mirror that verdict
+    /// here: the redirect fails and the command does not run. A
+    /// source the table does not hold open at all returns None and
+    /// keeps the existing missing-fd handling; a closed source is
+    /// claimed by the closed-target arms.
+    fn writeless_dup_source(&self, target: &str) -> Option<u32> {
+        let source = redirect_target_fd(target)?;
+        if self.fd_table.is_closed(source)
+            || self.fd_table.output_endpoint(source).is_some()
+        {
+            return None;
+        }
+        self.fd_table.entries.get(&source).map(|_| source)
+    }
+
+    /// The bad-fd redirect failure for a write-less dup source, in
+    /// the shape the input side established for its mirror case
+    /// (external_setup.rs, rubash#3792): the executor renders it
+    /// with the command's diagnostic envelope and the command
+    /// never spawns.
+    fn bad_fd_dup_error(source: u32) -> ExecuteError {
+        io::Error::new(
+            io::ErrorKind::Other,
+            format!("{source}: Bad file descriptor"),
+        )
+        .into()
+    }
+
     /// rubash#3372: `redirect` is the node being applied — the create
     /// arm below resolves its byte spelling through the node's own
     /// record, never the folded-string record a sibling redirect may
@@ -1383,6 +1426,10 @@ impl Executor {
             // child writes the pipe's other end (see the helper).
         } else if self.has_output_fd_target(target) {
             process.stdout(Stdio::from(self.open_output_fd_append(target)?));
+        } else if let Some(source) = self.writeless_dup_source(target) {
+            // rubash#3941: write-less dup source — fail the redirect
+            // instead of leaving the child on the ambient stdout.
+            return Err(Self::bad_fd_dup_error(source));
         } else if redirect_target_fd(target).is_none() {
             let file = self.create_redirect_output_for(redirect, target, clobber)?;
             process.stdout(Stdio::from(file));
@@ -1429,6 +1476,10 @@ impl Executor {
                 // rubash#2385: complementary-end target, fd-2 form.
             } else if self.has_output_fd_target(&target) {
                 process.stderr(Stdio::from(self.open_output_fd_append(&target)?));
+            } else if let Some(source) = self.writeless_dup_source(&target) {
+                // rubash#3941: fd-2 form of the write-less dup arm in
+                // apply_external_stdout_target.
+                return Err(Self::bad_fd_dup_error(source));
             } else if redirect_target_fd(&target).is_none() {
                 let file =
                     self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?;
@@ -1475,6 +1526,10 @@ impl Executor {
                     // append form.
                 } else if self.has_output_fd_target(&target) {
                     process.stderr(Stdio::from(self.open_output_fd_append(&target)?));
+                } else if let Some(source) = self.writeless_dup_source(&target) {
+                    // rubash#3941: append form of the fd-2 write-less
+                    // dup arm in apply_external_stdout_target.
+                    return Err(Self::bad_fd_dup_error(source));
                 } else if redirect_target_fd(&target).is_none() {
                     // Classified append open (rubash#1964), the fd-2
                     // twin of the stdout arm above.
