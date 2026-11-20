@@ -69,10 +69,7 @@ fn real_heredoc_in_comsub_in_brace_group_still_works() {
     // The fold refusal for groups that DO contain a heredoc operator
     // must stay: a terminated heredoc body inside the substitution is
     // gathered, not folded away.
-    assert_clean(
-        "{ x=$(cat <<EOF2\nfoo\nEOF2\n); echo \"$x\"; }",
-        "foo\n",
-    );
+    assert_clean("{ x=$(cat <<EOF2\nfoo\nEOF2\n); echo \"$x\"; }", "foo\n");
     assert_clean("{ cat <<EOF2\nfoo\nEOF2\n}", "foo\n");
 }
 
