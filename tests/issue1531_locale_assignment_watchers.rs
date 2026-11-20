@@ -22,6 +22,16 @@
 //! on the fly with localedef into a private LOCPATH, the issue1512
 //! approach, so the test truly runs wherever localedef can build the
 //! locale instead of silently skipping).
+//!
+//! Exception (rubash#3951): the script's last two `env | grep -c`
+//! counts. While `env` was a builtin, its in-process print showed
+//! only the exported view (0 before `export LC_COLLATE`, 1 after).
+//! `env` is an external command now, so the counts read the composed
+//! child environment — which the watcher above has already synced
+//! with the plain LC_COLLATE assignment, the same face a real
+//! /usr/bin/env child presented even before #3951. Both counts
+//! therefore read 1; the locale-immediacy lines proper (glob / cmp /
+//! ctype / numeric) are untouched.
 #![cfg(unix)]
 
 use std::path::PathBuf;
@@ -88,7 +98,7 @@ len-de: 5
 rm-de: llo
 num-de: 1,00
 num-C: 1.50
-0
+1
 1
 ";
 

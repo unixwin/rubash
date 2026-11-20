@@ -512,19 +512,22 @@ mod tests {
     fn matrix_counts_are_stable() {
         // A tripwire, not a target: if the count moves, the
         // generator changed and the ledger's baseline moved with it.
-        // Hand-computed from the table: 778 per context (724 Getopt
-        // + 39 NoScan + 15 Grammar), 3112 total. Phase 3 dropped one
+        // Hand-computed from the table: 775 per context (724 Getopt
+        // + 39 NoScan + 12 Grammar), 3100 total. Phase 3 dropped one
         // Getopt letter: the Phase 0 census read GNU's disabled
         // `l` entry into set's spec, but flags.c:190-192 keeps
         // `{ 'l', &lexical_scoping }` under `#if 0`, so `l` is not
-        // in the optflags set scans with at all.
+        // in the optflags set scans with at all. #3951 dropped the
+        // `env` row outright (GNU has no env builtin): a Grammar row
+        // carries only the 3 base cells per context, so Grammar
+        // fell 15 -> 12 and the total by 12.
         let cases = generate_cases();
-        assert_eq!(cases.len(), 3112);
+        assert_eq!(cases.len(), 3100);
         let file = cases
             .iter()
             .filter(|c| c.context == MatrixContext::ScriptFile)
             .count();
-        assert_eq!(file, 778);
+        assert_eq!(file, 775);
     }
 
     /// Report mode: write the generated cases for the driver.

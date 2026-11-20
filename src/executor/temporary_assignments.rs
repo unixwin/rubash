@@ -164,6 +164,70 @@ impl Executor {
             .map(|(_, _, env_name, bound)| (env_name.clone(), bound.clone()))
     }
 
+    /// The env composition paths for spawns whose prefix assignments
+    /// were never applied to the table (pipeline-stage spawners, the
+    /// concurrent / procsub composers) expand each assignment RHS
+    /// themselves. GNU walks the prefix list once, left to right:
+    /// do_assignment_statements (subst.c:13141) calls assign_in_env
+    /// (variables.c:3536) per word, which expands the RHS
+    /// (subst.c:3881 expand_assignment_string_to_string) and binds
+    /// into temporary_env, and variable lookup consults
+    /// temporary_env first (variables.c:1980) — so a later RHS sees
+    /// every earlier prefix bind (`a=1 b=$a env` yields b=1). Mirror
+    /// that here: stage each composed bind into the lookup path (the
+    /// env store, shadowing any typed cell) so the next RHS
+    /// expansion in the same composition reads it, and restore the
+    /// previous state when the composition finishes. The undo list
+    /// records each staged name once, in first-staged order.
+    pub(in crate::executor) fn stage_composition_bind(
+        &mut self,
+        undo: &mut Vec<(String, Option<String>, Option<crate::shell::Variable>)>,
+        name: &str,
+        value: &str,
+    ) {
+        if !undo.iter().any(|(staged, _, _)| staged == name) {
+            undo.push((
+                name.to_string(),
+                self.shell_state.env_vars.get(name).cloned(),
+                self.shell_state.variables.get(name).cloned(),
+            ));
+        }
+        self.shell_state
+            .env_vars
+            .insert(name.to_string(), value.to_string());
+        // The typed store is consulted before the env store
+        // (shell_variable_value), so a pre-existing typed cell would
+        // shadow the staged bind; drop it for the composition's
+        // duration — the undo entry restores it verbatim.
+        self.shell_state.variables.remove(name);
+    }
+
+    /// Undo every bind staged by
+    /// [`Executor::stage_composition_bind`], in reverse order.
+    pub(in crate::executor) fn restore_composition_binds(
+        &mut self,
+        undo: Vec<(String, Option<String>, Option<crate::shell::Variable>)>,
+    ) {
+        for (name, env_value, typed) in undo.into_iter().rev() {
+            match env_value {
+                Some(value) => {
+                    self.shell_state.env_vars.insert(name.clone(), value);
+                }
+                None => {
+                    self.shell_state.env_vars.remove(&name);
+                }
+            }
+            match typed {
+                Some(variable) => {
+                    let _ = self.shell_state.variables.set(name, variable);
+                }
+                None => {
+                    self.shell_state.variables.remove(&name);
+                }
+            }
+        }
+    }
+
     #[allow(clippy::type_complexity)]
     pub(in crate::executor) fn apply_temporary_assignments(
         &mut self,

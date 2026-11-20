@@ -398,8 +398,11 @@ fn issue2036_shape12_escape_hatches_spawn() {
 /// claims are disclosed by the describe faces, not the builtin table).
 /// `env` joins that group since rubash#3951: it is an emulated
 /// external, not a builtin, so `enable env` / `enable -n env` both
-/// refuse — and the refusal cannot divert the bare name, which keeps
-/// running the in-process emulation (never the fakebin script).
+/// refuse — and the refusal cannot divert the simple-command face,
+/// which keeps running the in-process emulation (never the fakebin
+/// script). The command-substitution shape is an ordinary PATH
+/// external, exactly as in GNU (which has no env builtin at all),
+/// so there the fakebin body answers.
 #[test]
 fn issue2036_shape13_enable_faces() {
     let rig = rig("s13");
@@ -425,9 +428,10 @@ fn issue2036_shape13_enable_faces() {
     );
     assert!(out.stdout.contains("cat_rc=1"), "{}", out.stdout);
     // rubash#3951: `env` is an emulated external, not a builtin —
-    // `enable` refuses it in both directions, and the bare name
-    // keeps running the in-process env (its output is the
-    // environment, never the fake's marker).
+    // `enable` refuses it in both directions. The simple-command
+    // face keeps running the in-process env (its print carries the
+    // marker, never the fake's); command substitution resolves the
+    // name on PATH like any external, so the fake answers there.
     write_fake(
         &rig.root.join("fakebin"),
         "env",
@@ -437,13 +441,16 @@ fn issue2036_shape13_enable_faces() {
         &rig.root,
         &rig.fake_path,
         "export MARKER2036=present; enable env 2>&1; echo env_rc=$?; env >/dev/null; echo on_rc=$?; \
-         enable -n env 2>&1; echo envn_rc=$?; echo t=$(type -t env); out=$(env); case \"$out\" in *MARKER2036=present*) echo off=in-process;; *) echo off=other;; esac",
+         enable -n env 2>&1; echo envn_rc=$?; echo t=$(type -t env); \
+         env > env_s13.out; m=other; while IFS= read -r l; do case $l in *MARKER2036=present*) m=in-process;; esac; done < env_s13.out; echo simple=$m; \
+         out=$(env); case \"$out\" in *FAKE-env*) echo comsub=disk;; *) echo comsub=other;; esac",
     );
     assert!(out.stdout.contains("env_rc=1"), "{}", out.stdout);
     assert!(out.stdout.contains("on_rc=0"), "{}", out.stdout);
     assert!(out.stdout.contains("envn_rc=1"), "{}", out.stdout);
     assert!(out.stdout.contains("t=file"), "{}", out.stdout);
-    assert!(out.stdout.contains("off=in-process"), "{}", out.stdout);
+    assert!(out.stdout.contains("simple=in-process"), "{}", out.stdout);
+    assert!(out.stdout.contains("comsub=disk"), "{}", out.stdout);
     assert!(
         out.stdout.contains("enable: env: not a shell builtin"),
         "{}",

@@ -1705,6 +1705,12 @@ impl Executor {
         // rubash#3456: snapshot the arithmetic flags so the prefix
         // composition below can be adjudicated before the handler runs.
         let prefix_arith_before = self.snapshot_arithmetic_error_flags();
+        // When the dispatch seam did not apply the prefix, each
+        // fall-through composition below stages its bind into the
+        // lookup path so the next RHS expands against it — GNU's
+        // assign_in_env / temporary_env order (see
+        // stage_composition_bind) — restored after the loop.
+        let mut composition_undo = Vec::new();
         for (index, (var_name, var_value)) in cmd.assignments.iter().enumerate() {
             let (base_name, append) = assignment_name_and_append(var_name);
             // GNU variables.c:3589 assign_in_env: an ASSIGN_DISALLOWED
@@ -1769,10 +1775,12 @@ impl Executor {
             } else {
                 expanded_value.to_string()
             };
+            self.stage_composition_bind(&mut composition_undo, &env_name, &expanded_value);
             if is_valid_process_env(&env_name, &expanded_value) {
                 env_vars.insert(env_name, expanded_value);
             }
         }
+        self.restore_composition_binds(composition_undo);
         // rubash#3456: a fatal arithmetic error in the prefix was already
         // diagnosed once by the composition above; GNU discards the whole
         // element, so the host child must never run — return the dead
@@ -1961,6 +1969,13 @@ impl Executor {
     ) -> Vec<(String, String)> {
         let mut pairs = self.compose_child_environment();
         let raws_aligned = cmd.assignment_raws.len() == cmd.assignments.len();
+        // Spawns whose prefix was never applied (the concurrent
+        // pipeline / procsub composers) expand each RHS in the
+        // fall-through below; stage each composed bind into the
+        // lookup path so the next RHS sees it — GNU's assign_in_env
+        // / temporary_env order (see stage_composition_bind) —
+        // restored after the loop.
+        let mut composition_undo = Vec::new();
         for (index, (var_name, var_value)) in cmd.assignments.iter().enumerate() {
             let (base_name, append) = assignment_name_and_append(var_name);
             // GNU variables.c:3589 assign_in_env: an ASSIGN_DISALLOWED
@@ -2028,6 +2043,7 @@ impl Executor {
             let Some(env_name) = self.tempenv_export_name(base_name) else {
                 continue;
             };
+            self.stage_composition_bind(&mut composition_undo, &env_name, expanded_value);
             if is_valid_process_env(&env_name, expanded_value) {
                 // Prefix assignments overwrite compose_child_environment above;
                 // retain its native TMPDIR boundary (niubash#162).
@@ -2045,6 +2061,7 @@ impl Executor {
                 }
             }
         }
+        self.restore_composition_binds(composition_undo);
         // GNU execute_cmd.c execute_disk_command finishes the child
         // environment with put_command_name_into_env (variables.c):
         // `_` is set to the pathname search_for_command resolved for
