@@ -471,6 +471,49 @@ fn compound_element_diag_word(token_raw: &str, assoc: bool) -> CompoundElementDi
     ))
 }
 
+/// Serialize one brace product of a compound-assignment body word for the
+/// string transport between brace expansion and the compound walkers.
+/// GNU hands expand_words_no_vars a word LIST (arrayfunc.c:581/610):
+/// every brace product is a word, whatever its text. The rubash transport
+/// instead re-joins the products into one string the walkers re-tokenize,
+/// so a product the bare text cannot carry is written in the quoted form
+/// the rest of the pipeline already reads as "this word is data":
+/// - a sequence null (BraceProduct::sequence_null — a character
+///   sequence's backslash element) is an empty word that EXISTS, the same
+///   fact command-word assembly carries as
+///   BraceExpansionWord::quoted_null. As bare text it would vanish into
+///   the join separator, so it is written as a quoted empty word (`''`),
+///   which the compound walkers store as one empty element. A bare
+///   alternative null (`{a,}`) carries no tag and stays bare text, so it
+///   keeps dropping (rubash#337).
+/// - a product that is exactly one backtick is a data word in GNU (the
+///   braces.tests `{a..A}` line prints it), but the storage tokenizer
+///   reads a bare backtick as a command-substitution opener and pairs it
+///   with the next product's backtick, swallowing both words;
+///   single-quoted it rides through as the literal element it is. A
+///   backtick GLUED to further text is a different face — GNU's own
+///   re-scan rejects it (bad substitution) — and is not reproduced here.
+/// - a product that OPENS with `[` and contains no `]` of its own (the
+///   sequence's `[` element, alone or glued to a postamble) is read by
+///   the storage tokenizer as an array-subscript span opener
+///   (parse.y:5635 P_ARRAYSUB): it swallows every following word up to
+///   the next product that is or contains `]` — in GNU the body was
+///   tokenized BEFORE brace expansion, so no product ever starts a
+///   word as a bare `[`. Quoting just the bracket keeps the rest of the
+///   product's text (and its expansions) untouched. A product with its
+///   own `]` is safe: the span closes inside the word.
+fn compound_brace_product_transport(product: &crate::expand::braces::BraceProduct) -> String {
+    if product.sequence_null {
+        "''".to_string()
+    } else if product.text == "`" {
+        "'`'".to_string()
+    } else if product.text.starts_with('[') && !product.text.contains(']') {
+        format!("'['{}", &product.text[1..])
+    } else {
+        product.text.clone()
+    }
+}
+
 impl Executor {
     // #609 slice 1: `name=literal|$other|"$other"` fast expansion (GNU
     // subst.c:3524 do_assignment_internal; variables.c:3225 bind_variable).
@@ -3595,10 +3638,10 @@ impl Executor {
                     (crate::executor::markers::ASSIGN_DATA_SQUOTE, "'"),
                 ],
             );
-            let expanded = crate::expand::braces::expand_braces(&word);
-            if expanded.len() > 1 || expanded.first().is_some_and(|w| w != &word) {
+            let expanded = crate::expand::braces::expand_braces_tagged(&word);
+            if expanded.len() > 1 || expanded.first().is_some_and(|p| p.text != word) {
                 changed = true;
-                products.extend(expanded);
+                products.extend(expanded.iter().map(compound_brace_product_transport));
             } else {
                 products.push(stored_word);
             }
