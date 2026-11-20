@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use super::fd_table::{FdReadEndpoint, FdWriteEndpoint, FileFd};
 use super::Executor;
-use super::{is_closed_redirect_target, redirect_target_fd};
+use super::{is_closed_redirect_target, redirect_target_fd, FUNCTION_STDIN, FUNCTION_STDIN_OFFSET};
 use crate::parser::{CommandNode, Redirect, RedirectKind};
 
 /// How the child's fd 0 is wired when it does not come from the fd table
@@ -1259,6 +1259,39 @@ impl Executor {
     }
 
     pub(in crate::executor) fn dev_fd_operand_bytes(&mut self, fd: u32) -> Option<Vec<u8>> {
+        // rubash#3964: fd 0's binding can be the FUNCTION_STDIN
+        // channel (a function body's stdin, an in-process stage's
+        // input) — the fd table then carries no fd-0 entry at all
+        // and the serve below returned None, which callers report
+        // as ENOENT (`cat /dev/stdin` inside a function on a pipe).
+        // Presence of the channel is the binding (rubash#2111); it
+        // is shadowed by a virtual fd-0 endpoint or a File endpoint
+        // and never serves a closed fd 0 — the precedence
+        // function_stdin_is_command_source judges for the text
+        // consumers. The serve drains the channel: the offset
+        // advances to the end, the accounting
+        // stdin_string_for_command_mut applies to its own drain.
+        if fd == 0
+            && !self.fd_table.is_closed(0)
+            && !matches!(
+                self.fd_table.read_endpoint(0),
+                Some(FdReadEndpoint::File(_))
+            )
+            && self.virtual_fd_stdin_remaining(0).is_none()
+            && self.shell_state.env_vars.contains_key(FUNCTION_STDIN)
+        {
+            let text = self.function_stdin_remaining().unwrap_or_default();
+            let end = self
+                .shell_state
+                .env_vars
+                .get(FUNCTION_STDIN)
+                .map(|input| input.len())
+                .unwrap_or(0);
+            self.shell_state
+                .env_vars
+                .insert(FUNCTION_STDIN_OFFSET.to_string(), end.to_string());
+            return Some(crate::executor::substitution_metadata::shell_text_to_raw_bytes(&text));
+        }
         let entry = self.fd_table.entries.get(&fd)?.clone();
         if entry.closed {
             return None;
