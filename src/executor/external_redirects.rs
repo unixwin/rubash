@@ -186,7 +186,7 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
         process: &mut Command,
-        preopened: Option<
+        mut preopened: Option<
             &mut std::collections::HashMap<usize, std::rc::Rc<crate::executor::fd_table::FileFd>>,
         >,
     ) -> Result<(), ExecuteError> {
@@ -202,8 +202,40 @@ impl Executor {
         // rubash#2235: a fresh command recomputes its own numbered
         // input bindings (see Executor::own_input_bindings).
         self.own_input_bindings.clear();
-        match self.plan_external_stdio(cmd, preopened)? {
+        // rubash#3875: the planner consumes the preopened map as it
+        // walks and may still decline AFTER adopting an entry (a
+        // later list entry it cannot express) — the adopted entries
+        // would be lost to the legacy branches below, which then
+        // re-open a target the gate already created (the
+        // probe-then-bind residual of rubash#3828). Run the planner
+        // on a duplicate-handle clone of the map instead: on
+        // acceptance, drop from the caller's map exactly the
+        // positions the planner consumed (the fd>=3 remainder rides
+        // to the spawn delivery); on decline, the clone drops and
+        // the caller's map stays intact for the legacy branches.
+        // When a handle cannot be duplicated, lend the planner the
+        // caller's map directly (the pre-#3875 shape).
+        let mut plan_clone = preopened
+            .as_deref()
+            .and_then(|map| self.clone_preopened_map(map));
+        let plan_result = match &mut plan_clone {
+            Some(clone) => self.plan_external_stdio(cmd, Some(clone))?,
+            None => {
+                self.plan_external_stdio(cmd, preopened.as_mut().map(|opened| &mut **opened))?
+            }
+        };
+        match plan_result {
             Some(plan) => {
+                if let (Some(clone), Some(original)) = (&plan_clone, preopened.as_deref_mut()) {
+                    let consumed: Vec<usize> = original
+                        .keys()
+                        .filter(|position| !clone.contains_key(position))
+                        .copied()
+                        .collect();
+                    for position in consumed {
+                        original.remove(&position);
+                    }
+                }
                 let ExternalStdioPlan {
                     stdout,
                     stderr,
@@ -270,12 +302,64 @@ impl Executor {
             self.external_stdio_piped_fallback = true;
             return Ok(());
         }
-        if self.apply_external_combined_output_redirect(cmd, process)? {
+        // rubash#3875: the legacy branches adopt the gate's recorded
+        // opens by list position — when the plan declines, its
+        // refusal must not send them back to a by-path open of a
+        // target the gate already created (the probe-then-bind
+        // residual of rubash#3828).
+        if self.apply_external_combined_output_redirect(
+            cmd,
+            process,
+            preopened.as_mut().map(|opened| &mut **opened),
+        )? {
             return Ok(());
         }
-        self.apply_external_stdout_redirect(cmd, process)?;
-        self.apply_external_stderr_redirect(cmd, process)?;
+        self.apply_external_stdout_redirect(
+            cmd,
+            process,
+            preopened.as_mut().map(|opened| &mut **opened),
+        )?;
+        self.apply_external_stderr_redirect(cmd, process, preopened)?;
         Ok(())
+    }
+
+    /// rubash#3875: duplicate-handle clone of a preopened map (see
+    /// the planner handoff in apply_external_redirects) — None when
+    /// any handle cannot be duplicated, so the caller falls back
+    /// to lending the planner the original map.
+    fn clone_preopened_map(
+        &self,
+        map: &std::collections::HashMap<usize, std::rc::Rc<crate::executor::fd_table::FileFd>>,
+    ) -> Option<std::collections::HashMap<usize, std::rc::Rc<crate::executor::fd_table::FileFd>>>
+    {
+        let mut clone = std::collections::HashMap::with_capacity(map.len());
+        for (position, file_fd) in map {
+            let dup = crate::fd::duplicate_handle(file_fd.handle).ok()?;
+            let file = crate::fd::handle_to_file(dup);
+            clone.insert(
+                *position,
+                crate::executor::fd_table::FileFd::from_file(file, file_fd.path.clone()),
+            );
+        }
+        Some(clone)
+    }
+
+    /// rubash#3875: adopt the preflight gate's open for the entry at
+    /// `position` as a stdio File — a dup of the gate's handle, so
+    /// the child shares the gate's ONE open file description (GNU's
+    /// fork+dup2 shape) instead of re-opening the path. None when
+    /// the gate recorded no open for the position (the caller's
+    /// by-path open is then the entry's one open).
+    fn take_preopened_stdio_file(
+        &self,
+        preopened: &mut Option<
+            &mut std::collections::HashMap<usize, std::rc::Rc<crate::executor::fd_table::FileFd>>,
+        >,
+        position: usize,
+    ) -> Option<File> {
+        let file_fd = preopened.as_deref_mut()?.remove(&position)?;
+        let dup = crate::fd::duplicate_handle(file_fd.handle).ok()?;
+        Some(crate::fd::handle_to_file(dup))
     }
 
     /// GNU redir.c r_close_this: `>&-` / `2>&-` (RedirectKind::CloseOutput,
@@ -1112,6 +1196,9 @@ impl Executor {
         &self,
         cmd: &CommandNode,
         process: &mut Command,
+        mut preopened: Option<
+            &mut std::collections::HashMap<usize, std::rc::Rc<crate::executor::fd_table::FileFd>>,
+        >,
     ) -> Result<bool, ExecuteError> {
         if let (Some(stdout_redirect), Some(stderr_redirect)) =
             (&cmd.redirect_out, &cmd.redirect_err_append)
@@ -1119,11 +1206,25 @@ impl Executor {
             let stdout_target = self.expand_redirect_target(stdout_redirect);
             let stderr_target = self.expand_redirect_target(stderr_redirect);
             if stdout_target == stderr_target {
-                let file = self.create_redirect_output_for(
-                    Some(stdout_redirect),
+                // rubash#3875: adopt the gate's one open for the
+                // combined entry when the plan declined (the
+                // plan-side adoption, reused for the legacy branch);
+                // the by-path create below stays for entries the
+                // gate never recorded.
+                let position = self.output_entry_position(cmd, 1, &stdout_target);
+                let file = match self.adopt_preopened_combined_target(
+                    position,
+                    preopened.as_mut().map(|opened| &mut **opened),
                     &stdout_target,
-                    stdout_redirect.clobber,
-                )?;
+                    stdout_redirect,
+                )? {
+                    Some(file) => file,
+                    None => self.create_redirect_output_for(
+                        Some(stdout_redirect),
+                        &stdout_target,
+                        stdout_redirect.clobber,
+                    )?,
+                };
                 process.stderr(Stdio::from(file.try_clone()?));
                 process.stdout(Stdio::from(file));
                 return Ok(true);
@@ -1136,11 +1237,21 @@ impl Executor {
             let stdout_target = self.expand_redirect_target(stdout_redirect);
             let stderr_target = self.expand_redirect_target(stderr_redirect);
             if stdout_target == stderr_target {
-                // One classified append open shared by both streams
-                // (rubash#1964), mirroring the truncating pair above.
-                let file = self
-                    .open_append_target_for(Some(stdout_redirect), &stdout_target)
-                    .map_err(|e| crate::posix_errors::path_error(&stdout_target, e))?;
+                // rubash#3875: same adoption as the truncating pair
+                // above; the classified append open (rubash#1964)
+                // stays for entries the gate never recorded.
+                let position = self.output_entry_position(cmd, 1, &stdout_target);
+                let file = match self.adopt_preopened_combined_target(
+                    position,
+                    preopened.as_mut().map(|opened| &mut **opened),
+                    &stdout_target,
+                    stdout_redirect,
+                )? {
+                    Some(file) => file,
+                    None => self
+                        .open_append_target_for(Some(stdout_redirect), &stdout_target)
+                        .map_err(|e| crate::posix_errors::path_error(&stdout_target, e))?,
+                };
                 process.stderr(Stdio::from(file.try_clone()?));
                 process.stdout(Stdio::from(file));
                 return Ok(true);
@@ -1184,6 +1295,9 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
         process: &mut Command,
+        mut preopened: Option<
+            &mut std::collections::HashMap<usize, std::rc::Rc<crate::executor::fd_table::FileFd>>,
+        >,
     ) -> Result<(), ExecuteError> {
         let mut redirected = false;
         if let Some(ref redirect) = cmd.redirect_out {
@@ -1202,6 +1316,7 @@ impl Executor {
                 &target,
                 redirect.clobber,
                 Some(redirect),
+                preopened.as_mut().map(|opened| &mut **opened),
             )?;
             redirected = true;
         }
@@ -1250,16 +1365,17 @@ impl Executor {
                     // arm in apply_external_stdout_target.
                     return Err(Self::bad_fd_dup_error(source));
                 } else if redirect_target_fd(&target).is_none() {
-                    // The append open classifies through the registry
-                    // (rubash#1964): a net target connects, synthetic
-                    // classes answer by their write class, and only
-                    // plain files reach the session-anchored mapped
-                    // append open. The raw mapped open this replaces
-                    // failed /dev/tcp targets with a bare ENOENT that
-                    // dropped the target word.
-                    let file = self
-                        .open_append_target_for(Some(redirect), &target)
-                        .map_err(|e| crate::posix_errors::path_error(&target, e))?;
+                    // rubash#3875: adopt the gate's one open for this
+                    // entry when the plan declined and the gate
+                    // recorded one; the classified append open below
+                    // (rubash#1964) stays for unrecorded entries.
+                    let position = self.output_entry_position(cmd, 1, &target);
+                    let file = match self.take_preopened_stdio_file(&mut preopened, position) {
+                        Some(file) => file,
+                        None => self
+                            .open_append_target_for(Some(redirect), &target)
+                            .map_err(|e| crate::posix_errors::path_error(&target, e))?,
+                    };
                     process.stdout(Stdio::from(file));
                 }
                 redirected = true;
@@ -1398,6 +1514,9 @@ impl Executor {
         target: &str,
         clobber: bool,
         redirect: Option<&crate::parser::Redirect>,
+        mut preopened: Option<
+            &mut std::collections::HashMap<usize, std::rc::Rc<crate::executor::fd_table::FileFd>>,
+        >,
     ) -> Result<(), ExecuteError> {
         if is_closed_redirect_target(target) {
             process.stdout(Stdio::null());
@@ -1431,7 +1550,14 @@ impl Executor {
             // instead of leaving the child on the ambient stdout.
             return Err(Self::bad_fd_dup_error(source));
         } else if redirect_target_fd(target).is_none() {
-            let file = self.create_redirect_output_for(redirect, target, clobber)?;
+            // rubash#3875: adopt the gate's one open for this entry
+            // when the plan declined and the gate recorded one; the
+            // by-path create stays for unrecorded entries.
+            let position = self.output_entry_position(cmd, 1, target);
+            let file = match self.take_preopened_stdio_file(&mut preopened, position) {
+                Some(file) => file,
+                None => self.create_redirect_output_for(redirect, target, clobber)?,
+            };
             process.stdout(Stdio::from(file));
         }
         Ok(())
@@ -1441,6 +1567,9 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
         process: &mut Command,
+        mut preopened: Option<
+            &mut std::collections::HashMap<usize, std::rc::Rc<crate::executor::fd_table::FileFd>>,
+        >,
     ) -> Result<(), ExecuteError> {
         let mut redirected = false;
         if let Some(ref redirect) = cmd.redirect_err {
@@ -1481,8 +1610,17 @@ impl Executor {
                 // apply_external_stdout_target.
                 return Err(Self::bad_fd_dup_error(source));
             } else if redirect_target_fd(&target).is_none() {
-                let file =
-                    self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?;
+                // rubash#3875: adopt the gate's one open for this
+                // entry when the plan declined and the gate recorded
+                // one; the by-path create stays for unrecorded
+                // entries.
+                let position = self.output_entry_position(cmd, 2, &target);
+                let file = match self.take_preopened_stdio_file(&mut preopened, position) {
+                    Some(file) => file,
+                    None => {
+                        self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?
+                    }
+                };
                 process.stderr(Stdio::from(file));
             }
             redirected = true;
@@ -1531,11 +1669,18 @@ impl Executor {
                     // dup arm in apply_external_stdout_target.
                     return Err(Self::bad_fd_dup_error(source));
                 } else if redirect_target_fd(&target).is_none() {
-                    // Classified append open (rubash#1964), the fd-2
-                    // twin of the stdout arm above.
-                    let file = self
-                        .open_append_target_for(Some(redirect), &target)
-                        .map_err(|e| crate::posix_errors::path_error(&target, e))?;
+                    // rubash#3875: adopt the gate's one open for
+                    // this entry when the plan declined and the gate
+                    // recorded one; the classified append open
+                    // (rubash#1964), the fd-2 twin of the stdout arm
+                    // above, stays for unrecorded entries.
+                    let position = self.output_entry_position(cmd, 2, &target);
+                    let file = match self.take_preopened_stdio_file(&mut preopened, position) {
+                        Some(file) => file,
+                        None => self
+                            .open_append_target_for(Some(redirect), &target)
+                            .map_err(|e| crate::posix_errors::path_error(&target, e))?,
+                    };
                     process.stderr(Stdio::from(file));
                 }
                 redirected = true;

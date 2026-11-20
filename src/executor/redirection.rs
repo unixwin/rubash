@@ -680,12 +680,31 @@ impl Executor {
         cmd: &CommandNode,
         settle_superseded_net_outputs: bool,
     ) -> Result<Option<RedirectRejection>, ExecuteError> {
-        // rubash#3828: this gate is the first redirect walk of the
-        // command — drop any pending preopened handles a previous
-        // command left behind. Consumers verify the recorded target,
-        // so an early clear can only cost a re-open (today's
-        // behavior), never a wrong bind.
-        self.pending_preopened_redirects.borrow_mut().clear();
+        // rubash#3828: this gate is an early redirect walk of the
+        // command — retire pending preopened handles an earlier
+        // command left behind, so a leftover can never bind this
+        // command's list. Consumers verify the recorded target, so
+        // an early retire can only cost a re-open, never a wrong
+        // bind.
+        // rubash#3875: the retirement is scoped by the channel's
+        // generation (Executor::preopened_generation), not a blanket
+        // clear: this command's own preparatory walks — a compound
+        // prepare phase, a pipeline admission probe, a procsub
+        // materialization — park their opens BEFORE this gate runs
+        // and the bind walks after it must adopt those handles (a
+        // re-open by path fails EACCES on a target the first open
+        // created without owner-write, umask masking 0200). Those
+        // walks all run inside the current generation, so only
+        // handles stamped by an OLDER generation retire here; a
+        // pipeline stage subshell's transferred entries (re-keyed,
+        // stamped by the transfer) are additionally exempted once
+        // via the one-shot flag, consumed here.
+        if !self.preopened_pending_preserved_once.replace(false) {
+            let generation = self.preopened_generation.get();
+            self.pending_preopened_redirects
+                .borrow_mut()
+                .retain(|_, (_, _, parked_generation)| *parked_generation == generation);
+        }
         // Semantic identity of a redirect for this scan (the same key the
         // expand_redirect_target memo uses): the ordered `redirects` list
         // plus the legacy mirror fields may carry THE SAME source redirect
@@ -1461,33 +1480,48 @@ impl Executor {
                         &self.shell_state.env_vars,
                     ))
                 };
+                // rubash#3875: an earlier walk of THIS command already
+                // performed the entry's one open and parked the handle
+                // (a pipeline stage's transfer keeps it across the
+                // stage subshell's first gate — see the clear above);
+                // re-probing would open the path a second time. The
+                // parked entry stays for the bind walk to adopt.
+                let already_parked = self
+                    .pending_preopened_redirects
+                    .borrow()
+                    .get(&index)
+                    .is_some_and(|(recorded, _, _)| recorded == &target);
                 // rubash#3268: from a deleted cwd the joined spelling is
                 // dead by construction — when the cwd anchor applies,
                 // its O_RDWR|O_CREAT verdict replaces the joined-path
                 // pair open's (see Executor::anchored_redirect_probe);
                 // every other state keeps the pair open below.
-                let probe_verdict = match self.anchored_redirect_probe(&target, true) {
-                    Some(verdict) => verdict,
-                    None => match FileFd::open_readwrite_pair(path) {
-                        Ok((read_fd, _write_fd)) => {
-                            // rubash#3828: this gate's O_RDWR|O_CREAT
-                            // open IS the entry's one open (GNU
-                            // redir.c r_input_output) — park the
-                            // handle so the setup walk's probe and
-                            // any later bind adopt it instead of
-                            // re-opening a file created without
-                            // owner-write (umask masking 0200), which
-                            // fails EACCES.
-                            if matches!(
-                                crate::special_paths::classify_special_path(&target),
-                                crate::special_paths::SpecialPathClass::Filesystem
-                            ) {
-                                self.store_pending_preopened(index, &target, read_fd);
+                let probe_verdict = if already_parked {
+                    Ok(())
+                } else {
+                    match self.anchored_redirect_probe(&target, true) {
+                        Some(verdict) => verdict,
+                        None => match FileFd::open_readwrite_pair(path) {
+                            Ok((read_fd, _write_fd)) => {
+                                // rubash#3828: this gate's O_RDWR|O_CREAT
+                                // open IS the entry's one open (GNU
+                                // redir.c r_input_output) — park the
+                                // handle so the setup walk's probe and
+                                // any later bind adopt it instead of
+                                // re-opening a file created without
+                                // owner-write (umask masking 0200), which
+                                // fails EACCES.
+                                if matches!(
+                                    crate::special_paths::classify_special_path(&target),
+                                    crate::special_paths::SpecialPathClass::Filesystem
+                                ) {
+                                    self.store_pending_preopened(index, &target, read_fd);
+                                }
+                                Ok(())
                             }
-                            Ok(())
-                        }
-                        Err(error) => Err(error),
-                    },
+                            Err(error) => Err(error),
+                        },
+                    }
                 };
                 if let Err(error) = probe_verdict {
                     // posix_errors::path_error already renders the
@@ -1832,6 +1866,16 @@ impl Executor {
         // ambient bindings, so no list redirect means the seeded
         // targets stand; only a failed open declines.
         self.apply_ordered_output_redirects(cmd, &mut state)?;
+        // rubash#3875: this probe's state is discarded, but its
+        // opens are real — park them in the pending channel so the
+        // next walk of this list (a second admission probe, the
+        // stage gate, the routing walk) adopts the descriptions
+        // instead of opening each target a second time (the
+        // probe-then-bind residual of rubash#3828: two admission
+        // probes run before the stage gate, and the second probe's
+        // by-path open failed EACCES on a target the first created
+        // without owner-write).
+        self.park_preopened_redirects(cmd, &state.preopened);
         // A stage whose own output open failed is not routable from the
         // resolved targets (the failed fd never bound): decline so the
         // sequential stage executor reports the failure per element
@@ -1885,6 +1929,27 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<bool, ExecuteError> {
+        Ok(self
+            .pipeline_stage_output_redirect_fails_with_preopened(cmd)?
+            .0)
+    }
+
+    /// rubash#3875: the stage gate's preopened map rides along, like
+    /// the plain funnel's gate — the stage's spawn delivery and the
+    /// routing walks bind these descriptions instead of re-opening
+    /// each target by path (GNU opens each entry once, redir.c
+    /// do_redirections). Discarding the map was the pipeline face of
+    /// the probe-then-bind double-open (rubash#3828).
+    pub(in crate::executor) fn pipeline_stage_output_redirect_fails_with_preopened(
+        &mut self,
+        cmd: &CommandNode,
+    ) -> Result<
+        (
+            bool,
+            HashMap<usize, std::rc::Rc<crate::executor::fd_table::FileFd>>,
+        ),
+        ExecuteError,
+    > {
         // rubash#2613: judge this walk in the descriptor space the
         // dynamic-fd applier binds — a stage list may reference the
         // descriptor a `{var}` entry allocated by number later in the
@@ -1895,7 +1960,8 @@ impl Executor {
         // applies, judges, and undoes — the same order the plain
         // funnel's gates see (applier first, gate second).
         if !command_has_dynamic_fd_var_redirects(cmd) {
-            return Ok(self.command_output_redirect_fails_impl(cmd, true)?.0);
+            let result = self.command_output_redirect_fails_impl(cmd, true);
+            return result;
         }
         // rubash#2629: this bracket is a verdict-only pass on the
         // PARENT executor — the stage element's own applier run is
@@ -1907,9 +1973,7 @@ impl Executor {
         let fd_var_walk_undoable = self.redirect_walk_is_undoable(cmd);
         let verdict = match self.apply_dynamic_fd_var_redirects(cmd, true, fd_var_walk_undoable) {
             Ok(false) => {
-                let result = self
-                    .command_output_redirect_fails_impl(cmd, true)
-                    .map(|(failed, _)| failed);
+                let result = self.command_output_redirect_fails_impl(cmd, true);
                 self.undo_child_fd_var_redirects();
                 result
             }
@@ -1918,12 +1982,31 @@ impl Executor {
             // exactly as a plain command whose applier run fails.
             Ok(true) => {
                 self.undo_child_fd_var_redirects();
-                Ok(true)
+                Ok((true, HashMap::new()))
             }
             Err(error) => Err(error),
         };
         Self::scan_pending_writes_rollback(writes_mark);
         verdict
+    }
+
+    /// rubash#3875: park a gate walk's preopened map in the pending
+    /// channel so the walks that run after the gate on this executor
+    /// (the pipeline routing walk, a builtin stage's clone gate)
+    /// adopt the entries' one open instead of re-opening by path —
+    /// the same carry the prepare-phase retains use (rubash#3828).
+    /// Consumers verify the recorded target before adopting.
+    pub(in crate::executor) fn park_preopened_redirects(
+        &self,
+        cmd: &CommandNode,
+        preopened: &HashMap<usize, std::rc::Rc<crate::executor::fd_table::FileFd>>,
+    ) {
+        for (position, file_fd) in preopened {
+            if let Some(redirect) = cmd.redirects.get(*position) {
+                let target = self.expand_redirect_target(redirect);
+                self.store_pending_preopened(*position, &target, std::rc::Rc::clone(file_fd));
+            }
+        }
     }
 
     fn command_output_redirect_fails_impl(
@@ -3840,6 +3923,19 @@ impl Executor {
                     crate::special_paths::SpecialPathClass::Filesystem
                 ) {
                     state.preopened.insert(index, std::rc::Rc::clone(&file_fd));
+                    // rubash#3875: park the open in the pending
+                    // channel too — this walk is not always the last
+                    // one to visit the entry (setup probes and
+                    // materialization walks run it before the spawn
+                    // gate, discarding their state), and a later
+                    // walk must adopt this ONE open instead of
+                    // opening the path again (probe-then-bind,
+                    // rubash#3828). Adoption is target-verified and
+                    // the reject gate drops entries that do not
+                    // match the incoming command's list, so a parked
+                    // handle can never bind a later command's
+                    // different target.
+                    self.store_pending_preopened(index, &target, std::rc::Rc::clone(&file_fd));
                 }
                 state.fds.insert(fd, OutputTarget::SharedFile(file_fd));
             } else {
@@ -3943,6 +4039,11 @@ impl Executor {
         stderr: &mut String,
         status: &mut i32,
     ) -> Result<bool, ExecuteError> {
+        // rubash#3875: routing opens the element's pending-channel
+        // generation — the admission probes below park under it, and
+        // the previous element's leftovers retire at this element's
+        // reject gate.
+        self.advance_preopened_generation();
         // rubash#2613: GNU runs ONE do_redirections walk per pipeline
         // element (execute_cmd.c:2620 execute_pipeline -> redir.c:237
         // do_redirections) and the `{var}` entries allocate their

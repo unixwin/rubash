@@ -2811,9 +2811,10 @@ impl Executor {
         target: &str,
         file_fd: std::rc::Rc<crate::executor::fd_table::FileFd>,
     ) {
-        self.pending_preopened_redirects
-            .borrow_mut()
-            .insert(position, (target.to_string(), file_fd));
+        self.pending_preopened_redirects.borrow_mut().insert(
+            position,
+            (target.to_string(), file_fd, self.preopened_generation.get()),
+        );
     }
 
     /// rubash#3828: carry a compound prepare phase's opened File into
@@ -2852,14 +2853,25 @@ impl Executor {
         position: usize,
         target: &str,
     ) -> Option<std::rc::Rc<crate::executor::fd_table::FileFd>> {
-        match self
+        let result = match self
             .pending_preopened_redirects
             .borrow_mut()
             .remove(&position)
         {
-            Some((recorded, file_fd)) if recorded == target => Some(file_fd),
+            Some((recorded, file_fd, _)) if recorded == target => Some(file_fd),
             _ => None,
-        }
+        };
+        result
+    }
+
+    /// rubash#3875: advance the pending channel's scoping generation
+    /// (see Executor::preopened_generation). Called once per command
+    /// dispatch and once per pipeline element routing: handles the
+    /// SAME command's earlier walks parked stay adoptable across its
+    /// reject gate, and the gate retires everything older.
+    pub(in crate::executor) fn advance_preopened_generation(&self) {
+        self.preopened_generation
+            .set(self.preopened_generation.get().wrapping_add(1));
     }
 
     pub(in crate::executor) fn redirect_output_path_target(&self, target: &str) -> String {
@@ -4426,11 +4438,47 @@ impl Executor {
                 ))
             };
             if redirect.append {
-                let _ = OpenOptions::new()
-                    .create(true)
-                    .read(true)
-                    .write(true)
-                    .open(&path);
+                // rubash#3875: this create performs the `<>` entry's
+                // O_RDWR|O_CREAT open (the create side effect is the
+                // redirection's, rubash#264) - when an earlier walk
+                // already parked the entry's one open, skip it; when
+                // this serve performs it, park the handle in the
+                // pending channel instead of dropping it, so the
+                // reject gate and the bind adopt the same description
+                // rather than re-opening a file the umask may have
+                // created without owner access (rubash#3828).
+                let entry_position = cmd
+                    .redirects
+                    .iter()
+                    .rposition(|entry| {
+                        entry.fd.unwrap_or(0) == 0
+                            && matches!(
+                                entry.kind,
+                                crate::parser::RedirectKind::Input
+                                    | crate::parser::RedirectKind::ReadWrite
+                            )
+                            && self.expand_redirect_target(entry) == target
+                    })
+                    .unwrap_or(cmd.redirects.len());
+                let already_parked = self
+                    .pending_preopened_redirects
+                    .borrow()
+                    .get(&entry_position)
+                    .is_some_and(|(recorded, _, _)| recorded == &target);
+                if !already_parked {
+                    if let Ok(file) = OpenOptions::new()
+                        .create(true)
+                        .read(true)
+                        .write(true)
+                        .open(&path)
+                    {
+                        self.store_pending_preopened(
+                            entry_position,
+                            &target,
+                            FileFd::from_file(file, path.clone()),
+                        );
+                    }
+                }
             }
             // Q11 /proc P1 (docs/proc-vfs-plan.md hook B): synthetic files
             // are served before the filesystem (read/cat/heredoc stdin path).

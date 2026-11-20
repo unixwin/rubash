@@ -4,6 +4,12 @@ use crate::executor::markers::{PARSE_ERROR_FIELD_SEP, STORAGE_WORD_PREFIX};
 impl Executor {
     /// Execute an AST
     pub fn execute_command(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
+        // rubash#3875: a fresh command dispatch opens a new pending
+        // preopened generation — handles this command's walks park
+        // stay adoptable across its gates, and its reject gate
+        // retires the previous command's leftovers (see
+        // Executor::preopened_generation).
+        self.advance_preopened_generation();
         // rubash#2652: a command dispatched outside suppression owns
         // the terminal status from here — clear any stale
         // suppressed-terminal record from an earlier command in the
