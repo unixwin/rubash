@@ -532,7 +532,62 @@ impl Executor {
         self.shell_state.env_vars.clear_array_cells_dirty();
     }
 
+    /// rubash#3994: GNU runs ONE redirect machinery for every simple
+    /// command: execute_null_command (execute_cmd.c:4626-4635) calls
+    /// do_redirections over the same list a word command applies, and
+    /// the process substitutions in the redirect words were already
+    /// materialized during word expansion (redirection_expand,
+    /// redir.c:298; make_dev_fd_filename, subst.c:6362+). The
+    /// word-command funnel honors that by routing through
+    /// command_with_process_substitution_files before dispatch; this
+    /// null-command path never did, so a recorded `<(...)` / `>(...)`
+    /// redirect target reached the apply layer as literal text and was
+    /// probed as a filesystem path — `x=1 < <(sleep 1)` reported
+    /// `<(sleep 1): No such file or directory` and failed where GNU
+    /// silently succeeds. When any redirect on the command carries a
+    /// parser-recorded span — the materialization arms' own admission,
+    /// redirect_target_span_is_recorded (rubash#1931), so a quoted
+    /// `"<(cmd)"` stays a literal filename — materialize through the
+    /// SAME function and finish through the SAME
+    /// finish_process_substitutions, with the completion convention of
+    /// the materialized paths: an inner Err governs (the finish still
+    /// runs, best-effort); on inner Ok the finish result governs.
     pub(in crate::executor) fn execute_empty_words_command(
+        &mut self,
+        cmd: &CommandNode,
+        vanished_substitution_status: Option<i32>,
+    ) -> Result<(), ExecuteError> {
+        let recorded_span = cmd
+            .redirects
+            .iter()
+            .any(|redirect| super::external_setup::redirect_target_span_is_recorded(redirect))
+            || [
+                &cmd.redirect_in,
+                &cmd.redirect_out,
+                &cmd.append,
+                &cmd.redirect_err,
+                &cmd.redirect_err_append,
+            ]
+            .into_iter()
+            .flatten()
+            .any(|redirect| super::external_setup::redirect_target_span_is_recorded(redirect));
+        if !recorded_span {
+            return self.execute_empty_words_command_inner(cmd, vanished_substitution_status);
+        }
+        let (materialized_cmd, process_substitution_files) =
+            self.command_with_process_substitution_files(cmd)?;
+        match self
+            .execute_empty_words_command_inner(&materialized_cmd, vanished_substitution_status)
+        {
+            Ok(()) => self.finish_process_substitutions(process_substitution_files),
+            Err(error) => {
+                let _ = self.finish_process_substitutions(process_substitution_files);
+                Err(error)
+            }
+        }
+    }
+
+    pub(in crate::executor) fn execute_empty_words_command_inner(
         &mut self,
         cmd: &CommandNode,
         vanished_substitution_status: Option<i32>,
