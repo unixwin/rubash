@@ -5786,12 +5786,31 @@ impl Executor {
 
     /// rubash#3313: whether the exec'd image's fd 0 is a closed slot —
     /// the closed arm of exec_inherited_stdin (no FUNCTION_STDIN
-    /// remainder, an fd-0 table entry marked closed). A write-only
-    /// fd 0 is an OPEN descriptor in GNU and is not this shape.
+    /// remainder, no fd-0 read endpoint, and the slot's read side
+    /// closed by a redirect walk). The close evidence is read-side:
+    /// the entry's `closed` flag is a both-arms flag, and a slot can
+    /// legitimately carry a write arm beside the read arm — the
+    /// rubash#2530 birth adoption installs a File write arm on fd 0
+    /// when the process is born with fd 0 open read-write (an RDWR
+    /// /dev/null, a terminal, a `<>` spawn delivery) — so a `<&-`
+    /// that took the read arm (close_input) leaves the flag unset
+    /// while GNU's descriptor is simply closed (redir.c:1239
+    /// r_close_this). The walk's fd-closed marker is the other
+    /// record of the same close (the stdio-only `exec 0<&-` walk
+    /// sets both). A write-only fd 0 the walks never closed (a
+    /// `0>file` binding: no marker, flag unset, read endpoint
+    /// already absent) is an OPEN descriptor in GNU and is not
+    /// this shape.
     fn exec_stdin_closed(&self) -> bool {
         self.function_stdin_remaining().is_none()
             && self.fd_table.read_endpoint(0).is_none()
-            && self.fd_table.is_closed(0)
+            && self.fd_table.has_entry(0)
+            && (self.fd_table.is_closed(0)
+                || self
+                    .shell_state
+                    .env_vars
+                    .get(&super::command_text::fd_closed_key(0))
+                    .is_some())
     }
 
     /// Write `bytes` to a fresh temp file and open it for the child.
