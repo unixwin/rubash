@@ -22,7 +22,7 @@ Rubash itself is not a shell product. It ships a reference CLI used by the compa
 | | |
 | --- | --- |
 | **Bash language level** | GNU Bash 5.3 semantics — including 5.3-only syntax such as no-fork command substitution `${ cmd; }` ([#195](https://github.com/unixwin/rubash/issues/195)) |
-| **Compatibility** | 244/246 on our differential suite vs GNU Bash 5.3.20 · 83/83 GNU upstream suites on the true-baseline ledger ([Compatibility at a Glance](#compatibility-at-a-glance)) · 1,680 issues filed / 1,654 closed (2026-11-03) |
+| **Compatibility** | 244/246 on our differential suite vs GNU Bash 5.3.20 · 83/83 GNU upstream suites on the true-baseline ledger ([Compatibility at a Glance](#compatibility-at-a-glance)) · 2,355 issues filed / 2,299 closed (2026-11-20) |
 | **Platforms** | Windows (full stack, primary target) · Linux x86_64 (native, CI lanes, upstream corpus replayed every push) · macOS (library tests in CI) |
 | **Embedding** | Rust library + reference CLI; stable, versioned engine API since 1.5.0 ([#595](https://github.com/unixwin/rubash/issues/595)); niubash is the reference host |
 | **License** | MIT |
@@ -130,7 +130,7 @@ The shells that call themselves bash replacements deserve the same measurement. 
 - Exit codes and diagnostics are home-grown end to end (rc 99, ANSI color codes inside pipes) — programs and agents that decide from exit status and stderr get silently misled.
 - Its headline platform is missing: Windows support is self-described "Preview", and the v0.4.0 release ships no Windows binary at all.
 
-Lightweight is no excuse for missing limbs. Rubash's 312,965 net lines (tests excluded — the docs/code-size.md caliber; GNU Bash's tree nets 162,815) — 373,267 together with niubash's 60,302 — are the finished price of two giant jobs: complete bash semantics re-implemented path by path without fork, and cross-platform itself. An implementation claiming the same thing at roughly a fifth of the engine mass, which then fails these foundation mechanisms, can be neither a bash replacement nor a reliable login shell.
+Lightweight is no excuse for missing limbs. Rubash's 380,217 net lines (tests excluded — the docs/code-size.md caliber; GNU Bash's tree nets 162,815) — 445,221 together with niubash's 65,004 — are the finished price of two giant jobs: complete bash semantics re-implemented path by path without fork, and cross-platform itself. An implementation claiming the same thing at roughly a fifth of the engine mass, which then fails these foundation mechanisms, can be neither a bash replacement nor a reliable login shell.
 
 ## Compatibility at a Glance
 
@@ -282,7 +282,7 @@ The engine presents a **selectable platform identity** instead of outsourcing it
 ## Testing
 
 ```bash
-# Unit + integration tests (1,115 integration test files under tests/, as of 2026-11-03)
+# Unit + integration tests (1,764 integration test files under tests/, as of 2026-11-20)
 cargo test --lib
 cargo test --test cli_tests
 
@@ -335,10 +335,41 @@ MIT — see [`LICENSE`](LICENSE).
 
 Issues, compatibility reproductions, focused regression tests, and implementation patches welcome. Read [`AGENTS.md`](AGENTS.md) before compatibility work.
 
+## Code size
+
+Two calibers, kept apart on purpose:
+
+- **Net caliber** — non-blank lines with test code excluded; this is the figure compared against GNU Bash (whose tree nets 162,815). It is maintained in [`docs/code-size.md`](docs/code-size.md) and shown in the badge at the top of this README.
+- **Gross caliber** — the table below: [tokei](https://github.com/XAMPPRocky/tokei) over the whole tree, tests included, refreshed weekly by the readme-stats workflow.
+
+<!-- AUTO:CODE-SIZE:START -->
+| Language | Files | Code lines |
+|---|---:|---:|
+| Rust | 2220 | 590,086 |
+| Shell | 1215 | 93,794 |
+| Python | 27 | 8,400 |
+| JSON | 4 | 3,282 |
+| BASH | 1 | 1,283 |
+| Perl | 1 | 1,140 |
+| C | 5 | 223 |
+| SVG | 6 | 189 |
+| TOML | 1 | 50 |
+| **Total** | **3480** | **698,447** |
+<!-- AUTO:CODE-SIZE:END -->
+
+## Maintainers
+
+| Maintainer | Role |
+|---|---|
+| [@caomengxuan666](https://github.com/caomengxuan666) | Creator and core maintainer |
+| [@arookieofc](https://github.com/arookieofc) | Core maintainer |
+
+Everyone who has landed code is listed under [Contributors](#contributors).
+
 ## Contributors
 
 <!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->
-[![All Contributors](https://img.shields.io/badge/all_contributors-17-orange.svg?style=flat-square)](#contributors)
+[![All Contributors](https://img.shields.io/badge/all_contributors-18-orange.svg?style=flat-square)](#contributors)
 <!-- ALL-CONTRIBUTORS-BADGE:END -->
 
 Thanks to everyone who has contributed code, compatibility reproductions, and fixes ([emoji key](https://allcontributors.org/docs/en/emoji-key)):
@@ -350,7 +381,7 @@ Thanks to everyone who has contributed code, compatibility reproductions, and fi
   <tbody>
     <tr>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/caomengxuan666"><img src="https://avatars.githubusercontent.com/u/114896873?v=4&size=100" width="100px" height="100px" alt="caomengxuan666"/><br /><sub><b>caomengxuan666</b></sub></a><br /><a href="https://github.com/unixwin/rubash/commits?author=caomengxuan666" title="Code">💻</a> <a href="#maintenance-caomengxuan666" title="Maintenance">🚧</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/a-rookie-of-C-language"><img src="https://avatars.githubusercontent.com/u/186315048?v=4&size=100" width="100px" height="100px" alt="a-rookie-of-C-language"/><br /><sub><b>a-rookie-of-C-language</b></sub></a><br /><a href="https://github.com/unixwin/rubash/commits?author=a-rookie-of-C-language" title="Code">💻</a> <a href="#maintenance-a-rookie-of-C-language" title="Maintenance">🚧</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/arookieofc"><img src="https://avatars.githubusercontent.com/u/186315048?v=4&size=100" width="100px" height="100px" alt="arookieofc"/><br /><sub><b>arookieofc</b></sub></a><br /><a href="https://github.com/unixwin/rubash/commits?author=arookieofc" title="Code">💻</a> <a href="#maintenance-arookieofc" title="Maintenance">🚧</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/apps/devin-ai-integration"><img src="https://avatars.githubusercontent.com/u/158243242?v=4&size=100" width="100px" height="100px" alt="devin-ai-integration[bot]"/><br /><sub><b>devin-ai-integration[bot]</b></sub></a><br /><a href="https://github.com/unixwin/rubash/commits?author=devin-ai-integration[bot]" title="Code">💻</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/daiaji"><img src="https://avatars.githubusercontent.com/u/25875791?v=4&size=100" width="100px" height="100px" alt="daiaji"/><br /><sub><b>daiaji</b></sub></a><br /><a href="https://github.com/unixwin/rubash/commits?author=daiaji" title="Code">💻</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/Catapult291"><img src="https://avatars.githubusercontent.com/u/200960228?v=4&size=100" width="100px" height="100px" alt="Catapult291"/><br /><sub><b>Catapult291</b></sub></a><br /><a href="https://github.com/unixwin/rubash/commits?author=Catapult291" title="Code">💻</a></td>
@@ -370,6 +401,7 @@ Thanks to everyone who has contributed code, compatibility reproductions, and fi
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/audit-bot"><img src="https://avatars.githubusercontent.com/u/72415544?v=4&size=100" width="100px" height="100px" alt="audit-bot"/><br /><sub><b>audit-bot</b></sub></a><br /><a href="#tool-audit-bot" title="Tools">🔧</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/claude"><img src="https://avatars.githubusercontent.com/u/81847?v=4&size=100" width="100px" height="100px" alt="claude"/><br /><sub><b>claude</b></sub></a><br /><a href="https://github.com/unixwin/rubash/commits?author=claude" title="Code">💻</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/apps/github-actions"><img src="https://avatars.githubusercontent.com/u/41898282?v=4&size=100" width="100px" height="100px" alt="github-actions[bot]"/><br /><sub><b>github-actions[bot]</b></sub></a><br /><a href="#tool-github-actions[bot]" title="Tools">🔧</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/arookieofc-ai"><img src="https://avatars.githubusercontent.com/u/282213208?v=4&size=100" width="100px" height="100px" alt="arookieofc-ai"/><br /><sub><b>arookieofc-ai</b></sub></a><br /><a href="https://github.com/unixwin/rubash/commits?author=arookieofc-ai" title="Code">💻</a></td>
     </tr>
   </tbody>
 </table>
@@ -378,6 +410,24 @@ Thanks to everyone who has contributed code, compatibility reproductions, and fi
 <!-- prettier-ignore-end -->
 
 <!-- ALL-CONTRIBUTORS-LIST:END -->
+Commit counts for everyone who has landed code (bots excluded), refreshed weekly by the readme-stats workflow:
+
+<!-- AUTO:CONTRIBUTORS:START -->
+| Contributor | Commits |
+|---|---:|
+| [@caomengxuan666](https://github.com/caomengxuan666) | 5,053 |
+| [@arookieofc](https://github.com/arookieofc) | 1,636 |
+| [@arookieofc-ai](https://github.com/arookieofc-ai) | 26 |
+| [@Uarz](https://github.com/Uarz) | 25 |
+| [@Catapult291](https://github.com/Catapult291) | 9 |
+| [@daiaji](https://github.com/daiaji) | 9 |
+| [@cognition-team](https://github.com/cognition-team) | 6 |
+| [@SuperYogurt](https://github.com/SuperYogurt) | 4 |
+| [@jhermelink](https://github.com/jhermelink) | 3 |
+| [@iwantobelieve](https://github.com/iwantobelieve) | 2 |
+| [@bbvdf](https://github.com/bbvdf) | 1 |
+<!-- AUTO:CONTRIBUTORS:END -->
+
 
 ## Acknowledgements
 
@@ -389,4 +439,4 @@ Thanks to everyone who has contributed code, compatibility reproductions, and fi
 
 Rubash is the engine inside [niubash](https://github.com/unixwin/niubash). If you build on it, [star the repo](https://github.com/unixwin/rubash/stargazers); the most valuable contributions are compatibility reproductions — see [Contributing](#contributing).
 
-*Last updated: 2026-11-04*
+*Last updated: 2026-11-20*

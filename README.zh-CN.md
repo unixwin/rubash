@@ -293,7 +293,7 @@ MIT — 详见 [`LICENSE`](LICENSE)。
 ## 贡献者
 
 <!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->
-[![All Contributors](https://img.shields.io/badge/all_contributors-17-orange.svg?style=flat-square)](#contributors)
+[![All Contributors](https://img.shields.io/badge/all_contributors-18-orange.svg?style=flat-square)](#contributors)
 <!-- ALL-CONTRIBUTORS-BADGE:END -->
 
 感谢每一位提交代码、兼容性复现与修复的贡献者 ([emoji key](https://allcontributors.org/docs/en/emoji-key)):
@@ -305,7 +305,7 @@ MIT — 详见 [`LICENSE`](LICENSE)。
   <tbody>
     <tr>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/caomengxuan666"><img src="https://avatars.githubusercontent.com/u/114896873?v=4&size=100" width="100px" height="100px" alt="caomengxuan666"/><br /><sub><b>caomengxuan666</b></sub></a><br /><a href="https://github.com/unixwin/rubash/commits?author=caomengxuan666" title="Code">💻</a> <a href="#maintenance-caomengxuan666" title="Maintenance">🚧</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/a-rookie-of-C-language"><img src="https://avatars.githubusercontent.com/u/186315048?v=4&size=100" width="100px" height="100px" alt="a-rookie-of-C-language"/><br /><sub><b>a-rookie-of-C-language</b></sub></a><br /><a href="https://github.com/unixwin/rubash/commits?author=a-rookie-of-C-language" title="Code">💻</a> <a href="#maintenance-a-rookie-of-C-language" title="Maintenance">🚧</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/arookieofc"><img src="https://avatars.githubusercontent.com/u/186315048?v=4&size=100" width="100px" height="100px" alt="arookieofc"/><br /><sub><b>arookieofc</b></sub></a><br /><a href="https://github.com/unixwin/rubash/commits?author=arookieofc" title="Code">💻</a> <a href="#maintenance-arookieofc" title="Maintenance">🚧</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/apps/devin-ai-integration"><img src="https://avatars.githubusercontent.com/u/158243242?v=4&size=100" width="100px" height="100px" alt="devin-ai-integration[bot]"/><br /><sub><b>devin-ai-integration[bot]</b></sub></a><br /><a href="https://github.com/unixwin/rubash/commits?author=devin-ai-integration[bot]" title="Code">💻</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/daiaji"><img src="https://avatars.githubusercontent.com/u/25875791?v=4&size=100" width="100px" height="100px" alt="daiaji"/><br /><sub><b>daiaji</b></sub></a><br /><a href="https://github.com/unixwin/rubash/commits?author=daiaji" title="Code">💻</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/Catapult291"><img src="https://avatars.githubusercontent.com/u/200960228?v=4&size=100" width="100px" height="100px" alt="Catapult291"/><br /><sub><b>Catapult291</b></sub></a><br /><a href="https://github.com/unixwin/rubash/commits?author=Catapult291" title="Code">💻</a></td>
@@ -325,6 +325,7 @@ MIT — 详见 [`LICENSE`](LICENSE)。
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/audit-bot"><img src="https://avatars.githubusercontent.com/u/72415544?v=4&size=100" width="100px" height="100px" alt="audit-bot"/><br /><sub><b>audit-bot</b></sub></a><br /><a href="#tool-audit-bot" title="Tools">🔧</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/claude"><img src="https://avatars.githubusercontent.com/u/81847?v=4&size=100" width="100px" height="100px" alt="claude"/><br /><sub><b>claude</b></sub></a><br /><a href="https://github.com/unixwin/rubash/commits?author=claude" title="Code">💻</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/apps/github-actions"><img src="https://avatars.githubusercontent.com/u/41898282?v=4&size=100" width="100px" height="100px" alt="github-actions[bot]"/><br /><sub><b>github-actions[bot]</b></sub></a><br /><a href="#tool-github-actions[bot]" title="Tools">🔧</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/arookieofc-ai"><img src="https://avatars.githubusercontent.com/u/282213208?v=4&size=100" width="100px" height="100px" alt="arookieofc-ai"/><br /><sub><b>arookieofc-ai</b></sub></a><br /><a href="https://github.com/unixwin/rubash/commits?author=arookieofc-ai" title="Code">💻</a></td>
     </tr>
   </tbody>
 </table>

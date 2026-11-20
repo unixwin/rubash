@@ -24,7 +24,7 @@
 - 物理行数同时报告作对照；毛数（含测试）不作头条。
 
 姊妹仓备忘（同口径、同一脚本在工作区测得，不由本仓工作流自动更新）：
-niubash 净 **60,302** 行（master 5c991c28，2026-11-03），为 GNU 基线的 0.37×。
+niubash 净 **65,004** 行（master bc5ebd3，2026-11-20），为 GNU 基线的 0.40×。
 
 ## 当前数字
 
@@ -32,16 +32,14 @@ niubash 净 **60,302** 行（master 5c991c28，2026-11-03），为 GNU 基线的
 
 | 目标 | 语言 | 文件 | 物理行 | 空行 | 剔除行 | 净行数（头条） |
 |---|---|---:|---:|---:|---:|---:|
-| rubash | rust | 326 | 343,953 | 11,491 | 19,497 | **312,965** |
+| rubash | rust | 335 | 415,830 | 12,768 | 22,845 | **380,217** |
 | gnu-5.3.20 | c | 384 | 189,616 | 26,801 | 0 | **162,815** |
 
 分桶明细（不进头条）:
 
-- rubash · tests: 1236 文件, 物理 257,830 行, 净 237,398 行
-- rubash · 备忘: 主桶内有 1 处 #[cfg(test)] 非 mod 项（按口径不剔除, 计入头条）
+- rubash · tests: 1885 文件, 物理 393,357 行, 净 363,456 行
+- rubash · 备忘: 主桶内有 3 处 #[cfg(test)] 非 mod 项（按口径不剔除, 计入头条）
 - gnu-5.3.20 · aux: 58 文件, 物理 14,134 行, 净 12,129 行
-- gnu-5.3.20 · generated: 11 文件, 物理 4,287 行, 净 3,763 行
-- gnu-5.3.20 · 生成文件清单: buildconf.h, builtins/builtext.h, builtins/builtins.c, builtins/pipesize.h, config.h, lsignames.h, pathnames.h, signames.h, stdckdint.h, syntax.c, version.h
 <!-- END code-size -->
 
 ## 更新方式
