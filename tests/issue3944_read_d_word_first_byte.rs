@@ -27,6 +27,14 @@ fn run_script_locale(script: &str, locale: &str) -> (String, String, Option<i32>
     std::fs::write(&path, script).expect("write script");
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg(path.to_str().expect("utf8 path"))
+        // The scripts below write/read the bare relative path `f`, so
+        // the child must run inside this test's own scratch dir (the
+        // issue3311 `rubash_script` isolation). Without it every
+        // parallel sibling shares the test process's cwd and they
+        // overwrite each other's `f` — the census failures showed
+        // sibling test data verbatim (e.g. the C-locale case reading
+        // the 0x82 case's bytes), with rotating victims.
+        .current_dir(&dir)
         .env("LC_ALL", locale)
         .env("TMPDIR", &dir)
         .stdin(Stdio::null())
