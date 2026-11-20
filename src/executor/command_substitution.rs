@@ -2934,6 +2934,28 @@ impl Executor {
                     .trim_capture_terminator()
                     .to_string();
             }
+            // rubash#3964: the enclosing context's fd 0 can ride the
+            // FUNCTION_STDIN channel instead of the fd table — a
+            // pipeline stage's input for in-process stages (brace
+            // groups, subshells), a function's stdin. The table arms
+            // above carry no endpoint for it, so the ladder fell
+            // through to the filesystem read below and read the
+            // PROCESS's own /dev/stdin (empty at ambient EOF, a
+            // block while a live ambient stdin stays open). Presence
+            // of the channel is the fd-0 binding (rubash#2111),
+            // shadowed by a virtual fd-0 endpoint (a File endpoint
+            // is served by the arm above) and never serving a
+            // closed fd 0. Serve it through the same cursor the
+            // $(cat /dev/stdin) shortcut uses, writeback included.
+            if fd == 0
+                && !self.fd_table.is_closed(0)
+                && self.virtual_fd_stdin_remaining(0).is_none()
+                && self.shell_state.env_vars.contains_key(FUNCTION_STDIN)
+            {
+                let text = self.comsub_cat_function_stdin_text();
+                self.last_command_substitution_status.set(Some(0));
+                return text.trim_capture_terminator().to_string();
+            }
         }
         // rubash#2359: there is deliberately NO net arm in this
         // ladder. GNU's $(<file) shortcut is optimize_cat_file
