@@ -862,11 +862,31 @@ impl Executor {
             }
             process.current_dir(directory);
         }
-        self.apply_external_redirects(cmd, &mut process, None)?;
+        // rubash#3875: the env leg runs the same preflight gate as
+        // the plain external path — without it the leg's spawn
+        // re-opened every redirect target by path after the setup
+        // walks had opened them once (the probe-then-bind residual
+        // of rubash#3828 on the env funnel, which the simple-command
+        // gate skips for EnvCommand). The gate's diagnostic and
+        // status are already placed when it fails.
+        let (redirect_failed, mut preopened) =
+            self.command_output_redirect_fails_with_preopened(cmd)?;
+        if redirect_failed {
+            return Ok(());
+        }
+        self.apply_external_redirects(cmd, &mut process, Some(&mut preopened))?;
         // rubash#1832: the environment was composed to finality by
         // the env emulation above — the seam must not stamp SHLVL
         // over it (env_composed_final).
-        self.spawn_external_process(cmd, &program, process, used_shell, dev_ops, true, None)
+        self.spawn_external_process(
+            cmd,
+            &program,
+            process,
+            used_shell,
+            dev_ops,
+            true,
+            Some(&mut preopened),
+        )
     }
 
     fn parse_env_command_args(
@@ -4130,12 +4150,32 @@ impl Executor {
             // already opened at this position (see `preopened`) is
             // stamped/pinned as THAT description, exactly like the
             // input stash.
+            // rubash#3875: a ReadWrite entry falls back to the
+            // pending channel — the reject gate's probe already
+            // performed the entry's one O_RDWR|O_CREAT open and
+            // parked the handle (rubash#3828); opening the path
+            // again here fails EACCES on a target created without
+            // owner-write. `pending_readwrite` marks the stash as
+            // THIS entry's own read-write description (not an
+            // earlier entry's), so both direction stamps below fire.
+            let mut pending_readwrite = false;
             let stashed = if write {
                 preopened
                     .as_deref_mut()
                     .and_then(|opened| opened.remove(&position))
             } else {
-                self.own_input_bindings.get(&fd).cloned()
+                match self.own_input_bindings.get(&fd).cloned() {
+                    Some(file) => Some(file),
+                    None => {
+                        if redirect.kind == crate::parser::RedirectKind::ReadWrite {
+                            let parked = self.take_pending_preopened(position, &target);
+                            pending_readwrite = parked.is_some();
+                            parked
+                        } else {
+                            None
+                        }
+                    }
+                }
             };
             if matches!(
                 redirect.kind,
@@ -4236,7 +4276,7 @@ impl Executor {
             // an earlier entry's description, whose access mode is
             // that entry's own.
             let stamp_read = !write;
-            let stamp_write = write || (readwrite && opened_file.is_some());
+            let stamp_write = write || (readwrite && (opened_file.is_some() || pending_readwrite));
             if stamp_read {
                 process.env(format!("__RUBASH_FD_HANDLE_{fd}"), format!("{dup:#x}"));
                 process.env(format!("__RUBASH_FD_PATH_{fd}"), path_label.clone());
@@ -5216,8 +5256,10 @@ impl Executor {
         // already opened for this list, by redirect position (see
         // `OutputFdState::preopened`) — the fd>=3 delivery adopts
         // them instead of re-opening by path. None when no preflight
-        // ran (the `env` leg, the async spawn paths).
-        preopened: Option<
+        // ran (the async spawn paths). rubash#3875: the ENOEXEC
+        // fallback legs below forward whatever entries the first
+        // attempt left unconsumed instead of dropping the map.
+        mut preopened: Option<
             &mut std::collections::HashMap<usize, std::rc::Rc<crate::executor::fd_table::FileFd>>,
         >,
     ) -> Result<(), ExecuteError> {
@@ -5225,7 +5267,12 @@ impl Executor {
         // command's own numbered redirects, the unix pin
         // registration) is shared with the sequential pipeline stage
         // spawner — see apply_external_fd_delivery.
-        let parent_side_dups = self.apply_external_fd_delivery(cmd, &mut process, None, preopened);
+        let parent_side_dups = self.apply_external_fd_delivery(
+            cmd,
+            &mut process,
+            None,
+            preopened.as_mut().map(|opened| &mut **opened),
+        );
         // rubash#2398: the job-control channel (see job_control_wait)
         // claims a plain interactive foreground spawn end to end —
         // the child leads its own process group (pre_exec below), the
@@ -5756,9 +5803,11 @@ impl Executor {
                                 // record before returning. (On success
                                 // the record moves into the recursive
                                 // spawn below, still armed.)
-                                if let Err(error) =
-                                    self.apply_external_redirects(cmd, &mut exe_process, None)
-                                {
+                                if let Err(error) = self.apply_external_redirects(
+                                    cmd,
+                                    &mut exe_process,
+                                    preopened.as_mut().map(|opened| &mut **opened),
+                                ) {
                                     dev_ops.disarm_finish();
                                     return Err(error);
                                 }
@@ -5769,7 +5818,7 @@ impl Executor {
                                     true,
                                     dev_ops,
                                     env_composed_final,
-                                    None,
+                                    preopened,
                                 );
                             }
                         }
@@ -5786,9 +5835,11 @@ impl Executor {
                         // rubash#2602: same disarm as the re-entry
                         // spawn above — a redirect-setup failure means
                         // no child ever ran.
-                        if let Err(error) =
-                            self.apply_external_redirects(cmd, &mut shell_process, None)
-                        {
+                        if let Err(error) = self.apply_external_redirects(
+                            cmd,
+                            &mut shell_process,
+                            preopened.as_mut().map(|opened| &mut **opened),
+                        ) {
                             dev_ops.disarm_finish();
                             return Err(error);
                         }
@@ -5799,7 +5850,7 @@ impl Executor {
                             true,
                             dev_ops,
                             env_composed_final,
-                            None,
+                            preopened,
                         );
                     }
                 }

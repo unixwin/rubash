@@ -1384,7 +1384,7 @@ impl Executor {
         // end.
         let mut last_stdout_leg: Option<Redirect> = None;
         let mut last_stderr_leg: Option<Redirect> = None;
-        for redirect in &call_cmd.redirects {
+        for (call_position, redirect) in call_cmd.redirects.iter().enumerate() {
             if redirect.fd_var.is_some() {
                 continue;
             }
@@ -1424,11 +1424,26 @@ impl Executor {
                 // `>>"$a"` expansion would make `2>"$b"` truncate
                 // the raw-byte file instead of creating the UTF-8 one).
                 if !redirect.append && redirect_target_fd(&target).is_none() {
-                    self.create_redirect_output_prepared_for(
-                        Some(redirect),
-                        &target,
-                        redirect.clobber,
-                    )?;
+                    // rubash#3875: an earlier walk of this call (a
+                    // pipeline stage gate, the reject gate) may
+                    // already have performed this entry's one open
+                    // and parked it - the pre-create is then a second
+                    // open of a file the umask may have created
+                    // without owner-write, which fails EACCES. Adopt
+                    // the parked handle and skip the create; the
+                    // scope wrap's own walk adopts it for the bind.
+                    if !self
+                        .pending_preopened_redirects
+                        .borrow()
+                        .get(&call_position)
+                        .is_some_and(|(recorded, _, _)| recorded == &target)
+                    {
+                        self.create_redirect_output_prepared_for(
+                            Some(redirect),
+                            &target,
+                            redirect.clobber,
+                        )?;
+                    }
                 }
                 let mut append_redirect = redirect.clone();
                 append_redirect.target = target;
@@ -1500,11 +1515,19 @@ impl Executor {
                     && redirect_target_fd(&target).is_none()
                     && !is_null_device(&target)
                 {
-                    self.create_redirect_output_prepared_for(
-                        Some(redirect),
-                        &target,
-                        redirect.clobber,
-                    )?;
+                    // rubash#3875: same adoption as the fd-1 leg above.
+                    if !self
+                        .pending_preopened_redirects
+                        .borrow()
+                        .get(&call_position)
+                        .is_some_and(|(recorded, _, _)| recorded == &target)
+                    {
+                        self.create_redirect_output_prepared_for(
+                            Some(redirect),
+                            &target,
+                            redirect.clobber,
+                        )?;
+                    }
                 }
                 let mut append_redirect = redirect.clone();
                 append_redirect.target = target;

@@ -964,7 +964,7 @@ impl Executor {
             // file aborts the command rather than silently yielding the
             // heredoc body. `<> file` runs its O_RDWR|O_CREAT open
             // (make_cmd.c:682) the same way (rubash#264).
-            for redirect in cmd.redirects.iter() {
+            for (position, redirect) in cmd.redirects.iter().enumerate() {
                 if redirect.fd.unwrap_or(0) == 0
                     && matches!(
                         redirect.kind,
@@ -982,7 +982,20 @@ impl Executor {
                         && !crate::special_paths::is_net_redirect_target(&target)
                     {
                         if redirect.kind == crate::parser::RedirectKind::ReadWrite {
-                            self.probe_input_redirect_readwrite(&target)?;
+                            // rubash#3875: the reject gate's probe
+                            // already performed this entry's one
+                            // O_RDWR|O_CREAT open and parked the
+                            // handle — probing again would open the
+                            // path a second time and fail EACCES on
+                            // a target created without owner-write.
+                            let already_parked = self
+                                .pending_preopened_redirects
+                                .borrow()
+                                .get(&position)
+                                .is_some_and(|(recorded, _, _)| recorded == &target);
+                            if !already_parked {
+                                self.probe_input_redirect_readwrite(&target)?;
+                            }
                         } else {
                             self.probe_input_redirect(&target)?;
                         }
@@ -1173,7 +1186,28 @@ impl Executor {
             if redirect.fd.unwrap_or(0) == 0 && self.input_fd_redirects_to_process_stdin(&target) {
                 return Ok(());
             }
-            let file = if redirect.append && crate::special_paths::is_net_redirect_target(&target) {
+            // rubash#3875: a `<>` mirror adopts the reject gate's
+            // parked open (its O_RDWR|O_CREAT probe is the entry's
+            // one open, GNU redir.c r_input_output) instead of
+            // re-opening the path below, which fails EACCES on a
+            // target created without owner-write (umask masking
+            // 0200, rubash#3828).
+            let preopened_readwrite = if redirect.kind == crate::parser::RedirectKind::ReadWrite {
+                cmd.redirects
+                    .iter()
+                    .position(|entry| {
+                        entry.kind == crate::parser::RedirectKind::ReadWrite
+                            && entry.fd.unwrap_or(0) == redirect.fd.unwrap_or(0)
+                            && self.expand_redirect_target(entry) == target
+                    })
+                    .and_then(|position| self.take_pending_preopened(position, &target))
+            } else {
+                None
+            };
+            let file = if let Some(file_fd) = preopened_readwrite {
+                let dup = crate::fd::duplicate_handle(file_fd.handle)?;
+                crate::fd::handle_to_file(dup)
+            } else if redirect.append && crate::special_paths::is_net_redirect_target(&target) {
                 // rubash#2091: a net target has no filesystem path — the
                 // raw open below reported a bare ENOENT (no target
                 // named) and the connection never happened. redir.c
@@ -2225,7 +2259,7 @@ impl Executor {
                             } else {
                                 ProcsubPlanMode::WriteTruncate
                             };
-                        match self.procsub_plan_capture(redirect, mode) {
+                        match self.procsub_plan_capture(redirect, mode, index) {
                             ProcsubPlanCapture::Captured(file) => {
                                 let first = match mode {
                                     ProcsubPlanMode::WriteTruncate => {
@@ -2268,7 +2302,7 @@ impl Executor {
                         } else {
                             ProcsubPlanMode::WriteTruncate
                         };
-                        match self.procsub_plan_capture(redirect, mode) {
+                        match self.procsub_plan_capture(redirect, mode, index) {
                             ProcsubPlanCapture::Captured(file) => {
                                 let disposition = match mode {
                                     ProcsubPlanMode::WriteTruncate => {
@@ -2306,7 +2340,7 @@ impl Executor {
                     } else if let Some(carrier) = input_carrier_by_position.get(&index) {
                         set(&mut plan, fd, ProcsubSpawnFd::CarrierRead(carrier.clone()));
                     } else {
-                        match self.procsub_plan_capture(redirect, ProcsubPlanMode::Read) {
+                        match self.procsub_plan_capture(redirect, ProcsubPlanMode::Read, index) {
                             ProcsubPlanCapture::Captured(file) => {
                                 set(
                                     &mut plan,
@@ -2327,7 +2361,7 @@ impl Executor {
                     if fd == 0 {
                         continue;
                     }
-                    match self.procsub_plan_capture(redirect, ProcsubPlanMode::ReadWrite) {
+                    match self.procsub_plan_capture(redirect, ProcsubPlanMode::ReadWrite, index) {
                         ProcsubPlanCapture::Captured(file) => {
                             set(
                                 &mut plan,
@@ -2400,8 +2434,27 @@ impl Executor {
         &mut self,
         redirect: &Redirect,
         mode: ProcsubPlanMode,
+        position: usize,
     ) -> ProcsubPlanCapture {
         let target = redirect.target.as_str();
+        // rubash#3875: an output capture is one of this entry's
+        // opens - adopt a parked handle when an earlier walk of
+        // this list already performed it, and park a fresh capture
+        // so the spawn gate adopts it in turn (GNU opens the entry
+        // once in do_redirections and forks the consumer off that
+        // description, redir.c:237; the probe-then-bind residual of
+        // rubash#3828 was this planner re-opening by path and the
+        // gate opening a third time). Admitted targets are literal
+        // (the decline screen below), so the raw target text is
+        // the key every other walk records.
+        if matches!(
+            mode,
+            ProcsubPlanMode::WriteTruncate | ProcsubPlanMode::WriteAppend
+        ) {
+            if let Some(file_fd) = self.take_pending_preopened(position, target) {
+                return ProcsubPlanCapture::Captured(file_fd);
+            }
+        }
         if target.is_empty()
             || target.chars().any(|c| {
                 matches!(
@@ -2451,7 +2504,7 @@ impl Executor {
                 return ProcsubPlanCapture::Declined;
             }
         }
-        match mode {
+        let captured = match mode {
             ProcsubPlanMode::Read => match FileFd::open_read(session_target) {
                 Ok(file) => ProcsubPlanCapture::Captured(file),
                 Err(_) => ProcsubPlanCapture::Failed,
@@ -2491,7 +2544,19 @@ impl Executor {
                     Err(_) => ProcsubPlanCapture::Failed,
                 }
             }
+        };
+        // rubash#3875: park a fresh output capture (see the adoption
+        // at this function's head) - the spawn gate's walk adopts
+        // the description instead of opening the path again.
+        if matches!(
+            mode,
+            ProcsubPlanMode::WriteTruncate | ProcsubPlanMode::WriteAppend
+        ) {
+            if let ProcsubPlanCapture::Captured(file_fd) = &captured {
+                self.store_pending_preopened(position, target, std::rc::Rc::clone(file_fd));
+            }
         }
+        captured
     }
 
     /// The plan value for an fd the prefix never bound, resolved
@@ -4591,6 +4656,17 @@ impl Executor {
     ) -> Result<PathBuf, ExecuteError> {
         let path = self.process_substitution_temp_path()?;
         File::create(&path)?;
+        // rubash#3875: the carrier is the shell's own scratch (the
+        // stand-in for GNU's /dev/fd pipe, which has no mode bits):
+        // a restrictive umask must not strip the permissions the
+        // shell's own later opens of the carrier need, or every
+        // process substitution dies under e.g. `umask 777` even
+        // though no user redirect target is involved.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
         Ok(path)
     }
 
@@ -4867,6 +4943,14 @@ impl Executor {
     ) -> Result<PathBuf, ExecuteError> {
         let path = self.process_substitution_temp_path()?;
         fs::write(&path, output)?;
+        // rubash#3875: same carrier hygiene as
+        // empty_process_substitution_temp - the shell's own
+        // scratch keeps owner read/write regardless of umask.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
         // subst.c:7143 command_substitute — the `<(cmd)` word names a
         // pipe-like stream: every open shares one offset that drains on
         // read. The temp file is only the argv carrier for external

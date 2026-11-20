@@ -15,6 +15,18 @@ pub(in crate::executor) fn cat_closed_stdout_error() -> ExecuteError {
 }
 
 impl Executor {
+    /// rubash#3875: the retained preflight walk (the rubash#3828
+    /// probe channel) may already hold this entry's one open -
+    /// adopt it instead of re-opening the mirror target by path
+    /// (the cat emulation's writers are the bind for its fd 1
+    /// mirror; GNU opens the entry once, redir.c:237).
+    fn take_parked_output_mirror(&mut self, cmd: &CommandNode, target: &str) -> Option<File> {
+        let position = self.output_entry_position(cmd, 1, target);
+        let file_fd = self.take_pending_preopened(position, target)?;
+        let dup = crate::fd::duplicate_handle(file_fd.handle).ok()?;
+        Some(crate::fd::handle_to_file(dup))
+    }
+
     pub(in crate::executor) fn write_cat_output(
         &mut self,
         cmd: &CommandNode,
@@ -79,8 +91,12 @@ impl Executor {
             {
                 return result;
             }
-            let file =
-                self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?;
+            let file = match self.take_parked_output_mirror(cmd, &target) {
+                Some(file) => file,
+                None => {
+                    self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?
+                }
+            };
             crate::fd::write_file_all(&file, output)?;
         } else if let Some(redirect) = &cmd.append {
             let target = self.expand_redirect_target(redirect);
@@ -107,7 +123,10 @@ impl Executor {
             // above) — the create arm in this same function already
             // takes it, and the append arm's string record is the
             // same collision.
-            let file = self.open_append_target_for(Some(redirect), &target)?;
+            let file = match self.take_parked_output_mirror(cmd, &target) {
+                Some(file) => file,
+                None => self.open_append_target_for(Some(redirect), &target)?,
+            };
             crate::fd::write_file_all(&file, output)?;
         } else {
             self.write_default_stdout(output)?;
@@ -154,6 +173,9 @@ impl Executor {
         // not a reopened path — leave those to the per-chunk path.
         if crate::executor::execution_misc::redirect_target_fd(&target).is_some() {
             return Ok(None);
+        }
+        if let Some(file) = self.take_parked_output_mirror(cmd, &target) {
+            return Ok(Some(file));
         }
         if append {
             // Classified append open (rubash#1964), the streaming

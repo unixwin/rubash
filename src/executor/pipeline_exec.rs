@@ -8093,14 +8093,21 @@ impl Executor {
                 1,
             )));
         }
-        let stage_output_redirect_failed = match self.pipeline_stage_output_redirect_fails(command)
-        {
-            Ok(failed) => failed,
-            Err(error) => {
-                crate::executor::shell_options::restore_stdout_capture(saved_capture);
-                return Err(error);
-            }
-        };
+        let (stage_output_redirect_failed, mut stage_preopened) =
+            match self.pipeline_stage_output_redirect_fails_with_preopened(command) {
+                Ok(pair) => pair,
+                Err(error) => {
+                    crate::executor::shell_options::restore_stdout_capture(saved_capture);
+                    return Err(error);
+                }
+            };
+        // rubash#3875: park the gate's opens for the walks that run
+        // after the gate on this executor (the driver's routing
+        // walk, a builtin stage's clone gate); the map itself
+        // threads into the external stage spawn below — the stage's
+        // one open per entry (GNU redir.c do_redirections), never a
+        // probe-then-bind second open (rubash#3828).
+        self.park_preopened_redirects(command, &stage_preopened);
         if stage_output_redirect_failed {
             // rubash#1844: the stage died at its own do_redirections,
             // before running — its pipe bytes are final, so mark it
@@ -8345,7 +8352,12 @@ impl Executor {
                 })
                 .is_some_and(|expanded| self.routes_as_builtin(&expanded));
             if !builtin_stage {
-                return self.execute_external_pipeline_stage(command, input, stdin_inherit);
+                return self.execute_external_pipeline_stage(
+                    command,
+                    input,
+                    stdin_inherit,
+                    Some(&mut stage_preopened),
+                );
             }
         }
 
@@ -8379,7 +8391,12 @@ impl Executor {
                 })
                 .is_some_and(|expanded| self.routes_as_builtin(&expanded));
             if !builtin_stage {
-                return self.execute_external_pipeline_stage(command, input, stdin_inherit);
+                return self.execute_external_pipeline_stage(
+                    command,
+                    input,
+                    stdin_inherit,
+                    Some(&mut stage_preopened),
+                );
             }
         }
 
@@ -8426,7 +8443,12 @@ impl Executor {
                         )
                 })
             {
-                return self.execute_external_pipeline_stage(command, input, stdin_inherit);
+                return self.execute_external_pipeline_stage(
+                    command,
+                    input,
+                    stdin_inherit,
+                    Some(&mut stage_preopened),
+                );
             }
         }
 
@@ -8497,7 +8519,12 @@ impl Executor {
         // The pre-check set is the registry's PIPELINE_PRECHECK
         // projection (rubash#2036 S4): the non-builtin stage claims.
         if pipeline_precheck_claims(name) && self.emulated_external_stands_down(name) {
-            return self.execute_external_pipeline_stage(command, input, stdin_inherit);
+            return self.execute_external_pipeline_stage(
+                command,
+                input,
+                stdin_inherit,
+                Some(&mut stage_preopened),
+            );
         }
         // The stage arms are the registry's PIPELINE_STAGE projection
         // (rubash#2036 S4); the restricted-guard claims (`.`, cd,
@@ -8690,7 +8717,12 @@ impl Executor {
                 // accepts may stay inline; every malformed/missing/negative
                 // count (niubash#708) declines so the real head reports it.
                 let Some(spec) = parse_head_line_count(&args) else {
-                    return self.execute_external_pipeline_stage(command, input, stdin_inherit);
+                    return self.execute_external_pipeline_stage(
+                        command,
+                        input,
+                        stdin_inherit,
+                        Some(&mut stage_preopened),
+                    );
                 };
                 // rubash#3456: committed to the inline arm — probe the prefix.
                 if let Some(status) = self.pipeline_prefix_arith_status(command) {
@@ -8721,7 +8753,12 @@ impl Executor {
                 // SpookyWaste/dsh-bash-native patch 0003 — the pipeline
                 // faces never read the flag.
                 if !self.external_file_builtins_enabled {
-                    return self.execute_external_pipeline_stage(command, input, stdin_inherit);
+                    return self.execute_external_pipeline_stage(
+                        command,
+                        input,
+                        stdin_inherit,
+                        Some(&mut stage_preopened),
+                    );
                 }
                 use crate::executor::external_file_builtins::{
                     cat_format, parse_cat_argv, CatParsed,
@@ -8742,7 +8779,12 @@ impl Executor {
                 let (options, operands) = match parse_cat_argv(command) {
                     CatParsed::HelpOrVersion => {
                         // The real binary prints its own --help/--version.
-                        return self.execute_external_pipeline_stage(command, input, stdin_inherit);
+                        return self.execute_external_pipeline_stage(
+                            command,
+                            input,
+                            stdin_inherit,
+                            Some(&mut stage_preopened),
+                        );
                     }
                     CatParsed::Usage(message) => {
                         return Ok(Some((String::new(), message, 1)));
@@ -8933,7 +8975,12 @@ impl Executor {
                 // the one shape the recheck cannot see (hash-resolved
                 // but missed by the PATH walk).
                 if !self.external_file_builtins_enabled {
-                    return self.execute_external_pipeline_stage(command, input, stdin_inherit);
+                    return self.execute_external_pipeline_stage(
+                        command,
+                        input,
+                        stdin_inherit,
+                        Some(&mut stage_preopened),
+                    );
                 }
                 let args = command.words[1..]
                     .iter()
@@ -8946,7 +8993,12 @@ impl Executor {
                 // run (rubash#1462). The bridge only serves the
                 // no-sed-on-PATH case it was built for.
                 if find_user_command("sed", &self.shell_state.env_vars).is_some() {
-                    return self.execute_external_pipeline_stage(command, input, stdin_inherit);
+                    return self.execute_external_pipeline_stage(
+                        command,
+                        input,
+                        stdin_inherit,
+                        Some(&mut stage_preopened),
+                    );
                 }
                 // rubash#3456: committed to the inline arm — probe the prefix.
                 if let Some(status) = self.pipeline_prefix_arith_status(command) {
@@ -8960,7 +9012,12 @@ impl Executor {
                     self.pipeline_stdin_consumed.set(Some(input.len()));
                     Ok(Some((output, String::new(), 0)))
                 } else {
-                    self.execute_external_pipeline_stage(command, input, stdin_inherit)
+                    self.execute_external_pipeline_stage(
+                        command,
+                        input,
+                        stdin_inherit,
+                        Some(&mut stage_preopened),
+                    )
                 }
             }
             Some(PipelineSlot::Grep) => {
@@ -8977,7 +9034,12 @@ impl Executor {
                     .map(|word| self.expand_word(word))
                     .collect();
                 let Some(spec) = inline_grep_args(&args) else {
-                    return self.execute_external_pipeline_stage(command, input, stdin_inherit);
+                    return self.execute_external_pipeline_stage(
+                        command,
+                        input,
+                        stdin_inherit,
+                        Some(&mut stage_preopened),
+                    );
                 };
                 // rubash#3456: committed to the inline arm — probe the prefix.
                 if let Some(status) = self.pipeline_prefix_arith_status(command) {
@@ -9071,6 +9133,7 @@ impl Executor {
                                 command,
                                 input,
                                 stdin_inherit,
+                                Some(&mut stage_preopened),
                             );
                         }
                     };
@@ -9098,7 +9161,12 @@ impl Executor {
                         0,
                     )));
                 }
-                self.execute_external_pipeline_stage(command, input, stdin_inherit)
+                self.execute_external_pipeline_stage(
+                    command,
+                    input,
+                    stdin_inherit,
+                    Some(&mut stage_preopened),
+                )
             }
             Some(PipelineSlot::Tr) => {
                 let args = command.words[1..]
@@ -9111,7 +9179,12 @@ impl Executor {
                 // (niubash#166). GNU coreutils tr owns option parsing; only
                 // plain two-set operands may take the fast path.
                 if args.iter().any(|arg| arg.starts_with('-')) {
-                    self.execute_external_pipeline_stage(command, input, stdin_inherit)
+                    self.execute_external_pipeline_stage(
+                        command,
+                        input,
+                        stdin_inherit,
+                        Some(&mut stage_preopened),
+                    )
                 } else if args.len() == 2 && matches!(args[0].as_str(), "\\n" | "\n") {
                     // rubash#3456: committed to the inline arm — probe the prefix.
                     if let Some(status) = self.pipeline_prefix_arith_status(command) {
@@ -9140,7 +9213,12 @@ impl Executor {
                     // classes it does not know, `[x*n]` repeats, escapes)
                     // must run the real external `tr`; silently returning the
                     // input unchanged is never acceptable.
-                    self.execute_external_pipeline_stage(command, input, stdin_inherit)
+                    self.execute_external_pipeline_stage(
+                        command,
+                        input,
+                        stdin_inherit,
+                        Some(&mut stage_preopened),
+                    )
                 }
             }
             // #800A: the same inline stand-in the simple-command path uses
@@ -9157,7 +9235,12 @@ impl Executor {
                 // handle_external_file_builtins, so the stage arm must
                 // not answer when the host turned the layer off.
                 if !self.external_file_builtins_enabled {
-                    return self.execute_external_pipeline_stage(command, input, stdin_inherit);
+                    return self.execute_external_pipeline_stage(
+                        command,
+                        input,
+                        stdin_inherit,
+                        Some(&mut stage_preopened),
+                    );
                 }
                 // Stage argv is pre-expansion here (the arms expand their
                 // own arguments), so resolve against the expanded operands
@@ -9178,7 +9261,12 @@ impl Executor {
                     };
                     Ok(Some((output, String::new(), status)))
                 } else {
-                    self.execute_external_pipeline_stage(command, input, stdin_inherit)
+                    self.execute_external_pipeline_stage(
+                        command,
+                        input,
+                        stdin_inherit,
+                        Some(&mut stage_preopened),
+                    )
                 }
             }
             // Unclaimed names — and, off Windows, the Tput slot (its
@@ -9199,7 +9287,12 @@ impl Executor {
                     )? {
                         Ok(Some(output))
                     } else {
-                        self.execute_external_pipeline_stage(command, input, stdin_inherit)
+                        self.execute_external_pipeline_stage(
+                            command,
+                            input,
+                            stdin_inherit,
+                            Some(&mut stage_preopened),
+                        )
                     }
                 }
             }

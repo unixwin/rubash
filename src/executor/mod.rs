@@ -1995,8 +1995,35 @@ pub struct Executor {
     /// target the producing walk saw — a consumer adopts only on an
     /// exact match, so a stale entry can never bind the wrong file.
     pub(crate) pending_preopened_redirects: std::cell::RefCell<
-        std::collections::HashMap<usize, (String, std::rc::Rc<crate::executor::fd_table::FileFd>)>,
+        std::collections::HashMap<
+            usize,
+            (String, std::rc::Rc<crate::executor::fd_table::FileFd>, u64),
+        >,
     >,
+    /// rubash#3875: one-shot — this executor is a pipeline builtin
+    /// stage's subshell and was handed the stage command's parked
+    /// preopened handles (the parent executor's reject/stage gates
+    /// already performed those entries' ONE open). The subshell's
+    /// first reject gate keeps the parked entries instead of clearing
+    /// them, so its probe and bind walks adopt the handles rather
+    /// than re-opening a target the first open created without
+    /// owner-write (umask masking 0200), which fails EACCES.
+    pub(crate) preopened_pending_preserved_once: std::cell::Cell<bool>,
+    /// rubash#3875: the pending channel's scoping generation. Every
+    /// parked handle is stamped with the generation current when it
+    /// was parked (see store_pending_preopened); the stamp advances
+    /// once per command dispatch (execute_command) and once per
+    /// pipeline element routing (route_pipeline_stage_streams), and
+    /// the reject gate retires handles stamped by an older
+    /// generation. A handle therefore lives only within the command
+    /// (or pipeline element) whose walks parked it: that command's
+    /// preparatory walks — compound prepare, pipeline admission
+    /// probes, the output gates — all run inside one generation,
+    /// while a previous command's leftovers can never be adopted by
+    /// a later command whose redirect list happens to coincide in
+    /// position and target text (the cross-command stale-handle
+    /// binds: a shared offset and no fresh truncate).
+    pub(crate) preopened_generation: std::cell::Cell<u64>,
     /// The group's execute_ast ended by unwinding (`exit`, errexit, POSIX
     /// special-builtin failure, fatal expansion — GNU's
     /// jump_to_top_level(EXITPROG/ERREXIT/FORCE_EOF)). run_source converts
