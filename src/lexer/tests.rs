@@ -746,11 +746,23 @@ fn nested_keyword_function_body_counts_as_group_opener() {
 }
 
 /// rubash#465 end-to-end shape (mirkop.sh): a completed `&& { ... <<< ""; }`
-/// group (whose herestring operator blocks its own fold) followed by a
-/// keyword-form function whose body holds a nested keyword-form function.
-/// The later definition's fold must keep both `}` lines: the outer body
-/// token spans to the LAST `}`, leaving no stray top-level closer, and the
-/// trailing statement survives.
+/// group followed by a keyword-form function whose body holds a nested
+/// keyword-form function. The token stream must stay balanced: every
+/// group is either folded into one self-contained token or emitted as a
+/// bare opener whose `}` arrives as its own token, no stray closer may
+/// trail, and the nested definition's content survives.
+///
+/// This used to assert that h's body specifically FOLDS into one token.
+/// That shape was incidental: it held only while the `<<<` group in f's
+/// body was refused its fold by the rubash#3967 phantom (the brace-group
+/// heredoc scan mistook the second `<` of `<<<` for the `<<` operator).
+/// With the phantom gone the `<<<` group folds like any heredoc-free
+/// group — the same landscape a plain `true` body produces on master —
+/// and h's body is then emitted in the paired bare-opener form instead.
+/// Both landscapes are balanced; the #465 breakage (a stray top-level
+/// closer swallowing the definitions in between) is the imbalance
+/// asserted against here. When h's body does fold, its span must still
+/// satisfy the original reach-the-outer-`}` property.
 #[test]
 fn herestring_group_then_nested_function_definitions_fold_balanced() {
     let script = concat!(
@@ -768,32 +780,45 @@ fn herestring_group_then_nested_function_definitions_fold_balanced() {
         "}\n",
     );
     let tokens = tokenize(script);
-    // No group token may be left unclosed, and no standalone `}' closer may
-    // trail the folded h body: the fold must reach the outer `}`.
-    let folded = tokens
-        .iter()
-        .filter(|token| {
-            token.kind == TokenKind::Keyword
-                && token.value.starts_with('{')
-                && token.value.contains('\n')
-        })
-        .count();
-    assert!(folded >= 1, "h's multi-line body should fold: {tokens:?}");
-    let h_body = tokens
-        .iter()
-        .find(|token| {
-            token.kind == TokenKind::Keyword
-                && token.value.starts_with('{')
-                && token.value.contains("function i")
-        })
-        .expect("folded h body token");
+    // Balance: bare `{`/`}` Keyword tokens pair up exactly and the
+    // stream does not end inside a group (folded group tokens are
+    // self-balanced by construction).
+    let mut depth = 0usize;
+    for token in &tokens {
+        if token.kind == TokenKind::Keyword {
+            if token.value == "{" {
+                depth += 1;
+            } else if token.value == "}" {
+                depth = depth
+                    .checked_sub(1)
+                    .expect("stray `}` closer in token stream");
+            }
+        }
+    }
+    assert_eq!(depth, 0, "token stream must end balanced: {tokens:?}");
+    // The nested definition's content survives tokenization — as its
+    // own Word token in the paired landscape, or inside the folded
+    // body token's text in the folded landscape.
     assert!(
-        h_body.value.matches('}').count() >= 2
-            && h_body.value.trim_end().ends_with('}')
-            && h_body.value.contains("printf X"),
-        "h body fold must include the nested function and both closers, got {:?}",
-        h_body.value
+        tokens.iter().any(|token| token.value.contains("printf")),
+        "nested definition content must survive: {tokens:?}"
     );
+    // When h's body folds into one token, the fold must reach the
+    // outer `}` and include the nested function (the original #465
+    // span property).
+    if let Some(h_body) = tokens.iter().find(|token| {
+        token.kind == TokenKind::Keyword
+            && token.value.starts_with('{')
+            && token.value.contains("function i")
+    }) {
+        assert!(
+            h_body.value.matches('}').count() >= 2
+                && h_body.value.trim_end().ends_with('}')
+                && h_body.value.contains("printf X"),
+            "h body fold must include the nested function and both closers, got {:?}",
+            h_body.value
+        );
+    }
 }
 
 #[test]
