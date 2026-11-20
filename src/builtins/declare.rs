@@ -577,7 +577,7 @@ where
         &[],
         &[],
         &[],
-        &[],
+        &|| Vec::new(),
         &crate::shell::var_table::TempenvListingUnderlay::new(),
         oob_word,
         &mut WrittenOperandHints::default(),
@@ -602,7 +602,7 @@ pub(crate) fn execute_with_io_named_in_context<'a, W>(
     frame_locals: &[String],
     dynamic_views: &[DynamicDeclarationView],
     dynamic_set_views: &[crate::builtins::set::DynamicSetView],
-    function_set_views: &[crate::builtins::set::FunctionSetView],
+    function_set_views: &crate::builtins::set::FunctionSetViewProvider<'_>,
     underlay: &crate::shell::var_table::TempenvListingUnderlay,
     oob_word: &mut Option<String>,
     written_hints: &mut WrittenOperandHints,
@@ -1534,11 +1534,14 @@ where
         || trace;
     let plain = names.is_empty() && !had_name_args && !print && !flags_on;
     if plain {
+        // The only arm that consumes the function views: realize the
+        // lazy provider here, never on an operand-carrying dispatch.
+        let function_set_views = function_set_views();
         crate::builtins::set::print_shell_variables(
             variables,
             underlay,
             dynamic_set_views,
-            function_set_views,
+            &function_set_views,
             stdout,
         )?;
         return Ok(attr_status);

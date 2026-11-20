@@ -842,14 +842,24 @@ impl Executor {
     /// definition metadata `declare -f` carries: body kind and
     /// definition redirects), for print_shell_variables to print after
     /// the variables when not in POSIX mode (rubash#3487).
-    pub(in crate::executor) fn function_set_views(
-        &self,
+    ///
+    /// This render is O(total definition text) across the whole table,
+    /// so it must only run when a bare listing actually prints: the
+    /// declare/set funnels take it as a lazy
+    /// [`crate::builtins::set::FunctionSetViewProvider`] and the
+    /// executor call sites pass a closure over the two maps. Eagerly
+    /// materializing the views on every declare-family dispatch taxed
+    /// every `local` in a function-heavy shell (bats' library is ~150
+    /// functions) and made bats' gather pathologically slow
+    /// (rubash#3230).
+    pub(in crate::executor) fn render_function_set_views(
+        functions: &std::collections::HashMap<String, FunctionBody>,
+        function_def_infos: &std::collections::HashMap<String, FunctionDefInfo>,
     ) -> Vec<crate::builtins::set::FunctionSetView> {
-        self.shell_state
-            .functions
+        functions
             .iter()
             .map(|(name, body)| {
-                let info = self.shell_state.function_def_infos.get(name);
+                let info = function_def_infos.get(name);
                 let text = crate::parser::ast_print::multiline_function_listing_text(
                     name,
                     &body.commands,
