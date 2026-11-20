@@ -2938,32 +2938,34 @@ impl Executor {
         // Quoted raws are safe too: the brace scanner is quote-aware, so
         // "{a,b}" stays literal while {a,b}'q' still splits.
         {
-            let braced = expand_braces_with_optional_raw(word, raw);
-            if braced.len() > 1 || (braced.len() == 1 && braced[0] != word) {
+            let braced = expand_braces_with_optional_raw_tagged(word, raw);
+            if braced.len() > 1 || (braced.len() == 1 && braced[0].text != word) {
                 let mut values = Vec::new();
-                for expanded in braced {
-                    // GNU braces.c brace_expand emits the empty-alternative
-                    // word, and expand_word_list_internal (subst.c:12026-
-                    // 12035) discards an unquoted null result the same way
-                    // it discards an unset variable's — `set -- {a,}` binds
-                    // one positional (rubash#337). Drop the empty member
-                    // HERE, at the brace-result assembly, so the comsum
-                    // word paths that share expand_command_word keep every
-                    // field they produce (the broad word-kind admission
-                    // cost the braces suite its command-substitution lines).
-                    // An escape-bearing sequence element (`{a..A}` yields
-                    // the `\` character) is never empty here, so it keeps
-                    // its field like GNU's quoted-null rule.
-                    // Sequence ({x..y}) elements are exempt: an
-                    // escape-bearing element — the `\` character in
-                    // {a..A} — expands empty but GNU KEEPS the field
-                    // (expand_word marks the word quoted; braces.tests
-                    // {a..A} keeps 33 args). Only plain ALTERNATIVE
-                    // members drop.
-                    if expanded.is_empty() && !word.contains("..") {
+                for product in braced {
+                    if product.text.is_empty() {
+                        // GNU braces.c brace_expand emits every member as
+                        // a word, and expand_word_list_internal
+                        // (subst.c:12026-12035) discards only an UNQUOTED
+                        // null result, the same way it discards an unset
+                        // variable's — `set -- {a,}` binds one positional
+                        // (rubash#337). Decide HERE, at the brace-result
+                        // assembly, so the comsub word paths that share
+                        // expand_command_word see the same fields (the
+                        // broad word-kind admission cost the braces suite
+                        // its command-substitution lines). Which empty
+                        // products are quoted nulls is a fact of their
+                        // origin, tagged by the brace layer
+                        // (BraceExpansionWord::quoted_null): a quoted
+                        // member (`{'',x}` keeps both words) and a
+                        // character sequence's backslash element
+                        // (braces.tests {a..A} keeps 33 args) keep their
+                        // field; only plain ALTERNATIVE members drop.
+                        if product.quoted_null {
+                            values.push(String::new());
+                        }
                         continue;
                     }
-                    values.extend(self.expand_command_word(cmd, index, &expanded, None));
+                    values.extend(self.expand_command_word(cmd, index, &product.text, None));
                 }
                 return values;
             }
@@ -5413,13 +5415,64 @@ fn expanded_word_has_process_substitution(word: &str) -> bool {
         .is_empty()
 }
 
+/// One brace-expansion product for command-word assembly: its text
+/// (after the quote-removal strip expand_braces_with_optional_raw
+/// applies) plus whether an empty text is nevertheless a real word.
+pub(in crate::executor) struct BraceExpansionWord {
+    pub text: String,
+    /// True when `text` is empty but the word exists: quote removal
+    /// reduced a non-empty product to nothing (a quoted member such as
+    /// `''`), or the brace layer flagged the product as a character
+    /// sequence's backslash element (BraceProduct::sequence_null).
+    /// GNU keeps such quoted nulls as fields; only bare alternative
+    /// nulls (`{a,}`) are discarded as unquoted null results
+    /// (rubash#337).
+    pub quoted_null: bool,
+}
+
+fn tag_brace_products(
+    products: Vec<crate::expand::braces::BraceProduct>,
+    strip: bool,
+) -> Vec<BraceExpansionWord> {
+    products
+        .into_iter()
+        .map(|product| {
+            let text = if strip {
+                crate::lexer::remove_shell_quotes(&product.text)
+            } else {
+                product.text.clone()
+            };
+            let quoted_null =
+                text.is_empty() && (!product.text.is_empty() || product.sequence_null);
+            BraceExpansionWord { text, quoted_null }
+        })
+        .collect()
+}
+
+fn untagged_brace_word(text: String) -> BraceExpansionWord {
+    BraceExpansionWord {
+        text,
+        quoted_null: false,
+    }
+}
+
 pub(in crate::executor) fn expand_braces_with_optional_raw(
     word: &str,
     raw: Option<&str>,
 ) -> Vec<String> {
+    expand_braces_with_optional_raw_tagged(word, raw)
+        .into_iter()
+        .map(|product| product.text)
+        .collect()
+}
+
+pub(in crate::executor) fn expand_braces_with_optional_raw_tagged(
+    word: &str,
+    raw: Option<&str>,
+) -> Vec<BraceExpansionWord> {
     if let Some(raw) = raw {
         if raw != word {
-            let braced = crate::expand::braces::expand_braces(raw);
+            let braced = crate::expand::braces::expand_braces_tagged(raw);
             // GNU braces.c brace_expand is a textual rewrite of the word;
             // when it returns the raw word byte-identical there IS no
             // expansion product, so the pass must be transparent: the word
@@ -5434,30 +5487,26 @@ pub(in crate::executor) fn expand_braces_with_optional_raw(
             // group (`'{}'`, `{y}`) makes brace expansion a no-op exactly
             // like an escaped one; only real expansion products (len > 1,
             // or a rewritten single word) take the strip below.
-            if braced.len() == 1 && braced[0] == raw {
-                return vec![word.to_string()];
+            if braced.len() == 1 && braced[0].text == raw {
+                return vec![untagged_brace_word(word.to_string())];
             }
             if braced.len() > 1 || word_contains_brace_group(raw) {
                 // The raw-based expansion kept backslash escapes that the
                 // lexer would otherwise strip. Strip them so escaped chars
                 // render literally, matching GNU bash, while real brace
                 // expansion still yields multiple words.
-                let mut stripped: Vec<String> = Vec::new();
-                for item in braced {
-                    stripped.push(crate::lexer::remove_shell_quotes(&item));
-                }
-                return stripped;
+                return tag_brace_products(braced, true);
             }
             // When raw has escaped braces that prevent expansion,
             // but word has lost the escapes and would expand, preserve the
             // raw result to avoid incorrect brace expansion.
             if crate::expand::braces::expand_braces(word).len() > 1 {
-                return vec![word.to_string()];
+                return vec![untagged_brace_word(word.to_string())];
             }
         }
     }
 
-    let braced = crate::expand::braces::expand_braces(word);
+    let braced = crate::expand::braces::expand_braces_tagged(word);
     // GNU bash runs brace expansion on the raw word (backslash escapes
     // intact) and applies quote removal to each result word afterwards
     // (subst.c brace expansion runs before the quote-removal pass on the
@@ -5465,19 +5514,13 @@ pub(in crate::executor) fn expand_braces_with_optional_raw(
     // removal, so strip the escapes here: {a,b\,c} must yield b,c and
     // \{a,b} must yield {a,b} once no expansion is possible.
     if braced.len() > 1 {
-        braced
-            .into_iter()
-            .map(|item| crate::lexer::remove_shell_quotes(&item))
-            .collect()
+        tag_brace_products(braced, true)
     } else if word_contains_brace_group(word) {
         // A brace group can be syntactically present without producing
         // multiple words; quote removal still applies to its escaped text.
-        braced
-            .into_iter()
-            .map(|item| crate::lexer::remove_shell_quotes(&item))
-            .collect()
+        tag_brace_products(braced, true)
     } else {
-        braced
+        tag_brace_products(braced, false)
     }
 }
 

@@ -10,18 +10,57 @@ pub fn expand_braces(word: &str) -> Vec<String> {
     brace_expand(word)
 }
 
+/// One product of brace expansion, with the one fact about it that the
+/// plain text cannot carry: whether an empty product is a word that
+/// nevertheless exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BraceProduct {
+    pub text: String,
+    /// True when this product is empty but is NOT a bare alternative
+    /// null: it descends from a character sequence's backslash element.
+    /// GNU braces.c emits one word per codepoint in a sequence; at the
+    /// backslash position the word's value is empty, yet the word itself
+    /// is kept through expansion (braces.tests: `{a..A}` yields 33
+    /// words, the backslash position an empty one — the snapshot line
+    /// shows `]  [`). A bare alternative's empty member (`{a,}`) is the
+    /// opposite kind: an unquoted null that word expansion discards
+    /// (rubash#337). Composition rule: a concatenated product carries
+    /// the flag only when its whole text is empty and one of its factors
+    /// carried it — glued to any real text the element simply
+    /// contributes nothing, like GNU's word at that position dequoting
+    /// away inside a larger word.
+    pub sequence_null: bool,
+}
+
+/// Brace expansion that reports, per product, whether an empty product
+/// is a sequence null (see BraceProduct::sequence_null). Text results
+/// are identical to expand_braces.
+pub(crate) fn expand_braces_tagged(word: &str) -> Vec<BraceProduct> {
+    brace_expand_tagged(word)
+}
+
 fn brace_expand(text: &str) -> Vec<String> {
+    brace_expand_tagged(text)
+        .into_iter()
+        .map(|product| product.text)
+        .collect()
+}
+
+fn brace_expand_tagged(text: &str) -> Vec<BraceProduct> {
     // GNU braces.c brace_expand recursion
     let Some((open, close, etype)) = find_first_valid_brace(text) else {
-        return vec![text.to_string()];
+        return vec![BraceProduct {
+            text: text.to_string(),
+            sequence_null: false,
+        }];
     };
     let preamble = &text[..open];
     let amble = &text[open + 1..close];
     let postamble = &text[close + 1..];
 
-    let tack: Vec<String> = if etype == BRACE_SEQ {
+    let tack: Vec<BraceProduct> = if etype == BRACE_SEQ {
         // valid_seqterm already passed, try expand_seqterm
-        if let Some(seq) = expand_range(amble) {
+        if let Some(seq) = expand_range_tagged(amble) {
             seq
         } else {
             // GNU: if sequence expansion fails (overflow etc) and postamble non-empty,
@@ -29,46 +68,72 @@ fn brace_expand(text: &str) -> Vec<String> {
             // If postamble empty, return literal whole text.
             if !postamble.is_empty() {
                 let mut literal = Vec::new();
-                literal.push(format!("{{{}}}", amble));
+                literal.push(BraceProduct {
+                    text: format!("{{{}}}", amble),
+                    sequence_null: false,
+                });
                 literal
             } else {
-                return vec![text.to_string()];
+                return vec![BraceProduct {
+                    text: text.to_string(),
+                    sequence_null: false,
+                }];
             }
         }
     } else if etype == BRACE_COMMA {
-        expand_amble(amble)
+        expand_amble_tagged(amble)
     } else {
-        vec![format!("{{{}}}", amble)]
+        vec![BraceProduct {
+            text: format!("{{{}}}", amble),
+            sequence_null: false,
+        }]
     };
 
     // array_concat(preamble, tack)
-    let mut result: Vec<String> = Vec::new();
+    let mut result: Vec<BraceProduct> = Vec::new();
     if preamble.is_empty() && tack.is_empty() {
-        result.push(String::new());
+        result.push(BraceProduct {
+            text: String::new(),
+            sequence_null: false,
+        });
     } else if preamble.is_empty() {
         result.extend(tack.clone());
     } else if tack.is_empty() {
-        result.push(preamble.to_string());
+        result.push(BraceProduct {
+            text: preamble.to_string(),
+            sequence_null: false,
+        });
     } else {
-        // preamble is single string, tack is Vec<String>
+        // preamble is single string, tack is Vec<BraceProduct>
         for t in &tack {
-            result.push(format!("{}{}", preamble, t));
+            let text = format!("{}{}", preamble, t.text);
+            result.push(BraceProduct {
+                sequence_null: text.is_empty() && t.sequence_null,
+                text,
+            });
         }
     }
     // handle empty tack case where result is just preamble?
     if result.is_empty() {
-        result.push(preamble.to_string());
+        result.push(BraceProduct {
+            text: preamble.to_string(),
+            sequence_null: false,
+        });
     }
 
     if postamble.is_empty() {
         return result;
     }
-    let post_expanded = brace_expand(postamble);
+    let post_expanded = brace_expand_tagged(postamble);
     // array_concat(result, post_expanded)
     let mut final_result = Vec::new();
     for r in &result {
         for p in &post_expanded {
-            final_result.push(format!("{}{}", r, p));
+            let text = format!("{}{}", r.text, p.text);
+            final_result.push(BraceProduct {
+                sequence_null: text.is_empty() && (r.sequence_null || p.sequence_null),
+                text,
+            });
         }
     }
     // handle cases where result or post_expanded is empty?
@@ -78,7 +143,7 @@ fn brace_expand(text: &str) -> Vec<String> {
     final_result
 }
 
-fn expand_amble(amble: &str) -> Vec<String> {
+fn expand_amble_tagged(amble: &str) -> Vec<BraceProduct> {
     let parts = split_brace_commas(amble);
     // GNU braces.c expand_amble: every top-level alternative is brace-expanded
     // and the results are appended (array_concat) — a list, not a cross
@@ -90,12 +155,18 @@ fn expand_amble(amble: &str) -> Vec<String> {
     //   {a,}   -> [a]        (the trailing empty word is discarded)
     // and
     //   {,}    -> one empty word (printf '<%s>' prints <>)
-    let mut result: Vec<String> = Vec::new();
+    // A member that is itself a brace group keeps its products' flags:
+    // in {{a..A},} the sequence member's null stays a sequence null,
+    // distinct from the bare empty alternative beside it.
+    let mut result: Vec<BraceProduct> = Vec::new();
     for part in parts {
-        result.extend(brace_expand(part));
+        result.extend(brace_expand_tagged(part));
     }
     if result.is_empty() {
-        result.push(String::new());
+        result.push(BraceProduct {
+            text: String::new(),
+            sequence_null: false,
+        });
     }
     result
 }
@@ -634,6 +705,11 @@ fn split_brace_commas(s: &str) -> Vec<&str> {
 }
 
 fn expand_range(s: &str) -> Option<Vec<String>> {
+    expand_range_tagged(s)
+        .map(|products| products.into_iter().map(|product| product.text).collect())
+}
+
+fn expand_range_tagged(s: &str) -> Option<Vec<BraceProduct>> {
     let parts = s.split("..").collect::<Vec<_>>();
     let ([left, right] | [left, right, _]) = parts.as_slice() else {
         return None;
@@ -679,7 +755,10 @@ fn expand_range(s: &str) -> Option<Vec<String>> {
         let mut result = Vec::with_capacity(count);
         let mut n = start;
         for i in 0..count {
-            result.push(format_numeric_range_value(n, width));
+            result.push(BraceProduct {
+                text: format_numeric_range_value(n, width),
+                sequence_null: false,
+            });
             if i + 1 < count {
                 // Invariant: n stays within [min(start,end), max(start,end)],
                 // so this cannot overflow (same invariant GNU relies on).
@@ -705,15 +784,26 @@ fn expand_range(s: &str) -> Option<Vec<String>> {
         let dir: i32 = if start <= end { 1 } else { -1 };
         let mut result = Vec::with_capacity(count);
         let mut cur = start as i32;
-        // GNU braces.c renders the backslash position of a character
-        // sequence as an EMPTY element (it is the quoting character):
+        // GNU braces.c emits one word per codepoint in the sequence; at
+        // the backslash position the word's value is empty (it is the
+        // quoting character), but the word itself survives expansion:
         // {a..Z} yields ... ] "" [ ... so the baseline shows "]  [".
+        // The element therefore carries empty text flagged as a
+        // sequence null (BraceProduct::sequence_null), so consumers
+        // that assemble fields can keep the word instead of discarding
+        // it as an unquoted null.
         for i in 0..count {
             let byte = cur as u8;
             if byte == b'\\' {
-                result.push(String::new());
+                result.push(BraceProduct {
+                    text: String::new(),
+                    sequence_null: true,
+                });
             } else {
-                result.push((byte as char).to_string());
+                result.push(BraceProduct {
+                    text: (byte as char).to_string(),
+                    sequence_null: false,
+                });
             }
             if i + 1 < count {
                 cur += dir * (step as i32);
@@ -776,6 +866,56 @@ mod tests {
     #[test]
     fn test_range_numeric() {
         assert_eq!(expand_braces("{1..3}"), vec!["1", "2", "3"]);
+    }
+
+    #[test]
+    fn sequence_backslash_element_is_a_flagged_null() {
+        // {a..A} spans codepoints 97..=65; index 5 is the backslash
+        // position (92). GNU keeps the word with an empty value
+        // (braces.tests: 33 words), so the product is an empty text
+        // flagged sequence_null — distinct from a bare alternative null.
+        let products = expand_braces_tagged("{a..A}");
+        assert_eq!(products.len(), 33);
+        assert_eq!(products[5].text, "");
+        assert!(products[5].sequence_null);
+        assert!(products
+            .iter()
+            .enumerate()
+            .all(|(i, p)| i == 5 || !p.sequence_null));
+        // Ascending ranges crossing the same codepoint flag it too.
+        let ascending = expand_braces_tagged("{A..a}");
+        assert_eq!(ascending.len(), 33);
+        assert!(ascending[27].sequence_null);
+        // Glued to real text the element contributes nothing and the
+        // flag does not leak into the (non-empty) product.
+        let glued = expand_braces_tagged("x{a..A}y");
+        assert_eq!(glued.len(), 33);
+        assert_eq!(glued[5].text, "xy");
+        assert!(glued.iter().all(|p| !p.sequence_null));
+        // Glued only to an empty alternative the composed word is still
+        // the sequence's null: {a..A}{,} doubles every element, the
+        // backslash position yielding two flagged nulls.
+        let doubled = expand_braces_tagged("{a..A}{,}");
+        assert_eq!(doubled.len(), 66);
+        assert!(doubled[10].sequence_null && doubled[11].sequence_null);
+        // A bare alternative null is never flagged.
+        let alt = expand_braces_tagged("{a,}");
+        assert_eq!(alt.len(), 2);
+        assert_eq!(alt[1].text, "");
+        assert!(!alt[1].sequence_null);
+        // A nested sequence member keeps its flag next to a bare
+        // alternative: {{a..A},} yields the sequence's 33 products
+        // (one flagged null) plus one unflagged bare null.
+        let nested = expand_braces_tagged("{{a..A},}");
+        assert_eq!(nested.len(), 34);
+        assert_eq!(nested.iter().filter(|p| p.sequence_null).count(), 1);
+        assert_eq!(
+            nested
+                .iter()
+                .filter(|p| p.text.is_empty() && !p.sequence_null)
+                .count(),
+            1
+        );
     }
 
     /// rubash#416/#417: the DATA_DOLLAR carrier (U+001F) is the cooked-word
