@@ -117,7 +117,7 @@ pub fn set(args: &[String], env_vars: &mut crate::shell::var_table::VarTable) ->
         &mut diag,
         &mut stdout,
         &crate::shell::var_table::TempenvListingUnderlay::new(),
-        &[],
+        &|| Vec::new(),
     );
     diag.flush_with(|| prolog_for_env(env_vars));
     status
@@ -195,7 +195,7 @@ pub(crate) fn set_with_io<'a, W>(
     diag: &mut Diag<'a>,
     stdout: &mut W,
     underlay: &crate::shell::var_table::TempenvListingUnderlay,
-    functions: &[FunctionSetView],
+    functions: &FunctionSetViewProvider<'_>,
 ) -> io::Result<i32>
 where
     W: Write,
@@ -231,7 +231,7 @@ pub(crate) fn set_with_io_and_o_writes<'a, W>(
     stdout: &mut W,
     underlay: &crate::shell::var_table::TempenvListingUnderlay,
     dynamic: &[DynamicSetView],
-    functions: &[FunctionSetView],
+    functions: &FunctionSetViewProvider<'_>,
     o_writes: &mut Vec<(String, bool)>,
 ) -> io::Result<i32>
 where
@@ -258,14 +258,17 @@ fn set_with_io_tracked<'a, W>(
     stdout: &mut W,
     underlay: &crate::shell::var_table::TempenvListingUnderlay,
     dynamic: &[DynamicSetView],
-    functions: &[FunctionSetView],
+    functions: &FunctionSetViewProvider<'_>,
     mut o_writes: Option<&mut Vec<(String, bool)>>,
 ) -> io::Result<i32>
 where
     W: Write,
 {
     if args.is_empty() {
-        print_shell_variables(env_vars, underlay, dynamic, functions, stdout)?;
+        // The only arm that consumes the function views: realize the
+        // lazy provider here, never on an operand-carrying dispatch.
+        let functions = functions();
+        print_shell_variables(env_vars, underlay, dynamic, &functions, stdout)?;
         return Ok(EXECUTION_SUCCESS);
     }
 
@@ -475,6 +478,16 @@ pub(crate) struct FunctionSetView {
     pub name: String,
     pub text: String,
 }
+
+/// Lazy supplier for the bare-listing function views. Rendering one
+/// FunctionSetView runs the ast_print port over a function's whole
+/// body, so materializing the list for the entire function table is
+/// O(total definition text) — far too expensive to do speculatively on
+/// every `set` / declare-family dispatch, nearly all of which carry
+/// operands and never reach the listing arm. Callers therefore pass a
+/// provider, and the render happens only inside the no-argument arm
+/// that actually prints the listing (rubash#3230).
+pub(crate) type FunctionSetViewProvider<'a> = dyn Fn() -> Vec<FunctionSetView> + 'a;
 
 /// GNU `set` with no arguments: print_all_shell_variables
 /// (builtins/set.def:506-527) — print_var_list (assignment form with
@@ -772,7 +785,7 @@ mod tests {
             &mut diag,
             stdout,
             &crate::shell::var_table::TempenvListingUnderlay::new(),
-            &[],
+            &|| Vec::new(),
         )
         .unwrap();
         diag.flush_with(|| Prolog {

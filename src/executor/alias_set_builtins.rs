@@ -135,7 +135,6 @@ impl Executor {
             crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "history");
         let mut o_writes: Vec<(String, bool)> = Vec::new();
         let dynamic_set_views = self.dynamic_set_views();
-        let function_set_views = self.function_set_views();
         let status = {
             let row =
                 super::builtin_table::builtin_table_row("set").expect("set row in BUILTIN_TABLE");
@@ -148,7 +147,12 @@ impl Executor {
                 &mut stdout,
                 &underlay,
                 &dynamic_set_views,
-                &function_set_views,
+                &|| {
+                    Self::render_function_set_views(
+                        &self.shell_state.functions,
+                        &self.shell_state.function_def_infos,
+                    )
+                },
                 &mut o_writes,
             );
             diag.flush_with(|| self.diagnostic_prolog());
