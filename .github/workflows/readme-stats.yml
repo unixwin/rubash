@@ -1,0 +1,47 @@
+# Weekly refresh of the auto-generated blocks in README.md (code size by
+# language via tokei, and the commit-contributors table). The script
+# rewrites only the <!-- AUTO:... --> marked blocks; everything else in
+# the README -- including the hand-curated maintainers list -- is left
+# untouched. Output is deterministic (no dates / HEAD sha), so the bot
+# commits only when the numbers actually changed.
+#
+# The net code-size caliber (tests excluded, vs GNU Bash) is a separate
+# figure maintained by scripts/code-size.py + the code-size workflow in
+# docs/code-size.md and the README badge; this workflow does not touch it.
+
+name: readme-stats
+
+on:
+  schedule:
+    - cron: "17 5 * * 1" # Mondays, 05:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+
+      - uses: taiki-e/install-action@tokei
+
+      - name: Regenerate README auto blocks
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/readme-stats.py
+
+      - name: Commit if changed
+        run: |
+          git add README.md
+          if git diff --cached --quiet -- README.md; then
+            echo "README auto blocks unchanged; nothing to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "docs: refresh README code-size + contributors blocks"
+          git push origin master
