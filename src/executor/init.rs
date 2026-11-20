@@ -1606,6 +1606,8 @@ impl Executor {
             reap_prev_mark: Cell::new((0, None, 0)),
             execute_generation: Cell::new(0),
             foreground_wait_count: Cell::new(0),
+            disposal_wait_count: Cell::new(0),
+            disposal_prev_mark: Cell::new(0),
             coproc_stderr_forwarders: HashMap::new(),
             coproc_displaced_stdout_writers: HashMap::new(),
             assignment_output_process_substitutions: Vec::new(),
