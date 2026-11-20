@@ -50,14 +50,14 @@ fn herestring_in_comsub_in_nested_brace_group() {
 
 #[test]
 fn herestring_in_comsub_in_brace_group_multiline_script() {
-    let script_path = "target/rubash-3967-multiline-group.sh";
-    std::fs::write(script_path, "{\nx=$(cat <<<foo)\necho \"$x\"\n}\n")
+    let script_path = std::env::temp_dir().join("rubash-3967-multiline-group.sh");
+    std::fs::write(&script_path, "{\nx=$(cat <<<foo)\necho \"$x\"\n}\n")
         .expect("write multiline group probe script");
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
-        .arg(script_path)
+        .arg(&script_path)
         .output()
         .expect("run multiline group probe");
-    let _ = std::fs::remove_file(script_path);
+    let _ = std::fs::remove_file(&script_path);
 
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), "foo\n");
