@@ -6244,6 +6244,12 @@ impl Executor {
                     child.env(key, value);
                 }
             }
+            // rubash#3219: a coproc child born inside an in-process
+            // fork region takes the region's recorded ulimit pairs at
+            // birth (see spawn_external_process's arm) — GNU's coproc
+            // child is a fork of the region's shell and carries its
+            // pair. No-op when no emulated-limit cells exist.
+            crate::builtins::ulimit::arm_emulated_limits(&mut child, &self.shell_state.env_vars);
             match child.spawn() {
                 Ok(mut child_proc) => {
                     // Rubash does not expose real coproc file descriptors yet,

@@ -1182,6 +1182,11 @@ pub fn spawn_whitelisted(spec: &WhitelistedSpawn) -> std::io::Result<SpawnedChil
     if let Some(anchor) = anchor_fd {
         max_fd = max_fd.max(anchor);
     }
+    // rubash#3219: if the composed spawn env carries emulated-limit
+    // cells (a fork region's recorded ulimit pairs ride the spawn env
+    // for child shells), the child is born with those pairs applied —
+    // the virtualized set never moved the spawning process's hard side.
+    let limit_pairs = crate::builtins::ulimit::emulated_limit_pairs_from_env(&spec.env);
     unsafe {
         use std::os::unix::process::CommandExt;
         cmd.pre_exec(move || {
@@ -1226,6 +1231,9 @@ pub fn spawn_whitelisted(spec: &WhitelistedSpawn) -> std::io::Result<SpawnedChil
             if new_process_group {
                 crate::builtins::kill::child_pre_exec_setpgid()?;
             }
+            // rubash#3219: apply the region's recorded ulimit pairs
+            // carried in the spawn env (computed above, parent-side).
+            crate::builtins::ulimit::apply_emulated_limits_in_child(&limit_pairs);
             Ok(())
         });
     }
