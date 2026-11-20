@@ -2138,6 +2138,23 @@ impl Executor {
         child: &mut std::process::Child,
         command: &str,
     ) -> Result<std::process::ExitStatus, ExecuteError> {
+        // rubash#2983: a background wrapper supervising a SIMPLE
+        // foreground command must be as transparent to addressed
+        // signals as it already is for a pipeline (rubash#2626,
+        // pipeline_exec's publish): publish this child as the relay
+        // target for exactly the span of this wait. Without it, a
+        // group-delivered SIGINT (the bats CTRL-C shape: `kill
+        // -SIGINT -- -$!` against the wrapper's process group) kills
+        // the wrapper — the relay, finding no target, restores the
+        // saved disposition and re-raises — and the rubash#737
+        // PDEATHSIG arm then SIGKILLs the script child before its
+        // own INT trap can run (bats file_setup_teardown #8:
+        // teardown_file never executes, the teardown log is never
+        // written). GNU has no wrapper interposed: the delivery
+        // reaches the script process and its trap runs. The guard
+        // is inert outside wrapper-role processes (and off unix).
+        let _wrapper_relay_guard =
+            crate::builtins::kill::WrapperRelayTargetGuard::publish(child.id());
         #[cfg(not(unix))]
         {
             const SLICE: std::time::Duration = std::time::Duration::from_millis(50);
