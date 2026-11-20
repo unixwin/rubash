@@ -1040,6 +1040,20 @@ impl Executor {
                     // hard failure; execute_declare's Err(()) arm returns 1
                     // with the reader-level discard already armed.
                     Err(partial) => {
+                        // rubash#753: the failglob class fails while the
+                        // operand is still being expanded (GNU
+                        // expand_words_no_vars reports `no match' and jumps
+                        // DISCARD before the builtin's bind ever runs), so
+                        // the name keeps exactly its prior state — no
+                        // attribute mark, no declared-unset entry:
+                        // `declare b=(/no/such/*.zzz)` leaves `declare -p b`
+                        // reporting `declare: b: not found` (verified GNU
+                        // 5.3.20). Propagate the hard failure; the caller's
+                        // Err(()) arm returns 1 with the reader-level
+                        // discard already armed.
+                        if self.evalerror_failglob_pending.get() {
+                            return Err(());
+                        }
                         // rubash#3613: an evalerror from a subscript's
                         // nested expansion (expr.c evalerror -> DISCARD)
                         // abandons the whole declaration before the bind —
@@ -1047,11 +1061,8 @@ impl Executor {
                         // stays unset (`declare -a b=([${x}]=v)` with
                         // x='$y', y='`echo 1`' reports `declare -a b`),
                         // unlike the err_badarraysub break which still
-                        // materializes the array. Same arm as the failglob
-                        // gate above.
-                        if self.evalerror_failglob_pending.get()
-                            || self.evalerror_pending.get()
-                        {
+                        // materializes the array.
+                        if self.evalerror_pending.get() {
                             let attr = if assoc { ASSOC_VARS } else { ARRAY_VARS };
                             mark_env_name(&mut self.shell_state.env_vars, attr, lhs);
                             mark_env_name(
