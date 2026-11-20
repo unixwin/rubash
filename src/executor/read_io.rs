@@ -298,12 +298,16 @@ impl Executor {
         // GNU read.def:482 input_is_pipe: a read whose descriptor is a
         // pipe is where a blocking builtin hands the SIGCHLD handler a
         // synchronous window — the dead coproc's reap (record) lands in
-        // that window and the cleanup after the command disposes it.
-        // The foreground-wait mark makes the next command-boundary
-        // refresh run the same retire-observed-coprocs step
-        // (flush_pending_coproc_retirements).
+        // that window and publishes at the next command-boundary
+        // refresh. Publication only: a builtin read is not a wait_for,
+        // so GNU disposal (cleanup_dead_jobs) does not follow it
+        // (rubash#2053) — the note must not move the disposal mark,
+        // or the boundary refresh would retire a sibling coproc whose
+        // child died during this read before the next command can
+        // expand its name (the named-coproc fd race:
+        // `read <&${A[0]}; read <&${B[0]}` losing B).
         if self.read_source_is_pipe(cmd, read_fd) {
-            self.note_foreground_wait();
+            self.note_blocking_read();
         }
         // rubash#3944: mirror the `-d` word's first byte (read.def:385)
         // onto the fd table for the record scanners, and retire it with

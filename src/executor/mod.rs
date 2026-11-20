@@ -856,6 +856,20 @@ pub struct Executor {
     /// blocked in wait() for (GNU wait_for reaps background children
     /// while it blocks, jobs.c:3064 — an observation point).
     foreground_wait_count: Cell<u64>,
+    /// Count of wait_for-grade foreground blocks only: a real or
+    /// emulated forked child's wait. GNU's coproc disposal points are
+    /// the notify_and_cleanup inside wait_for (jobs.c:3385) and
+    /// stop_pipeline after a forked command — a blocking builtin
+    /// `read` is NOT one (rubash#2053), so it bumps
+    /// foreground_wait_count (publishing the reap records its SIGCHLD
+    /// window collected) but never this count. The retirement flush
+    /// in refresh_background_jobs keys on this count, so a pipe read
+    /// cannot retire a dead sibling coproc before the next command
+    /// expands its name (the named-coproc fd race).
+    disposal_wait_count: Cell<u64>,
+    /// disposal_wait_count as of the previous refresh_background_jobs
+    /// call; a disposal point has occurred when it moved.
+    disposal_prev_mark: Cell<u64>,
     coproc_stderr_forwarders: HashMap<u32, std::thread::JoinHandle<Result<(), std::io::Error>>>,
     /// rubash#1632: pipe writers displaced from a coproc child's stdout
     /// by the coproc command's own `>file`/`>>file` redirection, held for
