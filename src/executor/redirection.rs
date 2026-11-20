@@ -309,6 +309,16 @@ struct OutputFdState {
     /// routing leave this false — their state is discarded or belongs to
     /// a child shell, so nothing may persist from them.
     persist_move_closes: bool,
+    /// rubash#3991: whether this walk runs with RX_UNDOABLE, so a
+    /// fixed entry's undo saves are real descriptors a later entry
+    /// can dup from (see fd_walk_register_saves). True for the
+    /// buffered-builtin route (the command ran in THIS shell); the
+    /// fork-child walks — pipeline-stage routing, the external
+    /// admission judges, the post-external drain — are RX_ACTIVE in
+    /// GNU (execute_cmd.c:5522) and leave this false: no saves exist
+    /// there, so a dup naming a would-be save slot fails exactly as
+    /// the child's own walk fails.
+    undoable_walk: bool,
     /// Speculative admission probes (pipeline_stage_stdio_targets)
     /// walk the same list only to resolve fd targets; the state is
     /// discarded and the executing path owns the failure report, so
@@ -832,6 +842,31 @@ impl Executor {
         let later_fd0_supplier: Vec<bool> =
             later_binds.iter().map(|binds| binds.contains(&0)).collect();
 
+        // rubash#3991: a shadow of the descriptor space the ordered
+        // walk evolves (see FdWalkSpace in trap_exec.rs), advanced
+        // one entry behind the scan. GNU's undo saves are real
+        // descriptors in the walk's one space (add_undo_redirect,
+        // redir.c:1296), so a dup whose source is an earlier entry's
+        // save slot is open at its position even though neither the
+        // ambient table nor this scan's `opened` overlay has the
+        // slot — without the shadow the scan rejected
+        // `echo W10 9>o1.txt 1>&10` (after `exec 9>seed.txt`) with
+        // EBADF for a descriptor GNU's walk holds open. The previous
+        // fixed entry's saves are registered at the top of the next
+        // candidate (fd_walk_register_saves), after that candidate's
+        // pending-close fold and before any of its checks — the
+        // deferral mirrors this gate's own discipline (an entry's
+        // effects are recorded only after its checks pass) and the
+        // applier's position (a save is visible to every later
+        // entry, never to its own entry's checks). Only real list
+        // entries advance the shadow; the mirror fields appended
+        // after cmd.redirects are projections of entries the shadow
+        // already passed (when the list itself is empty, the
+        // mirrors ARE the list and do advance it).
+        let mut gate_walk = super::trap_exec::FdWalkSpace::new();
+        let mut gate_occupied: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut prev_fixed: Option<&Redirect> = None;
+
         for (index, redirect) in candidates.iter().enumerate() {
             // rubash#2281: fold this command's recorded {var} closes
             // into the scan at their walk positions. The applier only
@@ -854,8 +889,32 @@ impl Executor {
                     let closed_fd = self.fd_var_pending_closes[folded_closes].1;
                     opened.insert(closed_fd, false);
                     opened_socket.insert(closed_fd, false);
+                    gate_walk.insert(closed_fd, super::trap_exec::FdWalkBinding::Closed);
                     folded_closes += 1;
                 }
+            }
+            // rubash#3991: register the previous fixed entry's undo
+            // saves into the scan (see the shadow's declaration
+            // above): each save slot joins the open set, carrying
+            // the endpoint class of the descriptor the save copies.
+            if let Some(prev) = prev_fixed.take() {
+                for (slot, source) in
+                    self.fd_walk_register_saves(&mut gate_walk, prev, &gate_occupied)
+                {
+                    gate_occupied.insert(slot);
+                    opened.insert(slot, true);
+                    let socket = scan_endpoint_is_socket(self, source, &opened_socket);
+                    opened_socket.insert(slot, socket);
+                }
+                self.fd_walk_record_fixed_entry(&mut gate_walk, prev);
+            }
+            if (index < real_redirect_count || real_redirect_count == 0)
+                && redirect.fd_var.is_none()
+            {
+                if let Some(fd) = redirect.fd {
+                    gate_occupied.insert(fd);
+                }
+                prev_fixed = Some(redirect);
             }
             if matches!(redirect.kind, crate::parser::RedirectKind::HereString) {
                 // rubash#2292: a here-string DOES bind its redirector
@@ -1849,6 +1908,9 @@ impl Executor {
     ) -> Result<Option<(OutputTarget, OutputTarget)>, ExecuteError> {
         let mut state = self.command_output_fd_state();
         state.fds.insert(1, OutputTarget::Stdout);
+        // rubash#3991: a pipeline element's walk is the fork child's
+        // RX_ACTIVE walk — no undo saves exist in it.
+        state.undoable_walk = false;
         // Same defer as route_pipeline_stage_streams: a diagnostic the walk
         // emits against the seeded Stdout must not leak to the real stdout.
         state.defer_stdout_writes = true;
@@ -1970,7 +2032,7 @@ impl Executor {
         // queue must not survive it (the #2558 pre-scan discipline):
         // mark the queue and roll it back on every exit.
         let writes_mark = Self::scan_pending_writes_mark();
-        let fd_var_walk_undoable = self.redirect_walk_is_undoable(cmd);
+        let fd_var_walk_undoable = self.fd_var_walk_undoable(cmd);
         let verdict = match self.apply_dynamic_fd_var_redirects(cmd, true, fd_var_walk_undoable) {
             Ok(false) => {
                 let result = self.command_output_redirect_fails_impl(cmd, true);
@@ -2021,6 +2083,10 @@ impl Executor {
         ExecuteError,
     > {
         let mut state = self.command_output_fd_state();
+        // rubash#3991: this judge stands in for the fork child's
+        // (external command's or pipeline stage's) own walk, which
+        // is RX_ACTIVE — no undo saves exist in it.
+        state.undoable_walk = false;
         if pipeline_stage {
             state.defer_stdout_writes = true;
             // rubash#2359: arm the stage judgment in
@@ -2271,6 +2337,10 @@ impl Executor {
         // verdict (rubash#2378; see the field's doc).
         state.resolve_only_numbered = resolve_only_numbered;
         state.foreign_drain = resolve_only_numbered;
+        // rubash#3991: the post-external drain stands in for the
+        // foreign child's RX_ACTIVE walk — no undo saves exist in
+        // it; the in-shell builtin route keeps the undoable walk.
+        state.undoable_walk = !resolve_only_numbered;
         // A failed open in THIS route keeps its historical channel:
         // the error returns as ExecuteError::IoError and the top-level
         // handler renders/routes it (rubash#1844 keeps the walk's
@@ -2762,6 +2832,7 @@ impl Executor {
             defer_stdout_writes: false,
             deferred_stdout: std::cell::RefCell::new(Vec::new()),
             persist_move_closes: false,
+            undoable_walk: true,
             diagnostics_muted: false,
             open_failure_via_error: false,
             resolve_only_numbered: false,
@@ -2848,7 +2919,53 @@ impl Executor {
         cmd: &CommandNode,
         state: &mut OutputFdState,
     ) -> Result<bool, ExecuteError> {
+        // rubash#3991: the descriptor space this walk evolves, in
+        // the shared walk currency (see FdWalkSpace in
+        // trap_exec.rs). This walk resolves dup sources against its
+        // own OutputFdState model, but the undo-save slots a fixed
+        // entry earns are a fact of the walk itself
+        // (fd_walk_undo_save_slots), so a shadow space tracks the
+        // walk: each fixed entry's saves are registered — and
+        // snapshotted into the routing state in this walk's
+        // currency — before the entry is performed, and the shadow
+        // records the entry as the walk passes it.
+        let mut route_walk = super::trap_exec::FdWalkSpace::new();
+        let mut route_occupied: std::collections::HashSet<u32> = std::collections::HashSet::new();
         for (index, redirect) in cmd.redirects.iter().enumerate() {
+            if let Some(fd) = redirect.fd {
+                route_occupied.insert(fd);
+            }
+            if redirect.fd_var.is_none() {
+                // rubash#3991: on an undoable walk, register this
+                // entry's undo saves before it is performed
+                // (fd_walk_register_saves): the save is a real
+                // descriptor in GNU's walk, so a later entry of this
+                // list can dup from the save slot. The snapshot
+                // freezes the save's at-position model — a dup2
+                // snapshot of the source's binding, so the live std
+                // aliases freeze to the process objects exactly as
+                // the dup arms below freeze them (rubash#170/#279).
+                // An active walk (pipeline stage, external child)
+                // has no saves at all.
+                if state.undoable_walk {
+                    for (slot, source) in
+                        self.fd_walk_register_saves(&mut route_walk, redirect, &route_occupied)
+                    {
+                        route_occupied.insert(slot);
+                        if let Some(target) = self.walk_dup_source_target(state, source) {
+                            let target = match (source, target) {
+                                (1, OutputTarget::Stdout) => OutputTarget::ProcessStdout,
+                                (2, OutputTarget::Stderr) => OutputTarget::ProcessStderr,
+                                (_, target) => target,
+                            };
+                            state.fds.insert(slot, target);
+                        }
+                        let bound = self.list_dup_model(state, source);
+                        state.list_binds.insert(slot, bound);
+                    }
+                }
+                self.fd_walk_record_fixed_entry(&mut route_walk, redirect);
+            }
             // rubash#1359: a `{var}` redirection is a redir_varassign
             // (GNU redir.c:1133-1166) — it allocates a fresh descriptor
             // >= 10 and is applied exactly once by
@@ -2894,6 +3011,7 @@ impl Executor {
                             state.list_binds.insert(fd, ListBound::Closed);
                             state.shared_with.remove(&fd);
                             state.saw_output_redirect = true;
+                            route_walk.insert(fd, super::trap_exec::FdWalkBinding::Closed);
                         }
                     }
                     crate::parser::RedirectKind::DuplicateOutput => {
@@ -2903,6 +3021,7 @@ impl Executor {
                             state.list_binds.insert(source_fd, ListBound::Closed);
                             state.shared_with.remove(&source_fd);
                             state.saw_output_redirect = true;
+                            route_walk.insert(source_fd, super::trap_exec::FdWalkBinding::Closed);
                         }
                     }
                     _ => {}
@@ -4077,7 +4196,7 @@ impl Executor {
         // where GNU's single do_redirections pass evaluates it
         // once. The replay falls back to the real applier when no
         // matching record exists.
-        let fd_var_walk_undoable = self.redirect_walk_is_undoable(cmd);
+        let fd_var_walk_undoable = self.fd_var_walk_undoable(cmd);
         let applied = self.replay_dynamic_fd_var_snapshot(cmd, true)
             || matches!(
                 self.apply_dynamic_fd_var_redirects(cmd, true, fd_var_walk_undoable),
@@ -4122,6 +4241,9 @@ impl Executor {
         // regardless of the ambient fd 1 binding; fd 2 stays ambient.
         state.fds.insert(1, OutputTarget::Stdout);
         state.defer_stdout_writes = true;
+        // rubash#3991: a pipeline element's walk is the fork child's
+        // RX_ACTIVE walk — no undo saves exist in it.
+        state.undoable_walk = false;
         // The stage already ran with its numbered bindings realized
         // by its own setup; this walk resolves them, never re-opens
         // them (see OutputFdState::resolve_only_numbered, rubash#2255).

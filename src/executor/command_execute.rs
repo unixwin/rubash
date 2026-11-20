@@ -741,7 +741,7 @@ impl Executor {
         // owns its fd_var redirects itself (execute_stdio_only_exec_redirect
         // applies them in list order with persistent semantics), so it is
         // excluded here.
-        let fd_var_walk_undoable = self.redirect_walk_is_undoable(&cmd);
+        let fd_var_walk_undoable = self.fd_var_walk_undoable(&cmd);
         if cmd.words.first().map(String::as_str) != Some("exec")
             && self.apply_dynamic_fd_var_redirects(&cmd, true, fd_var_walk_undoable)?
         {
@@ -2025,6 +2025,19 @@ impl Executor {
             return true;
         }
         self.heredoc_error_command_runs_in_main_shell(cmd)
+    }
+
+    /// rubash#3991: whether THIS node's `{var}` walk earns undo
+    /// saves (the applier's counting rule): the #2615 undoable
+    /// classification above, except that a pipeline element's own
+    /// walk is the fork child's RX_ACTIVE pass (execute_cmd.c:2620
+    /// execute_pipeline) even when the element is a compound or a
+    /// builtin — no saves exist there, so an element's `{var}`
+    /// allocation counts none (`{ g; } 9>f {v}>&9 | cat` binds
+    /// v=10 in GNU, not 11; the same group outside a pipeline
+    /// binds 11).
+    pub(in crate::executor) fn fd_var_walk_undoable(&mut self, cmd: &CommandNode) -> bool {
+        self.redirect_walk_is_undoable(cmd) && cmd.pipe.is_none() && cmd.pipeline_command.is_none()
     }
 
     /// True when the command carrying a failing heredoc would dispatch to

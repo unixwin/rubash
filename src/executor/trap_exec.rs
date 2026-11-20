@@ -6382,7 +6382,23 @@ impl Executor {
             && self.compound_redirect_scope_depth == 0;
         let prev = std::mem::replace(&mut self.fd_table.kernel_place_persistent, arm);
         let prev_close = std::mem::replace(&mut self.fd_table.kernel_close_persistent, arm);
-        let result = self.execute_stdio_only_exec_redirect_inner(cmd);
+        // rubash#3991: the saves the walk materializes (see the
+        // inner walk) are disposed when the list stands, on every
+        // exit path — GNU's exec undo list is disposed once the
+        // exec's redirections stand (execute_cmd.c:5619), so a
+        // save slot is not a descriptor the shell keeps.
+        let mut inserted_saves: Vec<(u32, super::fd_table::FdEntry)> = Vec::new();
+        let result = self.execute_stdio_only_exec_redirect_inner(cmd, &mut inserted_saves);
+        for (slot, entry) in &inserted_saves {
+            let untouched = self.fd_table.entries.get(slot).is_some_and(|current| {
+                current.closed == entry.closed
+                    && current.read == entry.read
+                    && current.write == entry.write
+            });
+            if untouched {
+                self.fd_table.entries.remove(slot);
+            }
+        }
         self.fd_table.kernel_place_persistent = prev;
         self.fd_table.kernel_close_persistent = prev_close;
         result
@@ -6391,6 +6407,7 @@ impl Executor {
     fn execute_stdio_only_exec_redirect_inner(
         &mut self,
         cmd: &CommandNode,
+        inserted_saves: &mut Vec<(u32, super::fd_table::FdEntry)>,
     ) -> Result<Option<i32>, ExecuteError> {
         // GNU redir.c: `exec` with only redirections applies every
         // redirection left to right (do_redirection_internal over the whole
@@ -6406,6 +6423,12 @@ impl Executor {
         // bound so far — a {var} allocation counts them as occupied
         // (see apply_dynamic_fd_var_redirects).
         let mut occupied_slots: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        // rubash#3991: the descriptor space this walk evolves, in
+        // the shared walk currency (see FdWalkSpace) — this walk
+        // binds straight into the persistent table, so the space
+        // only tracks the walk's own record for the undo-save
+        // computation below.
+        let mut walk_space = FdWalkSpace::new();
         // A compound command's redirect injected into cmd.redirects (see
         // GROUP_REDIRECT_INJECTED_MARK) is the ambient fd state GNU applies
         // before exec runs — it participates in `>&N` resolution but must
@@ -6460,6 +6483,36 @@ impl Executor {
             // fd 3, the application opened fd 4, the placement
             // dup2'd 4 onto 3, and the probe FileFd's Drop closed 3.
             drop(self.take_pending_preopened(position, &target));
+            // rubash#3991: GNU's exec walk is undoable while the
+            // list applies (execute_cmd.c:5619), so an entry's undo
+            // save is a real descriptor a later entry of THIS list
+            // can dup from (`exec 9>o1.txt 1>&10` copies the save
+            // of fd 9 at slot 10 into fd 1). Materialize the saves
+            // this entry earns into the table before it binds — a
+            // dup of the source's current table entry, taken at
+            // this position. The wrapper disposes them when the
+            // list stands; they are table-level clones, never
+            // kernel-placed, so the placement commit and the
+            // scoped table restore are unaffected.
+            if redirect.fd_var.is_none() {
+                for (slot, source) in
+                    self.fd_walk_register_saves(&mut walk_space, redirect, &occupied_slots)
+                {
+                    occupied_slots.insert(slot);
+                    let occupied_now = self.fd_table.entries.get(&slot).is_some_and(|current| {
+                        !current.closed && (current.read.is_some() || current.write.is_some())
+                    });
+                    if !occupied_now {
+                        if let Some(entry) = self.fd_table.saved_entry(source)? {
+                            if !entry.closed && (entry.read.is_some() || entry.write.is_some()) {
+                                self.fd_table.entries.insert(slot, entry.clone());
+                                inserted_saves.push((slot, entry));
+                            }
+                        }
+                    }
+                }
+                self.fd_walk_record_fixed_entry(&mut walk_space, redirect);
+            }
             // Mark the redirect as handled before dispatching: every arm
             // below ends in a `continue`, which would otherwise bypass a
             // bottom-of-loop flag and make `exec >&file` fall through to
@@ -6565,21 +6618,15 @@ impl Executor {
                 }
                 continue;
             }
-            // rubash#2615: GNU registers this fixed entry's undo save
-            // before performing it even for `exec` — exec_builtin's
-            // list carries a redirection_undo_list (execute_cmd.c:5619)
-            // whose saves are live for the walk's duration and only
-            // disposed once the whole list stands, so a later `{var}`
-            // allocation in THIS list counts them (see
-            // fd_walk_undo_save_slots). This walk's table IS the
-            // evolved descriptor space, so the walk overlay is empty;
-            // occupied_slots is walk-local, so the saves leave no
-            // trace for later commands, matching the dispose.
-            for (slot, _source) in
-                self.fd_walk_undo_save_slots(&FdWalkSpace::new(), redirect, &occupied_slots)
-            {
-                occupied_slots.insert(slot);
-            }
+            // rubash#2615/#3991: this entry's undo save was claimed
+            // and materialized at the top of this iteration (see
+            // fd_walk_register_saves there): exec_builtin's list
+            // carries a redirection_undo_list (execute_cmd.c:5619)
+            // whose saves are live for the walk's duration — a
+            // later entry can dup from a save slot and a later
+            // `{var}` allocation counts the slots through
+            // occupied_slots — and the wrapper disposes them once
+            // the whole list stands.
             // rubash#2635: an explicit redirector at/above the
             // RLIMIT_NOFILE soft limit fails at THIS list position —
             // GNU's redir_open runs first (the target file is
@@ -8379,7 +8426,7 @@ impl Executor {
     /// recorded is exactly the binding a `{var}` entry of the same
     /// kind and target would have produced at this position.
     pub(in crate::executor) fn fd_walk_record_fixed_entry(
-        &mut self,
+        &self,
         walk: &mut FdWalkSpace,
         redirect: &Redirect,
     ) {
@@ -8627,6 +8674,77 @@ impl Executor {
             crate::parser::RedirectKind::Unknown => {}
         }
         saves
+    }
+
+    /// rubash#3991: register one fixed entry's undo saves into the
+    /// walk space itself, at the entry's position — GNU's saves are
+    /// real descriptors in the walk's one descriptor space
+    /// (add_undo_redirect, redir.c:1296), so a later entry of the
+    /// same list can dup FROM a save slot (`echo W10 9>o1.txt
+    /// 1>&10` after `exec 9>seed.txt` copies the save of fd 9 at
+    /// slot 10 into fd 1). Before this registration the saves were
+    /// computed (fd_walk_undo_save_slots) only as an occupied-slot
+    /// set for `{var}` allocation, and no walk could resolve a
+    /// descriptor at a save slot, so such a dup failed EBADF. The
+    /// binding recorded at a save slot is the binding the save
+    /// copies — the source's own at-position binding, resolved
+    /// before the entry itself is recorded — in the walk space's
+    /// own currency, exactly like a plain dup entry's record
+    /// (fd_walk_record_fixed_entry). Returns the claimed
+    /// (slot, source) pairs so callers keeping an occupancy ledger
+    /// can fold the slots in.
+    pub(in crate::executor) fn fd_walk_register_saves(
+        &self,
+        walk: &mut FdWalkSpace,
+        redirect: &Redirect,
+        occupied_slots: &std::collections::HashSet<u32>,
+    ) -> Vec<(u32, u32)> {
+        let saves = self.fd_walk_undo_save_slots(walk, redirect, occupied_slots);
+        for (slot, source) in &saves {
+            let binding = self.fd_walk_resolve(walk, *source);
+            walk.insert(*slot, binding);
+        }
+        saves
+    }
+
+    /// rubash#3991: whether `fd` names a live descriptor recorded
+    /// in `cmd`'s walk at list position `before` — in particular an
+    /// undo save earned by an entry before that position (see
+    /// fd_walk_register_saves), which the fd table alone cannot
+    /// see. Mirrors the walk over the prefix in the shared space;
+    /// a slot the list itself rebound or closed after the save
+    /// resolves to that later record, exactly like a plain
+    /// descriptor. Undoable walks only: a subshell head or a
+    /// pipeline element is the fork child's RX_ACTIVE pass and
+    /// earns no saves.
+    pub(in crate::executor) fn in_list_save_open(
+        &self,
+        cmd: &CommandNode,
+        before: usize,
+        fd: u32,
+    ) -> bool {
+        if cmd.subshell_command.is_some() || cmd.pipe.is_some() || cmd.pipeline_command.is_some() {
+            return false;
+        }
+        let mut walk = FdWalkSpace::new();
+        let mut occupied_slots: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        for redirect in cmd.redirects.iter().take(before) {
+            if let Some(entry_fd) = redirect.fd {
+                occupied_slots.insert(entry_fd);
+            }
+            if redirect.fd_var.is_none() {
+                for (slot, _source) in
+                    self.fd_walk_register_saves(&mut walk, redirect, &occupied_slots)
+                {
+                    occupied_slots.insert(slot);
+                }
+                self.fd_walk_record_fixed_entry(&mut walk, redirect);
+            }
+        }
+        matches!(
+            walk.get(&fd),
+            Some(FdWalkBinding::TableSlot(_) | FdWalkBinding::File(_))
+        )
     }
 
     /// True when a non-`{var}` redirect entry at the current walk position
@@ -8982,8 +9100,11 @@ impl Executor {
                 // fd_walk_undo_save_slots); the save occupies its
                 // slot for the rest of the walk, so fold it into the
                 // running occupied set before recording the entry.
-                // The saves exist only in an UNDOABLE walk: redir.c's
-                // undo machinery is gated on RX_UNDOABLE (redir.c:243),
+                // rubash#3991: the save is also registered INTO the
+                // walk space (fd_walk_register_saves), so a later
+                // entry can dup from the save slot itself. The saves
+                // exist only in an UNDOABLE walk: redir.c's undo
+                // machinery is gated on RX_UNDOABLE (redir.c:243),
                 // and the fork-child walks (execute_disk_command,
                 // execute_cmd.c:5522; the subshell list,
                 // execute_cmd.c:1761) run RX_ACTIVE only, so a `{var}`
@@ -8991,7 +9112,7 @@ impl Executor {
                 // passes the walk's mode in `undoable_walk`.
                 if undoable_walk {
                     for (slot, _source) in
-                        self.fd_walk_undo_save_slots(&walk_space, redirect, &occupied_slots)
+                        self.fd_walk_register_saves(&mut walk_space, redirect, &occupied_slots)
                     {
                         occupied_slots.insert(slot);
                     }
@@ -9492,6 +9613,7 @@ impl Executor {
                     position,
                     &mut saved,
                     super::command_input_scope::MoveSourceSave::RestoreAlways,
+                    &[],
                 )?;
                 executor.open_compound_output_redirects_in(
                     cmd,
@@ -9499,6 +9621,7 @@ impl Executor {
                     position,
                     &mut saved_outputs,
                     super::command_input_scope::MoveSourceSave::RestoreAlways,
+                    &[],
                 )?;
                 executor.apply_script_fd_var_entry(
                     cmd,
@@ -9517,6 +9640,7 @@ impl Executor {
                 cmd.redirects.len(),
                 &mut saved,
                 super::command_input_scope::MoveSourceSave::RestoreAlways,
+                &[],
             )?;
             executor.open_compound_output_redirects_in(
                 cmd,
@@ -9524,6 +9648,7 @@ impl Executor {
                 cmd.redirects.len(),
                 &mut saved_outputs,
                 super::command_input_scope::MoveSourceSave::RestoreAlways,
+                &[],
             )?;
             Ok(())
         };

@@ -1024,6 +1024,23 @@ pub struct Executor {
     /// the issue3403 census regressions). Consulted by the
     /// placement arming guard in execute_stdio_only_exec_redirect.
     compound_redirect_scope_depth: usize,
+    /// rubash#3991: the undo-save slots the numbered-input binder
+    /// just materialized into the fd table for the current compound
+    /// list, keyed by the list's identity (redirects buffer
+    /// address + length): (address, length, saves by entry index).
+    /// A compound list is bound by two binder passes (numbered
+    /// inputs, outputs) whose order varies by face — a function
+    /// call binds its outputs through a separate wrapper from its
+    /// inputs — and GNU's ONE walk claims each undo save exactly
+    /// once, against the pre-list descriptor space. Whichever
+    /// binder runs first claims the saves against the pre-list
+    /// table, materializes them, and records them here; the
+    /// sibling binder, recognizing the same list, claims nothing
+    /// (a second claim would be computed against a table already
+    /// holding the first binder's saves and land on a different
+    /// slot). Both binder restores clear the field. None outside
+    /// that bracket.
+    compound_binder_saves: Option<(usize, usize, Vec<(usize, u32, u32)>)>,
     /// GNU `command -p` (builtins/command.def CDESC_STDPATH): the
     /// standard path for the re-dispatched command's OWN lookup only.
     /// Set for the duration of the re-dispatch and consulted by the
