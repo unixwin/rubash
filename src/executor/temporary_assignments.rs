@@ -1455,6 +1455,12 @@ impl Executor {
             let (base, append) = assignment_name_and_append(name);
             if matches!(base, "BASH_ALIASES" | "BASH_CMDS")
                 && !is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, base)
+                // A compound value reaches this door still wearing its
+                // COMPOUND_ASSIGNMENT_MARKER (the inner door strips it
+                // before routing), so a `(`-led test alone lets the
+                // marker-led compound slip into this scalar arm and bind
+                // the raw marked text as element [0] (rubash#3211).
+                && !value.starts_with(crate::executor::markers::COMPOUND_ASSIGNMENT_MARKER)
                 && !value.trim_start().starts_with('(')
             {
                 // ASS_APPEND rebuilds the bound string from the old
