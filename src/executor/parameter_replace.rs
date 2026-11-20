@@ -258,19 +258,23 @@ fn pattern_pair_gates_clean(pattern: &str, value: &str) -> bool {
 }
 
 fn normalize_parameter_pattern_backslashes(pattern: &str) -> String {
-    // The three passes rewrite the internal backslash markers only; a
-    // pattern carrying none of them is already normalized, so skip the
-    // three allocating replace passes (rubash#608).
+    // The passes rewrite the internal backslash markers only; a pattern
+    // carrying none of them is already normalized, so skip the allocating
+    // replace passes (rubash#608).
     if !pattern.contains(crate::executor::markers::DATA_BACKSLASH)
         && !pattern.contains(crate::executor::markers::PATTERN_LITERAL_BACKSLASH)
     {
         return pattern.to_string();
     }
+    // Each marker denotes ONE literal backslash: the pattern decoder
+    // already consumed the source-level escape pair (`\\` in the source
+    // becomes a single marker), so the conversion to real backslash text
+    // for the plain-string search is strictly one-for-one. Two adjacent
+    // markers are two literal backslashes (source `\\\\`), NOT an escape
+    // pair — collapsing them halved the pattern, so `${x//\\\\/@}` on
+    // `a\\b\c` replaced every single backslash instead of each pair
+    // (rubash#3963; GNU pat_subst matches the pair).
     pattern
-        .replace(
-            &crate::executor::markers::PATTERN_LITERAL_BACKSLASH_STR.repeat(2),
-            "\\",
-        )
         .replace(crate::executor::markers::DATA_BACKSLASH, "\\")
         .replace(crate::executor::markers::PATTERN_LITERAL_BACKSLASH, "\\")
 }
@@ -1252,6 +1256,33 @@ mod tests {
         assert_eq!(
             normalize_parameter_pattern_backslashes(&literal_marked),
             "a\\b"
+        );
+    }
+
+    #[test]
+    fn issue_3963_literal_backslash_markers_convert_one_for_one() {
+        // rubash#3963: each literal-backslash marker is ONE literal
+        // backslash (the decoder already consumed the source `\\`
+        // pair), so two markers normalize to two real backslashes and
+        // the literal search matches a backslash PAIR in the value,
+        // exactly like GNU pat_subst. Byte-compared against GNU
+        // bash 5.3.20 (script-file mode): `x='a\\b\c'`,
+        // `${x//\\\\/@}` is `a@b\c`, not `a@@b@c`.
+        let pair = crate::executor::markers::PATTERN_LITERAL_BACKSLASH_STR.repeat(2);
+        assert_eq!(normalize_parameter_pattern_backslashes(&pair), "\\\\");
+        assert_eq!(
+            replace_parameter_pattern("a\\\\b\\c", &pair, "@", true, false, false, false),
+            "a@b\\c"
+        );
+        assert_eq!(
+            replace_parameter_pattern("a\\\\b\\c", &pair, "@", false, false, false, false),
+            "a@b\\c"
+        );
+        // A value with three backslashes: the pair matches once and the
+        // scan resumes past it, leaving the third backslash.
+        assert_eq!(
+            replace_parameter_pattern("a\\\\\\b", &pair, "@", true, false, false, false),
+            "a@\\b"
         );
     }
 
