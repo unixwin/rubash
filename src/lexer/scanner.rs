@@ -1720,7 +1720,18 @@ impl<'a> Lexer<'a> {
                         return (false, HeredocOpEntry::Absent);
                     }
                 }
-                '<' if char_at(scan_start + index + 1) == Some('<')
+                // GNU read_token tokenizes a `<` run greedily at its
+                // FIRST `<`: `<<` is the heredoc operator, `<<<` the
+                // here-string, and a longer run leaves a stray operator
+                // that errors — a `<` in the middle of a run never
+                // starts an operator. Testing every position instead
+                // let the second `<` of `<<<` pose as `<<`, reporting a
+                // phantom heredoc inside e.g. `{ x=$(cat <<<foo); }`
+                // and refusing the fold for a group with no heredoc at
+                // all (rubash#3967). Only a run-start `<` (previous
+                // char is not `<`) can open the operator.
+                '<' if (index == 0 || char_at(scan_start + index - 1) != Some('<'))
+                    && char_at(scan_start + index + 1) == Some('<')
                     && char_at(scan_start + index + 2) != Some('<') =>
                 {
                     return (true, HeredocOpEntry::Found);
