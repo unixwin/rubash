@@ -5138,8 +5138,9 @@ impl Executor {
 
     /// One fd's spawn binding resolved from the fd table (see
     /// ExecSpawnBinding): a File endpoint materializes as a dup of
-    /// its handle, a closed entry as Closed, anything else stays
-    /// Ambient.
+    /// its handle, a FullDevice endpoint as the opened device where
+    /// the platform has one, a closed entry as Closed, anything
+    /// else stays Ambient.
     fn exec_spawn_table_binding(&self, fd: u32) -> ExecSpawnBinding {
         match self.fd_table.write_endpoint(fd) {
             Some(FdWriteEndpoint::File(file_fd)) => {
@@ -5149,6 +5150,28 @@ impl Executor {
                         Some(file_fd.path.to_string_lossy().into_owned()),
                     ),
                     Err(_) => ExecSpawnBinding::Ambient(fd),
+                }
+            }
+            // rubash#3985: a /dev/full table binding materializes as
+            // the opened device (the #2550 full_device_stdio_slot
+            // precedent in the external planner): GNU's image
+            // inherits the descriptor do_redirections bound
+            // (redir.c:237), so the exec'd child's own write fails
+            // ENOSPC. Ambient here would hand the child the
+            // process's own descriptor at this number — an unrelated
+            // transient — and the payload leaked there with status
+            // 0. Where no device backs the spelling the binding
+            // stays Ambient, as before.
+            Some(FdWriteEndpoint::FullDevice) => {
+                match crate::executor::external_redirects::open_spawn_full_device(
+                    "/dev/full",
+                    false,
+                ) {
+                    Some(file) => ExecSpawnBinding::File(
+                        std::rc::Rc::new(file),
+                        Some("/dev/full".to_string()),
+                    ),
+                    None => ExecSpawnBinding::Ambient(fd),
                 }
             }
             _ if self.fd_table.has_entry(fd) && !self.fd_table.is_open_for_write(fd) => {

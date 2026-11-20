@@ -255,10 +255,11 @@ impl Executor {
             SpecialPathClass::NetRedirect => return self.open_net_redirect_raw(target),
             // rubash#1898: the devices — <> on /dev/zero reads zeros
             // and discards writes; <> on /dev/full reads zeros (the
-            // probe's File is dropped by every caller; the sink
-            // stand-in carries the write side of the bind contract).
+            // probe's File is dropped by every caller).
             SpecialPathClass::ZeroDevice => return Self::zero_device_file(&target),
-            SpecialPathClass::FullDevice => return Self::synthetic_proc_write_sink(false),
+            // rubash#3985: the probe open is the device itself
+            // (O_RDWR, r_input_output) where the platform has it.
+            SpecialPathClass::FullDevice => return Self::full_device_open(false, true),
             // niubash#758: <> on an entropy device reads the CSPRNG
             // stream and discards writes (the probe's File is dropped
             // by every caller, exactly like the zero arm above).
@@ -691,6 +692,40 @@ impl Executor {
             let _ = std::fs::remove_file(&path);
         }
         Ok(file)
+    }
+
+    /// rubash#3985: one open of the /dev/full device itself, for
+    /// the create / append / readwrite-probe contracts that used
+    /// to take the temp-file sink on every platform. GNU redir_open
+    /// (redir.c:725) consults only its special-filename list
+    /// (/dev/fd, /dev/std*, /dev/tcp|udp) and opens anything else
+    /// — /dev/full included — with a plain open(2): the open
+    /// succeeds and only the write fails, ENOSPC, in whoever holds
+    /// the descriptor. Where the platform has the kernel device
+    /// (unix), open it: the File IS the device, no temp file rides
+    /// the contract, and a temp dir that rejects creates cannot
+    /// refuse the redirect at binding time with the sink's raw
+    /// EACCES. Only where no device backs the spelling (the
+    /// Windows simulation) does the #1898 sink stand in, as
+    /// before.
+    pub(in crate::executor) fn full_device_open(append: bool, read: bool) -> io::Result<File> {
+        #[cfg(unix)]
+        {
+            let mut options = OpenOptions::new();
+            options.write(true);
+            if read {
+                options.read(true);
+            }
+            if append {
+                options.append(true);
+            }
+            options.open("/dev/full")
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = read;
+            Self::synthetic_proc_write_sink(append)
+        }
     }
 
     /// rubash#1898: a readable File that yields an unbounded stream
@@ -2504,12 +2539,14 @@ impl Executor {
         // rubash#1898: /dev/full ACCEPTS the open — GNU fails only
         // the write (ENOSPC). The direct builtin faces route their
         // flush through OutputTarget::FullDevice, which owns the
-        // write-error shape; the File returned here is the stand-in
-        // for the probe/bind/external contracts that need the open
-        // itself to succeed (their writes are absorbed — the
-        // documented residual of those faces).
+        // write-error shape; the File returned here serves the
+        // probe/bind/external contracts that need the open itself
+        // to succeed. rubash#3985: where the platform has the
+        // device, that File IS the device (full_device_open) and
+        // its writes fail ENOSPC like GNU's; the absorbed-writes
+        // sink remains only where no device backs the spelling.
         if crate::special_paths::is_full_device(target) {
-            return Self::synthetic_proc_write_sink(false);
+            return Self::full_device_open(false, false);
         }
         // rubash#1935: synthetic /proc content has no filesystem file
         // behind the mapped path — without this step `> /proc/...`
@@ -2920,11 +2957,14 @@ impl Executor {
             }
             FdWriteEndpoint::FullDevice => {
                 // rubash#1898: an append-dup of a /dev/full binding —
-                // GNU's open succeeds and its writes fail ENOSPC; no
-                // handle reproduces that, so the append lands on the
-                // absorbed sink (a deep edge; the bound write faces
-                // themselves carry the exact ENOSPC shape).
-                return Self::synthetic_proc_write_sink(true);
+                // GNU's open succeeds and its writes fail ENOSPC.
+                // rubash#3985: where the platform has the device, a
+                // fresh append open of it reproduces that exactly
+                // (the device keeps no offset or state); the
+                // absorbed sink remains only where no device backs
+                // the spelling (the bound write faces themselves
+                // carry the exact ENOSPC shape there).
+                return Self::full_device_open(true, false);
             }
             FdWriteEndpoint::ProcContentWrite => {
                 // rubash#2042: an append-dup of a 0644-class synthetic
@@ -2999,8 +3039,9 @@ impl Executor {
                     ))
             }
             // rubash#1898: /dev/zero appends discard like the null
-            // device; /dev/full appends take the sink stand-in (the
-            // open succeeds — GNU fails only the write; the direct
+            // device; /dev/full appends open the device itself
+            // where the platform has it (rubash#3985 — the open
+            // succeeds, GNU fails only the write; the direct
             // builtin faces own that shape via OutputTarget).
             SpecialPathClass::ZeroDevice => {
                 OpenOptions::new()
@@ -3022,7 +3063,7 @@ impl Executor {
                         &self.shell_state.env_vars,
                     ))
             }
-            SpecialPathClass::FullDevice => Self::synthetic_proc_write_sink(true),
+            SpecialPathClass::FullDevice => Self::full_device_open(true, false),
             SpecialPathClass::FdAlias(fd) => {
                 if !super::redirection::dup_source_fd_open(
                     &self.fd_table,
