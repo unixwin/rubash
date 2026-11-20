@@ -9185,12 +9185,27 @@ impl Executor {
         // produced — exactly the descriptors it bound, in order —
         // with the fd-table entries still standing for them.
         if !redirect_failed {
+            // rubash#2613: record the binds with their kernel-backed
+            // endpoints DUPLICATED (the saved_entry form, rubash#3706),
+            // not as plain Rc clones. A helper walk brackets its
+            // judgement with apply -> undo, and the undo retires the
+            // applier's own FileFd and closes its kernel handle
+            // (retire_file); a snapshot holding that same Rc then
+            // replays a descriptor whose handle is already closed,
+            // and the routing walk's flush writes to it and fails
+            // EBADF. The duplicate is an independent descriptor of
+            // the same open file description (shared offset), so a
+            // bracket undo cannot retire it, and the replay's own
+            // undo retires it exactly once. A bind whose endpoints
+            // cannot be duplicated keeps its plain entry, matching
+            // saved_table's per-slot fallback.
             let binds: Vec<(String, u32, super::fd_table::FdEntry)> = self
                 .fd_var_external_undo
                 .iter()
                 .filter_map(|(name, _prior, _prior_typed, bound_fd)| {
                     let fd = (*bound_fd)?;
-                    let entry = self.fd_table.entries.get(&fd)?.clone();
+                    let entry = self.fd_table.entries.get(&fd)?;
+                    let entry = entry.dup_file_endpoints().unwrap_or_else(|_| entry.clone());
                     Some((name.clone(), fd, entry))
                 })
                 .collect();
