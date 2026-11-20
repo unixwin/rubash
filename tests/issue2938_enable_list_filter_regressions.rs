@@ -8,10 +8,10 @@
 //! lists every builtin.
 //!
 //! Expectations cross-checked against GNU bash 5.3.20 (E1 differential,
-//! 532 cells, master `854eed80`). The listing also differs from GNU by
-//! the single deliberate `enable env` row (rubash has an `env` builtin;
-//! user-ruled deliberate deviation) — these pins assert the listing is
-//! present and complete modulo that one row, never byte-equality.
+//! 532 cells, master `854eed80`). The listing now matches GNU exactly
+//! (61 names; rubash#3951 removed the `env` extension row that used to
+//! add a 62nd) — these pins assert the listing is present and complete,
+//! never byte-equality.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -43,14 +43,10 @@ fn run_script(body: &str) -> Run {
     }
 }
 
-/// The listing, minus the one deliberate `enable env` row: every other
-/// line must be `enable <name>` for an enabled builtin or
-/// `enable -n <name>` for a disabled one.
+/// The listing: every line must be `enable <name>` for an enabled
+/// builtin or `enable -n <name>` for a disabled one.
 fn listing_lines(run: &Run) -> Vec<&str> {
-    run.stdout
-        .lines()
-        .filter(|line| *line != "enable env")
-        .collect()
+    run.stdout.lines().collect()
 }
 
 #[test]

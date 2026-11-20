@@ -27,8 +27,9 @@
 //! - `tput`'s Windows-only claim resolves to its applet file;
 //! - no face ever prints the retired `emulation` type word;
 //! - the unified builtin projection reaches the product faces:
-//!   `compgen -b` and `enable -a` both list `env` (KD-1), and
-//!   `help env` has a topic (env was the one builtin without one).
+//!   `compgen -b` and `enable -a` both list GNU's 61 names
+//!   (rubash#3951: `env` is no longer a builtin), and
+//!   `help env` keeps its topic (user-ruled intentional deviation).
 
 #![cfg(windows)]
 
@@ -130,16 +131,20 @@ fn issue2036_s2_windows_builtin_projection_faces() {
     let lines: Vec<&str> = out.stdout.lines().collect();
     let sep = lines.iter().position(|l| *l == "---").expect("separator");
     let compgen_names = &lines[..sep];
-    assert_eq!(compgen_names.len(), 62, "{:?}", compgen_names);
-    assert!(compgen_names.contains(&"env"), "{:?}", compgen_names);
+    assert_eq!(compgen_names.len(), 61, "{:?}", compgen_names);
+    assert!(
+        !compgen_names.contains(&"env"),
+        "env is not a builtin (rubash#3951): {:?}",
+        compgen_names
+    );
     assert!(
         out.stdout
             .contains("Run a command in a modified environment"),
         "{}",
         out.stdout
     );
-    // enable -a lists the same 62; enable -s lists the 16 specials.
+    // enable -a lists the same 61; enable -s lists the 16 specials.
     let counts: Vec<&str> = lines[sep + 1..sep + 3].to_vec();
-    assert_eq!(counts[0].trim(), "62", "{}", out.stdout);
+    assert_eq!(counts[0].trim(), "61", "{}", out.stdout);
     assert_eq!(counts[1].trim(), "16", "{}", out.stdout);
 }

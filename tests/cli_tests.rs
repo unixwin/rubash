@@ -131,11 +131,28 @@ fn backtick_assignment_preserves_c0_bytes() {
 
 #[test]
 fn scalar_assignment_preserves_bytes_across_local_subshell_and_export() {
+    // rubash#3951: `env` is no longer a builtin, so in a pipeline the
+    // name resolves to the external program, whose output re-encodes
+    // the raw byte (0xff came back as 0xc3 0xbf) — the old
+    // `env | grep '^x='` channel can no longer witness the export.
+    // The in-process simple-command face still prints the composed
+    // environment with raw bytes intact, so observe through it:
+    // redirect its print to a file and filter with builtins
+    // (read/case/printf carry raw bytes through the marker layer).
+    // The byte assertion below is unchanged.
+    let dump = std::env::temp_dir().join(format!(
+        "rubash-cli-scalar-export-{}.txt",
+        std::process::id()
+    ));
+    let dump = shell_test_path(&dump);
     let output = rubash_command()
         .arg("-c")
-        .arg(r#"x=$(printf '\377'); y=$(printf '\035'); foo() { local x=$(printf '\377'); printf '%s' "$x"; }; foo; (x=$(printf '\377'); printf '%s' "$x"); x=$(printf '\377'); export x; env | grep '^x='"#)
+        .arg(format!(
+            r#"x=$(printf '\377'); y=$(printf '\035'); foo() {{ local x=$(printf '\377'); printf '%s' "$x"; }}; foo; (x=$(printf '\377'); printf '%s' "$x"); x=$(printf '\377'); export x; env > {dump}; while IFS= read -r l; do case $l in x=*) printf '%s\n' "$l";; esac; done < {dump}"#
+        ))
         .output()
         .expect("run scalar assignment scope probe");
+    let _ = fs::remove_file(&dump);
 
     assert!(output.status.success());
     assert_eq!(output.stdout, [0xff, 0xff, b'x', b'=', 0xff, b'\n']);

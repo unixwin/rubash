@@ -31,18 +31,19 @@ rubash 对一个命令词按优先级做三层处理：
    Windows 上 describe 严格按 GNU `describe_command`
    （builtins/type.def:211）作答——可解析即报告 PATH 文件本身
    （`command -v` 给全路径、`type -t` 给 `file`），不可解析即未找到，
-   与执行面是否接管无关。**#2642（2026-11-12）**：`env` 这一唯一的
-   扩展 builtin 同样适用——非 Windows 上 `type env` / `command -v env`
-   报告 PATH 文件；执行面与 `enable` / `compgen -b` 仍走统一投影。
+   与执行面是否接管无关。**#2642（2026-11-12）**：`env` 当时作为唯一
+   的扩展 builtin 同样适用——非 Windows 上 `type env` / `command -v env`
+   报告 PATH 文件。**#3951（2026-11-19）**：`env` 的扩展 builtin 注册
+   已摘除（见第三节），`env` 不再是 builtin；describe 面在所有平台上
+   均按 GNU 报告 PATH 文件。
 3. **外部命令**：沿 PATH 查找，由 winuxcmd 提供。
 
-## 二、真 builtin 清单（62 项）
+## 二、真 builtin 清单（61 项）
 
-GNU Bash 5.3 的 61 个 builtin **全部覆盖，无缺失**；唯一加粗的扩展是 `env`
-（rubash#759 item 4 起不再携带 zsh 兼容别名）。`env` 的 describe 面例外：
-非 Windows 上 `type env` / `command -v env` 按 GNU 报告 PATH 文件（#2642），
-仅 Windows 产品面报告为 builtin。另有 Windows 专属 `sudo`
-作为**隐藏 host builtin** 不计入 62（见第三节说明）。
+GNU Bash 5.3 的 61 个 builtin **全部覆盖，无缺失、无扩展**（rubash#759
+item 4 起不再携带 zsh 兼容别名；rubash#3951 起 `env` 不再是扩展 builtin，
+见第三节）。另有 Windows 专属 `sudo`
+作为**隐藏 host builtin** 不计入 61（见第三节说明）。
 
 <!-- builtins-list
 .
@@ -65,7 +66,6 @@ dirs
 disown
 echo
 enable
-env
 eval
 exec
 exit
@@ -112,7 +112,6 @@ wait
 | 类别 | 命令 |
 |---|---|
 | Bash 61 个 builtin（全部对齐） | `.` `:` `[` `alias` `bg` `bind` `break` `builtin` `caller` `cd` `command` `compgen` `complete` `compopt` `continue` `declare` `dirs` `disown` `echo` `enable` `eval` `exec` `exit` `export` `false` `fc` `fg` `getopts` `hash` `help` `history` `jobs` `kill` `let` `local` `logout` `mapfile` `popd` `printf` `pushd` `pwd` `read` `readarray` `readonly` `return` `set` `shift` `shopt` `source` `suspend` `test` `times` `trap` `true` `type` `typeset` `ulimit` `umask` `unalias` `unset` `wait` |
-| **扩展：进程内 env** | `env`（`executor/external_inner.rs`，按 coreutils 语义实现：排序输出、`-0` 等；bash 中为外部命令） |
 | Windows 专属（隐藏 host builtin） | `sudo`（不在白名单内；introspection 报告外部命令，仅当嵌入宿主注册了 elevation handler 时才在执行层拦截） |
 
 说明：
@@ -149,11 +148,18 @@ stty
 | `arch` | `builtins/uname.rs`（`uname -m` 语义） | 无 | 同上 |
 | `stty` | `builtins/stty.rs`（`execute_console_mode_tool`） | `execute_external`（stand-down 时） | 控制台模式工具，与 uname/arch 同族（#154）；stand_down=Replace 为已裁保持——用户 2026-10-29 确认 stty 暂用内建、不翻 Yield，评估格就此关闭，有实测问题再重评 |
 
-`env` 是唯一的混合形态：它在白名单内（属第二节真 builtin，Windows 上
-`type env` 报告为 builtin；非 Windows 上 describe 按 GNU 报告 PATH 文件，
-#2642），但实现是进程内执行 coreutils 语义、**没有外部回退路径**。它不进
-本清单，因为白名单归属与 fast-path 判定互斥，文档同步测试会拒绝两边都出现
-的名字。
+`env` 不再是 builtin（rubash#3951）：GNU bash 没有 `env` 内建（bash 5.3
+无 `builtins/env.def`，`env` 是 coreutils 程序），rubash 的扩展 builtin
+注册使 `compgen -A builtin` / `-A enabled`、`enable -n`、`builtin env`、
+`hash -t` 全部与 GNU 矛盾，故整行注册已摘除。`env` 现为**进程内模拟的外
+部命令**（注册表 `EmulatedExternal` 行，`executor/external_inner.rs` 的
+`execute_env_command`，按 coreutils 语义实现：排序输出、`-0` 等；裸名仍
+由进程内模拟作答——没有外部回退路径，这是 Windows 上没有 `/usr/bin/env`
+时的唯一 `env`）；describe 面（`type`、`command -v`）在所有平台上均按
+GNU 报告 PATH 文件（#2642 口径现为通则）。它不进上面的 fast-path 清单，
+因为 fast-path 判定是“简单形态进程内执行、复杂形态回退外部”，而 `env`
+没有外部回退形态；也不进第二节的真 builtin 清单。`help env` 的主题仍
+保留——用户裁定 `help` 多出的 `env` 条目为故意偏差，不立案。
 
 另有两类仅用于测试兼容的复刻 builtin（bash 官方测试套件 `tests/builtins/` 自带
 同名辅助 builtin，正式发行版不包含）：`recho`、`zecho`（late dispatch）。
@@ -249,11 +255,13 @@ tr
 
 winuxcmd（176 个外部命令）与 rubash 内置/保留字重叠的命令共 13 个：
 
-`echo` `env` `kill` `printf` `pwd` `test` `[` `true` `false`（真 builtin）、
+`echo` `kill` `printf` `pwd` `test` `[` `true` `false`（真 builtin）、
+`env`（进程内模拟的外部命令，见第三节）、
 `sleep` `dirname` `basename`（fast-path）、`time`（保留字 ↔ winuxcmd `time`）。
 
-重叠遵循 bash 语义：脚本内调用被 builtin/保留字遮蔽；`command env`、
-`/usr/bin/env` 等显式形式仍走 winuxcmd 外部版本。2026-09-08 已对重叠命令的
+重叠遵循 bash 语义：脚本内调用被 builtin/保留字遮蔽（`env` 的裸名仍由
+进程内模拟作答，见第三节）；`command env`、`/usr/bin/env` 等显式形式仍走
+winuxcmd 外部版本。2026-09-08 已对重叠命令的
 行为（选项、转义、格式化、信号、jobspec、TIMEFORMAT）完成逐项比对，结论：
 对齐。详细判定见工作区审计报告。
 
@@ -291,7 +299,9 @@ winuxcmd（176 个外部命令）与 rubash 内置/保留字重叠的命令共 1
 stage 入口；是**基于名字而非 PATH 顺序**的判定，PATH 前置 system32 也无法
 绕过。2026-09 期审计确认：Windows PATH 上与 builtin 同名真 .exe 共 11 个
 （fc/echo/printf/true/false/test/[/env/pwd/kill/help，含 system32 的
-fc.exe/help.exe），全部经 `$(...)` 实测走 builtin；回归覆盖
+fc.exe/help.exe），其中 10 个经 `$(...)` 实测走 builtin；`env` 自 #3951
+起不再是 builtin，`$(env)` 按外部命令解析（可解析时走 PATH 文件，不可
+解析时回落进程内模拟）；回归覆盖
 `tests/c_stub_regressions.rs`。
 
 ## 五、维护清单（改这里之前先看）

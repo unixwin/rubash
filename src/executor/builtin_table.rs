@@ -1,9 +1,12 @@
 //! The builtin declaration table (Stage-2 project ④, D1).
 //!
 //! One `const` row per builtin name — the single source of truth the
-//! design derives everything else from. The rows are the 62 names of
-//! `BUILTIN_NAMES` (the 61 GNU `shell_builtins` entries plus rubash's
-//! own `env` extension), each carrying:
+//! design derives everything else from. The rows are the 61 names of
+//! `BUILTIN_NAMES`, exactly GNU's `shell_builtins` table
+//! (bash 5.3 has no `env` builtin — there is no `builtins/env.def`;
+//! `env` is a coreutils program, and rubash#3951 removed the
+//! extension row, re-registering `env` as an emulated external
+//! command in `command_registry.rs`), each carrying:
 //!
 //! * `handler` — the canonical processor identity (`HandlerSlot`), one
 //!   variant per distinct dispatch arm across the four existing slot
@@ -20,9 +23,8 @@
 //!   `LOCALVAR_BUILTIN` (3), `ARRAYREF_BUILTIN` (10). Every static
 //!   builtin starts `BUILTIN_ENABLED` and `enable -n` clears it for
 //!   any of them — verified live on the oracle (`enable -n set` then
-//!   `set: command not found`) — so `DISABLEABLE` is set on all 62
-//!   rows. `env` carries only `DISABLEABLE`: it is rubash's own
-//!   extension, present in no GNU flag table.
+//!   `set: command not found`) — so `DISABLEABLE` is set on all 61
+//!   rows.
 //! * `opt_spec` — the getopt specification, read off each builtin's
 //!   `.def` (`internal_getopt(list, "...")`, `no_options(list)`, or
 //!   no scan at all). Dynamic specs are recorded at their constructed
@@ -38,19 +40,19 @@
 //!   (`":e:lnrs"`; inert in `bashgetopt.c`, which rejects the option
 //!   char `':'` before consulting the spec).
 //! * `doc` — the `HELP_TOPICS_TABLE` key for the row's long help
-//!   (`help_texts.rs`); `env` has no topic (`DocId::None`).
+//!   (`help_texts.rs`); every row has a topic.
 //! * `help_entry` — whether `--help` as an option word prints the
 //!   builtin's long help (status 2). All `Getopt` rows have it
 //!   (`bashgetopt.c`'s `ISHELP` branch, `common.h:27`, fires in
 //!   option position). `Grammar`/`NoScan` rows have it only when
 //!   their `.def` calls `CHECK_HELPOPT` (`kill`, `let`, `break`,
 //!   `continue`, `exit`, `logout`, `return`, `shift`, `pushd`,
-//!   `popd`, `dirs`); `:`, `true`, `false`, `echo`, `test`, `[` and
-//!   `env` do NOT — probed live on the oracle (`: --help` prints
+//!   `popd`, `dirs`); `:`, `true`, `false`, `echo`, `test` and `[`
+//!   do NOT — probed live on the oracle (`: --help` prints
 //!   nothing, rc 0; `echo --help` echoes the word; `test --help`
 //!   is rc 0 silent). The design's §4.2 wording ("CHECK_HELPOPT
 //!   ...统一经分发器，`--help` 不因文法形豁免") would diverge from
-//!   GNU on exactly those seven rows; the dispatcher (Phase 1)
+//!   GNU on exactly those six rows; the dispatcher (Phase 1)
 //!   must consult this bit, not force `--help` uniformly.
 //!
 //! Phase 0 is additive only: the table, its projections and its
@@ -92,7 +94,6 @@ pub(crate) enum HandlerSlot {
     Disown,
     Echo,
     Enable,
-    Env,
     Eval,
     Exec,
     Exit,
@@ -152,7 +153,6 @@ impl HandlerSlot {
             HandlerSlot::Dirs => PrimarySlot::Dirs,
             HandlerSlot::Echo => PrimarySlot::Echo,
             HandlerSlot::Enable => PrimarySlot::Enable,
-            HandlerSlot::Env => PrimarySlot::Env,
             HandlerSlot::Eval => PrimarySlot::Eval,
             HandlerSlot::Exec => PrimarySlot::Exec,
             HandlerSlot::Exit => PrimarySlot::Exit,
@@ -215,8 +215,7 @@ impl HandlerSlot {
 
     /// The `command`-prefix primary arm for this handler, if the
     /// name is a `CMD_PRIMARY_DISPATCH` claim (all 43 entries are
-    /// builtin rows; note `env` has no entry here — the
-    /// `command`-prefix path does not claim it).
+    /// builtin rows).
     pub(crate) fn cmd_primary_slot(self) -> Option<CmdPrimarySlot> {
         Some(match self {
             HandlerSlot::Alias => CmdPrimarySlot::Alias,
@@ -366,8 +365,7 @@ pub enum OptSpec {
     /// invalid; a leading `'+'` is plus mode; `':'` required arg,
     /// `';'` optional arg, `'#'` numeric arg).
     Getopt(&'static str),
-    /// Self-parsing grammar (`test`/`[`, `let`, `kill`, and the
-    /// rubash extension `env`): never passes through
+    /// Self-parsing grammar (`test`/`[`, `let`, `kill`): never passes through
     /// `internal_getopt`; the machine does not scan it.
     Grammar,
     /// Fixed positional arguments, no option scan at all (`:`,
@@ -382,18 +380,13 @@ pub enum OptSpec {
 pub enum DocId {
     /// The row's topic in `HELP_TOPICS_TABLE`.
     Topic(&'static str),
-    /// No help topic exists (rubash's own `env` extension).
-    None,
 }
 
 impl DocId {
-    /// The row's short documentation line (`short_doc`), if the
-    /// row has a help topic.
+    /// The row's short documentation line (`short_doc`).
     pub(crate) fn short_doc(self) -> Option<&'static str> {
-        match self {
-            DocId::Topic(name) => crate::builtins::help::builtin_short_doc(name),
-            DocId::None => None,
-        }
+        let DocId::Topic(name) = self;
+        crate::builtins::help::builtin_short_doc(name)
     }
 }
 
@@ -410,7 +403,7 @@ pub struct BuiltinRow {
     pub flags: BuiltinFlags,
     /// The getopt specification (`§4.2`).
     pub opt_spec: OptSpec,
-    /// The help-table index (`§4.4`; `DocId::None` for `env`).
+    /// The help-table index (`§4.4`).
     pub doc: DocId,
     /// The `type` / `command -v` answer category. `pub(crate)` for the
     /// same reason as `handler` above (rubash#2949).
@@ -418,7 +411,7 @@ pub struct BuiltinRow {
     /// Whether `--help` in option position prints the long help
     /// (status 2). True for every `Getopt` row and for the
     /// `Grammar`/`NoScan` rows whose `.def` calls `CHECK_HELPOPT`;
-    /// false for `:`, `true`, `false`, `echo`, `test`, `[`, `env`
+    /// false for `:`, `true`, `false`, `echo`, `test`, `[`
     /// (probed on the oracle — see the module doc).
     pub help_entry: bool,
 }
@@ -454,7 +447,6 @@ pub(crate) const BUILTIN_TABLE: &[BuiltinRow] = &[
     BuiltinRow { name: "disown", handler: H::Disown, flags: F::DISABLEABLE, opt_spec: O::Getopt("ahr"), doc: D::Topic("disown"), introspection: I::Builtin, help_entry: true },
     BuiltinRow { name: "echo", handler: H::Echo, flags: F::DISABLEABLE, opt_spec: O::NoScan, doc: D::Topic("echo"), introspection: I::Builtin, help_entry: false },
     BuiltinRow { name: "enable", handler: H::Enable, flags: F::DISABLEABLE, opt_spec: O::Getopt("adnpsf:"), doc: D::Topic("enable"), introspection: I::Builtin, help_entry: true },
-    BuiltinRow { name: "env", handler: H::Env, flags: F::DISABLEABLE, opt_spec: O::Grammar, doc: D::None, introspection: I::Builtin, help_entry: false },
     BuiltinRow { name: "eval", handler: H::Eval, flags: F::DISABLEABLE.or(F::SPECIAL), opt_spec: O::Getopt(""), doc: D::Topic("eval"), introspection: I::Builtin, help_entry: true },
     BuiltinRow { name: "exec", handler: H::Exec, flags: F::DISABLEABLE.or(F::SPECIAL), opt_spec: O::Getopt("cla:"), doc: D::Topic("exec"), introspection: I::Builtin, help_entry: true },
     BuiltinRow { name: "exit", handler: H::Exit, flags: F::DISABLEABLE.or(F::SPECIAL), opt_spec: O::NoScan, doc: D::Topic("exit"), introspection: I::Builtin, help_entry: true },
@@ -509,8 +501,8 @@ pub(crate) fn builtin_table_row(name: &str) -> Option<&'static BuiltinRow> {
 
 /// The member set, derived from the table (const-built so the
 /// `&'static [&'static str]` shape of `builtin_names()` is kept).
-const fn table_names_array() -> [&'static str; 62] {
-    let mut names = [""; 62];
+const fn table_names_array() -> [&'static str; 61] {
+    let mut names = [""; 61];
     let mut i = 0;
     while i < BUILTIN_TABLE.len() {
         names[i] = BUILTIN_TABLE[i].name;
@@ -519,8 +511,8 @@ const fn table_names_array() -> [&'static str; 62] {
     names
 }
 
-/// The 62 builtin names, in table order.
-pub(crate) static TABLE_BUILTIN_NAMES: [&str; 62] = table_names_array();
+/// The 61 builtin names, in table order.
+pub(crate) static TABLE_BUILTIN_NAMES: [&str; 61] = table_names_array();
 
 /// The member set, derived from the table.
 pub(crate) fn table_builtin_names() -> &'static [&'static str] {
@@ -533,19 +525,6 @@ pub(crate) fn table_builtin_names() -> &'static [&'static str] {
 pub(crate) fn is_table_builtin_name(name: &str) -> bool {
     builtin_table_row(name).is_some()
 }
-
-/// Builtin-table names GNU bash does not ship as builtins: the
-/// rubash extension builtins, currently only `env` — the in-process
-/// coreutils-env implementation that exists because Windows has no
-/// /usr/bin/env (docs/builtins.md §2; the #2036 S2/KD-1 unified
-/// projection keeps it in every face). The faces split on this set
-/// wherever GNU's table is the contract: the builtin group of
-/// `compgen -A command` filters it out (#2538), and the describe
-/// faces off Windows report these names as PATH files (#2642,
-/// completing #2514 — GNU `describe_command`,
-/// builtins/type.def:211, knows no env builtin). Dispatch, `enable`,
-/// `compgen -b` and `builtin env` keep the full table.
-pub(crate) const NON_GNU_BUILTIN_NAMES: &[&str] = &["env"];
 
 /// Whether `name` is a POSIX special builtin — the table half of
 /// `command_registry::SPECIAL_BUILTINS` membership (pinned equal by
@@ -568,8 +547,9 @@ pub(crate) fn table_special_builtin_names() -> Vec<&'static str> {
 
 /// The primary-dispatch projection: `(name, slot)` pairs for the
 /// builtin rows the primary path claims, sorted by name — the
-/// table-derived form of `PRIMARY_DISPATCH` minus its `sleep`
-/// fast-path entry.
+/// table-derived form of `PRIMARY_DISPATCH` minus its two
+/// non-builtin entries (the `sleep` fast path and the `env`
+/// emulated-external claim, rubash#3951).
 pub(crate) fn primary_projection() -> Vec<(&'static str, PrimarySlot)> {
     let mut out: Vec<(&'static str, PrimarySlot)> = BUILTIN_TABLE
         .iter()
@@ -633,8 +613,8 @@ mod tests {
     use crate::executor::builtin_names::BUILTIN_NAMES_FOR_TEST;
 
     #[test]
-    fn table_has_62_sorted_unique_rows() {
-        assert_eq!(BUILTIN_TABLE.len(), 62);
+    fn table_has_61_sorted_unique_rows() {
+        assert_eq!(BUILTIN_TABLE.len(), 61);
         let mut names: Vec<&str> = BUILTIN_TABLE.iter().map(|row| row.name).collect();
         let sorted = {
             let mut s = names.clone();
@@ -643,7 +623,7 @@ mod tests {
         };
         assert_eq!(names, sorted, "table rows must be sorted by name");
         names.dedup();
-        assert_eq!(names.len(), 62, "table rows must be unique");
+        assert_eq!(names.len(), 61, "table rows must be unique");
     }
 
     #[test]
@@ -665,8 +645,8 @@ mod tests {
     fn table_flags_match_gnu_shell_builtins() {
         // The oracle's generated shell_builtins table
         // (build-gnu/bash-5.3/builtins/builtins.c), masked to the six
-        // flag bits this table records. `env` is rubash's own
-        // extension and carries only DISABLEABLE.
+        // flag bits this table records. The table is GNU's 61 rows
+        // exactly (rubash#3951: no `env` extension row).
         let expected: &[(&str, u8)] = &[
             (".", 0x01 | 0x08),
             (":", 0x01 | 0x08),
@@ -688,7 +668,6 @@ mod tests {
             ("disown", 0x01),
             ("echo", 0x01),
             ("enable", 0x01),
-            ("env", 0x01),
             ("eval", 0x01 | 0x08),
             ("exec", 0x01 | 0x08),
             ("exit", 0x01 | 0x08),
@@ -731,7 +710,7 @@ mod tests {
             ("unset", 0x01 | 0x08 | 0x80),
             ("wait", 0x01 | 0x20 | 0x80),
         ];
-        assert_eq!(expected.len(), 62);
+        assert_eq!(expected.len(), 61);
         for (name, bits) in expected {
             let row = builtin_table_row(name).unwrap_or_else(|| panic!("no row for {name}"));
             assert_eq!(row.flags.0, *bits, "flags mismatch for {name}");
@@ -739,19 +718,17 @@ mod tests {
     }
 
     #[test]
-    fn table_docs_resolve_except_env() {
+    fn table_docs_all_resolve() {
+        // Every row has a help topic (rubash#3951 removed the one
+        // `env` row, the only row that carried `DocId::None`).
         for row in BUILTIN_TABLE {
-            match row.doc {
-                DocId::Topic(name) => {
-                    assert_eq!(name, row.name, "doc key must be the row name");
-                    assert!(
-                        row.doc.short_doc().is_some(),
-                        "no help topic for {}",
-                        row.name
-                    );
-                }
-                DocId::None => assert_eq!(row.name, "env", "only env has no topic"),
-            }
+            let DocId::Topic(name) = row.doc;
+            assert_eq!(name, row.name, "doc key must be the row name");
+            assert!(
+                row.doc.short_doc().is_some(),
+                "no help topic for {}",
+                row.name
+            );
         }
     }
 
@@ -787,11 +764,10 @@ mod tests {
 
     #[test]
     fn table_help_entry_set_is_the_def_truth() {
-        // False exactly for the seven rows with no --help entry:
-        // the three NoScan builtins whose .def never checks
-        // (--help is an operand or ignored), the two Grammar
-        // builtins whose own parser takes --help as an operand,
-        // and env (coreutils-style parser, --help is a command).
+        // False exactly for the six rows with no --help entry:
+        // the four NoScan builtins whose .def never checks
+        // (--help is an operand or ignored) and the two Grammar
+        // builtins whose own parser takes --help as an operand.
         let false_rows: Vec<&str> = BUILTIN_TABLE
             .iter()
             .filter(|row| !row.help_entry)
@@ -799,7 +775,7 @@ mod tests {
             .collect();
         assert_eq!(
             false_rows,
-            [":", "[", "echo", "env", "false", "test", "true"]
+            [":", "[", "echo", "false", "test", "true"]
         );
         // Every Getopt row has the entry (ISHELP in option position).
         for row in BUILTIN_TABLE {
@@ -817,7 +793,10 @@ mod tests {
     fn primary_projection_matches_dispatch_table() {
         let expected: Vec<(&str, PrimarySlot)> = command_registry::PRIMARY_DISPATCH
             .iter()
-            .filter(|(name, _)| *name != "sleep")
+            // The primary table's two non-builtin entries: the `sleep`
+            // fast path and the `env` emulated-external claim
+            // (rubash#3951) keep their dispatch arms without table rows.
+            .filter(|(name, _)| *name != "sleep" && *name != "env")
             .copied()
             .collect();
         assert_eq!(primary_projection(), expected);
@@ -904,7 +883,6 @@ mod tests {
         assert_eq!(spec("export"), OptSpec::Getopt("aAfnp"));
         assert_eq!(spec("kill"), OptSpec::Grammar);
         assert_eq!(spec("test"), OptSpec::Grammar);
-        assert_eq!(spec("env"), OptSpec::Grammar);
         assert_eq!(spec(":"), OptSpec::NoScan);
         assert_eq!(spec("echo"), OptSpec::NoScan);
     }

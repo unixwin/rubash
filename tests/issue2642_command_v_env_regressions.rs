@@ -19,9 +19,19 @@
 //!
 //! #2642 completes #2514 for that one row, describe-only: off
 //! Windows the describe faces fall through to the PATH branch.
-//! Dispatch routing, `enable -n env`, `compgen -b`, `builtin env`
-//! and the `help env` topic keep the unified projection and are
-//! pinned as unchanged below. This battery is therefore unix-only.
+//!
+//! rubash#3951 then removed `env` from the builtin registration
+//! entirely (it is an emulated external command now): `enable -n
+//! env`, `compgen -b` and `builtin env` no longer treat it as a
+//! builtin — those faces are pinned by `issue3951_env_not_a_builtin`
+//! and the rewritten #2581 battery. What stays pinned here: the
+//! describe faces still report the PATH file, the bare name's
+//! simple-command face still runs the in-process emulation, and
+//! `enable -n env` (now refused) cannot divert that face to the
+//! PATH body; command-substitution and pipeline shapes resolve
+//! `env` as an ordinary PATH external, as in GNU. The `help
+//! env` topic stays by user ruling. This battery is therefore
+//! unix-only.
 //!
 //! Before the fix, `command -v env` printed the bare name `env` and
 //! `command -V env` printed `env is a shell builtin`.
@@ -190,9 +200,15 @@ fn issue2642_command_v_env_not_found_on_empty_path() {
     );
 }
 
-/// Dispatch is untouched by the fix: the bare name still runs the
-/// in-process env (print mode, assignment form, `builtin env`),
-/// while the `command` prefix still reaches the disk file.
+/// Dispatch faces after rubash#3951: the simple-command face still
+/// runs the in-process env (print mode — its output carries the
+/// marker, never the fake's), and the in-process face still composes
+/// the assignment form into its command's environment (witnessed
+/// with the disk env as the inner command). The `command` prefix
+/// still reaches the disk file, and command substitution resolves
+/// the name as an ordinary PATH external, as in GNU. `builtin env`
+/// is no longer a dispatch at all (`env` is not a builtin), so it
+/// fails and prints nothing.
 #[test]
 fn issue2642_env_dispatch_still_in_process() {
     let root = scratch("dispatch");
@@ -204,26 +220,35 @@ fn issue2642_env_dispatch_still_in_process() {
     let out = run(
         &root,
         fake_path,
-        "export MARKER2642=present; out=$(env); case \"$out\" in *MARKER2642=present*) echo print-ok;; *) echo print-miss;; esac; \
-         out=$(env FOO2642=zzz env); case \"$out\" in *FOO2642=zzz*) echo assign-ok;; *) echo assign-miss;; esac; \
-         out=$(builtin env); case \"$out\" in *MARKER2642=present*) echo builtin-ok;; *) echo builtin-miss;; esac; \
+        "export MARKER2642=present; env > envout.txt; m=miss; while IFS= read -r l; do case $l in *MARKER2642=present*) m=in-process;; esac; done < envout.txt; echo print=$m; \
+         out=$(builtin env 2>/dev/null); case \"$out\" in *MARKER2642=present*) echo builtin-ok;; *) echo builtin-miss;; esac; \
          echo disk=$(command env)",
     );
-    assert!(out.stdout.contains("print-ok"), "{}", out.stdout);
-    assert!(out.stdout.contains("assign-ok"), "{}", out.stdout);
-    assert!(out.stdout.contains("builtin-ok"), "{}", out.stdout);
+    assert!(out.stdout.contains("print=in-process"), "{}", out.stdout);
+    assert!(out.stdout.contains("builtin-miss"), "{}", out.stdout);
     assert!(
         out.stdout.contains("disk=FAKE-env"),
         "`command env` must reach the disk file: {}",
         out.stdout
     );
+    // The assignment form, composed by the in-process face with the
+    // disk env as its command (a fakebin-free PATH, so the inner
+    // `env` is the real program and prints the composed value).
+    let out = run(
+        &root,
+        "/usr/bin:/bin",
+        "env FOO2642=zzz env > envout2.txt; m=miss; while IFS= read -r l; do case $l in *FOO2642=zzz*) m=ok;; esac; done < envout2.txt; echo assign=$m",
+    );
+    assert!(out.stdout.contains("assign=ok"), "{}", out.stdout);
 }
 
-/// `enable -n env` still disables the in-process implementation to
-/// the PATH body (pinned by issue2036 §3.1; guarded here so the
-/// describe gate cannot silently break the disable path).
+/// `enable -n env` is refused (rubash#3951: `env` is not a builtin,
+/// so enable cannot manage it) and the refusal cannot divert the
+/// simple-command face: the in-process emulation still answers it,
+/// never the PATH body. Command substitution is an ordinary PATH
+/// shape (GNU has no env builtin), so there the disk body answers.
 #[test]
-fn issue2642_enable_n_env_still_disables_to_path() {
+fn issue2642_enable_n_env_refused_emulation_kept() {
     let root = scratch("disable");
     let fakebin = root.join("fakebin");
     fs::create_dir_all(&fakebin).expect("fakebin dir");
@@ -233,9 +258,11 @@ fn issue2642_enable_n_env_still_disables_to_path() {
     let out = run(
         &root,
         fake_path,
-        "enable -n env; echo envn_rc=$?; echo t=$(type -t env); echo off=$(env)",
+        "export MARKER2642=present; enable -n env; echo envn_rc=$?; echo t=$(type -t env); env > envout.txt; m=miss; while IFS= read -r l; do case $l in *MARKER2642=present*) m=in-process;; esac; done < envout.txt; echo simple=$m; out=$(env); case \"$out\" in *FAKE-env*) echo comsub=disk;; *) echo comsub=other;; esac",
     );
-    assert!(out.stdout.contains("envn_rc=0"), "{}", out.stdout);
+    assert!(out.stdout.contains("envn_rc=1"), "{}", out.stdout);
     assert!(out.stdout.contains("t=file"), "{}", out.stdout);
-    assert!(out.stdout.contains("off=FAKE-env"), "{}", out.stdout);
+    assert!(out.stdout.contains("simple=in-process"), "{}", out.stdout);
+    assert!(out.stdout.contains("comsub=disk"), "{}", out.stdout);
+    assert!(out.stderr.contains("not a shell builtin"), "{}", out.stderr);
 }

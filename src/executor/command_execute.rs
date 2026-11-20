@@ -1952,17 +1952,13 @@ impl Executor {
         if self.function_name_for_command_word(name).is_some() {
             return true;
         }
-        // `env` is rubash's one extension builtin (docs/builtins.md
-        // section 2): GNU has no env builtin — it is an external
-        // program, and rubash's in-process implementation likewise
-        // hands its command operand to a spawned program
-        // (execute_env_command) — so for heredoc expansion the context
-        // follows GNU's dispatch class (the forked child,
-        // execute_cmd.c:5522), not the implementation technique. The
-        // builtin registration itself (resolution, `type env`) is
-        // untouched; this predicate only places the expansion.
-        name != "env"
-            && self.routes_as_builtin(name)
+        // A disabled builtin dispatches to disk in GNU, so it
+        // classifies as a child context here too. (rubash#3951:
+        // `env` is no longer a builtin, so it is not special-cased
+        // here at all — `routes_as_builtin("env")` is false and the
+        // command classifies as the forked child, execute_cmd.c:5522,
+        // exactly as GNU's external `env` does.)
+        self.routes_as_builtin(name)
             && !crate::builtins::enable::is_disabled(&self.shell_state.env_vars, name)
     }
 

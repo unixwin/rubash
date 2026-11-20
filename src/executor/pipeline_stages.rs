@@ -1754,6 +1754,12 @@ impl Executor {
         // expanded this prefix once, so a delta would miss it).
         let prefix_arith_before = self.snapshot_arithmetic_error_flags();
         let raws_aligned = command.assignment_raws.len() == command.assignments.len();
+        // The stage's assignments were never applied to the table, so
+        // each composed bind is staged into the lookup path as the
+        // loop walks left to right — GNU's assign_in_env /
+        // temporary_env order (see stage_composition_bind) — and
+        // restored when the composition finishes.
+        let mut composition_undo = Vec::new();
         for (index, (var_name, var_value)) in command.assignments.iter().enumerate() {
             let (base_name, append) = assignment_name_and_append(var_name);
             let raw = raws_aligned
@@ -1777,15 +1783,18 @@ impl Executor {
                 // plus the literal RHS text (rubash#1620 — re-applying the
                 // raw RHS lost the base and leaked the marker).
                 let window = format!("{}{}", self.tempenv_scalar_view(base_name), expanded_value);
+                self.stage_composition_bind(&mut composition_undo, base_name, &window);
                 if is_valid_process_env(base_name, &window) {
                     process.env(base_name, window);
                 }
                 continue;
             }
+            self.stage_composition_bind(&mut composition_undo, base_name, expanded_value);
             if is_valid_process_env(base_name, expanded_value) {
                 process.env(base_name, expanded_value);
             }
         }
+        self.restore_composition_binds(composition_undo);
         // rubash#3456: a fatal arithmetic error in the prefix was already
         // diagnosed once by the composition above (and the stage status
         // folds to 1); GNU discards the whole element, so the child must

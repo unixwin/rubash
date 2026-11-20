@@ -33,6 +33,12 @@
 //! builtin. On unix it describes as its PATH file like every other
 //! name; the Windows builtin answer is pinned in
 //! `issue2036_s2_introspection_windows`.
+//!
+//! #3951 update (2026-11-19): the extension row is gone — `env` is
+//! an emulated external command now, not a builtin at all. `enable`
+//! refuses it, `compgen -b` / `enable -a` list 61 names, and
+//! `builtin env` fails; the bare name still runs the in-process
+//! emulation and the describe faces still report the PATH file.
 
 #![cfg(unix)]
 
@@ -390,6 +396,13 @@ fn issue2036_shape12_escape_hatches_spawn() {
 /// `enable cat` refuse with the not-a-builtin diagnostic (the emulated
 /// names are not builtins and stay unmanageable by enable — their
 /// claims are disclosed by the describe faces, not the builtin table).
+/// `env` joins that group since rubash#3951: it is an emulated
+/// external, not a builtin, so `enable env` / `enable -n env` both
+/// refuse — and the refusal cannot divert the simple-command face,
+/// which keeps running the in-process emulation (never the fakebin
+/// script). The command-substitution shape is an ordinary PATH
+/// external, exactly as in GNU (which has no env builtin at all),
+/// so there the fakebin body answers.
 #[test]
 fn issue2036_shape13_enable_faces() {
     let rig = rig("s13");
@@ -414,13 +427,11 @@ fn issue2036_shape13_enable_faces() {
         out.stdout
     );
     assert!(out.stdout.contains("cat_rc=1"), "{}", out.stdout);
-    // KD-1, closed by S2: env is in the registry projection every
-    // face reads, so enable manages it like any other builtin — and
-    // the disable is real, not a report-only state: after
-    // `enable -n env` the describe face stops reporting the builtin
-    // and dispatch falls through to the PATH body (the fakebin script
-    // here). Before the disable, the bare name runs the in-process
-    // env (its output is the environment, never the fake's marker).
+    // rubash#3951: `env` is an emulated external, not a builtin —
+    // `enable` refuses it in both directions. The simple-command
+    // face keeps running the in-process env (its print carries the
+    // marker, never the fake's); command substitution resolves the
+    // name on PATH like any external, so the fake answers there.
     write_fake(
         &rig.root.join("fakebin"),
         "env",
@@ -429,14 +440,22 @@ fn issue2036_shape13_enable_faces() {
     let out = run(
         &rig.root,
         &rig.fake_path,
-        "enable env; echo env_rc=$?; env >/dev/null; echo on_rc=$?; \
-         enable -n env; echo envn_rc=$?; echo t=$(type -t env); echo off=$(env)",
+        "export MARKER2036=present; enable env 2>&1; echo env_rc=$?; env >/dev/null; echo on_rc=$?; \
+         enable -n env 2>&1; echo envn_rc=$?; echo t=$(type -t env); \
+         env > env_s13.out; m=other; while IFS= read -r l; do case $l in *MARKER2036=present*) m=in-process;; esac; done < env_s13.out; echo simple=$m; \
+         out=$(env); case \"$out\" in *FAKE-env*) echo comsub=disk;; *) echo comsub=other;; esac",
     );
-    assert!(out.stdout.contains("env_rc=0"), "{}", out.stdout);
+    assert!(out.stdout.contains("env_rc=1"), "{}", out.stdout);
     assert!(out.stdout.contains("on_rc=0"), "{}", out.stdout);
-    assert!(out.stdout.contains("envn_rc=0"), "{}", out.stdout);
+    assert!(out.stdout.contains("envn_rc=1"), "{}", out.stdout);
     assert!(out.stdout.contains("t=file"), "{}", out.stdout);
-    assert!(out.stdout.contains("off=FAKE-env"), "{}", out.stdout);
+    assert!(out.stdout.contains("simple=in-process"), "{}", out.stdout);
+    assert!(out.stdout.contains("comsub=disk"), "{}", out.stdout);
+    assert!(
+        out.stdout.contains("enable: env: not a shell builtin"),
+        "{}",
+        out.stdout
+    );
 }
 
 // ------------------------------------------------------- §3.1 introspection
@@ -448,7 +467,7 @@ fn issue2036_shape13_enable_faces() {
 /// these names describe as their PATH file like any other name.
 const SIMPLE_CLAIM_NAMES: &[&str] = &[
     "stty", "uname", "arch", "sleep", "dirname", "basename", "cat", "sed", "mkdir", "touch",
-    "chmod", "cp", "rm", "rmdir", "mkfifo", "tty",
+    "chmod", "cp", "rm", "rmdir", "mkfifo", "tty", "env",
 ];
 
 /// Names claimed only in other shapes (pipeline stage, command
@@ -535,9 +554,11 @@ fn issue2036_introspection_emulated_names_report_file() {
 /// is rubash's one extension builtin (no GNU counterpart), but on unix
 /// the describe faces follow GNU `describe_command`
 /// (builtins/type.def:211) exactly — a resolved name reports its PATH
-/// file. The builtin registration and dispatch are untouched: the bare
-/// name still runs the in-process env, `enable -n env` still disables
-/// it to the PATH body, and `compgen -b` still lists it.
+/// file. rubash#3951 then removed the extension registration: `env`
+/// is an emulated external now, not a builtin at all — the bare name
+/// still runs the in-process env, but `enable -n env` is refused and
+/// `compgen -b` no longer lists it. The describe faces are unchanged
+/// by that move (still the PATH file on unix).
 #[test]
 fn issue2036_introspection_env_reports_file_on_unix() {
     let dir = scratch("introenv");
@@ -552,10 +573,11 @@ fn issue2036_introspection_env_reports_file_on_unix() {
     assert!(out.stdout.contains("v=/"), "{}", out.stdout);
 }
 
-/// §3.1 + audit M23, as adjudicated by S2 (KD-1 closed): `compgen -b`
-/// projects from the same registry as every other introspection
-/// face — the hand-maintained second list that lacked `env` is gone,
-/// so the full 62-name builtin set (GNU 61 + the env extension) is
+/// §3.1 + audit M23, as adjudicated by S2 (KD-1 closed) and
+/// re-adjudicated by rubash#3951: `compgen -b` projects from the
+/// same registry as every other introspection face — the
+/// hand-maintained second list that lacked `env` is gone, and so is
+/// the `env` extension row itself, so GNU's 61-name builtin set is
 /// listed. (This pin was the drift pin in S1; it is positive now.)
 #[test]
 fn issue2036_introspection_compgen_b_known_drift_env() {
@@ -563,7 +585,7 @@ fn issue2036_introspection_compgen_b_known_drift_env() {
     let path = std::env::var("PATH").unwrap_or_default();
     let out = run(&dir, &path, "compgen -b | sort | tr '\\n' ' '; echo");
     let expected = ". : [ alias bg bind break builtin caller cd command compgen complete \
-                    compopt continue declare dirs disown echo enable env eval exec exit export \
+                    compopt continue declare dirs disown echo enable eval exec exit export \
                     false fc fg getopts hash help history jobs kill let local logout mapfile \
                     popd printf pushd pwd read readarray readonly return set shift shopt \
                     source suspend test times trap true type typeset ulimit umask unalias \
@@ -576,10 +598,11 @@ fn issue2036_introspection_compgen_b_known_drift_env() {
 }
 
 /// §3.1 + audit M23 (extended by S1), as adjudicated by S2 (KD-1
-/// closed): `enable -a` projects from the registry like every other
-/// face — 62 names including `env`, and `enable env` / `enable -n env`
-/// manage it (pinned in the shape-13 test). The claimed-but-not-builtin
-/// names stay unlisted: they are not builtins.
+/// closed) and re-adjudicated by rubash#3951: `enable -a` projects
+/// from the registry like every other face — GNU's 61 names, with
+/// `env` no longer among them (it is an emulated external now, not
+/// a builtin). The claimed-but-not-builtin names stay unlisted:
+/// they are not builtins.
 #[test]
 fn issue2036_introspection_enable_a_lists_builtins_only() {
     let dir = scratch("introena");
@@ -593,10 +616,10 @@ fn issue2036_introspection_enable_a_lists_builtins_only() {
                 .or_else(|| l.strip_prefix("enable -n "))
         })
         .collect();
-    assert_eq!(names.len(), 62, "enable -a rows: {:?}", names);
+    assert_eq!(names.len(), 61, "enable -a rows: {:?}", names);
     assert!(
-        names.contains(&"env"),
-        "env must be listed (KD-1 closed): {:?}",
+        !names.contains(&"env"),
+        "env must not be listed (rubash#3951): {:?}",
         names
     );
     for n in ["stty", "cat", "sleep", "uname"] {
