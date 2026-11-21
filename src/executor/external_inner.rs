@@ -2312,6 +2312,15 @@ impl Executor {
             crate::builtins::kill::WrapperRelayTargetGuard::publish(child.id());
         #[cfg(not(unix))]
         {
+            // jobs.c:3064 wait_for blocks in waitchld — reaping any
+            // dead child — and ends in notify_and_cleanup (jobs.c:3385
+            // -> cleanup_dead_jobs -> execute_cmd.c:2225 coproc_reap):
+            // a foreground external wait is both a reap-observation
+            // and a coproc-disposal point, so both marks move here
+            // exactly as the unix arm's note below does. The missing
+            // note left a dead coproc's <name>/<name>_PID bound across
+            // a real spawned command on Windows (rubash#3948).
+            self.note_foreground_wait();
             const SLICE: std::time::Duration = std::time::Duration::from_millis(50);
             loop {
                 if let Some(status) =
@@ -6458,7 +6467,11 @@ pub(crate) fn wait_fg_child_draining(
     executor: &mut Executor,
     child: &mut std::process::Child,
 ) -> Result<std::process::ExitStatus, ExecuteError> {
-    let _ = executor;
+    // A real foreground child wait is wait_for-grade on every
+    // platform (jobs.c:3064 blocked in waitchld; jobs.c:3385
+    // notify_and_cleanup -> coproc_reap disposal) — move both marks
+    // like wait_external_child's arm above (rubash#3948).
+    executor.note_foreground_wait();
     child.wait().map_err(ExecuteError::IoError)
 }
 
