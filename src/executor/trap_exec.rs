@@ -652,6 +652,22 @@ impl Executor {
             || crate::special_paths::is_random_device(target)
         {
             let full = crate::special_paths::is_full_device(target);
+            #[cfg(unix)]
+            if !full {
+                // rubash#3939: GNU redir.c:725 redir_open / r_input_output
+                // opens /dev/zero and /dev/random with O_RDWR as ONE open
+                // file description shared by both directions.
+                let (read_file, write_file) =
+                    FileFd::open_readwrite_pair(std::path::PathBuf::from(target))?;
+                self.fd_table.open_readwrite(
+                    fd,
+                    FdReadEndpoint::File(read_file),
+                    FdWriteEndpoint::File(write_file),
+                    dynamic,
+                );
+                self.apply_readwrite_file_mirrors(fd, target, dynamic);
+                return Ok(());
+            }
             let read_file = if crate::special_paths::is_random_device(target) {
                 Self::random_device_file(&target)?
             } else {
@@ -10518,6 +10534,29 @@ impl Executor {
                             }
                         }
                     }
+                }
+
+                if redirect.kind == crate::parser::RedirectKind::ReadWrite
+                    && (crate::special_paths::is_zero_device(&target)
+                        || crate::special_paths::is_full_device(&target)
+                        || crate::special_paths::is_random_device(&target))
+                {
+                    let Some(fd) = self.allocate_dynamic_fd_in_walk(occupied_slots, walk) else {
+                        return Err(ExecuteError::IoError(
+                            self.report_fd_dup_alloc_error(&target),
+                        ));
+                    };
+                    self.set_fd_readwrite_file(fd, &target, true)
+                        .map_err(|io| crate::posix_errors::path_error(&target, io))?;
+                    if !self.set_dynamic_fd_variable(name, fd) {
+                        self.close_persistent_fd(fd)?;
+                        return Err(ExecuteError::IoError(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            format!("{name}: cannot assign fd to variable"),
+                        )));
+                    }
+                    close_after_success(self, fd)?;
+                    return Ok(true);
                 }
 
                 // G-02 session-cwd anchor (rubash#1887): see

@@ -1932,10 +1932,10 @@ impl FdTable {
     /// rubash#3917: place a `<>` pair's shared FileFd once (see
     /// place_persistent_file) — both arms share one Rc, so the
     /// placed descriptor serves both directions on one open file
-    /// description, as GNU's O_RDWR redirect does. An arm whose
-    /// FileFd is a DIFFERENT file (the /dev/zero split model: read
-    /// from the zero source, write to /dev/null) keeps its own
-    /// endpoint — only the arm sharing the placed Rc is rebound.
+    /// description, as GNU's O_RDWR redirect does. Where a platform
+    /// lacks a kernel device (Windows `/dev/zero` pump + `NUL`), an
+    /// arm whose FileFd is a different file keeps its own endpoint —
+    /// only the arm sharing the placed Rc is rebound.
     fn place_persistent_readwrite_endpoint(
         &mut self,
         fd: u32,
@@ -2486,8 +2486,19 @@ impl FdTable {
                     Self::mark_displaced_by_dup2(f, fd);
                 }
             }
+            let shared_arms = matches!(
+                (&read, &write),
+                (FdReadEndpoint::File(r), FdWriteEndpoint::File(w)) if Rc::ptr_eq(r, w)
+            );
             let read = Self::materialize_read_endpoint(fd, read);
-            let write = Self::materialize_write_endpoint(fd, write);
+            let write = if shared_arms {
+                match &read {
+                    FdReadEndpoint::File(r) => FdWriteEndpoint::File(r.clone()),
+                    _ => Self::materialize_write_endpoint(fd, write),
+                }
+            } else {
+                Self::materialize_write_endpoint(fd, write)
+            };
             entry.read = Some(read);
             entry.write = Some(write);
             entry.closed = false;
