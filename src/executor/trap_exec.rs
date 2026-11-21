@@ -8806,6 +8806,53 @@ impl Executor {
         saves
     }
 
+    /// rubash#3999: the descriptor space `cmd`'s own list evolves
+    /// through position `before` — the walk in_list_save_open
+    /// mirrors, factored out so the read builtin's serve and
+    /// availability machinery resolves the same bindings (list
+    /// entries AND the undo saves earlier entries earned through
+    /// fd_walk_register_saves, the #3998 registry; GNU's saves are
+    /// real descriptors in the one walk space, add_undo_redirect
+    /// redir.c:1296). Slots the list never touched are absent:
+    /// callers resolve those against the ambient fd table.
+    fn in_list_walk_space(&self, cmd: &CommandNode, before: usize) -> FdWalkSpace {
+        let mut walk = FdWalkSpace::new();
+        let mut occupied_slots: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        for redirect in cmd.redirects.iter().take(before) {
+            if let Some(entry_fd) = redirect.fd {
+                occupied_slots.insert(entry_fd);
+            }
+            if redirect.fd_var.is_none() {
+                for (slot, _source) in
+                    self.fd_walk_register_saves(&mut walk, redirect, &occupied_slots)
+                {
+                    occupied_slots.insert(slot);
+                }
+                self.fd_walk_record_fixed_entry(&mut walk, redirect);
+            }
+        }
+        walk
+    }
+
+    /// rubash#3999: the binding `fd` holds at list position `before`
+    /// in `cmd`'s own redirect list, in the walk's currency — a save
+    /// slot an earlier entry earned, or a binding an earlier entry
+    /// recorded. None when no entry before `before` touches fd: the
+    /// ambient fd table then governs. Same undoable-walk gate as
+    /// in_list_save_open — a subshell head or a pipeline element is
+    /// the fork child's RX_ACTIVE pass and earns no saves.
+    pub(in crate::executor) fn in_list_walk_binding(
+        &self,
+        cmd: &CommandNode,
+        before: usize,
+        fd: u32,
+    ) -> Option<FdWalkBinding> {
+        if cmd.subshell_command.is_some() || cmd.pipe.is_some() || cmd.pipeline_command.is_some() {
+            return None;
+        }
+        self.in_list_walk_space(cmd, before).get(&fd).cloned()
+    }
+
     /// rubash#3991: whether `fd` names a live descriptor recorded
     /// in `cmd`'s walk at list position `before` — in particular an
     /// undo save earned by an entry before that position (see
@@ -8825,23 +8872,8 @@ impl Executor {
         if cmd.subshell_command.is_some() || cmd.pipe.is_some() || cmd.pipeline_command.is_some() {
             return false;
         }
-        let mut walk = FdWalkSpace::new();
-        let mut occupied_slots: std::collections::HashSet<u32> = std::collections::HashSet::new();
-        for redirect in cmd.redirects.iter().take(before) {
-            if let Some(entry_fd) = redirect.fd {
-                occupied_slots.insert(entry_fd);
-            }
-            if redirect.fd_var.is_none() {
-                for (slot, _source) in
-                    self.fd_walk_register_saves(&mut walk, redirect, &occupied_slots)
-                {
-                    occupied_slots.insert(slot);
-                }
-                self.fd_walk_record_fixed_entry(&mut walk, redirect);
-            }
-        }
         matches!(
-            walk.get(&fd),
+            self.in_list_walk_space(cmd, before).get(&fd),
             Some(FdWalkBinding::TableSlot(_) | FdWalkBinding::File(_))
         )
     }

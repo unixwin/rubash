@@ -535,7 +535,22 @@ impl Executor {
         cmd: &CommandNode,
         fd: u32,
     ) -> Option<bool> {
-        match self.own_input_binding_scan(cmd, fd, None) {
+        self.own_input_binding_availability_before(cmd, fd, None)
+    }
+
+    /// Positioned form of own_input_binding_availability (rubash#3999):
+    /// `before` bounds the ordered scan like own_input_binding_scan's —
+    /// GNU judges a dup source's availability at the dup's own list
+    /// position (do_redirections applies entries left to right,
+    /// redir.c:237), so `read x 9<f 0<&10 10<&-` sees fd 10 open at the
+    /// `0<&10` position even though a later entry closes it.
+    pub(in crate::executor) fn own_input_binding_availability_before(
+        &self,
+        cmd: &CommandNode,
+        fd: u32,
+        before: Option<usize>,
+    ) -> Option<bool> {
+        match self.own_input_binding_scan(cmd, fd, before) {
             Some((_position, OwnInputBinding::Close)) => Some(false),
             Some((dup_position, OwnInputBinding::Duplicate(source))) => {
                 // rubash#2314: the availability chase is positioned
@@ -558,7 +573,32 @@ impl Executor {
                         }
                         Some((_position, OwnInputBinding::File))
                         | Some((_position, OwnInputBinding::Heredoc)) => return Some(true),
-                        None => return Some(self.fd_table.is_open_for_read(current)),
+                        None => {
+                            // rubash#3999: `current` may name an undo
+                            // save an earlier entry earned — a live
+                            // descriptor GNU's walk holds but the fd
+                            // table cannot see (add_undo_redirect,
+                            // redir.c:1296). Resolve it through the
+                            // same walk space (fd_walk_register_saves)
+                            // at the chase's position: a TableSlot or
+                            // File binding is open, a Closed binding
+                            // is not, and an absent binding defers to
+                            // the ambient table.
+                            return Some(
+                                match self.in_list_walk_binding(
+                                    cmd,
+                                    bound.unwrap_or(cmd.redirects.len()),
+                                    current,
+                                ) {
+                                    Some(
+                                        super::trap_exec::FdWalkBinding::TableSlot(_)
+                                        | super::trap_exec::FdWalkBinding::File(_),
+                                    ) => true,
+                                    Some(super::trap_exec::FdWalkBinding::Closed) => false,
+                                    _ => self.fd_table.is_open_for_read(current),
+                                },
+                            );
+                        }
                     }
                 }
             }
@@ -586,13 +626,18 @@ impl Executor {
     /// own redirects into the fd table (builtin_redirects.rs), so
     /// without this scan the funnel sees only the ambient entry —
     /// fd 0's readable process stdin — and reads it to a silent EOF.
+    /// `before` bounds the scan like own_input_binding_scan's
+    /// (rubash#3999): a dup source's write-only judgment is made at
+    /// the dup's own list position, and `cmd.redirects.len()` is the
+    /// end-of-list form the record serve uses.
     pub(in crate::executor) fn own_list_leaves_fd_write_only(
         &self,
         cmd: &CommandNode,
         fd: u32,
+        before: usize,
     ) -> bool {
         let mut write_only = false;
-        for redirect in &cmd.redirects {
+        for redirect in cmd.redirects.iter().take(before) {
             if redirect.fd_var.is_some() {
                 continue;
             }
@@ -712,6 +757,24 @@ impl Executor {
                 None => break,
             }
         }
+        // rubash#3999: `current` may name an undo save an earlier
+        // entry earned — a live descriptor GNU's walk holds at this
+        // position but the fd table cannot see (add_undo_redirect,
+        // redir.c:1296). Resolve it through the same walk space
+        // (fd_walk_register_saves) before the ambient ladder.
+        if let Some(line) = self.read_walk_bound_fd_input(
+            cmd,
+            current,
+            bound.unwrap_or(cmd.redirects.len()),
+            false,
+            delimiter,
+            char_limit,
+            exact_char_limit,
+            escape_aware,
+            raw,
+        ) {
+            return Some(line);
+        }
         if let Some(line) = self.read_virtual_fd_stdin(
             current,
             false,
@@ -742,5 +805,89 @@ impl Executor {
                 raw,
             )
         })
+    }
+
+    /// rubash#3999: serve `fd` when the command's own list walk binds
+    /// it at position `before` to something the fd table cannot see —
+    /// an undo save an earlier entry earned (fd_walk_register_saves,
+    /// the #3998 registry; GNU's saves are real descriptors in the
+    /// one walk space, add_undo_redirect redir.c:1296) or a file
+    /// binding the entry scan deferred. A TableSlot binding copies
+    /// the persistent table's descriptor at the save's source, so it
+    /// serves through the same numbered-fd transports; a File binding
+    /// serves the stored entry for input-side kinds and records the
+    /// write-only EBADF an output binding gives builtin_read
+    /// (read.def:911). None continues the caller's ambient ladder —
+    /// an absent walk binding means the list never touched `fd`.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::executor) fn read_walk_bound_fd_input(
+        &mut self,
+        cmd: &CommandNode,
+        fd: u32,
+        before: usize,
+        silent: bool,
+        delimiter: char,
+        char_limit: Option<usize>,
+        exact_char_limit: bool,
+        escape_aware: bool,
+        raw: bool,
+    ) -> Option<String> {
+        match self.in_list_walk_binding(cmd, before, fd)? {
+            super::trap_exec::FdWalkBinding::TableSlot(source) if source != fd => {
+                if let Some(line) = self.read_virtual_fd_stdin(
+                    source,
+                    silent,
+                    delimiter,
+                    char_limit,
+                    exact_char_limit,
+                    escape_aware,
+                    raw,
+                ) {
+                    return Some(line);
+                }
+                self.read_coproc_stdout(
+                    source,
+                    delimiter,
+                    char_limit,
+                    exact_char_limit,
+                    escape_aware,
+                    raw,
+                )
+                .map(|output| {
+                    trim_read_input(
+                        output,
+                        delimiter,
+                        self.read_delim_word_byte,
+                        char_limit,
+                        exact_char_limit,
+                        escape_aware,
+                        raw,
+                    )
+                })
+            }
+            super::trap_exec::FdWalkBinding::File(entry) => {
+                if matches!(
+                    entry.kind,
+                    crate::parser::RedirectKind::Input | crate::parser::RedirectKind::ReadWrite
+                ) {
+                    self.read_redirected_fd_entry(
+                        &entry,
+                        // rubash#3210/#3299: body seed is procsub_body_seed_line.
+                        super::command_text::procsub_body_seed_line(cmd, self.ambient_line.get()),
+                        delimiter,
+                        char_limit,
+                        exact_char_limit,
+                        escape_aware,
+                        raw,
+                    )
+                } else {
+                    if self.fd_table.read_error.is_none() {
+                        self.fd_table.read_error = Some("Bad file descriptor".to_string());
+                    }
+                    None
+                }
+            }
+            _ => None,
+        }
     }
 }
