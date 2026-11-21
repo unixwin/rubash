@@ -1350,7 +1350,7 @@ pub(super) fn skip_funsub_body(chars: &[char], open: usize) -> Option<usize> {
             // A lone `{` opens a brace group at command position, at the
             // FUNCTION/COPROC-name fallback position, or under
             // PST_ALLOWOPNBRC after `function` (parse.y:3444-3451
-            // `{'.tokstr == "{"' whole-token gate + parse.y:5940-5943);
+            // `{'.tokstr is the single-char "{"' whole-token gate + parse.y:5940-5943);
             // `{x`-glued text stays word characters.
             '{' if !word.word_active()
                 && (term || word.brace_open_ctx())
