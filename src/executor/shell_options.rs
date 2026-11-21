@@ -3880,19 +3880,21 @@ impl Executor {
             crate::executor::expand_braced_indices::next_word_ctx(),
         );
         self.apply_parameter_assignment_expansions_in_word(word);
-        let mut expanded = if let Some(value) =
-            tilde_expand::expand_word_prefix(word, &self.shell_state.env_vars)
-        {
+        // rubash#4007: no post-expansion `<(`/`>(` rescan here. GNU
+        // expand_word_internal (subst.c:11365-11391) recognizes process
+        // substitution only while scanning the parser WORD, never inside
+        // an expansion result — text a variable's value contributes is
+        // data. The case word's own source-level substitutions are
+        // already materialized by execute_case_command from the parser's
+        // quote-aware scan (word_metadata.process_substitutions) before
+        // this runs; re-scanning the cooked output executed
+        // `v='x >(touch PWNED) y'; case "$v" in ...` and materialized
+        // source-quoted `"<(...)"` spans.
+        if let Some(value) = tilde_expand::expand_word_prefix(word, &self.shell_state.env_vars) {
             value
         } else {
             self.expand_word(word)
-        };
-        if expanded.contains("<(") || expanded.contains(">(") {
-            expanded = self
-                .materialize_assignment_process_substitutions(&expanded)
-                .unwrap_or(expanded);
         }
-        expanded
     }
 
     /// Fingerprint of a FUNCTION_STDIN buffer so a deferred command-

@@ -7417,12 +7417,45 @@ impl Executor {
         // `b` as a live substitution (rubash#153). Walk the raw text like
         // the pattern side (quote_aware_case_pattern) but without the
         // glob-literal escaping, which belongs to the pattern domain only.
+        //
+        // rubash#4007: materialize the word's process substitutions from the
+        // PARSER's quote-aware scan of the raw word
+        // (word_metadata.process_substitutions), splicing each produced
+        // `/dev/fd/N` into the text BEFORE expansion — the same vehicle the
+        // case-pattern side and the for/select list words use
+        // (materialize_for_list_process_substitutions, rubash#2390). GNU
+        // expand_word_internal's '<'/'>' arms (subst.c:11365-11391) fire
+        // only while scanning the parser word itself, never on an expansion
+        // RESULT: a `<(`/`>(` carried in a variable's value is data. The
+        // cooked-text rescan expand_case_word used to run after expansion
+        // executed `v='x >(touch PWNED) y'; case "$v" in ...` — the value's
+        // literal text — and likewise materialized `"<(...)"` spans that
+        // were quoted data at the source level.
+        let word_substitutions = &case_command.word_metadata.process_substitutions;
         let word = if case_command.word_metadata.raw.is_empty()
             || case_command.word_metadata.raw == case_command.word
         {
-            self.expand_case_word(&case_command.word)
+            if word_substitutions.is_empty() {
+                self.expand_case_word(&case_command.word)
+            } else {
+                let materialized = self
+                    .materialize_for_list_process_substitutions(
+                        &case_command.word,
+                        word_substitutions,
+                    )
+                    .unwrap_or_else(|_| case_command.word.clone());
+                self.expand_case_word(&materialized)
+            }
         } else {
-            let raw = case_command.word_metadata.raw.clone();
+            let raw = if word_substitutions.is_empty() {
+                case_command.word_metadata.raw.clone()
+            } else {
+                self.materialize_for_list_process_substitutions(
+                    &case_command.word_metadata.raw,
+                    word_substitutions,
+                )
+                .unwrap_or_else(|_| case_command.word_metadata.raw.clone())
+            };
             quote_aware_case_word(&raw, |segment| self.expand_case_word(segment))
         };
         let word = tilde_expand::strip_assignment_quote_marker(&word);
