@@ -1099,15 +1099,20 @@ impl Executor {
         // measured #3201 shape (`exec 3<file 5<file2`).
         #[cfg(unix)]
         {
-            let pins = self.ambient_fd_pins_unbound();
-            if !pins.is_empty() {
+            let delivery = self.ambient_fd_pins_unbound();
+            if !delivery.is_empty() {
                 use std::os::unix::process::CommandExt;
                 // SAFETY: same contract as attach_ambient_fd_pins —
                 // the closure runs only in the forked child before
-                // exec and only dup2/closes raw descriptors.
+                // exec and only dup2/closes raw descriptors and opens
+                // the recorded device spellings.
                 unsafe {
                     process.pre_exec(move || {
-                        super::external_inner::pin_ambient_fds_in_child(&pins).map(|_| ())
+                        super::external_inner::pin_ambient_fds_in_child(
+                            &delivery.pins,
+                            &delivery.devices,
+                        )
+                        .map(|_| ())
                     });
                 }
             }

@@ -6117,7 +6117,7 @@ impl Executor {
                             unsafe {
                                 use std::os::unix::process::CommandExt as _;
                                 child.pre_exec(move || {
-                                    super::external_inner::pin_ambient_fds_in_child(&pins)
+                                    super::external_inner::pin_ambient_fds_in_child(&pins, &[])
                                         .map(|_| ())
                                 });
                             }
