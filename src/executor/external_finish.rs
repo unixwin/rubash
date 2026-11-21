@@ -697,7 +697,15 @@ impl Executor {
             // child's PPID is the parent shell's pid (a real child would see
             // getppid() == the parent shell's getpid()).
             child_env.insert("PPID".to_string(), self.shell_pid.to_string());
+            // rubash#3534: a scalar PIPESTATUS reaching the child
+            // environment is GNU's imported scalar — pipelines never
+            // write it (variables.c:6301-6303 set_pipestatus_array
+            // returns early on a non-array cell).
+            let child_pipestatus_scalar = child_env.contains_key("PIPESTATUS");
             self.shell_state.env_vars = child_env;
+            if child_pipestatus_scalar {
+                self.shell_state.pipestatus_shape = crate::shell::state::PipestatusShape::Scalar;
+            }
             // variables.c:907 set_pwd: the fresh child's logical cwd
             // is the adoption the initializer just performed against
             // its inherited $PWD (rubash#2799).

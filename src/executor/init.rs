@@ -1098,6 +1098,11 @@ impl Executor {
             internal_respawn,
             process_exit,
         );
+        // rubash#3534: a scalar PIPESTATUS cell arriving with the
+        // environment is GNU's imported scalar — pipelines never write
+        // it (variables.c:6301-6303 set_pipestatus_array returns early
+        // on a non-array cell).
+        let env_vars_pipestatus_scalar = env_vars.contains_key("PIPESTATUS");
 
         // rubash#2136: the stamped pid is adopted as `$$` only for a
         // validated respawn (GNU fork semantics: a forked child's `$$`
@@ -1389,6 +1394,20 @@ impl Executor {
         // before the first command runs (rubash#3535).
         let history_comment_char_armed_seed = env_vars.contains_key("HISTTIMEFORMAT");
 
+        // rubash#3534: an import-severed BASH_ARGC/BASH_ARGV (the
+        // UNSET_DYNAMIC_VARS mark the fresh-shell adjudication in
+        // initialize_fresh_shell_env_vars leaves for an imported
+        // scalar) must never materialize the bottom frame: with
+        // bash_argv_initialized set and no frame installed, the
+        // composed views stay empty and every read defers to the
+        // plain imported cell — the same initialized-but-empty
+        // record a runtime `unset` leaves behind (rubash#3909).
+        // Computed here because the ShellState literal below moves
+        // env_vars.
+        let import_severed_arg_arrays =
+            is_marked_var(&env_vars, UNSET_DYNAMIC_VARS, "BASH_ARGC")
+                || is_marked_var(&env_vars, UNSET_DYNAMIC_VARS, "BASH_ARGV");
+
         let mut executor = Self {
             shell_state: ShellState {
                 // rubash#3108: bind from the table with its attribute
@@ -1460,7 +1479,17 @@ impl Executor {
                 pipestatus_shape: respawn_pipestatus
                     .as_ref()
                     .map(|(shape, _)| *shape)
-                    .unwrap_or(crate::shell::state::PipestatusShape::Absent),
+                    .unwrap_or_else(|| {
+                        // rubash#3534: an imported scalar PIPESTATUS is
+                        // the same frozen-scalar state a `PIPESTATUS=99`
+                        // bind produces (variables.c:6301-6303
+                        // set_pipestatus_array no-ops on non-arrays).
+                        if env_vars_pipestatus_scalar {
+                            crate::shell::state::PipestatusShape::Scalar
+                        } else {
+                            crate::shell::state::PipestatusShape::Absent
+                        }
+                    }),
                 function_name_stack: Vec::new(),
                 bash_argc_stack: Vec::new(),
                 bash_argv_stack: Vec::new(),
@@ -1471,7 +1500,18 @@ impl Executor {
                 // rubash#3909: the flag crosses with the frame — a
                 // flag-set/bottom-None parent must not become a
                 // synthesizing child (see the transport doc).
-                bash_argv_initialized: std::cell::Cell::new(respawn_bash_argv_initialized),
+                // rubash#3534: an import-severed BASH_ARGC/BASH_ARGV
+                // (the UNSET_DYNAMIC_VARS mark the fresh-shell
+                // adjudication in initialize_fresh_shell_env_vars
+                // leaves for an imported scalar) must never
+                // materialize the bottom frame: with the flag set and
+                // no frame installed, the composed views stay empty
+                // and every read defers to the plain imported cell —
+                // the same initialized-but-empty record a runtime
+                // `unset` leaves behind (rubash#3909).
+                bash_argv_initialized: std::cell::Cell::new(
+                    respawn_bash_argv_initialized || import_severed_arg_arrays,
+                ),
                 dynamic_cells: std::cell::RefCell::new(
                     crate::shell::state::DynamicCellState::default(),
                 ),
@@ -1943,8 +1983,21 @@ impl Executor {
         // session's serialization or a shared host process env.
         process_startup: bool,
     ) -> String {
-        env_vars.remove("BASH_ARGV0");
-        env_vars.remove("BASH_EXECUTION_STRING");
+        // variables.c:1850 (initialize_dynamic_variables)
+        // INIT_DYNAMIC_VAR("BASH_ARGV0", NULL, get_bash_argv0, ...)
+        // rebinds the imported cell valueless — the imported
+        // att_exported survives on the attributes — and get_bash_argv0
+        // materializes dollar_vars[0] on each read. The env entry
+        // therefore dies like GNU's NULL cell; the -x mark is
+        // re-applied below when the name was imported (rubash#3534).
+        // A validated respawn (keep_shlvl) keeps the transported cell:
+        // GNU's fork copies the variable table, materialized values
+        // included (execute_cmd.c execute_in_subshell).
+        let bash_argv0_imported = !keep_shlvl && env_vars.remove("BASH_ARGV0").is_some();
+        // BASH_EXECUTION_STRING is bound only while a -c string
+        // executes (variables.c:638): an imported cell survives a
+        // script-mode shell untouched, and the -c bind replaces it
+        // through the ordinary bind path either way.
         // GNU variables.c:907 set_pwd: an imported $PWD that is
         // absolute and names the current directory (same_file with
         // ".") is ADOPTED as the shell's logical cwd,
@@ -2115,6 +2168,12 @@ impl Executor {
             // `$OLDPWD` would still expand to the rejected value.
             mirror_env_remove("OLDPWD");
         }
+        // The imported SECONDS base recorded by the fresh-shell arm
+        // below; folded into __RUBASH_SHELL_START_EPOCH at its insert
+        // site (see there). Zero when SECONDS was not imported and on
+        // the keep_shlvl path, whose offset rides the transported
+        // __RUBASH_SECONDS_OFFSET key instead.
+        let mut imported_seconds_offset: i64 = 0;
         // rubash#2058: see the keep_shlvl parameter.
         if !keep_shlvl {
             initialize_shell_level(env_vars);
@@ -2134,6 +2193,52 @@ impl Executor {
             }
             if !this_sh_inherited {
                 unmark_env_name(env_vars, EXPORTED_VARS, "THIS_SH");
+            }
+            // rubash#3534 — GNU initialize_dynamic_variables
+            // (variables.c:1844-1878): each scalar INIT_DYNAMIC_VAR
+            // rebinds its name to a NULL cell with the getter
+            // installed — the imported VALUE dies at the rebind while
+            // the imported att_exported survives on the attributes.
+            // A kept env entry would let the stale value shadow reads
+            // GNU answers from the getter (imported RANDOM=1 must not
+            // fix the stream) and would emit the stale value into
+            // child environments where GNU emits nothing until the
+            // cell materializes. The export mark applied above stands.
+            for name in [
+                "RANDOM",
+                "SRANDOM",
+                "LINENO",
+                "BASHPID",
+                "BASH_COMMAND",
+                "BASH_SUBSHELL",
+                "EPOCHSECONDS",
+                "EPOCHREALTIME",
+                "BASH_MONOSECONDS",
+                "HISTCMD",
+            ] {
+                env_vars.remove(name);
+            }
+            // init_seconds_var (variables.c:1350-1361) is the one
+            // exception: the imported value is rebound into the cell
+            // AND seeds the offset (seconds_value_assigned =
+            // valid_number(value)), so $SECONDS starts counting from
+            // the imported base — keep the cell and record the offset.
+            // The offset is NOT stored under its own key here: a plain
+            // values entry is a visible variable (a named `declare -p`
+            // prints it, rc=0), while GNU has no such variable at all.
+            // It folds into __RUBASH_SHELL_START_EPOCH at the insert
+            // site below instead — every SECONDS reader computes
+            // now - epoch + offset, so epoch - offset with no key
+            // reproduces the imported base exactly, and the assignment
+            // arms (which read the same epoch when they install the
+            // offset key themselves) stay self-consistent. A raw
+            // __RUBASH_SECONDS_OFFSET riding a fresh shell's birth
+            // environment alongside SECONDS is superseded the same
+            // way; continuity across the respawn boundary rides the
+            // keep_shlvl transport, which skips this whole block.
+            if let Some(imported) = env_vars.get("SECONDS").cloned() {
+                imported_seconds_offset = imported.parse::<i64>().unwrap_or(0);
+                env_vars.remove(SECONDS_OFFSET);
             }
         }
         // keep_shlvl (a validated respawn) skips the whole export-set
@@ -2189,18 +2294,23 @@ impl Executor {
         // (rubash#1334).
         env_vars.insert("IFS".to_string(), " \t\n".to_string());
         // GNU variables.c initialize_shell_variables binds these defaults
-        // for every fresh shell (an inherited value wins): OPTERR=1
-        // (getopts diagnostic default), PS4="+ " (xtrace prefix), and the
-        // compiled-in BASH_LOADABLES_PATH search list (rubash#1075,
-        // rubash#1076). They are ordinary (non-exported) variables, so
-        // introspection (`${OPTERR-unset}`, `declare -p PS4`) sees them
-        // exactly like GNU.
-        env_vars
-            .entry("OPTERR".to_string())
-            .or_insert_with(|| "1".to_string());
-        env_vars
-            .entry("PS4".to_string())
-            .or_insert_with(|| "+ ".to_string());
+        // for every fresh shell: OPTERR=1 unconditionally
+        // (variables.c:612-613 bind_variable, getopts diagnostic default —
+        // an imported value dies but the imported export mark survives,
+        // rubash#3534), PS4="+ " unconditionally for euid==0 and only
+        // when absent otherwise (variables.c:575-579, xtrace prefix),
+        // and the compiled-in BASH_LOADABLES_PATH search list
+        // (rubash#1075, rubash#1076). They are ordinary (non-exported)
+        // variables, so introspection (`${OPTERR-unset}`, `declare -p
+        // PS4`) sees them exactly like GNU.
+        env_vars.insert("OPTERR".to_string(), "1".to_string());
+        if real_euid() == 0 {
+            env_vars.insert("PS4".to_string(), "+ ".to_string());
+        } else {
+            env_vars
+                .entry("PS4".to_string())
+                .or_insert_with(|| "+ ".to_string());
+        }
         env_vars
             .entry("BASH_LOADABLES_PATH".to_string())
             .or_insert_with(|| {
@@ -2217,10 +2327,15 @@ impl Executor {
         // GNU bashline.c initializes COMP_WORDBREAKS at startup from
         // rl_basic_word_break_characters, so the variable is always set
         // (declare -p COMP_WORDBREAKS succeeds in a fresh shell) even
-        // non-interactively (rubash#1086).
-        env_vars
-            .entry("COMP_WORDBREAKS".to_string())
-            .or_insert_with(|| " \t\n\"'@><=;|&(:".to_string());
+        // non-interactively (rubash#1086). variables.c:1878 binds the
+        // INIT_DYNAMIC_VAR cell NULL unconditionally — an imported
+        // value dies while its export mark survives (rubash#3534) —
+        // and get_comp_wordbreaks materializes the compiled-in
+        // default on first read, so store the default directly.
+        env_vars.insert(
+            "COMP_WORDBREAKS".to_string(),
+            " \t\n\"'@><=;|&(:".to_string(),
+        );
         // GNU binds COMP_WORDBREAKS with att_invisible: the variable
         // exists (`declare -p COMP_WORDBREAKS` succeeds) but print_var_list
         // (the `set` listing) skips invisible variables (rubash#1325).
@@ -2239,7 +2354,7 @@ impl Executor {
             .or_insert_with(|| "dumb".to_string());
         env_vars.insert(
             SHELL_START_EPOCH.to_string(),
-            current_epoch_seconds().to_string(),
+            (current_epoch_seconds() - imported_seconds_offset).to_string(),
         );
         // GNU shell.c:1974-1986 (shell_initialize -> initialize_shell_options
         // set.def:607-630 via parse_shellopts set.def:600-604, and
@@ -2327,13 +2442,24 @@ impl Executor {
         let bashopts = crate::builtins::shopt::bashopts_value(env_vars);
         env_vars.insert("BASHOPTS".to_string(), bashopts);
         mark_env_name(env_vars, READONLY_VARS, "BASHOPTS");
-        mark_env_name(env_vars, ARRAY_VARS, "PIPESTATUS");
+        // GNU variables.c:6291-6303 set_pipestatus_array does nothing
+        // to a non-array cell — an imported scalar PIPESTATUS keeps
+        // its value and its scalar shape (rubash#3534); only an absent
+        // cell gets the array mark.
+        if !env_vars.contains_key("PIPESTATUS") {
+            mark_env_name(env_vars, ARRAY_VARS, "PIPESTATUS");
+        }
+        // variables.c:609-611: OPTIND is bound unconditionally to "1"
+        // with att_integer — the imported value dies while the
+        // imported att_exported survives (rubash#3534).
         env_vars.insert("OPTIND".to_string(), "1".to_string());
         // GNU variables.c creates OPTIND with att_integer (it prints as
         // `declare -i OPTIND="1"`), which is also why a getopts name bind
         // into OPTIND arith-evaluates (rubash#1270).
         mark_env_name(env_vars, INTEGER_VARS, "OPTIND");
-        env_vars.remove("OPTARG");
+        // OPTARG is bound by getopts at runtime only (builtins/
+        // getopts.def) — an imported cell keeps its value and mark
+        // (rubash#3534); nothing is bound here.
         env_vars.remove("__RUBASH_GETOPTS_OFFSET");
         // rubash#2586: the readonly-OPTIND shadow counter is the OFFSET
         // key's pair (temporary_assignments.rs drops both together on an
@@ -2342,29 +2468,95 @@ impl Executor {
         // ambient shadow surviving fresh construction made getopts
         // resume a foreign parent's counter and replay consumed args.
         env_vars.remove("__RUBASH_GETOPTS_OPTIND");
-        env_vars
-            .entry("BASH_VERSION".to_string())
-            .or_insert_with(bash_version_value);
-        env_vars
-            .entry("BASH".to_string())
-            .or_insert_with(bash_path_value);
+        // variables.c:618-634 (initialize_shell_variables): BASH and
+        // BASH_VERSION are bound unconditionally — the imported value
+        // dies while the imported att_exported survives (rubash#3534).
+        env_vars.insert("BASH_VERSION".to_string(), bash_version_value());
+        env_vars.insert("BASH".to_string(), bash_path_value());
+        // variables.c:1010-1033 make_vers_array: BASH_VERSINFO is
+        // unbound and rebuilt as a readonly array — one of the two
+        // managed names that also lose the imported att_exported
+        // (PPID is the other, set_ppid).
+        env_vars.remove("BASH_VERSINFO");
         store_indexed_array(env_vars, "BASH_VERSINFO", bash_versinfo_values());
         mark_env_name(env_vars, READONLY_VARS, "BASH_VERSINFO");
-        store_indexed_array(env_vars, "BASH_ARGC", Vec::new());
-        store_indexed_array(env_vars, "BASH_ARGV", Vec::new());
-        store_indexed_array(env_vars, "BASH_LINENO", vec!["0".to_string()]);
-        store_indexed_array(env_vars, "BASH_SOURCE", Vec::new());
-        env_vars.insert("BASH_CMDS".to_string(), "()".to_string());
-        mark_env_name(env_vars, ASSOC_VARS, "BASH_CMDS");
-        env_vars.insert("BASH_ALIASES".to_string(), "()".to_string());
-        mark_env_name(env_vars, ASSOC_VARS, "BASH_ALIASES");
+        unmark_env_name(env_vars, EXPORTED_VARS, "BASH_VERSINFO");
+        // The cell-level half of that same adjudication is above (the
+        // guarded defaults); this is its dynamic-face half. Keeping
+        // the imported cell is not enough while the name still
+        // resolves through the live dynamic machinery: declaration
+        // views render the stack/owner-table state instead of the
+        // cell, the stack read arms answer from the views, and
+        // DIRSTACK materializes from the live stack — the imported
+        // scalar was shadowed or overwritten on every face. Sever
+        // the dynamic link for an imported name with the tree's
+        // existing severance record, UNSET_DYNAMIC_VARS — the same
+        // mark `unset` leaves behind (variables.c:3839: the name
+        // loses its special meaning for the shell's lifetime). Every
+        // dynamic face consults it: declaration views return None,
+        // DIRSTACK defers via dirstack_shadowed, the
+        // BASH_ALIASES/BASH_CMDS owner-table views fall through to
+        // the plain binding. The ARRAY/ASSOC marks come off so the
+        // surviving cell renders and reads as the scalar it is.
+        // Fresh shells only: a validated respawn (keep_shlvl) is a
+        // fork — its dynamic arrays are live state, not imports.
+        if !keep_shlvl {
+            for name in [
+                "BASH_ALIASES",
+                "BASH_ARGC",
+                "BASH_ARGV",
+                "BASH_CMDS",
+                "BASH_LINENO",
+                "BASH_SOURCE",
+                "DIRSTACK",
+                "FUNCNAME",
+            ] {
+                if env_vars.contains_key(name) {
+                    mark_env_name(env_vars, UNSET_DYNAMIC_VARS, name);
+                    unmark_env_name(env_vars, ARRAY_VARS, name);
+                    unmark_env_name(env_vars, ASSOC_VARS, name);
+                }
+            }
+        }
+        // variables.c:1255-1277 init_dynamic_array_var /
+        // init_dynamic_assoc_var and variables.c:1831 init_funcname_var
+        // return an EXISTING variable unchanged — an imported scalar
+        // cell for BASH_ARGC/BASH_ARGV/BASH_LINENO/BASH_SOURCE/
+        // BASH_CMDS/BASH_ALIASES/DIRSTACK/FUNCNAME keeps its value,
+        // its scalar shape, and the imported att_exported; the dynamic
+        // array/assoc object is never installed (rubash#3534). Only
+        // absent names get the fresh cells below.
+        if !env_vars.contains_key("BASH_ARGC") {
+            store_indexed_array(env_vars, "BASH_ARGC", Vec::new());
+        }
+        if !env_vars.contains_key("BASH_ARGV") {
+            store_indexed_array(env_vars, "BASH_ARGV", Vec::new());
+        }
+        if !env_vars.contains_key("BASH_LINENO") {
+            store_indexed_array(env_vars, "BASH_LINENO", vec!["0".to_string()]);
+        }
+        if !env_vars.contains_key("BASH_SOURCE") {
+            store_indexed_array(env_vars, "BASH_SOURCE", Vec::new());
+        }
+        if !env_vars.contains_key("BASH_CMDS") {
+            env_vars.insert("BASH_CMDS".to_string(), "()".to_string());
+            mark_env_name(env_vars, ASSOC_VARS, "BASH_CMDS");
+        }
+        if !env_vars.contains_key("BASH_ALIASES") {
+            env_vars.insert("BASH_ALIASES".to_string(), "()".to_string());
+            mark_env_name(env_vars, ASSOC_VARS, "BASH_ALIASES");
+        }
         // The stored DIRSTACK cell starts as an empty indexed array, not
         // scalar-empty: a bare `declare -a` listing prints the last
         // materialized cell (variables.c get_dirstack runs on named access
         // only), and GNU shows `declare -a DIRSTACK=()` there.
-        store_indexed_array(env_vars, "DIRSTACK", Vec::new());
-        env_vars.insert("FUNCNAME".to_string(), String::new());
-        mark_env_name(env_vars, ARRAY_VARS, "FUNCNAME");
+        if !env_vars.contains_key("DIRSTACK") {
+            store_indexed_array(env_vars, "DIRSTACK", Vec::new());
+        }
+        if !env_vars.contains_key("FUNCNAME") {
+            env_vars.insert("FUNCNAME".to_string(), String::new());
+            mark_env_name(env_vars, ARRAY_VARS, "FUNCNAME");
+        }
         env_vars
             .entry("HOSTTYPE".to_string())
             .or_insert_with(hosttype_value);
@@ -2377,19 +2569,31 @@ impl Executor {
         env_vars
             .entry("MACHTYPE".to_string())
             .or_insert_with(machtype_value);
-        env_vars.insert("UID".to_string(), uid_value());
-        env_vars.insert("EUID".to_string(), euid_value());
+        // variables.c:984-1008 uidset binds UID/EUID only when the
+        // name is ABSENT — an imported cell keeps its scalar value and
+        // the imported att_exported, and never gains readonly/integer
+        // (rubash#3534). The fresh binds get V_INTEGER|V_READONLY
+        // (`declare -p UID` reports -ir, rubash#1326).
+        if !env_vars.contains_key("UID") {
+            env_vars.insert("UID".to_string(), uid_value());
+            mark_env_name(env_vars, READONLY_VARS, "UID");
+            mark_env_name(env_vars, INTEGER_VARS, "UID");
+        }
+        if !env_vars.contains_key("EUID") {
+            env_vars.insert("EUID".to_string(), euid_value());
+            mark_env_name(env_vars, READONLY_VARS, "EUID");
+            mark_env_name(env_vars, INTEGER_VARS, "EUID");
+        }
+        // variables.c:970-982 set_ppid: PPID is the ONE managed name
+        // that always loses its imported att_exported (VUNSETATTR
+        // before the forced readonly-integer rebind).
         env_vars.insert("PPID".to_string(), ppid_value());
-        mark_env_name(env_vars, READONLY_VARS, "UID");
-        mark_env_name(env_vars, READONLY_VARS, "EUID");
         mark_env_name(env_vars, READONLY_VARS, "PPID");
-        // GNU variables.c create_variable_tables/initialize_shell_variables:
-        // UID/EUID/PPID are created with V_INTEGER|V_READONLY, so
-        // `declare -p UID` reports -ir, not just -r (rubash#1326, same root
-        // as #1184 finding 3 — both clusters landed this fix; kept once).
-        mark_env_name(env_vars, INTEGER_VARS, "UID");
-        mark_env_name(env_vars, INTEGER_VARS, "EUID");
         mark_env_name(env_vars, INTEGER_VARS, "PPID");
+        unmark_env_name(env_vars, EXPORTED_VARS, "PPID");
+        if bash_argv0_imported {
+            mark_env_name(env_vars, EXPORTED_VARS, "BASH_ARGV0");
+        }
         startup_logical_cwd
     }
 }

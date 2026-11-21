@@ -22,6 +22,18 @@ impl Executor {
                     crate::executor::UNSET_DYNAMIC_VARS,
                     "FUNCNAME",
                 ) {
+                    // rubash#3534: the same mark is also the import
+                    // severance record - a FUNCNAME imported as a scalar
+                    // keeps its cell (GNU init_dynamic_array_var returns
+                    // the imported cell as-is), and element reads see
+                    // that scalar. A genuine `unset FUNCNAME` unbinds
+                    // the cell entirely, so the #541 empty result is
+                    // preserved whenever no scalar cell exists.
+                    if let Some(variable) = self.shell_state.variables.get("FUNCNAME") {
+                        if let crate::shell::ShellValue::Scalar(value) = &variable.value {
+                            return vec![value.clone()];
+                        }
+                    }
                     return Vec::new();
                 }
                 // GNU pushes the synthetic bottom "main" frame ONLY when the

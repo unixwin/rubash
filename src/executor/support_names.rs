@@ -158,33 +158,37 @@ pub(in crate::executor) fn euid_value() -> String {
 /// Real process identities (GNU shell.c current_user uid/euid). libc is
 /// already a dependency on every Unix target in this tree.
 #[cfg(unix)]
-fn real_uid() -> u32 {
+pub(in crate::executor) fn real_uid() -> u32 {
     unsafe { libc::getuid() }
 }
 
 /// Windows has no uid/euid; the persona shell reports 0 there (unchanged).
 #[cfg(windows)]
-fn real_uid() -> u32 {
+pub(in crate::executor) fn real_uid() -> u32 {
     0
 }
 
 /// Real effective uid; same platform split as real_uid.
 #[cfg(unix)]
-fn real_euid() -> u32 {
+pub(in crate::executor) fn real_euid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
 /// Windows has no euid; keep the persona 0 (unchanged).
 #[cfg(windows)]
-fn real_euid() -> u32 {
+pub(in crate::executor) fn real_euid() -> u32 {
     0
 }
 
 pub(in crate::executor) fn ppid_value() -> String {
-    std::env::var("PPID")
-        .ok()
-        .filter(|value| value.chars().all(|ch| ch.is_ascii_digit()))
-        .or_else(|| parent_process_id().map(|pid| pid.to_string()))
+    // GNU variables.c:700 (initialize_shell_variables): set_ppid binds
+    // $PPID from getppid(2) at startup — an imported PPID environment
+    // entry is never honored, because the name is not inherited state:
+    // the exporting process's parent is not this shell's parent
+    // (rubash#3534). The previous env-first read returned the imported
+    // value verbatim whenever it was all digits.
+    parent_process_id()
+        .map(|pid| pid.to_string())
         .unwrap_or_else(|| std::process::id().to_string())
 }
 

@@ -1777,6 +1777,18 @@ impl Executor {
                 *current = value.clone();
             }
         }
+        // rubash#3534: a BASH_SOURCE name severed at import
+        // (UNSET_DYNAMIC_VARS) holds an imported scalar cell; GNU
+        // variables.c init_dynamic_array_var returns the imported cell
+        // as-is and never installs an array object over it. The seed
+        // stores below would overwrite that cell (typed cell and env
+        // mirror alike), so they are skipped while the mark stands;
+        // the bash_source_stack / bash_source_seed records still run.
+        let bash_source_import_severed = is_marked_var(
+            &self.shell_state.env_vars,
+            crate::executor::UNSET_DYNAMIC_VARS,
+            "BASH_SOURCE",
+        );
         if name == "__RUBASH_IS_C" {
             // GNU: a `-c` command string has no script file, so BASH_SOURCE
             // starts as a set-but-EMPTY array; only function entry pushes
@@ -1794,7 +1806,13 @@ impl Executor {
             // fixup; cli_tests function_call_stack_* encode the GNU
             // shape). The SCRIPT_NAME branch below guards the reverse
             // seeding order.
-            store_indexed_array_state(&mut self.shell_state, "BASH_SOURCE", Vec::<String>::new());
+            if !bash_source_import_severed {
+                store_indexed_array_state(
+                    &mut self.shell_state,
+                    "BASH_SOURCE",
+                    Vec::<String>::new(),
+                );
+            }
         }
         if name == "__RUBASH_SCRIPT_NAME" {
             let source_value = if self
@@ -1818,8 +1836,10 @@ impl Executor {
             // ./dbg-support.tests"), so only a top-level script-name change
             // (startup, -c, bashdb launcher) rebinds BASH_SOURCE.
             if self.shell_state.env_vars.contains_key("__RUBASH_IN_SOURCE") {
-                let values = self.shell_state.bash_source_stack.clone();
-                store_indexed_array_state(&mut self.shell_state, "BASH_SOURCE", values);
+                if !bash_source_import_severed {
+                    let values = self.shell_state.bash_source_stack.clone();
+                    store_indexed_array_state(&mut self.shell_state, "BASH_SOURCE", values);
+                }
                 return;
             }
             if self.shell_state.env_vars.contains_key("__RUBASH_IS_C") {
@@ -1832,18 +1852,22 @@ impl Executor {
                 // this seed.
                 self.shell_state.bash_source_stack = vec![source_value.clone()];
                 self.shell_state.bash_source_seed = Some(source_value.clone());
-                store_indexed_array_state(
-                    &mut self.shell_state,
-                    "BASH_SOURCE",
-                    Vec::<String>::new(),
-                );
+                if !bash_source_import_severed {
+                    store_indexed_array_state(
+                        &mut self.shell_state,
+                        "BASH_SOURCE",
+                        Vec::<String>::new(),
+                    );
+                }
                 return;
             }
             // rubash#3125: record the seed alongside the stack
             // (see the field doc on `bash_source_seed`).
             self.shell_state.bash_source_stack = vec![source_value.clone()];
             self.shell_state.bash_source_seed = Some(source_value.clone());
-            store_indexed_array_state(&mut self.shell_state, "BASH_SOURCE", vec![source_value]);
+            if !bash_source_import_severed {
+                store_indexed_array_state(&mut self.shell_state, "BASH_SOURCE", vec![source_value]);
+            }
         }
     }
 
@@ -1987,8 +2011,18 @@ impl Executor {
             source
         };
         self.shell_state.bash_source_stack.insert(0, source);
-        let values = self.shell_state.bash_source_stack.clone();
-        store_indexed_array_state(&mut self.shell_state, "BASH_SOURCE", values);
+        // rubash#3534: while BASH_SOURCE is severed at import, the frame
+        // push records on the stack only - materializing the stack over
+        // the imported scalar cell would undo the import preservation
+        // (GNU keeps the imported scalar through source push/pop).
+        if !is_marked_var(
+            &self.shell_state.env_vars,
+            crate::executor::UNSET_DYNAMIC_VARS,
+            "BASH_SOURCE",
+        ) {
+            let values = self.shell_state.bash_source_stack.clone();
+            store_indexed_array_state(&mut self.shell_state, "BASH_SOURCE", values);
+        }
     }
 
     fn debugger_source_path(path: &std::path::Path) -> String {
@@ -2006,8 +2040,17 @@ impl Executor {
         if !self.shell_state.bash_source_stack.is_empty() {
             self.shell_state.bash_source_stack.remove(0);
         }
-        let values = self.shell_state.bash_source_stack.clone();
-        store_indexed_array_state(&mut self.shell_state, "BASH_SOURCE", values);
+        // rubash#3534: exit pair of the push_bash_source gate above -
+        // while severed at import, the pop also records on the stack
+        // only and never materializes over the imported scalar cell.
+        if !is_marked_var(
+            &self.shell_state.env_vars,
+            crate::executor::UNSET_DYNAMIC_VARS,
+            "BASH_SOURCE",
+        ) {
+            let values = self.shell_state.bash_source_stack.clone();
+            store_indexed_array_state(&mut self.shell_state, "BASH_SOURCE", values);
+        }
     }
 
     /// Pushes the synthetic "source" call frame for a `source`/`.` of a
