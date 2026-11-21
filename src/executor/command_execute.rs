@@ -709,6 +709,32 @@ impl Executor {
             if let Some(error) =
                 self.parameter_expansion_error_in_word_isolated_with_raw(target, raw_target)
             {
+                // rubash#4001: a PLAIN nounset verdict in a redirect word
+                // is the reject gate's to adjudicate (rubash#535), not
+                // this pre-scan's. GNU raises it inside
+                // redirection_expand (redir.c:298), in the context where
+                // do_redirections runs: the FORCE_EOF jump is contained
+                // by the forked child for a disk command
+                // (execute_cmd.c:5522) and reaches the main shell only
+                // for builtin/function targets (execute_cmd.c:5606).
+                // Raising it here applied word-position fatality to
+                // every class, and because this pre-scan runs before
+                // dispatch it shadowed the gate's arm entirely — the
+                // gate never saw a simple command's redirect words.
+                // When the gate's own per-entry query
+                // (redirect_word_nounset_hit) confirms this entry
+                // carries that exact verdict, stop the pre-scan here
+                // and let dispatch's gate report it (through the fd-2
+                // bindings in force at the entry, with the gate's line
+                // attribution) and classify its containment. The `:?`
+                // class and the `:=` bindings above keep this
+                // pre-scan's handling (rubash#2701).
+                if error.2 == Self::FATAL_PARAMETER_EXPANSION_STATUS
+                    && error.1 == "unbound variable"
+                    && self.redirect_word_nounset_hit(redirect).as_deref() == Some(error.0.as_str())
+                {
+                    break;
+                }
                 return self.raise_word_expansion_error(error);
             }
             // rubash#3969: a brace product carrying an unclosed raw
