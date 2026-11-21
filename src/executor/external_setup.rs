@@ -4331,7 +4331,11 @@ impl Executor {
         let mut process = std::process::Command::new(&exe);
         process
             .args(&spawn_args)
-            .envs(env_entries)
+            .envs(
+                env_entries
+                    .into_iter()
+                    .map(|(k, v)| (k, crate::executor::substitution_metadata::env_value_to_os_string(&v))),
+            )
             // rubash#2195: fds 1-2 follow the spawn plan (the
             // prefix state at the substitution's own redirect);
             // fd 0 stays the payload pipe — GNU's

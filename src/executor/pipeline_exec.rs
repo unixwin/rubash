@@ -1741,7 +1741,10 @@ impl Executor {
             if saved_table.attr_of(key).exported || current.attr_of(key).exported {
                 match current.get(key) {
                     Some(value) => {
-                        process.env(key, value);
+                        process.env(
+                            key,
+                            crate::executor::substitution_metadata::env_value_to_os_string(value),
+                        );
                     }
                     None => {
                         process.env_remove(key);
