@@ -50,6 +50,7 @@ pub(crate) fn shell_keyword_names() -> Vec<&'static str> {
 const EXPORTED_VARS: &str = "__RUBASH_EXPORTED_VARS";
 const ARRAY_VARS: &str = "__RUBASH_ARRAY_VARS";
 const ASSOC_VARS: &str = "__RUBASH_ASSOC_VARS";
+const DECLARED_UNSET_VARS: &str = crate::executor::DECLARED_UNSET_VARS;
 
 const READLINE_BINDINGS: &[&str] = &[
     "abort",
@@ -2779,7 +2780,7 @@ fn services_db_path() -> std::path::PathBuf {
 }
 
 fn variable_completion_candidates(
-    env_vars: &HashMap<String, String>,
+    env_vars: &crate::shell::var_table::VarTable,
     underlay: &crate::shell::var_table::TempenvListingUnderlay,
     pipestatus_cell_visible: bool,
 ) -> Vec<String> {
@@ -2818,7 +2819,15 @@ fn variable_completion_candidates(
         // candidate; a shadowed name stays (its underlying binding is
         // one). The dynamic names appended below are context variables
         // by construction and stay unconditional.
-        .filter(|name| !matches!(underlay.get(name.as_str()), Some(None)))
+        // rubash#3950: GNU all_visible_variables (variables.c:4319) filters
+        // by visible_var (invisible_p(var) == 0), so declared-but-never-
+        // assigned variables (att_invisible / DECLARED_UNSET_VARS) are
+        // excluded from -A variable.
+        .filter(|name| match underlay.get(name.as_str()) {
+            None => !env_vars.is_marked(DECLARED_UNSET_VARS, name),
+            Some(None) => false,
+            Some(Some((_, attrs))) => !attrs.declared_unset,
+        })
         .cloned()
         .collect();
     candidates.extend(
@@ -2882,10 +2891,13 @@ fn array_variable_completion_candidates(
     }
     candidates.insert("GROUPS".to_string());
     // rubash#1569: same own-frame adjudication as the other listings.
+    // rubash#3950: GNU all_array_variables (variables.c:4416) filters by
+    // visible_array_vars (invisible_p(var) == 0), so declared-but-never-
+    // assigned arrays (att_invisible / DECLARED_UNSET_VARS) are excluded.
     candidates.retain(|name| match underlay.get(name) {
-        None => true,
+        None => !env_vars.is_marked(DECLARED_UNSET_VARS, name),
         Some(None) => false,
-        Some(Some((_, attrs))) => attrs.array || attrs.assoc,
+        Some(Some((_, attrs))) => !attrs.declared_unset && (attrs.array || attrs.assoc),
     });
     candidates.into_iter().collect()
 }
@@ -2898,10 +2910,12 @@ fn exported_variable_completion_candidates(
     // rubash#1569: compgen -e lists the exported CONTEXT variables;
     // a name bound by the current command's own tempenv frame counts
     // only through its pre-frame binding.
+    // rubash#3950: GNU all_exported_variables (variables.c:4350) filters
+    // by visible_and_exported (invisible_p(var) == 0 && exported_p(var)).
     candidates.retain(|name| match underlay.get(name) {
-        None => true,
+        None => !env_vars.is_marked(DECLARED_UNSET_VARS, name),
         Some(None) => false,
-        Some(Some((_, attrs))) => attrs.exported,
+        Some(Some((_, attrs))) => !attrs.declared_unset && attrs.exported,
     });
     candidates.sort();
     candidates.dedup();
