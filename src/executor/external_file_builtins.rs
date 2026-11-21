@@ -2388,6 +2388,13 @@ impl Executor {
                 if crate::executor::execution_misc::is_closed_redirect_target(&target) {
                     return Err(super::external_finish::cat_closed_stdout_error());
                 }
+                // rubash#3980: `>&N` dup2 face before the alias face —
+                // see write_cat_dup_fd_output.
+                if let Some(result) = self.write_cat_dup_fd_output(cmd, &target, &output) {
+                    result?;
+                    self.exit_code = 0;
+                    return Ok(true);
+                }
                 if let Some(result) =
                     self.write_dev_stdio_redirect_output(&target, &output, false, redirect.clobber)
                 {
