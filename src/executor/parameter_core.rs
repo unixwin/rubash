@@ -285,9 +285,13 @@ impl Executor {
                 // a=${-x}` reported `${-x}` instead of `a=${-x}`).
                 // Compound values are excluded: GNU names the ELEMENT word
                 // there (`[0]=${-x}` for `a=([0]=${-x})`), which needs
-                // element-boundary tracking of its own.
-                let _diag_word =
-                    crate::executor::expand_word::PendingDiagnosticWordGuard::new(word);
+                // element-boundary tracking of its own. A here-document
+                // body is runtime text GNU never ran parse_comsub on —
+                // its `$(` spans cite raw (rubash#3543).
+                let _diag_word = crate::executor::expand_word::PendingDiagnosticWordGuard::new(
+                    word,
+                    matches!(context, SubstitutionQuoteContext::HereDocument),
+                );
                 crate::executor::assignment_expansion::restore_sq_content_markers(
                     self.expand_embedded_parameters_mut(&hoisted)
                         .replace(DQ_DATA, "\"")

@@ -1846,7 +1846,11 @@ impl Executor {
     /// left side is a valid parameter reference, which keeps
     /// operator-shaped text inside a message or pattern from being
     /// mistaken for the span's own operator (rubash#2343).
-    fn nested_operator_word_error(&self, inner: &str) -> Option<(String, String, i32)> {
+    fn nested_operator_word_error(
+        &self,
+        inner: &str,
+        quote_aware: bool,
+    ) -> Option<(String, String, i32)> {
         for op in [":=", ":-", ":+", "=", "-", "+"] {
             let Some((var_name, word)) = split_once_outside_subscript_str(inner, op) else {
                 continue;
@@ -1874,7 +1878,10 @@ impl Executor {
             if !word_evaluated {
                 return None;
             }
-            return self.parameter_expansion_error_in_word(word);
+            // rubash#3543: propagate the enclosing scan's quote context —
+            // a here-document body's operator word is runtime text whose
+            // `$(` spans GNU cites raw, exactly like the outer body.
+            return self.parameter_expansion_error_in_word_context(word, quote_aware);
         }
         // rubash#2701 — `${var/pat/repl}`: GNU expands the replacement
         // word (parameter_brace_patsub -> expand_string on the repl text,
@@ -1893,7 +1900,8 @@ impl Executor {
                             .scan_operator_value(var_name)
                             .is_some_and(|value| value.is_some())
                     {
-                        return self.parameter_expansion_error_in_word(replacement);
+                        return self
+                            .parameter_expansion_error_in_word_context(replacement, quote_aware);
                     }
                 }
             }
@@ -1914,12 +1922,16 @@ impl Executor {
     /// real expansion's subscript walk yields empty for it). Scan the
     /// subscript text before the operator arms, so the subscript
     /// error pre-empts them exactly like the fetch does.
-    fn nested_subscript_word_error(&self, inner: &str) -> Option<(String, String, i32)> {
+    fn nested_subscript_word_error(
+        &self,
+        inner: &str,
+        quote_aware: bool,
+    ) -> Option<(String, String, i32)> {
         let subscript = leading_reference_subscript(inner)?;
         if !subscript.contains("${") {
             return None;
         }
-        self.scan_subscript_text_for_errors(subscript)
+        self.scan_subscript_text_for_errors(subscript, quote_aware)
     }
 
     /// Walk subscript text for nested `${...}` errors (rubash#2596).
@@ -1931,7 +1943,11 @@ impl Executor {
     /// to the inner command, which reports it itself while the outer
     /// command continues. `$((...))` arithmetic units stay opaque
     /// like the top-level scan's P_ARITH rule (rubash#533).
-    fn scan_subscript_text_for_errors(&self, text: &str) -> Option<(String, String, i32)> {
+    fn scan_subscript_text_for_errors(
+        &self,
+        text: &str,
+        quote_aware: bool,
+    ) -> Option<(String, String, i32)> {
         let bytes = text.as_bytes();
         let mut index = 0usize;
         while index < bytes.len() {
@@ -2007,7 +2023,9 @@ impl Executor {
                         ));
                     };
                     let span = &text[index..index + 2 + end + 1];
-                    if let Some(error) = self.parameter_expansion_error_in_word(span) {
+                    if let Some(error) =
+                        self.parameter_expansion_error_in_word_context(span, quote_aware)
+                    {
                         return Some(error);
                     }
                     index += 2 + end + 1;
@@ -2630,7 +2648,7 @@ impl Executor {
             // `${#x[]}`) whose reference obeys the same rule.
             if Self::malformed_braced_reference(inner) {
                 return Some((
-                    crate::executor::expand_word::bad_substitution_display(word),
+                    crate::executor::expand_word::bad_substitution_display(word, !quote_aware),
                     "bad substitution".to_string(),
                     1,
                 ));
@@ -2641,7 +2659,7 @@ impl Executor {
             // a single nested subscript such as `${A[${i}]}` remains valid.
             if inner.contains("[${${") {
                 return Some((
-                    crate::executor::expand_word::bad_substitution_display(word),
+                    crate::executor::expand_word::bad_substitution_display(word, !quote_aware),
                     "bad substitution".to_string(),
                     1,
                 ));
@@ -2653,7 +2671,7 @@ impl Executor {
             // (new-exp.tests `${c//${$(($#-1))}/x/}`).
             if inner.starts_with("$(") || inner.contains("${$(") {
                 return Some((
-                    crate::executor::expand_word::bad_substitution_display(word),
+                    crate::executor::expand_word::bad_substitution_display(word, !quote_aware),
                     "bad substitution".to_string(),
                     1,
                 ));
@@ -2664,7 +2682,7 @@ impl Executor {
             // parameter_brace_expand; expand_subscript_string,
             // subst.c:11063) — a nested error inside it pre-empts
             // every arm below.
-            if let Some(nested) = self.nested_subscript_word_error(inner) {
+            if let Some(nested) = self.nested_subscript_word_error(inner, quote_aware) {
                 return Some(nested);
             }
             // GNU subst.c:8944-8951 parameter_brace_transform +
@@ -2696,7 +2714,7 @@ impl Executor {
                     };
                 if is_set {
                     return Some((
-                        crate::executor::expand_word::bad_substitution_display(word),
+                        crate::executor::expand_word::bad_substitution_display(word, !quote_aware),
                         "bad substitution".to_string(),
                         Self::FATAL_PARAMETER_EXPANSION_STATUS,
                     ));
@@ -2709,7 +2727,7 @@ impl Executor {
             if let Some(length_name) = inner.strip_prefix('#') {
                 if !Self::is_valid_length_parameter_name(length_name) {
                     return Some((
-                        crate::executor::expand_word::bad_substitution_display(word),
+                        crate::executor::expand_word::bad_substitution_display(word, !quote_aware),
                         "bad substitution".to_string(),
                         1,
                     ));
@@ -2722,7 +2740,7 @@ impl Executor {
             if let Some(indirect) = self.indirect_parameter_body(inner) {
                 if !Self::is_valid_indirect_expression(indirect) {
                     return Some((
-                        crate::executor::expand_word::bad_substitution_display(word),
+                        crate::executor::expand_word::bad_substitution_display(word, !quote_aware),
                         "bad substitution".to_string(),
                         1,
                     ));
@@ -3119,7 +3137,7 @@ impl Executor {
                 && !word_contains_current_shell_command_substitution(word)
             {
                 return Some((
-                    crate::executor::expand_word::bad_substitution_display(word),
+                    crate::executor::expand_word::bad_substitution_display(word, !quote_aware),
                     "bad substitution".to_string(),
                     1,
                 ));
@@ -3147,7 +3165,7 @@ impl Executor {
                 && crate::executor::expand_word::braced_name_is_bad_substitution(inner)
             {
                 return Some((
-                    crate::executor::expand_word::bad_substitution_display(word),
+                    crate::executor::expand_word::bad_substitution_display(word, !quote_aware),
                     "bad substitution".to_string(),
                     1,
                 ));
@@ -3185,7 +3203,9 @@ impl Executor {
                         // INNER variable (rubash#2343: `${a:?${b:?inner}}`
                         // reports `b: inner`, never `a: inner`).
                         if !message.is_empty() {
-                            if let Some(nested) = self.parameter_expansion_error_in_word(message) {
+                            if let Some(nested) =
+                                self.parameter_expansion_error_in_word_context(message, quote_aware)
+                            {
                                 return Some(nested);
                             }
                         }
@@ -3229,7 +3249,7 @@ impl Executor {
             // and reported for the inner parameter (rubash#2343:
             // `${a:-${b:?inner}}` with a unset reports `b: inner` and
             // aborts; it never yields the message text as a value).
-            if let Some(nested) = self.nested_operator_word_error(inner) {
+            if let Some(nested) = self.nested_operator_word_error(inner, quote_aware) {
                 return Some(nested);
             }
             // rubash#3225: the scan parse must not probe through the

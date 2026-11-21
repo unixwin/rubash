@@ -525,7 +525,7 @@ impl Printer {
                 // (rubash#2500).
                 let raw = cmd.assignment_raws[index].clone();
                 let mut rendered = raw.clone();
-                for node in &crate::parser::command_substitutions_in_word_public(&raw) {
+                for node in &crate::parser::command_substitutions_in_word_live_public(&raw) {
                     if node.backtick || node.current_shell {
                         continue;
                     }
@@ -596,11 +596,11 @@ impl Printer {
         // (parse.y:4451 parse_comsub + print_comsub); the parse-time word
         // scan that captured the substitution trees is gone, so the
         // renderer re-derives them from the word text on demand — the same
-        // scan the intake used to run (identical span boundaries,
-        // command_substitutions_in_word_public is also print_comsub's
-        // oracle).
+        // scan the intake used to run (identical span boundaries; the LIVE
+        // variant replays read_token_word's quote state so single-quoted
+        // and backslash-escaped `$(` stay literal, rubash#3543).
         if metadata.is_some() {
-            for node in &crate::parser::command_substitutions_in_word_public(word) {
+            for node in &crate::parser::command_substitutions_in_word_live_public(word) {
                 if node.backtick || node.current_shell {
                     continue;
                 }

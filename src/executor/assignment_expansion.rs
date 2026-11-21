@@ -3294,7 +3294,7 @@ impl Executor {
         // fragment's own word.
         let expanded = match compound_element_diag_word(token_raw, assoc) {
             CompoundElementDiag::Element(word) | CompoundElementDiag::Value(word) => {
-                crate::executor::expand_word::with_pending_diagnostic_word(&word, || {
+                crate::executor::expand_word::with_pending_diagnostic_word(&word, false, || {
                     self.expand_embedded_parameters_compound(token_raw)
                 })
             }
@@ -3456,7 +3456,7 @@ impl Executor {
         // compound_plain_element_value_fields (see there).
         let expanded = match compound_element_diag_word(token_raw, assoc) {
             CompoundElementDiag::Element(word) | CompoundElementDiag::Value(word) => {
-                crate::executor::expand_word::with_pending_diagnostic_word(&word, || {
+                crate::executor::expand_word::with_pending_diagnostic_word(&word, false, || {
                     self.expand_embedded_parameters_compound(token_raw)
                 })
             }
@@ -4082,7 +4082,7 @@ impl Executor {
         // declare context, so no word is installed there.
         let value = match compound_element_diag_word(token_raw, assoc) {
             CompoundElementDiag::Element(word) | CompoundElementDiag::Value(word) if !bare => {
-                crate::executor::expand_word::with_pending_diagnostic_word(&word, || {
+                crate::executor::expand_word::with_pending_diagnostic_word(&word, false, || {
                     self.whole_word_parameter_single_value(unquoted)
                 })
             }

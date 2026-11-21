@@ -94,11 +94,18 @@ pub(in crate::executor) fn print_comsub_text(
 /// Backquote and `${ ... }` (funsub/valsub) spans keep their raw text — GNU
 /// extracts those verbatim (parse.y:3877 parse_matched_pair), never through
 /// print_comsub.
+///
+/// The span scan is the LIVE variant (rubash#2789): it replays the word's
+/// lexical state like parse.y:5305 read_token_word, so a `$(` inside
+/// single quotes or behind a backslash is literal text and stays raw —
+/// GNU's parse_comsub only ever saw lexer-recognized openers
+/// (`: pre'$(echo sq >&2)'${-x$(echo hi >&2)}` cites the quoted span raw,
+/// rubash#3543).
 pub(in crate::executor) fn canonicalize_comsub_spans(text: &str) -> String {
     if !text.contains("$(") {
         return text.to_string();
     }
-    let substitutions = crate::parser::command_substitutions_in_word_public(text);
+    let substitutions = crate::parser::command_substitutions_in_word_live_public(text);
     if substitutions.is_empty() {
         return text.to_string();
     }
