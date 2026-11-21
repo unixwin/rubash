@@ -311,18 +311,84 @@ fn issue3997_inshell_write_face_unchanged() {
 /// pristine c885c5a5 (which passes by accident — the symbolic
 /// endpoint was dropped before it could be delivered).
 #[cfg(unix)]
+fn snapshot_inheritable_fds() -> std::collections::BTreeSet<i32> {
+    let mut fds = std::collections::BTreeSet::new();
+    let Ok(entries) = fs::read_dir("/proc/self/fd") else {
+        fds.extend([0, 1, 2]);
+        return fds;
+    };
+    for entry in entries.flatten() {
+        let Some(name) = entry
+            .file_name()
+            .to_str()
+            .and_then(|s| s.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        // Only fds without FD_CLOEXEC are inherited across Command::new(RUBASH).
+        // This also excludes read_dir's own directory fd and any O_CLOEXEC fds
+        // opened concurrently by other test threads.
+        let flags = unsafe { libc::fcntl(name, libc::F_GETFD) };
+        if flags != -1 && (flags & libc::FD_CLOEXEC) == 0 {
+            fds.insert(name);
+        }
+    }
+    fds
+}
+
+#[cfg(unix)]
+fn parse_proc_fd_glob(stdout: &str) -> std::collections::BTreeSet<i32> {
+    let mut fds = std::collections::BTreeSet::new();
+    for token in stdout.split_whitespace() {
+        let fd_str = token.strip_prefix("/proc/self/fd/").unwrap_or_else(|| {
+            panic!("unexpected /proc/self/fd entry {token:?} in stdout: {stdout:?}")
+        });
+        let fd: i32 = fd_str
+            .parse()
+            .unwrap_or_else(|e| panic!("non-numeric fd {fd_str:?} in stdout {stdout:?}: {e}"));
+        assert!(fds.insert(fd), "duplicate fd {fd} in stdout: {stdout:?}");
+    }
+    fds
+}
+
+#[cfg(unix)]
+fn assert_child_fd_set(
+    stdout: &str,
+    stderr: &str,
+    inheritable: &std::collections::BTreeSet<i32>,
+    bound_fd3: bool,
+) {
+    assert_eq!(stderr, "");
+    let actual = parse_proc_fd_glob(stdout);
+    let mut expected = inheritable.clone();
+    expected.extend([0, 1, 2]);
+    if bound_fd3 {
+        expected.insert(3);
+    } else {
+        expected.remove(&3);
+    }
+    // `/bin/sh -c 'echo /proc/self/fd/*'` opens /proc/self/fd to glob it,
+    // which takes the lowest free descriptor in the child.
+    let glob_fd = (0..)
+        .find(|fd| !expected.contains(fd))
+        .expect("find lowest free fd for opendir");
+    expected.insert(glob_fd);
+    assert_eq!(
+        actual, expected,
+        "child fd set mismatch (inheritable={inheritable:?}, bound_fd3={bound_fd3}, stdout={stdout:?})"
+    );
+}
+
+#[cfg(unix)]
 #[test]
 fn issue3997_bracket_save_slot_not_delivered_rebind() {
     let dir = scratch("save-rebind");
+    let inheritable = snapshot_inheritable_fds();
     let (stdout, stderr, _) = rubash_script(
         &dir,
         "exec 3>/dev/full\n{ /bin/sh -c 'echo /proc/self/fd/*'; } 3>cap.txt\n",
     );
-    assert_eq!(
-        stdout,
-        "/proc/self/fd/0 /proc/self/fd/1 /proc/self/fd/2 /proc/self/fd/3 /proc/self/fd/4\n"
-    );
-    assert_eq!(stderr, "");
+    assert_child_fd_set(&stdout, &stderr, &inheritable, true);
 }
 
 /// The close form of the same guard: the bracket closes fd 3,
@@ -333,15 +399,12 @@ fn issue3997_bracket_save_slot_not_delivered_rebind() {
 #[test]
 fn issue3997_bracket_save_slot_not_delivered_close() {
     let dir = scratch("save-close");
+    let inheritable = snapshot_inheritable_fds();
     let (stdout, stderr, _) = rubash_script(
         &dir,
         "exec 3>/dev/full\n{ /bin/sh -c 'echo /proc/self/fd/*'; } 3>&-\n",
     );
-    assert_eq!(
-        stdout,
-        "/proc/self/fd/0 /proc/self/fd/1 /proc/self/fd/2 /proc/self/fd/3\n"
-    );
-    assert_eq!(stderr, "");
+    assert_child_fd_set(&stdout, &stderr, &inheritable, false);
 }
 
 /// Captain graft guard: a simple command closing the only
@@ -354,15 +417,12 @@ fn issue3997_bracket_save_slot_not_delivered_close() {
 #[test]
 fn issue3997_close_only_slot_no_carrier_leak_full() {
     let dir = scratch("close-carrier-full");
+    let inheritable = snapshot_inheritable_fds();
     let (stdout, stderr, _) = rubash_script(
         &dir,
         "exec 3>/dev/full\n/bin/sh -c 'echo /proc/self/fd/*' 3>&-\n",
     );
-    assert_eq!(
-        stdout,
-        "/proc/self/fd/0 /proc/self/fd/1 /proc/self/fd/2 /proc/self/fd/3\n"
-    );
-    assert_eq!(stderr, "");
+    assert_child_fd_set(&stdout, &stderr, &inheritable, false);
 }
 
 /// The plain-file form of the same guard (captain probe
@@ -372,13 +432,10 @@ fn issue3997_close_only_slot_no_carrier_leak_full() {
 #[test]
 fn issue3997_close_only_slot_no_carrier_leak_file() {
     let dir = scratch("close-carrier-file");
+    let inheritable = snapshot_inheritable_fds();
     let (stdout, stderr, _) = rubash_script(
         &dir,
         "exec 3>cap.txt\n/bin/sh -c 'echo /proc/self/fd/*' 3>&-\n",
     );
-    assert_eq!(
-        stdout,
-        "/proc/self/fd/0 /proc/self/fd/1 /proc/self/fd/2 /proc/self/fd/3\n"
-    );
-    assert_eq!(stderr, "");
+    assert_child_fd_set(&stdout, &stderr, &inheritable, false);
 }
