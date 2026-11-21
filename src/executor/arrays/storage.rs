@@ -1044,10 +1044,16 @@ fn is_print_byte(byte: u8) -> bool {
     (0x20..=0x7e).contains(&byte)
 }
 
-/// strtrans.c iswprint under a UTF-8 locale: Unicode control characters
-/// (C0, DEL, the C1 range) are non-printing, everything else prints.
+/// strtrans.c iswprint under a UTF-8 locale (ansic_wshouldquote's
+/// mbstowcs + iswprint walk, strtrans.c:312-336): glibc's print class is
+/// the complement of its cntrl table — category Cc plus the
+/// line/paragraph separators U+2028/U+2029 are non-printing
+/// (locale.rs is_glibc_cntrl, the model printf's ansic_char_printable
+/// verified against the glibc oracle for rubash#3942), while Cf format
+/// characters (U+200B, U+00AD, U+FEFF) print. Rust's is_control() alone
+/// misses the two separators (rubash#3946).
 fn is_printable_wide(ch: char) -> bool {
-    !ch.is_control()
+    !crate::locale::is_glibc_cntrl(ch)
 }
 
 /// Decode one UTF-8 character at the slice start; None for an invalid or
