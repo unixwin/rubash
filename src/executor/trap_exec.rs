@@ -3949,7 +3949,7 @@ impl Executor {
         if let Some(path) = self.get_env("PATH") {
             sleeper.env("PATH", path);
         }
-        let mut child = match sleeper.spawn() {
+        let mut child = match crate::fault_injection::spawn_command(&mut sleeper) {
             Ok(child) => child,
             Err(_) => return Err(ExecuteError::ExitCode(128 + SIGTSTP_NUMBER)),
         };
@@ -6647,7 +6647,7 @@ impl Executor {
                 });
             }
         }
-        match child.spawn() {
+        match crate::fault_injection::spawn_command(&mut child) {
             Ok(child_proc) => {
                 for dup in &ambient_fd_dups {
                     crate::fd::close_handle(*dup);
@@ -11228,6 +11228,11 @@ impl Executor {
     /// `"soft:hard"` cell, so it failed on every stored value and the
     /// allocator silently fell back to its 1024 hard cap.
     pub(in crate::executor) fn open_files_limit(&self) -> Option<u32> {
+        let base = self.open_files_limit_raw();
+        crate::fault_injection::clamp_open_files_limit(base)
+    }
+
+    fn open_files_limit_raw(&self) -> Option<u32> {
         const UNLIMITED: u64 = u64::MAX;
         #[cfg(unix)]
         {

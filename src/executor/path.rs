@@ -3322,14 +3322,15 @@ fn winuxcmd_has_command(dispatcher: &Path, name: &str, env_vars: &HashMap<String
         }
     }
     suppress_orphan_console(&mut command);
-    command
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .inspect(|child| adopt_orphan_console(child.id()))
-        .and_then(|child| child.wait_with_output())
-        .is_ok_and(|output| output.status.success())
+    crate::fault_injection::spawn_command(
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .inspect(|child| adopt_orphan_console(child.id()))
+    .and_then(|child| child.wait_with_output())
+    .is_ok_and(|output| output.status.success())
 }
 
 /// rubash#159: `winuxcmd help NAME` probe memo. Each uncached probe is a

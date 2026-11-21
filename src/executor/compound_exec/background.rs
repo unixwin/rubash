@@ -416,7 +416,8 @@ impl Executor {
                 }
                 self.stamp_spawn_cwd(&mut process);
                 suppress_orphan_console(&mut process);
-                process.spawn().map(crate::fd::SpawnedChild::from)
+                crate::fault_injection::spawn_command(&mut process)
+                    .map(crate::fd::SpawnedChild::from)
             };
             match spawned {
                 Ok(child) => {
@@ -1137,22 +1138,24 @@ impl Executor {
         let cwd_anchor_fd = self.session_cwd_anchor_fd();
         #[cfg(not(unix))]
         let cwd_anchor_fd: Option<i32> = None;
-        let spawn_result = crate::fd::spawn_whitelisted(&crate::fd::WhitelistedSpawn {
-            program: exe.clone(),
-            args: spawn_args,
-            env: env_entries,
-            std_handles,
-            extra_handles,
-            // G-02: the respawned child starts in the session cwd.
-            cwd: Some(self.shell_state.cwd.clone()),
-            cwd_anchor_fd,
-            // rubash#2241: under job control the respawned async child
-            // leads its own process group (GNU jobs.c:2390 make_child),
-            // matching the pgrp the job table records for it below.
-            new_process_group: crate::builtins::set::shell_option_enabled(
-                &self.shell_state.env_vars,
-                "monitor",
-            ),
+        let spawn_result = crate::fault_injection::maybe_inject_spawn_error().and_then(|()| {
+            crate::fd::spawn_whitelisted(&crate::fd::WhitelistedSpawn {
+                program: exe.clone(),
+                args: spawn_args,
+                env: env_entries,
+                std_handles,
+                extra_handles,
+                // G-02: the respawned child starts in the session cwd.
+                cwd: Some(self.shell_state.cwd.clone()),
+                cwd_anchor_fd,
+                // rubash#2241: under job control the respawned async child
+                // leads its own process group (GNU jobs.c:2390 make_child),
+                // matching the pgrp the job table records for it below.
+                new_process_group: crate::builtins::set::shell_option_enabled(
+                    &self.shell_state.env_vars,
+                    "monitor",
+                ),
+            })
         });
         for h in owned_handles {
             crate::fd::close_handle(h);

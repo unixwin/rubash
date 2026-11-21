@@ -4520,7 +4520,7 @@ impl Executor {
         // pairs at birth (see spawn_external_process's arm). No-op
         // when no emulated-limit cells exist.
         crate::builtins::ulimit::arm_emulated_limits(&mut process, &self.shell_state.env_vars);
-        let spawn_result = process.spawn();
+        let spawn_result = crate::fault_injection::spawn_command(&mut process);
         for dup in parent_side_dups {
             crate::fd::close_handle(dup);
         }

@@ -718,6 +718,12 @@ pub fn read_available(file: &std::fs::File) -> std::io::Result<Vec<u8>> {
 pub fn read_some(h: HANDLE, n: usize) -> std::io::Result<Vec<u8>> {
     let mut buf = vec![0u8; n.max(1)];
     let got = loop {
+        if let Err(err) = crate::fault_injection::maybe_inject_read_eintr() {
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
+        }
         let got = unsafe { libc::read(h, buf.as_mut_ptr().cast(), buf.len()) };
         if got >= 0 {
             break got;
@@ -755,6 +761,7 @@ pub fn write_file_all(file: &std::fs::File, bytes: &[u8]) -> std::io::Result<()>
 }
 
 pub fn write_all(h: HANDLE, bytes: &[u8]) -> std::io::Result<()> {
+    crate::fault_injection::maybe_inject_write_fault(None)?;
     let mut off = 0usize;
     while off < bytes.len() {
         let n = unsafe { libc::write(h, bytes[off..].as_ptr().cast(), bytes.len() - off) };

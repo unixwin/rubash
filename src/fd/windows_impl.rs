@@ -1378,6 +1378,12 @@ fn is_directory_handle(h: HANDLE) -> bool {
 
 /// Read up to `n` bytes; ERROR_BROKEN_PIPE (drained anonymous pipe) is EOF.
 pub fn read_some(h: HANDLE, n: usize) -> std::io::Result<Vec<u8>> {
+    while let Err(err) = crate::fault_injection::maybe_inject_read_eintr() {
+        if err.kind() == std::io::ErrorKind::Interrupted {
+            continue;
+        }
+        return Err(err);
+    }
     // rubash#1976: a netopen endpoint is a socket handle — recv, not
     // ReadFile (see is_socket_handle). recv returning 0 is the orderly
     // peer shutdown = EOF GNU's read(2) sees on the netopen descriptor;
@@ -1439,6 +1445,7 @@ pub fn write_file_all(file: &std::fs::File, bytes: &[u8]) -> std::io::Result<()>
 }
 
 pub fn write_all(h: HANDLE, bytes: &[u8]) -> std::io::Result<()> {
+    crate::fault_injection::maybe_inject_write_fault(None)?;
     // rubash#1976: send, not WriteFile, on a netopen endpoint (see
     // is_socket_handle); write_all loops send until the buffer is out,
     // the same contract as the WriteFile loop below.

@@ -3233,6 +3233,7 @@ impl Executor {
                 }
             },
             FdWriteEndpoint::Stderr => {
+                crate::fault_injection::maybe_inject_write_fault(Some(fd))?;
                 if let Some(capture) = &mut self.stderr_capture {
                     capture.write_all(output)?;
                 } else {
@@ -3637,6 +3638,7 @@ impl Executor {
             // and swallow bytes that GNU sends outside the substitution
             // (rubash#368: `exec 3>&1; v=$(echo x >&3)` prints x outside).
             FdWriteEndpoint::Stdout => {
+                crate::fault_injection::maybe_inject_write_fault(Some(fd))?;
                 // niubash#345: while a shell-side pipeline producer's capture
                 // frame is active, its fd-1 writes stream into the next
                 // stage's OS pipe instead of any in-memory capture. This must
@@ -3674,6 +3676,7 @@ impl Executor {
                 }
             }
             FdWriteEndpoint::Stderr => {
+                crate::fault_injection::maybe_inject_write_fault(Some(fd))?;
                 if let Some(capture) = &mut self.stderr_capture {
                     capture.write_all(output)?;
                 } else {
