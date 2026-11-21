@@ -538,9 +538,9 @@ impl Executor {
         // left-to-right walk reports the FIRST failing dup in list order
         // like GNU do_redirections (output side rubash#263/#266, input
         // side rubash#2030).
-        if let Some((index, name, cannot_duplicate)) = self.compound_dup_bad_fd(cmd) {
+        if let Some((index, name, move_open_redirector)) = self.compound_dup_bad_fd(cmd) {
             let abandoned =
-                self.abandon_compound_for_dup_bad_fd(cmd, index, &name, cannot_duplicate);
+                self.abandon_compound_for_dup_bad_fd(cmd, index, &name, move_open_redirector);
             self.unwind_dynamic_fd_pass(&bound_dynamic_fds, saved_dynamic_closes);
             return abandoned;
         }
@@ -3395,8 +3395,8 @@ impl Executor {
         // Same preflight-first discipline as with_command_input_redirects:
         // the walk is pure, and the abandonment it triggers must not race
         // half-applied binds.
-        if let Some((index, name, cannot_duplicate)) = self.compound_dup_bad_fd(cmd) {
-            return self.abandon_compound_for_dup_bad_fd(cmd, index, &name, cannot_duplicate);
+        if let Some((index, name, move_open_redirector)) = self.compound_dup_bad_fd(cmd) {
+            return self.abandon_compound_for_dup_bad_fd(cmd, index, &name, move_open_redirector);
         }
         let saved_numbered = self.open_compound_numbered_input_redirects(cmd)?;
         let saved_output = self.open_compound_output_redirects(cmd)?;
@@ -3441,21 +3441,24 @@ impl Executor {
     /// (`compound_dup_bad_fd`) and route the failure here. The diagnostic
     /// goes through the fd 2 binding only the redirects BEFORE the failing
     /// dup installed (`{ :; } 2>/dev/null 2>&3` is silent), because
-    /// do_redirections stops at the failing step. `cannot_duplicate` is
-    /// the move-undo verdict compound_dup_bad_fd computed (rubash#4028):
-    /// on an RX_UNDOABLE compound walk whose move redirector was open,
-    /// redir.c:1171-1175's source-close save fails first and sys_errors
-    /// `redirection error: cannot duplicate fd` ahead of the
-    /// `N: Bad file descriptor` line.
+    /// do_redirections stops at the failing step. `move_open_redirector`
+    /// is the move-with-open-redirector fact compound_dup_bad_fd
+    /// computed; the first line additionally requires the shared
+    /// RX_UNDOABLE gate (`dup_move_walk_is_undoable`, rubash#4046 —
+    /// the #4028 form computed the whole verdict inline with a
+    /// compound-only face test): on an RX_UNDOABLE compound walk whose
+    /// move redirector was open, redir.c:1171-1175's source-close save
+    /// fails first and sys_errors `redirection error: cannot duplicate
+    /// fd` ahead of the `N: Bad file descriptor` line.
     pub(in crate::executor) fn abandon_compound_for_dup_bad_fd<T: Default>(
         &mut self,
         cmd: &CommandNode,
         index: usize,
         name: &str,
-        cannot_duplicate: bool,
+        move_open_redirector: bool,
     ) -> Result<T, ExecuteError> {
         let mut stderr = Vec::new();
-        if cannot_duplicate {
+        if move_open_redirector && self.dup_move_walk_is_undoable(cmd) {
             writeln!(
                 stderr,
                 "{}redirection error: cannot duplicate fd: Bad file descriptor",
@@ -3501,18 +3504,12 @@ impl Executor {
         cmd: &CommandNode,
     ) -> Option<(usize, String, bool)> {
         let mut opened: HashMap<u32, bool> = HashMap::new();
-        // rubash#4028: whether this compound's redirect list is applied
-        // with GNU's RX_UNDOABLE saves — the only walks where
-        // add_undo_redirect (redir.c:1296) runs and a move's
-        // source-close save can sys_error `cannot duplicate fd`
-        // (redir.c:1171-1175). A `( )` subshell head's own list is the
-        // fork child's RX_ACTIVE pass (execute_cmd.c:1761), and a
-        // respawned background/procsub payload root replays that same
-        // child face, so neither earns the first diagnostic line.
-        let undoable_walk = cmd.subshell_command.is_none()
-            && cmd.pipe.is_none()
-            && cmd.pipeline_command.is_none()
-            && self.respawn_payload_face.get() == 0;
+        // rubash#4046: the RX_UNDOABLE verdict for the move diagnostic
+        // is not computed here — compound_dup_bad_fd reports the
+        // move-with-open-source fact and the abandon path applies the
+        // shared gate (dup_move_walk_is_undoable). The #4028-era local
+        // form (respawn_payload_face == 0 plus structural heads)
+        // excluded the face-2/3 respawn bodies #4046 is about.
         // rubash#3991: the undo saves a fixed entry earns are real
         // descriptors in GNU's walk (see fd_walk_register_saves), so
         // a dup naming a save slot is not a bad-fd dup. Mirror the
@@ -3590,14 +3587,17 @@ impl Executor {
                             // undo save — whose failed fcntl prints
                             // `cannot duplicate fd` — runs only on an
                             // RX_UNDOABLE walk whose redirector is open
-                            // at this position.
-                            let cannot_duplicate = move_source
-                                && undoable_walk
+                            // at this position. This site reports the
+                            // move with its source open; the RX_UNDOABLE
+                            // verdict itself is the shared gate the
+                            // abandon path applies
+                            // (dup_move_walk_is_undoable, rubash#4046).
+                            let move_open_redirector = move_source
                                 && dup_source_fd_open(&self.fd_table, fd, &opened);
                             return Some((
                                 index,
                                 dup_bad_fd_name(raw_word, fd, source_fd),
-                                cannot_duplicate,
+                                move_open_redirector,
                             ));
                         }
                         let open = dup_source_fd_open(&self.fd_table, source_fd, &opened);

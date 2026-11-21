@@ -2046,6 +2046,31 @@ impl Executor {
         self.redirect_walk_is_undoable(cmd) && cmd.pipe.is_none() && cmd.pipeline_command.is_none()
     }
 
+    /// GNU redir.c:1169 (`(flags & RX_UNDOABLE) && (ri == r_move_input || ri == r_move_output)`):
+    /// whether this command's move-redirect walk runs with `RX_UNDOABLE` so
+    /// an open redirector triggers `add_undo_redirect` (`redir.c:1296`) and
+    /// emits `redirection error: cannot duplicate fd` before `redirection_error`.
+    ///
+    /// Both the simple-command preflight (`reject_with_dup_bad_fd` in
+    /// `redirection.rs`) and the compound-command preflight
+    /// (`abandon_compound_for_dup_bad_fd` in `command_input_scope.rs`) share
+    /// this predicate:
+    /// - `execute_command_internal` (`execute_cmd.c:854`) and
+    ///   `execute_builtin_or_function` (`execute_cmd.c:5606`) pass `RX_UNDOABLE`.
+    /// - Forked contexts — subshells (`execute_cmd.c:1761`), pipeline stages
+    ///   (`execute_cmd.c:5522`), async commands (`execute_cmd.c:4551`,
+    ///   including `respawn_payload_face == 1`), and external commands — run
+    ///   `RX_ACTIVE` only.
+    /// - Respawn faces 2 (`subshell` body) and 3 (`procsub` body) execute
+    ///   their inner commands in-process inside the child shell, so their
+    ///   compounds and builtins keep `RX_UNDOABLE` (`respawn_payload_face != 1`).
+    pub(in crate::executor) fn dup_move_walk_is_undoable(&mut self, cmd: &CommandNode) -> bool {
+        self.respawn_payload_face.get() != 1
+            && self.fd_var_walk_undoable(cmd)
+            && !cmd.background
+            && cmd.background_command.is_none()
+    }
+
     /// True when the command carrying a failing heredoc would dispatch to
     /// a builtin or function (main-shell redirects, execute_cmd.c:5606)
     /// rather than a forked external child (execute_cmd.c:5884+).
