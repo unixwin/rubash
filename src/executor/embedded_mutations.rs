@@ -2291,6 +2291,13 @@ impl Executor {
         // inside a comment (`# don't`) opened a phantom single-quote that
         // swallowed the closing `}`.
         let mut at_word_start = true;
+        // parse.y:5899 reserved_word_acceptable is a TOKEN-level predicate:
+        // `term` alone sees only the last character class, so a body ending
+        // in a compound command spelled by reserved words (`... fi`,
+        // `... done`, `... esac`, `... ]]`) or a bare `)` needs the word
+        // itself classified — the same tracker extract_funsub_body_tail
+        // and the other funsub extent scanners carry (rubash#4017).
+        let mut word = crate::lexer::classification::FunsubWordTracker::default();
         // `while let` (not `for ... in chars.by_ref()`): the lone-`}` check
         // needs chars.peek() while the loop owns the iterator.
         while let Some(source_ch) = chars.next() {
@@ -2303,6 +2310,9 @@ impl Executor {
             if source_ch == '\\' && !single {
                 source.push(source_ch);
                 escaped = true;
+                // An escape makes the word quoted — never a reserved word
+                // (parse.y:3170 CHECK_FOR_RESERVED_WORD's `quoted` gate).
+                word.poison(term);
                 if !double {
                     term = false;
                 }
@@ -2348,7 +2358,10 @@ impl Executor {
                     // consume_nested_dollar_unit. Without this arm
                     // `${ echo X${ echo nested; }Y; }' ended the outer body
                     // at the inner funsub's `}' (341bf41b follow-up).
+                    // A `$` unit is expansion material: the word is quoted
+                    // for reserved-word purposes (parse.y:3170).
                     source.push(source_ch);
+                    word.poison(term);
                     super::command_substitution::consume_nested_dollar_unit(chars, &mut source);
                     term = false;
                     at_word_start = false;
@@ -2356,46 +2369,70 @@ impl Executor {
                 }
                 '\'' => {
                     single = true;
+                    word.poison(term);
                     term = false;
                     at_word_start = false;
                 }
                 '"' => {
                     double = true;
+                    word.poison(term);
                     term = false;
                     at_word_start = false;
                 }
                 '(' => {
+                    word.finish_into(&mut term);
+                    word.note_hard_token();
                     paren_depth += 1;
                     term = false;
                     at_word_start = true;
                 }
                 ')' if paren_depth > 0 => {
+                    word.finish_into(&mut term);
+                    word.note_hard_token();
                     paren_depth -= 1;
                     // A closed outermost `( ... )` is a complete command.
                     term = paren_depth == 0;
                     at_word_start = true;
                 }
                 // A bare `)` (no open subshell) is a metacharacter, not
-                // word text: the next token starts after it.
+                // word text: `)` itself is in reserved_word_acceptable
+                // (parse.y:5919), so a `}` after it is recognized.
                 ')' => {
-                    term = false;
+                    word.finish_into(&mut term);
+                    word.note_hard_token();
+                    term = true;
                     at_word_start = true;
                 }
-                '{' if term && paren_depth == 0 => {
+                // A lone `{` opens a brace group at command position, at
+                // the FUNCTION/COPROC-name fallback position, or under
+                // PST_ALLOWOPNBRC after `function` (parse.y:3444-3451
+                // `{'.tokstr is the single-char "{"' whole-token gate + parse.y:5940-5943);
+                // `{x`-glued text stays word characters.
+                '{' if !word.word_active()
+                    && (term || word.brace_open_ctx())
+                    && paren_depth == 0
+                    && crate::lexer::classification::brace_token_boundary_next(
+                        chars.peek().copied(),
+                    ) =>
+                {
+                    word.note_brace_open();
                     depth += 1;
                     // A command follows the opening brace.
                     term = true;
                 }
-                '}' if term && paren_depth == 0 => {
+                '}' if (term || word.name_ctx_fallback()) && paren_depth == 0 => {
                     // parse.y:5407-5416 read_token_word: a word BEGINNING
-                    // with `}` in command position (reserved_word_
-                    // acceptable) terminates the substitution even when more
-                    // characters follow; term==false covers the mid-word
-                    // case (`a}b`, `\"}`) — those `}` are word text.
+                    // with `}` in an acceptable position (reserved_word_
+                    // acceptable — including the FUNCTION/COPROC-name
+                    // fallback, parse.y:5940-5943) terminates the
+                    // substitution even when more characters follow;
+                    // term==false covers the mid-word case (`a}b`, `\"}`)
+                    // — those `}` are word text.
                     if depth > 1 {
                         // A closed `{ }` group is a complete command: the
                         // funsub's own `}` may follow without another
                         // separator.
+                        word.note_hard_token();
                         depth -= 1;
                         term = true;
                         at_word_start = true;
@@ -2412,6 +2449,8 @@ impl Executor {
                 // no body to skip, and stays for the next iteration's
                 // plain `<` arm.
                 '<' if chars.peek() == Some(&'<') => {
+                    word.finish_into(&mut term);
+                    word.note_hard_token();
                     source.push(source_ch);
                     if let Some(second) = chars.next() {
                         source.push(second);
@@ -2441,10 +2480,14 @@ impl Executor {
                 // `term` is untouched — a `}` right after `>` is the
                 // redirect's target word, not this body's closer.
                 '<' | '>' => {
+                    word.finish_into(&mut term);
+                    word.note_hard_token();
                     term = false;
                     at_word_start = true;
                 }
                 ';' | '&' | '|' | '\n' => {
+                    word.finish_into(&mut term);
+                    word.note_hard_token();
                     // A separator is a token boundary at any depth (`#`
                     // after `;` comments even inside `( ... )`), but it
                     // restores command position only at funsub level —
@@ -2457,9 +2500,39 @@ impl Executor {
                     at_word_start = true;
                 }
                 ' ' | '\t' | '\r' => {
+                    // Whitespace is not a token: the verdict a pending
+                    // word earned (`fi` → FI, `x` → WORD) is what a
+                    // following `}` sees (parse.y:5899 `term` semantics).
+                    word.finish_into(&mut term);
                     at_word_start = true;
                 }
-                _ => word_text = true,
+                // A backquote span is one word element (parse.y:5494's
+                // backquote branch → parse_matched_pair P_COMMAND):
+                // consume it whole so `;`/`}`/quotes inside cannot move
+                // this scan.
+                '`' => {
+                    word.poison(term);
+                    term = false;
+                    at_word_start = false;
+                    source.push(source_ch);
+                    while let Some(inner) = chars.next() {
+                        source.push(inner);
+                        match inner {
+                            '\\' => {
+                                if let Some(escaped_inner) = chars.next() {
+                                    source.push(escaped_inner);
+                                }
+                            }
+                            '`' => break,
+                            _ => {}
+                        }
+                    }
+                    continue;
+                }
+                _ => {
+                    word.push(source_ch, term);
+                    word_text = true;
+                }
             }
             if word_text {
                 term = false;

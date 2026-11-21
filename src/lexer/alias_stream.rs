@@ -1242,9 +1242,19 @@ pub(super) fn skip_funsub_body(chars: &[char], open: usize) -> Option<usize> {
     // single-quote that swallowed the rest of the input (rubash#3813,
     // same class as #2033's pre-pass walkers).
     let mut at_word_start = true;
+    // parse.y:5899 reserved_word_acceptable is a TOKEN-level predicate:
+    // `term` alone sees only the last character class, so a body ending
+    // in a compound command spelled by reserved words (`... fi`,
+    // `... done`, `... esac`, `... ]]`) or a bare `)` needs the word
+    // itself classified — the same tracker extract_funsub_body_tail and
+    // the continuation.rs funsub delimiters carry (rubash#4017).
+    let mut word = crate::lexer::classification::FunsubWordTracker::default();
     while index < chars.len() {
         let ch = chars[index];
         if ch == '\\' && !single {
+            // An escape makes the word quoted — never a reserved word
+            // (parse.y:3170 CHECK_FOR_RESERVED_WORD's `quoted` gate).
+            word.poison(term);
             if !double {
                 term = false;
             }
@@ -1279,6 +1289,9 @@ pub(super) fn skip_funsub_body(chars: &[char], open: usize) -> Option<usize> {
                 // the outer body at the inner funsub's `}' (341bf41b
                 // follow-up; the same rule lives in skip.rs,
                 // command_substitution.rs and embedded_mutations.rs).
+                // A `$` unit is expansion material: the word is quoted
+                // for reserved-word purposes (parse.y:3170).
+                word.poison(term);
                 index = match chars.get(index + 1) {
                     Some('{')
                         if chars
@@ -1301,33 +1314,64 @@ pub(super) fn skip_funsub_body(chars: &[char], open: usize) -> Option<usize> {
             }
             '\'' => {
                 single = true;
+                word.poison(term);
                 term = false;
                 at_word_start = false;
             }
             '"' => {
                 double = true;
+                word.poison(term);
                 term = false;
                 at_word_start = false;
             }
             '(' => {
+                word.finish_into(&mut term);
+                word.note_hard_token();
                 paren_depth += 1;
                 term = false;
                 at_word_start = true;
             }
             ')' if paren_depth > 0 => {
+                word.finish_into(&mut term);
+                word.note_hard_token();
                 paren_depth -= 1;
                 term = paren_depth == 0;
                 at_word_start = true;
             }
-            '{' if term && paren_depth == 0 => {
+            // A bare `)` (no open subshell) is a metacharacter, not word
+            // text: `)` itself is in reserved_word_acceptable
+            // (parse.y:5919), so a `}` after it is recognized.
+            ')' => {
+                word.finish_into(&mut term);
+                word.note_hard_token();
+                term = true;
+                at_word_start = true;
+            }
+            // A lone `{` opens a brace group at command position, at the
+            // FUNCTION/COPROC-name fallback position, or under
+            // PST_ALLOWOPNBRC after `function` (parse.y:3444-3451
+            // `{'.tokstr is the single-char "{"' whole-token gate + parse.y:5940-5943);
+            // `{x`-glued text stays word characters.
+            '{' if !word.word_active()
+                && (term || word.brace_open_ctx())
+                && paren_depth == 0
+                && crate::lexer::classification::brace_token_boundary_next(
+                    chars.get(index + 1).copied(),
+                ) =>
+            {
+                word.note_brace_open();
                 depth += 1;
                 term = true;
             }
-            '}' if term && paren_depth == 0 => {
-                // parse.y:5407-5416: a word beginning with `}` in command
-                // position terminates the substitution; term==false covers
-                // mid-word `}` (`a}b`, `\"}`) as word text.
+            '}' if (term || word.name_ctx_fallback()) && paren_depth == 0 => {
+                // parse.y:5407-5416: a word beginning with `}` in an
+                // acceptable position (reserved_word_acceptable —
+                // including the FUNCTION/COPROC-name fallback,
+                // parse.y:5940-5943) terminates the substitution;
+                // term==false covers mid-word `}` (`a}b`, `\"}`) as word
+                // text.
                 if depth > 1 {
+                    word.note_hard_token();
                     depth -= 1;
                     term = true;
                     at_word_start = true;
@@ -1337,6 +1381,12 @@ pub(super) fn skip_funsub_body(chars: &[char], open: usize) -> Option<usize> {
                 return Some(index + 1);
             }
             ';' | '&' | '|' | '\n' => {
+                // Flush the pending word before the separator verdict:
+                // `x;` must not leave "x" active to be classified at the
+                // NEXT whitespace, where its Word verdict would clobber
+                // the command position this separator just restored.
+                word.finish();
+                word.note_hard_token();
                 // `term` stays false inside a subshell (an inner group's
                 // `}` must not read as this funsub's closer), but the
                 // token boundary is real at any depth: `#` after `;`
@@ -1346,7 +1396,13 @@ pub(super) fn skip_funsub_body(chars: &[char], open: usize) -> Option<usize> {
                 }
                 at_word_start = true;
             }
-            ' ' | '\t' | '\r' => at_word_start = true,
+            ' ' | '\t' | '\r' => {
+                // Whitespace is not a token: the verdict a pending
+                // word earned (`fi` → FI, `x` → WORD) is what a
+                // following `}` sees (parse.y:5899 `term` semantics).
+                word.finish_into(&mut term);
+                at_word_start = true;
+            }
             // parse.y:3631 shell_getc: `#` at a token start discards to
             // EOL; a quote character inside the comment is inert, so an
             // apostrophe (`# don't`) must not open a phantom quote that
@@ -1364,6 +1420,8 @@ pub(super) fn skip_funsub_body(chars: &[char], open: usize) -> Option<usize> {
             // apostrophe swallowed it). `<<<` is a herestring — no body
             // to skip — and falls through to the plain `<`/`>` arm.
             '<' if chars.get(index + 1) == Some(&'<') && chars.get(index + 2) != Some(&'<') => {
+                word.finish_into(&mut term);
+                word.note_hard_token();
                 let (next, _closes) =
                     super::heredoc_scan::skip_heredoc_in_chars_with_closure(chars, index);
                 index = next;
@@ -1382,10 +1440,33 @@ pub(super) fn skip_funsub_body(chars: &[char], open: usize) -> Option<usize> {
                 // (parse.y:3631; `echo >#f` is a comment in GNU, #2033).
                 // `term` is untouched — a `}` right after `>` is the
                 // redirect's target word, not this body's closer.
+                word.finish_into(&mut term);
+                word.note_hard_token();
                 at_word_start = true;
                 term = false;
             }
+            // A backquote span is one word element (parse.y:5494's
+            // backquote branch → parse_matched_pair P_COMMAND): consume
+            // it whole so `;`/`}`/quotes inside cannot move this scan.
+            '`' => {
+                word.poison(term);
+                term = false;
+                at_word_start = false;
+                index += 1;
+                while index < chars.len() {
+                    match chars[index] {
+                        '\\' => index += 2,
+                        '`' => {
+                            index += 1;
+                            break;
+                        }
+                        _ => index += 1,
+                    }
+                }
+                continue;
+            }
             _ => {
+                word.push(ch, term);
                 term = false;
                 at_word_start = false;
             }
