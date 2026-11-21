@@ -3259,3 +3259,65 @@ mod conditional_pattern_tests {
         assert!(!executor.conditional_string_binary("a\\b", "==", "$x"));
     }
 }
+
+#[cfg(test)]
+mod conditional_regex_cache_tests {
+    use super::*;
+
+    #[test]
+    fn cache_stays_bounded_under_distinct_pattern_flood() {
+        let executor = Executor::new();
+        for i in 0..100 {
+            let pat = format!("^item_{i}_([0-9]+)$");
+            let compiled = executor
+                .compile_conditional_regex(&pat)
+                .expect("valid pattern should compile");
+            assert!(compiled.captures(&format!("item_{i}_42")).is_some());
+        }
+        // Also flood invalid patterns to verify failure entries obey the cap.
+        for i in 0..50 {
+            let pat = format!("^invalid_{i}_[");
+            assert!(executor.compile_conditional_regex(&pat).is_err());
+        }
+        let len = CONDITIONAL_REGEX_CACHE.with(|cache| cache.borrow().len());
+        assert!(
+            len <= CONDITIONAL_REGEX_CACHE_CAP,
+            "cache len {len} exceeded cap {CONDITIONAL_REGEX_CACHE_CAP}"
+        );
+    }
+
+    #[test]
+    fn cache_separates_case_insensitive_and_byte_mode_keys() {
+        let executor = Executor::new();
+        let pat = "^(abc)$";
+
+        let cs_text = executor
+            .compile_conditional_regex_uncached(pat, false, false)
+            .expect("compile case-sensitive text");
+        let ci_text = executor
+            .compile_conditional_regex_uncached(pat, true, false)
+            .expect("compile case-insensitive text");
+        let cs_bytes = executor
+            .compile_conditional_regex_uncached(pat, false, true)
+            .expect("compile case-sensitive bytes");
+
+        conditional_regex_cache_store(pat, false, false, Some(std::rc::Rc::new(cs_text)));
+        conditional_regex_cache_store(pat, true, false, Some(std::rc::Rc::new(ci_text)));
+        conditional_regex_cache_store(pat, false, true, Some(std::rc::Rc::new(cs_bytes)));
+
+        let hit_cs_text = conditional_regex_cache_lookup(pat, false, false)
+            .flatten()
+            .expect("hit cs text");
+        let hit_ci_text = conditional_regex_cache_lookup(pat, true, false)
+            .flatten()
+            .expect("hit ci text");
+        let hit_cs_bytes = conditional_regex_cache_lookup(pat, false, true)
+            .flatten()
+            .expect("hit cs bytes");
+
+        assert!(hit_cs_text.captures("ABC").is_none());
+        assert!(hit_ci_text.captures("ABC").is_some());
+        assert!(matches!(*hit_cs_bytes, CompiledConditionalRegex::Bytes(_)));
+        assert!(matches!(*hit_cs_text, CompiledConditionalRegex::Text(_)));
+    }
+}
