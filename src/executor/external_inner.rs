@@ -9,6 +9,71 @@ type FdPinVec = Vec<(std::os::unix::io::RawFd, u32)>;
 #[cfg(not(unix))]
 type FdPinVec = Vec<(i32, u32)>;
 
+/// rubash#3997: one symbolic device endpoint the ambient fd>=3
+/// delivery must materialize for a spawn — `FdWriteEndpoint::
+/// FullDevice` carries no handle the pin pass can dup2, so the
+/// child opens the device itself between fork and exec. GNU's
+/// image inherits the descriptor redir_open produced (redir.c:725
+/// redir_open; the special-name list does not include /dev/full),
+/// and an independent open of the device is indistinguishable —
+/// it keeps no offset or state (the open_spawn_full_device /
+/// exec_spawn_table_binding precedent, rubash#3985).
+#[cfg(unix)]
+#[derive(Clone)]
+pub(in crate::executor) struct AmbientDevicePin {
+    /// NUL-terminated device spelling for the child's open(2).
+    path: &'static std::ffi::CStr,
+    /// The entry's read arm is bound too (`<>`): open O_RDWR so the
+    /// delivered description serves both directions, like GNU's one
+    /// redir_open result; a write-only bind opens O_WRONLY.
+    readable: bool,
+    slot: u32,
+}
+
+#[cfg(unix)]
+impl AmbientDevicePin {
+    /// The `FdWriteEndpoint::FullDevice` materialization — the
+    /// canonical /dev/full spelling, the same literal the fd ledger
+    /// records (record_output_fd_ledger) and the exec spawn walk
+    /// opens (exec_spawn_table_binding).
+    pub(in crate::executor) fn full_device(readable: bool, slot: u32) -> Self {
+        /// SAFETY: the byte string is NUL-terminated with no
+        /// interior NUL.
+        const PATH: &std::ffi::CStr =
+            unsafe { std::ffi::CStr::from_bytes_with_nul_unchecked(b"/dev/full\0") };
+        Self {
+            path: PATH,
+            readable,
+            slot,
+        }
+    }
+
+    fn open_flags(&self) -> libc::c_int {
+        if self.readable {
+            libc::O_RDWR
+        } else {
+            libc::O_WRONLY
+        }
+    }
+}
+
+/// rubash#3997: the ambient fd>=3 delivery one spawn computed —
+/// descriptor pins (sources already open in the parent) plus device
+/// pins the child opens itself (symbolic endpoints carry no handle).
+#[cfg(unix)]
+#[derive(Default)]
+pub(in crate::executor) struct AmbientFdPins {
+    pub(in crate::executor) pins: Vec<(std::os::unix::io::RawFd, u32)>,
+    pub(in crate::executor) devices: Vec<AmbientDevicePin>,
+}
+
+#[cfg(unix)]
+impl AmbientFdPins {
+    pub(in crate::executor) fn is_empty(&self) -> bool {
+        self.pins.is_empty() && self.devices.is_empty()
+    }
+}
+
 /// rubash#3311: the unix pre_exec pin registration one fd delivery
 /// computed (collect_external_fd_delivery): the ambient + own pins in
 /// precedence order, the carrier duplicates the pin pass retires,
@@ -20,6 +85,8 @@ pub(crate) struct FdPinPlan {
     #[cfg(unix)]
     pins: Vec<(std::os::unix::io::RawFd, u32)>,
     #[cfg(unix)]
+    devices: Vec<AmbientDevicePin>,
+    #[cfg(unix)]
     carriers: Vec<(std::os::unix::io::RawFd, u32)>,
     #[cfg(unix)]
     dead: Vec<std::os::unix::io::RawFd>,
@@ -27,19 +94,32 @@ pub(crate) struct FdPinPlan {
 
 impl FdPinPlan {
     /// Register the pin pass on `process` (one pre_exec closure;
-    /// nothing when the plan pins no slot — the pre-#3311 shape).
+    /// nothing when the plan has no work at all — the pre-#3311
+    /// shape). rubash#3997 (captain graft): a plan whose only
+    /// content is revoked carriers still has work — when the
+    /// command closes the only stamped slot, pins and devices are
+    /// both empty, but the dead carrier is an inheritable
+    /// duplicate that std's spawn would otherwise hand to the
+    /// child at the carrier's own number (captain probe: `exec
+    /// 3>/dev/full` + `witness 3>&-` delivered /dev/full at fd
+    /// 10, where GNU delivers nothing; the rubash#2688 retirement
+    /// in pin_ambient_fds_and_close_carriers already closes dead
+    /// carriers unconditionally once the closure runs).
     pub(crate) fn register(&self, process: &mut Command) {
         #[cfg(unix)]
-        if !self.pins.is_empty() {
+        if !self.pins.is_empty() || !self.devices.is_empty() || !self.dead.is_empty() {
             use std::os::unix::process::CommandExt;
             let pins = self.pins.clone();
+            let devices = self.devices.clone();
             let carriers = self.carriers.clone();
             let dead = self.dead.clone();
             // SAFETY: the closure runs only in the forked child before
-            // exec and only dup2/closes raw descriptors.
+            // exec and only dup2/closes raw descriptors and opens the
+            // recorded device spellings.
             unsafe {
-                process
-                    .pre_exec(move || pin_ambient_fds_and_close_carriers(&pins, &carriers, &dead));
+                process.pre_exec(move || {
+                    pin_ambient_fds_and_close_carriers(&pins, &devices, &carriers, &dead)
+                });
             }
         }
         #[cfg(not(unix))]
@@ -311,6 +391,7 @@ fn apply_pending_close_at(
 #[cfg(unix)]
 pub(in crate::executor) fn pin_ambient_fds_in_child(
     pins: &[(std::os::unix::io::RawFd, u32)],
+    devices: &[AmbientDevicePin],
 ) -> std::io::Result<Vec<u32>> {
     use std::os::unix::io::RawFd;
     let sources: Vec<RawFd> = pins.iter().map(|&(source, _)| source).collect();
@@ -351,6 +432,42 @@ pub(in crate::executor) fn pin_ambient_fds_in_child(
             delivered.push(target as u32);
         }
     }
+    // rubash#3997: device pins run AFTER every descriptor pin — a
+    // `<>` entry's read File pin and its FullDevice write pin name
+    // the same slot, and GNU's single O_RDWR redir_open result
+    // (redir.c:725) is the device open itself, which serves both
+    // directions. The child opens the recorded spelling here (an
+    // independent open of the device is indistinguishable — it
+    // keeps no offset or state), then dup2's it onto the slot under
+    // the same anonymous-pipe guard the descriptor pins obey: never
+    // clobber std's exec-error channel parked at the target. A
+    // failed open or dup2 leaves the slot unbound — the pre-#3997
+    // EBADF shape — instead of failing the spawn.
+    for device in devices {
+        let target = device.slot as RawFd;
+        let source = unsafe { libc::open(device.path.as_ptr(), device.open_flags()) };
+        if source < 0 {
+            continue;
+        }
+        if !sources.contains(&target)
+            && fd_is_anonymous_pipe(target)
+            && !fd_is_stdio_pipe_alias(target)
+            && !fd_is_pin_source_pipe_alias(target, &sources)
+        {
+            unsafe { libc::close(source) };
+            continue;
+        }
+        // open(2) answers the lowest free number — it can BE the
+        // slot: dup2(same, same) is a no-op success and the source
+        // must then stay open (closing it would undo the delivery).
+        let landed = source == target || unsafe { libc::dup2(source, target) } >= 0;
+        if landed {
+            delivered.push(target as u32);
+        }
+        if source != target {
+            unsafe { libc::close(source) };
+        }
+    }
     Ok(delivered)
 }
 
@@ -377,10 +494,11 @@ pub(in crate::executor) fn pin_ambient_fds_in_child(
 #[cfg(unix)]
 pub(in crate::executor) fn pin_ambient_fds_and_close_carriers(
     pins: &[(std::os::unix::io::RawFd, u32)],
+    devices: &[AmbientDevicePin],
     carriers: &[(std::os::unix::io::RawFd, u32)],
     dead: &[std::os::unix::io::RawFd],
 ) -> std::io::Result<()> {
-    let delivered = pin_ambient_fds_in_child(pins)?;
+    let delivered = pin_ambient_fds_in_child(pins, devices)?;
     for &(dup, slot) in carriers {
         if dup < 3 {
             continue;
@@ -3395,7 +3513,7 @@ impl Executor {
     pub(in crate::executor) fn ambient_fd_pins_for(
         &self,
         cmd: &crate::parser::CommandNode,
-    ) -> Vec<(std::os::unix::io::RawFd, u32)> {
+    ) -> AmbientFdPins {
         self.ambient_fd_pins_with_redirects(&cmd.redirects)
     }
 
@@ -3415,20 +3533,47 @@ impl Executor {
     /// subst.c:7143 command_substitute forks, and the forked child
     /// inherits the shell's descriptor set at its numbers.
     #[cfg(unix)]
-    pub(in crate::executor) fn ambient_fd_pins_unbound(
-        &self,
-    ) -> Vec<(std::os::unix::io::RawFd, u32)> {
+    pub(in crate::executor) fn ambient_fd_pins_unbound(&self) -> AmbientFdPins {
         self.ambient_fd_pins_with_redirects(&[])
+    }
+
+    /// rubash#3997 (captain graft): whether `fd` currently names a
+    /// walk undo-save slot materialized into the fd table — the
+    /// current exec walk's saves (exec_walk_save_slots) or the
+    /// current compound list's binder saves (compound_binder_saves).
+    /// A save is walk-local currency / scope restore state, not a
+    /// live binding: GNU's save descriptors are close-on-exec and
+    /// never reach a child, so every ambient delivery scan must
+    /// skip them. A save of a /dev/full binding clones the
+    /// symbolic FullDevice endpoint into the slot and a save of a
+    /// file binding clones its handle; delivering the clone hands
+    /// the child a descriptor at a number the shell never bound
+    /// for it (captain probe sv2/sv3/sv4/sv6/sv7: the child saw
+    /// `10 -> /dev/full` resp. `10 -> <the saved file>` where GNU
+    /// delivers nothing at the slot). The registration-as-identity
+    /// rule, twin of the rubash#3998 checks in
+    /// close_persistent_output_fd / close_orphaned_process_fd.
+    pub(in crate::executor) fn fd_is_walk_save_slot(&self, fd: u32) -> bool {
+        if self.exec_walk_save_slots.contains(&fd) {
+            return true;
+        }
+        match &self.compound_binder_saves {
+            Some((_, _, saves)) => saves.iter().any(|(_, slot, _)| *slot == fd),
+            None => false,
+        }
     }
 
     #[cfg(unix)]
     fn ambient_fd_pins_with_redirects(
         &self,
         redirects: &[crate::parser::Redirect],
-    ) -> Vec<(std::os::unix::io::RawFd, u32)> {
-        let mut pins: Vec<(std::os::unix::io::RawFd, u32)> = Vec::new();
+    ) -> AmbientFdPins {
+        let mut delivery = AmbientFdPins::default();
         for (fd, entry) in &self.fd_table.entries {
             if *fd < 3 || entry.closed {
+                continue;
+            }
+            if self.fd_is_walk_save_slot(*fd) {
                 continue;
             }
             if let Some(redirect) = redirects.iter().find(|redirect| redirect.fd == Some(*fd)) {
@@ -3455,7 +3600,7 @@ impl Executor {
                     crate::executor::fd_table::FdReadEndpoint::CoprocStdout { fd, .. } => Some(fd),
                     _ => None,
                 }),
-                &mut pins,
+                &mut delivery.pins,
             );
             take(
                 entry.write.as_ref().and_then(|write| match write {
@@ -3463,8 +3608,21 @@ impl Executor {
                     crate::executor::fd_table::FdWriteEndpoint::CoprocStdin { fd, .. } => Some(fd),
                     _ => None,
                 }),
-                &mut pins,
+                &mut delivery.pins,
             );
+            // rubash#3997: a symbolic device write endpoint carries no
+            // handle to pin — record the materialization instead: the
+            // pin pass opens the device in the child (see
+            // AmbientDevicePin). The entry's read arm decides the open
+            // mode (`<>` is O_RDWR, GNU's one redir_open result).
+            if matches!(
+                entry.write.as_ref(),
+                Some(crate::executor::fd_table::FdWriteEndpoint::FullDevice)
+            ) {
+                delivery
+                    .devices
+                    .push(AmbientDevicePin::full_device(entry.read.is_some(), *fd));
+            }
             // rubash#2212: standard-stream endpoints (an `N>&1` /
             // `N<&0` dup) carry no FileFd — the process standard
             // descriptor backs the pin, and dup2'ing it onto the
@@ -3473,21 +3631,21 @@ impl Executor {
             if let Some(read) = &entry.read {
                 if let Some((handle, _label)) = read.standard_backing() {
                     let pin = (handle, *fd);
-                    if !pins.contains(&pin) {
-                        pins.push(pin);
+                    if !delivery.pins.contains(&pin) {
+                        delivery.pins.push(pin);
                     }
                 }
             }
             if let Some(write) = &entry.write {
                 if let Some((handle, _label)) = write.standard_backing() {
                     let pin = (handle, *fd);
-                    if !pins.contains(&pin) {
-                        pins.push(pin);
+                    if !delivery.pins.contains(&pin) {
+                        delivery.pins.push(pin);
                     }
                 }
             }
         }
-        pins
+        delivery
     }
 
     /// rubash#2292: deliver the fd table's ambient Text endpoints
@@ -3532,6 +3690,9 @@ impl Executor {
         let mut slots: Vec<u32> = Vec::new();
         for (fd, entry) in &self.fd_table.entries {
             if *fd < 3 || entry.closed || entry.write.is_some() {
+                continue;
+            }
+            if self.fd_is_walk_save_slot(*fd) {
                 continue;
             }
             if !matches!(
@@ -3593,14 +3754,17 @@ impl Executor {
         cmd: &crate::parser::CommandNode,
         process: &mut std::process::Command,
     ) {
-        let pins = self.ambient_fd_pins_for(cmd);
-        if !pins.is_empty() {
+        let delivery = self.ambient_fd_pins_for(cmd);
+        if !delivery.is_empty() {
             use std::os::unix::process::CommandExt;
             // SAFETY: same contract as the spawn_external_process
             // registration — the closure runs only in the forked child
-            // before exec and only dup2/closes raw descriptors.
+            // before exec and only dup2/closes raw descriptors and
+            // opens the recorded device spellings.
             unsafe {
-                process.pre_exec(move || pin_ambient_fds_in_child(&pins).map(|_| ()));
+                process.pre_exec(move || {
+                    pin_ambient_fds_in_child(&delivery.pins, &delivery.devices).map(|_| ())
+                });
             }
         }
     }
@@ -3666,7 +3830,7 @@ impl Executor {
             // before exec and only dup2/closes raw descriptors.
             unsafe {
                 process.pre_exec(move || {
-                    pin_ambient_fds_and_close_carriers(&command_fd_pins, &fd_carriers, &[])
+                    pin_ambient_fds_and_close_carriers(&command_fd_pins, &[], &fd_carriers, &[])
                 });
             }
         }
@@ -3770,6 +3934,9 @@ impl Executor {
             if *fd < 3 || entry.closed {
                 continue;
             }
+            if self.fd_is_walk_save_slot(*fd) {
+                continue;
+            }
             let mut pass =
                 |endpoint: Option<&Rc<crate::executor::fd_table::FileFd>>,
                  write: bool,
@@ -3813,6 +3980,42 @@ impl Executor {
                 &mut parent_side_dups,
                 &mut fd_carriers,
             );
+            // rubash#3997: a symbolic device write endpoint has no
+            // handle to stamp — materialize the device itself for the
+            // env channel (the AmbientDevicePin the pin assembly
+            // below records covers fd placement in the child; this
+            // stamp is what a rubash child restores its fd table
+            // from). GNU's forked child inherits the descriptor
+            // redir_open produced (redir.c:725); an independent open
+            // of the device is indistinguishable (the
+            // open_spawn_full_device precedent, rubash#3985). Where
+            // no device backs the spelling the slot stays
+            // undelivered, as before.
+            if matches!(
+                entry.write.as_ref(),
+                Some(crate::executor::fd_table::FdWriteEndpoint::FullDevice)
+            ) {
+                if let Some(file) =
+                    crate::executor::external_redirects::open_spawn_full_device("/dev/full", false)
+                {
+                    #[cfg(unix)]
+                    let raw = {
+                        use std::os::unix::io::AsRawFd;
+                        file.as_raw_fd()
+                    };
+                    #[cfg(windows)]
+                    let raw = {
+                        use std::os::windows::io::AsRawHandle;
+                        file.as_raw_handle() as crate::fd::HANDLE
+                    };
+                    if let Ok(dup) = crate::fd::duplicate_handle_inheritable(raw) {
+                        process.env(format!("__RUBASH_FD_WHANDLE_{fd}"), format!("{dup:#x}"));
+                        process.env(format!("__RUBASH_FD_WPATH_{fd}"), "/dev/full".to_string());
+                        parent_side_dups.push(dup);
+                        fd_carriers.push((dup, *fd));
+                    }
+                }
+            }
         }
         // The command's own fd>=3 file redirects are not fd-table entries on
         // the simple-command path (only compounds bind them scoped), so open
@@ -4356,14 +4559,14 @@ impl Executor {
         // computed by ambient_fd_pins_for so hand-built pipeline stage
         // processes inherit the same descriptors (rubash#1688).
         #[cfg(unix)]
-        let ambient_fd_pins: Vec<(std::os::unix::io::RawFd, u32)> = {
-            let mut pins = self.ambient_fd_pins_for(cmd);
+        let ambient_delivery = {
+            let mut delivery = self.ambient_fd_pins_for(cmd);
             // rubash#1686: the command's own redirect descriptors ride
             // the same registration, appended after the ambient pins so
             // a command binding wins any slot both sides name (the pin
             // helper dup2's in list order).
-            pins.extend(command_fd_pins);
-            pins
+            delivery.pins.extend(command_fd_pins);
+            delivery
         };
         // rubash#1626: pin the ambient descriptors at their slot numbers
         // (see the pin table built above). The caller registers the
@@ -4380,7 +4583,9 @@ impl Executor {
             parent_side_dups,
             pins: FdPinPlan {
                 #[cfg(unix)]
-                pins: ambient_fd_pins,
+                pins: ambient_delivery.pins,
+                #[cfg(unix)]
+                devices: ambient_delivery.devices,
                 #[cfg(unix)]
                 carriers: fd_carriers,
                 #[cfg(unix)]
