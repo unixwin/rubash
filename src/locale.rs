@@ -610,14 +610,81 @@ pub fn simple_lowercase(value: &str) -> String {
     value.chars().map(simple_case_lower).collect()
 }
 
+/// Byte length of the character at the start of `bytes` under the C
+/// library's UTF-8 `mbrlen` — the walk behind GNU `mbstrlen`
+/// (lib/sh/shmbchar.c:56-79, itself behind MB_STRLEN at subst.c:8308
+/// for `${#var}`) and `ADVANCE_CHAR` (include/shmbutil.h:114-147, behind
+/// mb_substring at subst.c:9022 for `${var:off:len}`).
+///
+/// glibc's UTF-8 decoder accepts the pre-2003 range — sequences of up
+/// to six bytes encoding up to U+7FFFFFFF — which is wider than Rust's
+/// `str` UTF-8 (Unicode scalar values, four bytes max): the F5..=F7
+/// four-byte leads, F4 with a second byte >= 0x90, and the five-byte
+/// F8..=FB / six-byte FC..=FD forms all decode as ONE character
+/// (rubash#4035; probed byte-for-byte against WSL GNU Bash 5.3.20 +
+/// glibc mbrlen under LC_ALL=C.utf8). It still rejects overlong forms
+/// (C0/C1 leads, E0 with second < 0xA0, F0 with second < 0x90, F8 with
+/// second < 0x88, FC with second < 0x84), the surrogate band (ED with
+/// second >= 0xA0), and lone continuation bytes; every rejected byte
+/// is one character, matching MB_INVALIDCH -> clen = 1, and a sequence
+/// truncated by the end of `bytes` fails the same way the terminating
+/// NUL fails it for mbrlen.
+fn utf8_mblen(bytes: &[u8]) -> usize {
+    debug_assert!(!bytes.is_empty());
+    let b0 = bytes[0];
+    if b0 < 0x80 {
+        return 1;
+    }
+    // (sequence length, inclusive valid range for the second byte).
+    // The second-byte floor encodes the non-overlong boundary: the
+    // shortest form that reaches past what all shorter forms can
+    // encode (3-byte >= U+0800, 4-byte >= U+10000, 5-byte >= U+200000,
+    // 6-byte >= U+4000000); ED's ceiling excludes U+D800..=U+DFFF.
+    let (len, second_lo, second_hi) = match b0 {
+        0xC2..=0xDF => (2, 0x80, 0xBF),
+        0xE0 => (3, 0xA0, 0xBF),
+        0xE1..=0xEC | 0xEE..=0xEF => (3, 0x80, 0xBF),
+        0xED => (3, 0x80, 0x9F),
+        0xF0 => (4, 0x90, 0xBF),
+        0xF1..=0xF7 => (4, 0x80, 0xBF),
+        0xF8 => (5, 0x88, 0xBF),
+        0xF9..=0xFB => (5, 0x80, 0xBF),
+        0xFC => (6, 0x84, 0xBF),
+        0xFD => (6, 0x80, 0xBF),
+        // 0x80..=0xC1: lone continuation or overlong two-byte lead.
+        // 0xFE..=0xFF: never a UTF-8 lead byte.
+        _ => return 1,
+    };
+    if bytes.len() < len || !(second_lo..=second_hi).contains(&bytes[1]) {
+        return 1;
+    }
+    if bytes[2..len].iter().all(|b| (0x80..=0xBF).contains(b)) {
+        len
+    } else {
+        1
+    }
+}
+
+/// Character count of `bytes` under the [`utf8_mblen`] walk — the
+/// `${#var}` face (MB_STRLEN -> mbstrlen, subst.c:8308).
+pub fn multibyte_char_count(bytes: &[u8]) -> usize {
+    let mut count = 0usize;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        index += utf8_mblen(&bytes[index..]);
+        count += 1;
+    }
+    count
+}
+
 /// Byte offsets of the GNU multibyte character boundaries in `bytes`.
 ///
 /// This is the ADVANCE_CHAR walk of `include/shmbutil.h:114-147`: a valid
 /// multibyte sequence is one character, and every byte of an invalid
 /// sequence is one character (`mbrlen` returns (size_t)-1 / (size_t)-2, so
 /// the macro advances the index by one byte). `${#v}` (MB_STRLEN,
-/// subst.c:8308 -> utf8.c:167-184) and `${v:off:len}` (mb_substring,
-/// subst.c:9022 -> ADVANCE_CHAR) share this walk.
+/// subst.c:8308 -> mbstrlen, lib/sh/shmbchar.c:56) and `${v:off:len}`
+/// (mb_substring, subst.c:9022 -> ADVANCE_CHAR) share this walk.
 ///
 /// The result always begins with 0 and ends with `bytes.len()`, so a
 /// character count is `offsets.len() - 1` and the `n`-th character spans
@@ -627,33 +694,8 @@ pub fn multibyte_char_offsets(bytes: &[u8]) -> Vec<usize> {
     offsets.push(0);
     let mut index = 0usize;
     while index < bytes.len() {
-        match std::str::from_utf8(&bytes[index..]) {
-            Ok(text) => {
-                let mut cursor = index;
-                for ch in text.chars() {
-                    cursor += ch.len_utf8();
-                    offsets.push(cursor);
-                }
-                index = bytes.len();
-            }
-            Err(error) => {
-                let valid = error.valid_up_to();
-                if valid > 0 {
-                    let text = std::str::from_utf8(&bytes[index..index + valid])
-                        .expect("valid_up_to prefix is valid UTF-8");
-                    let mut cursor = index;
-                    for ch in text.chars() {
-                        cursor += ch.len_utf8();
-                        offsets.push(cursor);
-                    }
-                    index += valid;
-                }
-                // utf8.c:177-178 / shmbutil.h:134-138: an invalid byte is
-                // one character and advances the walk by one byte.
-                index += 1;
-                offsets.push(index);
-            }
-        }
+        index += utf8_mblen(&bytes[index..]);
+        offsets.push(index);
     }
     offsets
 }
@@ -2157,6 +2199,105 @@ mod tests {
             super::multibyte_char_offsets(&[0xe2, 0x82, 0xac, 0xff, 0x41]),
             vec![0, 3, 4, 5]
         );
+    }
+
+    /// rubash#4035: glibc's UTF-8 mbrlen accepts the pre-2003 extended
+    /// range (up to six bytes, U+7FFFFFFF) that Rust's `str` UTF-8
+    /// rejects, so `${#v}`/`${v:off:len}` count those sequences as ONE
+    /// character. Boundaries probed against WSL GNU Bash 5.3.20 +
+    /// glibc under LC_ALL=C.utf8.
+    #[test]
+    fn multibyte_char_offsets_accepts_extended_utf8_band() {
+        // Four-byte forms past U+10FFFF: F4 with second >= 0x90 and the
+        // F5..=F7 leads are one character.
+        assert_eq!(
+            super::multibyte_char_offsets(&[0xf4, 0x90, 0x80, 0x80]),
+            vec![0, 4]
+        );
+        assert_eq!(
+            super::multibyte_char_offsets(&[0xf4, 0x8f, 0xbf, 0xbf]),
+            vec![0, 4]
+        );
+        assert_eq!(
+            super::multibyte_char_offsets(&[0xf5, 0x80, 0x80, 0x80]),
+            vec![0, 4]
+        );
+        assert_eq!(
+            super::multibyte_char_offsets(&[0xf7, 0xbf, 0xbf, 0xbf]),
+            vec![0, 4]
+        );
+        // Five-byte F8..=FB and six-byte FC..=FD forms are one
+        // character at the non-overlong boundary and above.
+        assert_eq!(
+            super::multibyte_char_offsets(&[0xf8, 0x88, 0x80, 0x80, 0x80]),
+            vec![0, 5]
+        );
+        assert_eq!(
+            super::multibyte_char_offsets(&[0xfb, 0xbf, 0xbf, 0xbf, 0xbf]),
+            vec![0, 5]
+        );
+        assert_eq!(
+            super::multibyte_char_offsets(&[0xfc, 0x84, 0x80, 0x80, 0x80, 0x80]),
+            vec![0, 6]
+        );
+        assert_eq!(
+            super::multibyte_char_offsets(&[0xfd, 0xbf, 0xbf, 0xbf, 0xbf, 0xbf]),
+            vec![0, 6]
+        );
+        // Mixed with ASCII and valid scalar characters.
+        assert_eq!(
+            super::multibyte_char_offsets(&[0x61, 0xf4, 0x90, 0x80, 0x80, 0x62]),
+            vec![0, 1, 5, 6]
+        );
+        assert_eq!(super::multibyte_char_count(&[0xf4, 0x90, 0x80, 0x80]), 1);
+        assert_eq!(
+            super::multibyte_char_count(&[0xc3, 0xa9, 0xf8, 0x88, 0x80, 0x80, 0x80]),
+            2
+        );
+    }
+
+    #[test]
+    fn multibyte_char_offsets_rejects_overlong_surrogate_and_truncated() {
+        // Second-byte floors: one byte below the non-overlong boundary
+        // the whole sequence is invalid and counts per byte.
+        for lead_floor in [
+            &[0xf8, 0x87, 0xbf, 0xbf, 0xbf][..], // 5-byte below U+200000
+            &[0xfc, 0x83, 0xbf, 0xbf, 0xbf, 0xbf][..], // 6-byte below U+4000000
+            &[0xf0, 0x8f, 0x80, 0x80][..],       // 4-byte below U+10000
+            &[0xe0, 0x9f, 0xbf][..],             // 3-byte below U+0800
+        ] {
+            let expected: Vec<usize> = (0..=lead_floor.len()).collect();
+            assert_eq!(super::multibyte_char_offsets(lead_floor), expected);
+        }
+        // The surrogate band ED A0..BF is rejected per byte.
+        assert_eq!(
+            super::multibyte_char_offsets(&[0xed, 0xa0, 0x80]),
+            vec![0, 1, 2, 3]
+        );
+        assert_eq!(
+            super::multibyte_char_offsets(&[0xed, 0xbf, 0xbf]),
+            vec![0, 1, 2, 3]
+        );
+        // ED 9F stays valid (U+D7FF), as do C0/C1 overlong rejects and
+        // truncated extended sequences.
+        assert_eq!(
+            super::multibyte_char_offsets(&[0xed, 0x9f, 0xbf]),
+            vec![0, 3]
+        );
+        assert_eq!(super::multibyte_char_offsets(&[0xc0, 0x80]), vec![0, 1, 2]);
+        assert_eq!(super::multibyte_char_offsets(&[0xf4, 0x90]), vec![0, 1, 2]);
+        assert_eq!(
+            super::multibyte_char_offsets(&[0xf8, 0x88, 0x80]),
+            vec![0, 1, 2, 3]
+        );
+        // A non-continuation byte ends the candidate: the lead counts
+        // once and the walk resumes at the next byte.
+        assert_eq!(
+            super::multibyte_char_offsets(&[0xf4, 0x90, 0x41]),
+            vec![0, 1, 2, 3]
+        );
+        assert_eq!(super::multibyte_char_count(&[0xed, 0xa0, 0x80]), 3);
+        assert_eq!(super::multibyte_char_count(&[0xf8, 0x88, 0x80]), 3);
     }
 }
 
