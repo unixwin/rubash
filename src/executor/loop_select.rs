@@ -42,7 +42,9 @@ impl Executor {
                     .map(|metadata| metadata.raw.as_str())
                     .filter(|raw| !raw.is_empty())
                     .unwrap_or(word.as_str());
-                if let Some(error) = self.parameter_expansion_error_in_word_isolated(scan_text) {
+                if let Some(error) = self
+                    .parameter_expansion_error_in_word_isolated_with_raw(scan_text, Some(scan_text))
+                {
                     return self.raise_word_expansion_error(error);
                 }
             }
@@ -62,7 +64,16 @@ impl Executor {
                     .get(index)
                     .map(|metadata| metadata.raw.as_str());
                 let metadata = for_command.word_metadata.get(index);
-                match self.expand_for_word_values_result(word, raw, metadata) {
+                let result = if let Some(raw_text) = raw.filter(|r| !r.is_empty()) {
+                    crate::executor::expand_word::with_pending_diagnostic_raw(
+                        raw_text,
+                        false,
+                        || self.expand_for_word_values_result(word, raw, metadata),
+                    )
+                } else {
+                    self.expand_for_word_values_result(word, raw, metadata)
+                };
+                match result {
                     Ok(expanded) => {
                         // GNU execute_cmd.c execute_for_command expands
                         // the whole word list (expand_word_list) before

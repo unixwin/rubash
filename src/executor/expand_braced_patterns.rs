@@ -231,7 +231,15 @@ impl Executor {
         if self.pattern_word_is_silent(var_name, false, false) {
             return Some(String::new());
         }
-        let pattern = self.expand_embedded_parameters(pattern);
+        // rubash#3501/#4039: the casemod pattern expands through the generic
+        // embedded walker, bypassing expand_parameter_pattern_word, so it
+        // needs the same diagnostic-raw re-root at the pattern text —
+        // otherwise a bad fragment inside the pattern cites the whole
+        // outer word instead of the pattern fragment.
+        let pattern =
+            crate::executor::expand_word::with_pending_diagnostic_raw(pattern, false, || {
+                self.expand_embedded_parameters(pattern)
+            });
         if let Some(value) = self.indirect_case_parameter(var_name, operation, &pattern) {
             return Some(value);
         }

@@ -153,10 +153,16 @@ impl Executor {
             let arith_err_before = self.shell_state.arithmetic_expansion_error.replace(false);
             let arith_fatal_before = self.shell_state.arithmetic_fatal_error.replace(false);
             let arith_nonfatal_before = self.shell_state.arithmetic_nonfatal_error.replace(false);
-            let expanded = self.expand_embedded_parameters_mut_with_context(
-                &decoded,
-                SubstitutionQuoteContext::DoubleQuoted,
-            );
+            // Captain graft (rubash#4029 × rubash#3543): as in the `@P`
+            // transform channel, this pass expands runtime text — an
+            // outer parser word's raw record must not name citations
+            // inside it.
+            let expanded = crate::executor::expand_word::without_pending_diagnostic_raw(|| {
+                self.expand_embedded_parameters_mut_with_context(
+                    &decoded,
+                    SubstitutionQuoteContext::DoubleQuoted,
+                )
+            });
             let failed = self
                 .shell_state
                 .parameter_bad_substitution

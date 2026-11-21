@@ -33,6 +33,41 @@ pub(crate) use extglob::extglob_case_pattern_matches;
 pub(in crate::executor) use extglob::extglob_case_pattern_matches_nocase;
 pub(in crate::executor) use extglob::extglob_case_pattern_matches_nocase_with_word_chars;
 pub(crate) use extglob::extglob_case_pattern_matches_with_word_chars;
+
+thread_local! {
+    static CONDITIONAL_ARG_RAWS: std::cell::RefCell<Vec<Vec<(String, String)>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+struct ConditionalArgRawsGuard;
+
+impl ConditionalArgRawsGuard {
+    fn push(entries: Vec<(String, String)>) -> Self {
+        CONDITIONAL_ARG_RAWS.with(|stack| stack.borrow_mut().push(entries));
+        Self
+    }
+}
+
+impl Drop for ConditionalArgRawsGuard {
+    fn drop(&mut self) {
+        CONDITIONAL_ARG_RAWS.with(|stack| {
+            stack.borrow_mut().pop();
+        });
+    }
+}
+
+impl Executor {
+    fn conditional_arg_raw(&self, word: &str) -> Option<String> {
+        CONDITIONAL_ARG_RAWS.with(|stack| {
+            stack.borrow().last().and_then(|entries| {
+                entries
+                    .iter()
+                    .find(|(arg, _)| arg == word)
+                    .map(|(_, raw)| raw.clone())
+            })
+        })
+    }
+}
 pub(in crate::executor) use pattern::{
     case_bracket_expression_matches_with_case, case_pattern_matches, case_pattern_matches_nocase,
     case_pattern_matches_nocase_with_word_chars, case_pattern_matches_with_word_chars,
@@ -73,6 +108,15 @@ impl Executor {
                 }
             })
             .collect();
+        let raw_entries: Vec<(String, String)> = command
+            .args
+            .iter()
+            .zip(&command.arg_metadata)
+            .filter_map(|(arg, metadata)| {
+                (!metadata.raw.is_empty()).then(|| (arg.clone(), metadata.raw.clone()))
+            })
+            .collect();
+        let _raw_guard = ConditionalArgRawsGuard::push(raw_entries);
         let saved_span_targets =
             std::mem::replace(&mut self.conditional_procsub_span_targets, span_targets);
         let status = if let Some(status) =
@@ -448,6 +492,15 @@ impl Executor {
         if self.conditional_expansion_error_status.get().is_some() {
             return String::new();
         }
+        let raw_for_arg = self.conditional_arg_raw(word);
+        let masked_raw_for_scan = raw_for_arg.as_deref().map(|raw| {
+            let targets = self
+                .conditional_procsub_span_targets
+                .iter()
+                .filter(|(target_word, _)| target_word == word)
+                .flat_map(|(_, targets)| targets.iter().map(String::as_str));
+            Self::mask_recorded_span_targets_preserving_len(raw, targets).into_owned()
+        });
         // rubash#1932: realize the operand's recorded procsub spans
         // first — the nounset scan below then judges the fd words (no
         // span text remains to mask), and the expansion consumes the
@@ -466,8 +519,11 @@ impl Executor {
             // recorded procsub body — mask this word's recorded spans
             // (the expansion below still consumes the original word).
             let masked = self.mask_conditional_procsub_spans(word);
-            if let Some((name, message, status)) =
-                self.parameter_expansion_error_in_word_isolated(&masked)
+            if let Some((name, message, status)) = self
+                .parameter_expansion_error_in_word_isolated_with_raw(
+                    &masked,
+                    masked_raw_for_scan.as_deref(),
+                )
             {
                 if status == 1 {
                     // GNU subst.c: a non-fatal word-expansion error
@@ -512,12 +568,19 @@ impl Executor {
         // ANSI_C_IFS_GUARD pairs (decoded `$'...'` blanks) so both
         // operands compare as their real text (rubash#379).
         // E400-aware: user U+E401 data (E400 E401) must survive.
+        let expanded = if let Some(ref raw_text) = raw_for_arg {
+            crate::executor::expand_word::with_pending_diagnostic_raw(raw_text, false, || {
+                self.expand_word_mut(word)
+            })
+        } else {
+            self.expand_word_mut(word)
+        };
         crate::executor::markers::strip_ansi_c_ifs_guard(
             // E002 is registry-zone: a typed `$'\uE002'` arrives
             // E400-escaped and is user data — strip only the BARE
             // carrier (rubash#840).
             &crate::executor::markers::restore_bare_sentinels(
-                &self.expand_word_mut(word),
+                &expanded,
                 &[(crate::executor::embedded_mutations::QUOTED_NULL_MARKER, "")],
             ),
         )

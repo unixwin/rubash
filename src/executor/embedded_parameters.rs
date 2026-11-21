@@ -1047,16 +1047,34 @@ impl Executor {
                             // bodies are runtime text GNU never ran
                             // parse_comsub on — their bad-substitution
                             // citations keep `$(` spans raw (rubash#3543).
-                            let value = crate::executor::expand_word::with_pending_diagnostic_word(
-                                word,
-                                double_quoted || heredoc,
-                                || {
-                                    crate::executor::expand_word::with_extquote_name_quoted_context(
-                                        true,
-                                        || self.expand_word(&format!("${{{body}}}")),
+                            // When a raw source word is recorded, the
+                            // citation is rebuilt from it instead
+                            // (rubash#4029).
+                            let this_frag = frag_index;
+                            frag_index += 1;
+                            let raw_diag =
+                                crate::executor::expand_word::diagnostic_word_for_fragment(
+                                    this_frag,
+                                );
+                            let _diag_word = match raw_diag.as_deref() {
+                                Some(diag) => {
+                                    crate::executor::expand_word::PendingDiagnosticWordGuard::new_rendered(
+                                        diag,
+                                        double_quoted || heredoc,
                                     )
-                                },
-                            );
+                                }
+                                None => {
+                                    crate::executor::expand_word::PendingDiagnosticWordGuard::new(
+                                        word,
+                                        double_quoted || heredoc,
+                                    )
+                                }
+                            };
+                            let value =
+                                crate::executor::expand_word::with_extquote_name_quoted_context(
+                                    true,
+                                    || self.expand_word(&format!("${{{body}}}")),
+                                );
                             if preserve_quotes {
                                 push_preserved_expansion_output(&mut output, &value, in_double);
                             } else {
@@ -1131,13 +1149,25 @@ impl Executor {
                             // (`double_quoted`): runtime text, cited raw
                             // (rubash#3543).
                             if self.bad_substitution_report_first() {
+                                let diag =
+                                    crate::executor::expand_word::diagnostic_word_for_fragment(
+                                        this_frag,
+                                    )
+                                    .map(|rendered| {
+                                        crate::executor::expand_word::bad_substitution_display(
+                                            &rendered, true,
+                                        )
+                                    })
+                                    .unwrap_or_else(|| {
+                                        crate::executor::expand_word::bad_substitution_display(
+                                            word, true,
+                                        )
+                                    });
                                 self.write_diagnostic_fd2(
                                     format!(
                                         "{}{}: bad substitution\n",
                                         self.diagnostic_prefix(),
-                                        crate::executor::expand_word::bad_substitution_display(
-                                            word, true
-                                        )
+                                        diag
                                     )
                                     .as_bytes(),
                                 );
@@ -1227,15 +1257,20 @@ impl Executor {
                         // segments), so the word is parser text and its
                         // `$(` spans cite canonical (rubash#3543).
                         if self.bad_substitution_report_first() {
-                            self.write_diagnostic_fd2(
-                                format!(
-                                    "{}{}: bad substitution\n",
-                                    self.diagnostic_prefix(),
-                                    crate::executor::expand_word::bad_substitution_display(
-                                        word, false
-                                    )
+                            let diag = crate::executor::expand_word::diagnostic_word_for_fragment(
+                                this_frag,
+                            )
+                            .map(|rendered| {
+                                crate::executor::expand_word::bad_substitution_display(
+                                    &rendered, false,
                                 )
-                                .as_bytes(),
+                            })
+                            .unwrap_or_else(|| {
+                                crate::executor::expand_word::bad_substitution_display(word, false)
+                            });
+                            self.write_diagnostic_fd2(
+                                format!("{}{}: bad substitution\n", self.diagnostic_prefix(), diag)
+                                    .as_bytes(),
                             );
                         }
                         self.shell_state.parameter_bad_substitution.set(true);
@@ -1248,16 +1283,26 @@ impl Executor {
                     // walker's quote context for the extquote-name gate
                     // (rubash#2650): record it for the dispatch. Prompt
                     // strings and here-document bodies are runtime text —
-                    // GNU cites their `$(` spans raw (rubash#3543).
-                    let value = crate::executor::expand_word::with_pending_diagnostic_word(
-                        word,
-                        double_quoted || heredoc,
-                        || {
-                            crate::executor::expand_word::with_extquote_name_quoted_context(
-                                in_double || double_quoted || heredoc || fragment_site_quoted,
-                                || self.expand_word(&format!("${{{name}}}")),
+                    // GNU cites their `$(` spans raw (rubash#3543). When
+                    // a raw source word is recorded, the citation is
+                    // rebuilt from it instead (rubash#4029).
+                    let raw_diag =
+                        crate::executor::expand_word::diagnostic_word_for_fragment(this_frag);
+                    let _diag_word = match raw_diag.as_deref() {
+                        Some(diag) => {
+                            crate::executor::expand_word::PendingDiagnosticWordGuard::new_rendered(
+                                diag,
+                                double_quoted || heredoc,
                             )
-                        },
+                        }
+                        None => crate::executor::expand_word::PendingDiagnosticWordGuard::new(
+                            word,
+                            double_quoted || heredoc,
+                        ),
+                    };
+                    let value = crate::executor::expand_word::with_extquote_name_quoted_context(
+                        in_double || double_quoted || heredoc || fragment_site_quoted,
+                        || self.expand_word(&format!("${{{name}}}")),
                     );
                     if preserve_quotes {
                         push_preserved_expansion_output(&mut output, &value, in_double);

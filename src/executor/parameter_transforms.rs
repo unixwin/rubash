@@ -564,7 +564,14 @@ impl Executor {
             // so `$var`/backtick text stays literal (issue #757).
             let decoded = self.decode_prompt_string(strip_matching_quotes(value));
             if self.prompt_expansion_enabled() {
-                return self.expand_embedded_parameters_double_quoted(&decoded);
+                // Captain graft (rubash#4029 × rubash#3543): the prompt
+                // pass expands runtime text (a variable's value), never a
+                // parser word — an outer parser word's raw record must
+                // not name citations inside it. Records installed by this
+                // pass's own sub-expansions are unaffected.
+                return crate::executor::expand_word::without_pending_diagnostic_raw(|| {
+                    self.expand_embedded_parameters_double_quoted(&decoded)
+                });
             }
             return decoded;
         }

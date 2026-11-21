@@ -356,7 +356,10 @@ impl Executor {
         // expand_embedded_parameters_protect_ifs_and_data); the final
         // unescape below must not fold them as source escapes, so the
         // carrier is restored after it.
-        let expanded = self.expand_embedded_parameters_protect_ifs_and_data(word);
+        let expanded =
+            crate::executor::expand_word::with_pending_diagnostic_raw(word, false, || {
+                self.expand_embedded_parameters_protect_ifs_and_data(word)
+            });
         // GNU subst.c:4807 dequote_string: quote removal ran inside the
         // expansion pass, so `'`/`"` left in its output are
         // expansion-produced data, not syntax. Mark them \x17/\x18 before
@@ -413,7 +416,10 @@ impl Executor {
     // one pass, so expansions inside quoted regions see the quote state
     // and their own whitespace stays protected (more-exp ${B:-"$A"}).
     pub(in crate::executor) fn expand_alternate_parameter_word(&mut self, word: &str) -> String {
-        let expanded = self.expand_embedded_parameters_alternate_mut(word);
+        let expanded =
+            crate::executor::expand_word::with_pending_diagnostic_raw(word, false, || {
+                self.expand_embedded_parameters_alternate_mut(word)
+            });
         let expanded = tilde_expand::expand_assignment_tilde_value(
             &expanded,
             &self.shell_state.env_vars,
@@ -442,7 +448,10 @@ impl Executor {
         // distinguish a source `\X` from a `\` the generic walker already
         // collapsed out of `\\` (rubash#209: `${z=a\\b}` stores `a\b`,
         // `${z=a\@b}` stores `a@b`).
-        let expanded = self.expand_embedded_parameters_alternate_mut(word);
+        let expanded =
+            crate::executor::expand_word::with_pending_diagnostic_raw(word, false, || {
+                self.expand_embedded_parameters_alternate_mut(word)
+            });
         tilde_expand::expand_assignment_tilde_value(&expanded, &self.shell_state.env_vars, false)
     }
 
@@ -815,24 +824,27 @@ impl Executor {
         word: &str,
         context: SubstitutionQuoteContext,
     ) -> String {
-        if !matches!(context, SubstitutionQuoteContext::Unquoted) {
-            // rubash#3088: the walk must NOT restore expansion-result
-            // backslashes before the operator-result unescape below — it
-            // would fold them as source escapes (subst.c:4773
-            // quote_string CTLESC-protects expansion results; subst.c:4807
-            // dequote_string strips only CTLESC). The walk defers both
-            // carriers; the helper restores them after the pass.
-            let unescaped = unescape_parameter_operator_result(
-                &self.expand_embedded_parameters_mut_with_context_no_restore(
-                    &self.decode_operator_word_for_context(word, context),
+        let outer_dq = matches!(context, SubstitutionQuoteContext::DoubleQuoted);
+        crate::executor::expand_word::with_pending_diagnostic_raw(word, outer_dq, || {
+            if !matches!(context, SubstitutionQuoteContext::Unquoted) {
+                // rubash#3088: the walk must NOT restore expansion-result
+                // backslashes before the operator-result unescape below — it
+                // would fold them as source escapes (subst.c:4773
+                // quote_string CTLESC-protects expansion results; subst.c:4807
+                // dequote_string strips only CTLESC). The walk defers both
+                // carriers; the helper restores them after the pass.
+                let unescaped = unescape_parameter_operator_result(
+                    &self.expand_embedded_parameters_mut_with_context_no_restore(
+                        &self.decode_operator_word_for_context(word, context),
+                        context,
+                    ),
                     context,
-                ),
-                context,
-                self.shell_state.env_vars.get("IFS").map(String::as_str),
-            );
-            return restore_deferred_operator_backslashes(&unescaped);
-        }
-        self.expand_embedded_parameters_alternate_mut(word)
+                    self.shell_state.env_vars.get("IFS").map(String::as_str),
+                );
+                return restore_deferred_operator_backslashes(&unescaped);
+            }
+            self.expand_embedded_parameters_alternate_mut(word)
+        })
     }
 
     /// Resolve one `${...}` fragment collected by the embedded walker
@@ -1084,7 +1096,9 @@ impl Executor {
                 crate::executor::expand_word::resolve_dollar_quoted_parameter_name(name)
             {
                 let resolved_word = format!("${{{resolved}}}");
-                return self.expand_quoted_parameter_word_mut(&resolved_word, context);
+                return crate::executor::expand_word::without_pending_diagnostic_raw(|| {
+                    self.expand_quoted_parameter_word_mut(&resolved_word, context)
+                });
             }
         }
         // The bad-substitution diagnostic names the ENCLOSING word GNU was
@@ -1093,13 +1107,11 @@ impl Executor {
         // (rubash#758). A word with no record is this `${...}` fragment
         // itself; a here-document body is runtime text GNU never ran
         // parse_comsub on, so its `$(` spans cite raw (rubash#3543).
-        let (diagnostic_word, diagnostic_runtime) =
-            crate::executor::expand_word::take_pending_diagnostic_word().unwrap_or_else(|| {
-                (
-                    word.to_string(),
-                    matches!(context, SubstitutionQuoteContext::HereDocument),
-                )
-            });
+        let diagnostic_word =
+            crate::executor::expand_word::take_pending_diagnostic_word_for_display(
+                word,
+                matches!(context, SubstitutionQuoteContext::HereDocument),
+            );
         // GNU subst.c:10272-10288 (parameter_brace_expand): a quote
         // terminating the parameter name matches no operator arm and lands
         // on the `bad substitution` default. Mirror of the same check in
@@ -1112,10 +1124,7 @@ impl Executor {
                     format!(
                         "{}{}: bad substitution\n",
                         self.diagnostic_prefix(),
-                        crate::executor::expand_word::bad_substitution_display(
-                            &diagnostic_word,
-                            diagnostic_runtime
-                        )
+                        diagnostic_word
                     )
                     .as_bytes(),
                 );
@@ -1136,10 +1145,7 @@ impl Executor {
                     format!(
                         "{}{}: bad substitution\n",
                         self.diagnostic_prefix(),
-                        crate::executor::expand_word::bad_substitution_display(
-                            &diagnostic_word,
-                            diagnostic_runtime
-                        )
+                        diagnostic_word
                     )
                     .as_bytes(),
                 );

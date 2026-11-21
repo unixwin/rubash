@@ -62,9 +62,15 @@ impl Executor {
         // `:?` verdict is the same FORCE_EOF class as in a command word
         // (subst.c:10347/10414/10418) and `:=` binds at evaluation.
         // The simple-command pre-passes never see this list.
-        for word in &select_command.words {
+        for (index, word) in select_command.words.iter().enumerate() {
+            let raw = select_command
+                .word_metadata
+                .get(index)
+                .map(|metadata| metadata.raw.as_str())
+                .filter(|raw| !raw.is_empty());
             self.apply_parameter_assignment_expansions_in_word(word);
-            if let Some(error) = self.parameter_expansion_error_in_word_isolated(word) {
+            if let Some(error) = self.parameter_expansion_error_in_word_isolated_with_raw(word, raw)
+            {
                 return self.raise_word_expansion_error(error);
             }
         }
@@ -158,7 +164,16 @@ impl Executor {
                     .get(index)
                     .map(|metadata| metadata.raw.as_str());
                 let metadata = select_command.word_metadata.get(index);
-                match self.expand_for_word_values_result(word, raw, metadata) {
+                let result = if let Some(raw_text) = raw.filter(|r| !r.is_empty()) {
+                    crate::executor::expand_word::with_pending_diagnostic_raw(
+                        raw_text,
+                        false,
+                        || self.expand_for_word_values_result(word, raw, metadata),
+                    )
+                } else {
+                    self.expand_for_word_values_result(word, raw, metadata)
+                };
+                match result {
                     Ok(expanded) => values.extend(expanded),
                     Err(pattern) => {
                         self.report_failglob(&pattern);

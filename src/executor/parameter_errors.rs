@@ -148,9 +148,15 @@ fn parameter_reference_len(body: &str) -> usize {
 /// quote is literal data (parse.y skip_double_quoted), matching GNU
 /// word expansion; heredoc bodies keep the raw scan instead.
 fn next_quoted_parameter_expansion_start(text: &str) -> Option<usize> {
+    next_quoted_parameter_expansion_start_in_context(text, false)
+}
+
+fn next_quoted_parameter_expansion_start_in_context(
+    text: &str,
+    mut in_double: bool,
+) -> Option<usize> {
     let bytes = text.as_bytes();
     let mut index = 0usize;
-    let mut in_double = false;
     while index < bytes.len() {
         let ch = bytes[index];
         match ch {
@@ -1235,6 +1241,41 @@ impl Executor {
         masked.map_or(std::borrow::Cow::Borrowed(text), std::borrow::Cow::Owned)
     }
 
+    pub(in crate::executor) fn mask_recorded_process_substitutions_preserving_len<'a>(
+        text: &'a str,
+        spans: &[crate::parser::ProcessSubstitution],
+    ) -> std::borrow::Cow<'a, str> {
+        Self::mask_recorded_span_targets_preserving_len(
+            text,
+            spans
+                .iter()
+                .map(|substitution| substitution.target.as_str()),
+        )
+    }
+
+    pub(in crate::executor) fn mask_recorded_span_targets_preserving_len<'a, 't>(
+        text: &'a str,
+        targets: impl Iterator<Item = &'t str>,
+    ) -> std::borrow::Cow<'a, str> {
+        let mut masked: Option<String> = None;
+        for target in targets {
+            if target.is_empty() {
+                continue;
+            }
+            let current: &str = masked.as_deref().unwrap_or(text);
+            if let Some(pos) = current.find(target) {
+                let mut buf = String::with_capacity(current.len());
+                buf.push_str(&current[..pos]);
+                for _ in 0..target.len() {
+                    buf.push(' ');
+                }
+                buf.push_str(&current[pos + target.len()..]);
+                masked = Some(buf);
+            }
+        }
+        masked.map_or(std::borrow::Cow::Borrowed(text), std::borrow::Cow::Owned)
+    }
+
     pub(in crate::executor) fn parameter_expansion_error(
         &self,
         cmd: &CommandNode,
@@ -1321,17 +1362,82 @@ impl Executor {
         // empty — otherwise a `:?` earlier in the list would see a
         // later fragment's bind.
         crate::executor::expand_braced_indices::scan_sim_clear();
-        for word in &cmd.words {
+        for (index, word) in cmd.words.iter().enumerate() {
+            let raw = cmd
+                .word_metadata
+                .get(index)
+                .map(|metadata| metadata.raw.as_str())
+                .filter(|raw| !raw.is_empty());
+            if cmd.process_substitutions.is_empty()
+                && !word.starts_with(STORAGE_WORD_PREFIX)
+                && raw.is_some_and(|raw_text| raw_text.contains('{'))
+                && self.is_brace_expand_enabled()
+            {
+                if let Some(raw_text) = raw {
+                    let braced = crate::expand::braces::expand_braces_tagged(raw_text);
+                    if braced.len() > 1 {
+                        for product in &braced {
+                            let cooked = crate::lexer::quotes::remove_shell_quotes_with_posix(
+                                &product.text,
+                                self.posix_mode_enabled(),
+                            );
+                            if let Some(error) = self.parameter_expansion_error_in_word_with_raw(
+                                &cooked,
+                                Some(&product.text),
+                            ) {
+                                return Some(error);
+                            }
+                        }
+                        continue;
+                    }
+                }
+            }
             let masked =
                 Self::mask_recorded_process_substitutions(word, &cmd.process_substitutions);
-            if let Some(error) = self.parameter_expansion_error_in_word(&masked) {
+            let masked_raw = raw.map(|raw_text| {
+                Self::mask_recorded_process_substitutions_preserving_len(
+                    raw_text,
+                    &cmd.process_substitutions,
+                )
+            });
+            let raw_ctx = match (raw, masked_raw.as_deref()) {
+                (Some(display_raw), Some(scan_raw)) => Some(ScanRawContext {
+                    display_raw,
+                    scan_raw,
+                    outer_double_quoted: false,
+                }),
+                _ => None,
+            };
+            if let Some(error) =
+                self.parameter_expansion_error_in_word_context_with_raw(&masked, true, raw_ctx)
+            {
                 return Some(error);
             }
         }
-        for value in cmd.assignment_values() {
+        let raws_aligned = cmd.assignment_raws.len() == cmd.assignments.len();
+        for (index, value) in cmd.assignment_values().enumerate() {
+            let raw = raws_aligned
+                .then(|| cmd.assignment_raws[index].as_str())
+                .filter(|raw| !raw.is_empty());
             let masked =
                 Self::mask_recorded_process_substitutions(value, &cmd.process_substitutions);
-            if let Some(error) = self.parameter_expansion_error_in_word(&masked) {
+            let masked_raw = raw.map(|raw_text| {
+                Self::mask_recorded_process_substitutions_preserving_len(
+                    raw_text,
+                    &cmd.process_substitutions,
+                )
+            });
+            let raw_ctx = match (raw, masked_raw.as_deref()) {
+                (Some(display_raw), Some(scan_raw)) => Some(ScanRawContext {
+                    display_raw,
+                    scan_raw,
+                    outer_double_quoted: false,
+                }),
+                _ => None,
+            };
+            if let Some(error) =
+                self.parameter_expansion_error_in_word_context_with_raw(&masked, true, raw_ctx)
+            {
                 return Some(error);
             }
         }
@@ -1498,7 +1604,20 @@ impl Executor {
         &self,
         word: &str,
     ) -> Option<(String, String, i32)> {
-        self.parameter_expansion_error_in_word_context(word, true)
+        self.parameter_expansion_error_in_word_with_raw(word, None)
+    }
+
+    pub(in crate::executor) fn parameter_expansion_error_in_word_with_raw(
+        &self,
+        word: &str,
+        raw: Option<&str>,
+    ) -> Option<(String, String, i32)> {
+        let raw_ctx = raw.map(|raw_text| ScanRawContext {
+            display_raw: raw_text,
+            scan_raw: raw_text,
+            outer_double_quoted: false,
+        });
+        self.parameter_expansion_error_in_word_context_with_raw(word, true, raw_ctx)
     }
 
     /// Top-level word-scan entry with the rubash#2558 deferred-write
@@ -1513,10 +1632,18 @@ impl Executor {
         &self,
         word: &str,
     ) -> Option<(String, String, i32)> {
+        self.parameter_expansion_error_in_word_isolated_with_raw(word, None)
+    }
+
+    pub(in crate::executor) fn parameter_expansion_error_in_word_isolated_with_raw(
+        &self,
+        word: &str,
+        raw: Option<&str>,
+    ) -> Option<(String, String, i32)> {
         // rubash#2595/#2762: one scan call, one simulated walk.
         crate::executor::expand_braced_indices::scan_ctx_begin();
         let mark = Self::scan_pending_writes_mark();
-        let verdict = self.parameter_expansion_error_in_word(word);
+        let verdict = self.parameter_expansion_error_in_word_with_raw(word, raw);
         if verdict.is_none() {
             Self::scan_pending_writes_rollback(mark);
         }
@@ -1849,6 +1976,7 @@ impl Executor {
     fn nested_operator_word_error(
         &self,
         inner: &str,
+        raw_inner_info: Option<(&str, bool)>,
         quote_aware: bool,
     ) -> Option<(String, String, i32)> {
         for op in [":=", ":-", ":+", "=", "-", "+"] {
@@ -1881,7 +2009,12 @@ impl Executor {
             // rubash#3543: propagate the enclosing scan's quote context —
             // a here-document body's operator word is runtime text whose
             // `$(` spans GNU cites raw, exactly like the outer body.
-            return self.parameter_expansion_error_in_word_context(word, quote_aware);
+            // rubash#4029: when the enclosing word's raw text is known,
+            // the nested word's raw tail names the citation instead.
+            let raw_tail = raw_inner_info.and_then(|(raw_body, in_double)| {
+                split_once_outside_subscript_str(raw_body, op).map(|(_, tail)| (tail, in_double))
+            });
+            return self.scan_nested_raw_word(word, raw_tail, quote_aware);
         }
         // rubash#2701 — `${var/pat/repl}`: GNU expands the replacement
         // word (parameter_brace_patsub -> expand_string on the repl text,
@@ -1900,13 +2033,39 @@ impl Executor {
                             .scan_operator_value(var_name)
                             .is_some_and(|value| value.is_some())
                     {
-                        return self
-                            .parameter_expansion_error_in_word_context(replacement, quote_aware);
+                        let raw_repl = raw_inner_info.and_then(|(raw_body, in_double)| {
+                            let (_, raw_tail) = split_once_outside_subscript_str(raw_body, "/")?;
+                            let raw_tail = raw_tail.strip_prefix('/').unwrap_or(raw_tail);
+                            let raw_tail = raw_tail.strip_prefix(['#', '%']).unwrap_or(raw_tail);
+                            let (_, raw_repl) = split_parameter_separator(raw_tail)?;
+                            Some((raw_repl, in_double))
+                        });
+                        return self.scan_nested_raw_word(replacement, raw_repl, quote_aware);
                     }
                 }
             }
         }
         None
+    }
+
+    fn scan_nested_raw_word(
+        &self,
+        word: &str,
+        raw_info: Option<(&str, bool)>,
+        quote_aware: bool,
+    ) -> Option<(String, String, i32)> {
+        if let Some((raw_tail, in_double)) = raw_info {
+            return self.parameter_expansion_error_in_word_context_with_raw(
+                word,
+                quote_aware,
+                Some(ScanRawContext {
+                    display_raw: raw_tail,
+                    scan_raw: raw_tail,
+                    outer_double_quoted: in_double,
+                }),
+            );
+        }
+        self.parameter_expansion_error_in_word_context(word, quote_aware)
     }
 
     /// Adjudicate a nested `${...}` inside the leading reference's
@@ -1925,13 +2084,18 @@ impl Executor {
     fn nested_subscript_word_error(
         &self,
         inner: &str,
+        raw_inner_info: Option<(&str, bool)>,
         quote_aware: bool,
     ) -> Option<(String, String, i32)> {
         let subscript = leading_reference_subscript(inner)?;
         if !subscript.contains("${") {
             return None;
         }
-        self.scan_subscript_text_for_errors(subscript, quote_aware)
+        self.scan_subscript_text_for_errors(
+            subscript,
+            raw_inner_info.and_then(|(raw_body, _)| leading_reference_subscript(raw_body)),
+            quote_aware,
+        )
     }
 
     /// Walk subscript text for nested `${...}` errors (rubash#2596).
@@ -1946,6 +2110,7 @@ impl Executor {
     fn scan_subscript_text_for_errors(
         &self,
         text: &str,
+        raw_subscript: Option<&str>,
         quote_aware: bool,
     ) -> Option<(String, String, i32)> {
         let bytes = text.as_bytes();
@@ -2023,9 +2188,16 @@ impl Executor {
                         ));
                     };
                     let span = &text[index..index + 2 + end + 1];
-                    if let Some(error) =
-                        self.parameter_expansion_error_in_word_context(span, quote_aware)
-                    {
+                    let raw_span = raw_subscript.unwrap_or(span);
+                    if let Some(error) = self.parameter_expansion_error_in_word_context_with_raw(
+                        span,
+                        quote_aware,
+                        Some(ScanRawContext {
+                            display_raw: raw_span,
+                            scan_raw: raw_span,
+                            outer_double_quoted: false,
+                        }),
+                    ) {
                         return Some(error);
                     }
                     index += 2 + end + 1;
@@ -2490,6 +2662,15 @@ impl Executor {
         word: &str,
         quote_aware: bool,
     ) -> Option<(String, String, i32)> {
+        self.parameter_expansion_error_in_word_context_with_raw(word, quote_aware, None)
+    }
+
+    fn parameter_expansion_error_in_word_context_with_raw(
+        &self,
+        word: &str,
+        quote_aware: bool,
+        raw_ctx: Option<ScanRawContext<'_>>,
+    ) -> Option<(String, String, i32)> {
         // perf6 admission: same necessary condition as
         // parameter_assignment_error_in_word — every arm (nounset `$ref`,
         // `${` spans, `${|`) needs an ASCII `$`; a `$`-free word cannot
@@ -2532,7 +2713,38 @@ impl Executor {
                 return Some((name, message, Self::FATAL_PARAMETER_EXPANSION_STATUS));
             }
         }
+        let format_bad_sub = |ordinal: usize| -> String {
+            if let Some(ctx) = raw_ctx {
+                if let Some(dollar_offset) =
+                    crate::executor::expand_word::nth_quoted_parameter_expansion_start(
+                        ctx.scan_raw,
+                        ordinal,
+                        ctx.outer_double_quoted,
+                    )
+                {
+                    // Captain graft synthesis (rubash#4029 × rubash#3543):
+                    // the raw channel names WHICH word is cited (rebuilt
+                    // with its quote delimiters and backslashes); the
+                    // display decides how its comsub spans print — a
+                    // parser word's spans canonicalize, runtime text
+                    // (`!quote_aware`) stays raw.
+                    let rendered =
+                        crate::executor::expand_word::bad_substitution_diagnostic_word_from_raw(
+                            ctx.display_raw,
+                            dollar_offset,
+                            ctx.outer_double_quoted,
+                        );
+                    return crate::executor::expand_word::bad_substitution_display(
+                        &rendered,
+                        !quote_aware,
+                    );
+                }
+            }
+            crate::executor::expand_word::bad_substitution_display(word, !quote_aware)
+        };
         let mut rest = word;
+        let mut frag_ordinal = 0usize;
+        let mut scan_in_double = raw_ctx.is_some_and(|ctx| ctx.outer_double_quoted);
         loop {
             // P_ARITH units are opaque to this scan (rubash#533): GNU reads
             // a `$((...))`/`$[...]` body through parse_matched_pair (P_ARITH)
@@ -2571,17 +2783,20 @@ impl Executor {
                         }
                     }
                 }
+                scan_in_double = advance_scan_double_quote_state(&rest[..len], scan_in_double);
                 rest = &rest[len..];
                 continue;
             }
             let start = if quote_aware {
-                next_quoted_parameter_expansion_start(rest)
+                next_quoted_parameter_expansion_start_in_context(rest, scan_in_double)
             } else {
                 rest.find("${")
             };
             let Some(start) = start else {
                 break;
             };
+            let current_ordinal = frag_ordinal;
+            frag_ordinal += 1;
             let after_start = &rest[start + 2..];
             // GNU subst.c:10775-10798 param_expand `case LBRACE`:
             // `${` + FUNSUB_CHAR (parser.h:85 — blank/newline/`|`)
@@ -2618,6 +2833,8 @@ impl Executor {
                         if let Some((close, _)) =
                             after_start.char_indices().nth(body.chars().count() + 1)
                         {
+                            scan_in_double =
+                                advance_scan_double_quote_state(&rest[..start], scan_in_double);
                             rest = &after_start[close + 1..];
                             continue;
                         }
@@ -2648,7 +2865,7 @@ impl Executor {
             // `${#x[]}`) whose reference obeys the same rule.
             if Self::malformed_braced_reference(inner) {
                 return Some((
-                    crate::executor::expand_word::bad_substitution_display(word, !quote_aware),
+                    format_bad_sub(current_ordinal),
                     "bad substitution".to_string(),
                     1,
                 ));
@@ -2659,7 +2876,7 @@ impl Executor {
             // a single nested subscript such as `${A[${i}]}` remains valid.
             if inner.contains("[${${") {
                 return Some((
-                    crate::executor::expand_word::bad_substitution_display(word, !quote_aware),
+                    format_bad_sub(current_ordinal),
                     "bad substitution".to_string(),
                     1,
                 ));
@@ -2671,18 +2888,34 @@ impl Executor {
             // (new-exp.tests `${c//${$(($#-1))}/x/}`).
             if inner.starts_with("$(") || inner.contains("${$(") {
                 return Some((
-                    crate::executor::expand_word::bad_substitution_display(word, !quote_aware),
+                    format_bad_sub(current_ordinal),
                     "bad substitution".to_string(),
                     1,
                 ));
             }
+            let raw_inner_info: Option<(&str, bool)> = raw_ctx.and_then(|ctx| {
+                let (dollar_offset, in_double) =
+                    crate::executor::expand_word::nth_quoted_parameter_expansion_start_and_quote_state(
+                        ctx.scan_raw,
+                        current_ordinal,
+                        ctx.outer_double_quoted,
+                    )?;
+                let body = crate::executor::expand_word::raw_dollar_brace_body_slice(
+                    ctx.display_raw,
+                    dollar_offset,
+                    in_double,
+                )?;
+                Some((body, in_double))
+            });
             // rubash#2596: the subscript is expanded while the
             // parameter is fetched, before any operator, transform,
             // length or indirect adjudication (subst.c:9777
             // parameter_brace_expand; expand_subscript_string,
             // subst.c:11063) — a nested error inside it pre-empts
             // every arm below.
-            if let Some(nested) = self.nested_subscript_word_error(inner, quote_aware) {
+            if let Some(nested) =
+                self.nested_subscript_word_error(inner, raw_inner_info, quote_aware)
+            {
                 return Some(nested);
             }
             // GNU subst.c:8944-8951 parameter_brace_transform +
@@ -2714,7 +2947,7 @@ impl Executor {
                     };
                 if is_set {
                     return Some((
-                        crate::executor::expand_word::bad_substitution_display(word, !quote_aware),
+                        format_bad_sub(current_ordinal),
                         "bad substitution".to_string(),
                         Self::FATAL_PARAMETER_EXPANSION_STATUS,
                     ));
@@ -2727,7 +2960,7 @@ impl Executor {
             if let Some(length_name) = inner.strip_prefix('#') {
                 if !Self::is_valid_length_parameter_name(length_name) {
                     return Some((
-                        crate::executor::expand_word::bad_substitution_display(word, !quote_aware),
+                        format_bad_sub(current_ordinal),
                         "bad substitution".to_string(),
                         1,
                     ));
@@ -2740,7 +2973,7 @@ impl Executor {
             if let Some(indirect) = self.indirect_parameter_body(inner) {
                 if !Self::is_valid_indirect_expression(indirect) {
                     return Some((
-                        crate::executor::expand_word::bad_substitution_display(word, !quote_aware),
+                        format_bad_sub(current_ordinal),
                         "bad substitution".to_string(),
                         1,
                     ));
@@ -3137,7 +3370,7 @@ impl Executor {
                 && !word_contains_current_shell_command_substitution(word)
             {
                 return Some((
-                    crate::executor::expand_word::bad_substitution_display(word, !quote_aware),
+                    format_bad_sub(current_ordinal),
                     "bad substitution".to_string(),
                     1,
                 ));
@@ -3165,7 +3398,7 @@ impl Executor {
                 && crate::executor::expand_word::braced_name_is_bad_substitution(inner)
             {
                 return Some((
-                    crate::executor::expand_word::bad_substitution_display(word, !quote_aware),
+                    format_bad_sub(current_ordinal),
                     "bad substitution".to_string(),
                     1,
                 ));
@@ -3203,8 +3436,13 @@ impl Executor {
                         // INNER variable (rubash#2343: `${a:?${b:?inner}}`
                         // reports `b: inner`, never `a: inner`).
                         if !message.is_empty() {
+                            let op = if require_non_empty { ":?" } else { "?" };
+                            let raw_msg_info = raw_inner_info.and_then(|(raw_body, in_double)| {
+                                split_once_outside_subscript_str(raw_body, op)
+                                    .map(|(_, raw_msg)| (raw_msg, in_double))
+                            });
                             if let Some(nested) =
-                                self.parameter_expansion_error_in_word_context(message, quote_aware)
+                                self.scan_nested_raw_word(message, raw_msg_info, quote_aware)
                             {
                                 return Some(nested);
                             }
@@ -3249,7 +3487,9 @@ impl Executor {
             // and reported for the inner parameter (rubash#2343:
             // `${a:-${b:?inner}}` with a unset reports `b: inner` and
             // aborts; it never yields the message text as a value).
-            if let Some(nested) = self.nested_operator_word_error(inner, quote_aware) {
+            if let Some(nested) =
+                self.nested_operator_word_error(inner, raw_inner_info, quote_aware)
+            {
                 return Some(nested);
             }
             // rubash#3225: the scan parse must not probe through the
@@ -3335,6 +3575,7 @@ impl Executor {
             // fragments of the same walk are adjudicated against the
             // evolved state.
             self.scan_record_assignment(inner);
+            scan_in_double = advance_scan_double_quote_state(&rest[..start], scan_in_double);
             rest = &after_start[end + 1..];
         }
         None
@@ -5005,4 +5246,91 @@ fn parameter_error_display_name(name: &str, parser_word: bool) -> String {
     } else {
         name.to_string()
     }
+}
+
+#[derive(Clone, Copy)]
+struct ScanRawContext<'a> {
+    display_raw: &'a str,
+    scan_raw: &'a str,
+    outer_double_quoted: bool,
+}
+
+fn advance_scan_double_quote_state(text: &str, mut in_double: bool) -> bool {
+    let bytes = text.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            0x11 => index += 2,
+            0x13 | 0x14 | 0x17 | 0x18 | 0x1a | 0x1f => index += 1,
+            b'\'' if !in_double => {
+                index += 1;
+                while index < bytes.len() && bytes[index] != b'\'' {
+                    index += 1;
+                }
+                index += 1;
+            }
+            b'$' if bytes.get(index + 1) == Some(&b'\'') && !in_double => {
+                index += 2;
+                while index < bytes.len() {
+                    if bytes[index] == b'\\' {
+                        index += 2;
+                        continue;
+                    }
+                    if bytes[index] == b'\'' {
+                        index += 1;
+                        break;
+                    }
+                    index += 1;
+                }
+            }
+            b'$' if bytes.get(index + 1) == Some(&b'(') => {
+                index += 2;
+                let mut depth = 1usize;
+                let mut single = false;
+                let mut double = false;
+                while index < bytes.len() {
+                    let current = bytes[index];
+                    if current == b'\\' && !single {
+                        index += 2;
+                        continue;
+                    }
+                    match current {
+                        b'\'' if !double => single = !single,
+                        b'"' if !single => double = !double,
+                        b'(' if !single && !double => depth += 1,
+                        b')' if !single && !double => {
+                            depth -= 1;
+                            if depth == 0 {
+                                index += 1;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    index += 1;
+                }
+            }
+            b'`' => {
+                index += 1;
+                while index < bytes.len() {
+                    if bytes[index] == b'\\' {
+                        index += 2;
+                        continue;
+                    }
+                    if bytes[index] == b'`' {
+                        index += 1;
+                        break;
+                    }
+                    index += 1;
+                }
+            }
+            b'"' => {
+                in_double = !in_double;
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    in_double
 }

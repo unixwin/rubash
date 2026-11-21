@@ -2965,7 +2965,15 @@ impl Executor {
                         }
                         continue;
                     }
-                    values.extend(self.expand_command_word(cmd, index, &product.text, None));
+                    if let Some(raw_product) = product.raw.as_deref() {
+                        values.extend(crate::executor::expand_word::with_pending_diagnostic_raw(
+                            raw_product,
+                            false,
+                            || self.expand_command_word(cmd, index, &product.text, None),
+                        ));
+                    } else {
+                        values.extend(self.expand_command_word(cmd, index, &product.text, None));
+                    }
                 }
                 return values;
             }
@@ -3134,7 +3142,18 @@ impl Executor {
             self.inside_assignment_rhs.set(true);
         }
         let saved_nonfatal = self.shell_state.arithmetic_nonfatal_error.replace(false);
-        let expanded = self.expand_word_mut_with_context(word_to_expand, context);
+        let expanded =
+            if !word_to_expand.contains(crate::executor::markers::COMPOUND_ASSIGNMENT_MARKER) {
+                if let Some(raw) = raw {
+                    crate::executor::expand_word::with_pending_diagnostic_raw(raw, false, || {
+                        self.expand_word_mut_with_context(word_to_expand, context)
+                    })
+                } else {
+                    self.expand_word_mut_with_context(word_to_expand, context)
+                }
+            } else {
+                self.expand_word_mut_with_context(word_to_expand, context)
+            };
         if decl_assignment_operand {
             self.inside_assignment_rhs.set(saved_assignment_rhs);
         }
@@ -5420,6 +5439,7 @@ fn expanded_word_has_process_substitution(word: &str) -> bool {
 /// applies) plus whether an empty text is nevertheless a real word.
 pub(in crate::executor) struct BraceExpansionWord {
     pub text: String,
+    pub raw: Option<String>,
     /// True when `text` is empty but the word exists: quote removal
     /// reduced a non-empty product to nothing (a quoted member such as
     /// `''`), or the brace layer flagged the product as a character
@@ -5444,7 +5464,12 @@ fn tag_brace_products(
             };
             let quoted_null =
                 text.is_empty() && (!product.text.is_empty() || product.sequence_null);
-            BraceExpansionWord { text, quoted_null }
+            let raw = strip.then_some(product.text);
+            BraceExpansionWord {
+                text,
+                raw,
+                quoted_null,
+            }
         })
         .collect()
 }
@@ -5452,6 +5477,7 @@ fn tag_brace_products(
 fn untagged_brace_word(text: String) -> BraceExpansionWord {
     BraceExpansionWord {
         text,
+        raw: None,
         quoted_null: false,
     }
 }

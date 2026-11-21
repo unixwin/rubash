@@ -404,16 +404,33 @@ pub(in crate::executor) fn dbg_aav_enabled() -> bool {
 /// The diagnostic word for one compound-assignment element, mirroring GNU
 /// quote_assign (arrayfunc.c:938-977) over quote_array_assignment_chars
 /// (:1108-1129): an indexed `[sub]=value` element is cited with its
-/// subscript span backslash-quoted, an associative element names its bare
-/// value (arrayfunc.c:594-599/:630 expand key/value separately), and a
-/// quoted value keeps the fragment's own word.
+/// subscript span backslash-quoted, and an associative element names its
+/// bare value (arrayfunc.c:594-599/:630 expand key/value separately).
 enum CompoundElementDiag {
     /// Indexed `[sub]=value`: `\[sub\]=value`.
     Element(String),
     /// Associative `[key]=value`: the bare value.
     Value(String),
-    /// Quoted value: the fragment keeps its own word.
-    Fragment,
+}
+
+fn unhoist_compound_diag_raw(text: &str) -> String {
+    // One E400-aware scan (markers::restore_bare_sentinels): a bare hoisted
+    // carrier is protocol and unhoists, while the escaped member of a
+    // user-typed E400 pair is data and survives verbatim — the blind
+    // `.replace` chain this replaces folded the pair's second char into a
+    // quote and stranded the introducer (the rubash#840 family; the marker
+    // blind-consumer lint requires the pair-aware route). The storage
+    // prefix is a bare-carrier strip of the same kind (C0 carriers never
+    // arrive E400-paired as data, so the rule is a plain delete).
+    crate::executor::markers::restore_bare_sentinels(
+        text,
+        &[
+            (ASSIGN_DATA_DQUOTE, "\""),
+            (ASSIGN_HOISTED_SQUOTE, "'"),
+            (crate::executor::markers::ASSIGN_HOISTED_BACKSLASH, "\\\\"),
+            (STORAGE_WORD_PREFIX, ""),
+        ],
+    )
 }
 
 fn compound_element_diag_word(token_raw: &str, assoc: bool) -> CompoundElementDiag {
@@ -421,15 +438,15 @@ fn compound_element_diag_word(token_raw: &str, assoc: bool) -> CompoundElementDi
     // anything else is a plain element whose walker default already names
     // the whole token.
     if !token_raw.starts_with('[') {
-        return CompoundElementDiag::Element(token_raw.to_string());
+        return CompoundElementDiag::Element(unhoist_compound_diag_raw(token_raw));
     }
     let Some((sub_end, tail)) =
         crate::executor::subscript_expansion::scan_compound_subscript(token_raw, 0)
     else {
-        return CompoundElementDiag::Element(token_raw.to_string());
+        return CompoundElementDiag::Element(unhoist_compound_diag_raw(token_raw));
     };
     if tail != crate::executor::subscript_expansion::CompoundSubscriptTail::Assignment {
-        return CompoundElementDiag::Element(token_raw.to_string());
+        return CompoundElementDiag::Element(unhoist_compound_diag_raw(token_raw));
     }
     let after = &token_raw[sub_end + 1..];
     let Some((operator, rhs)) = after
@@ -437,37 +454,23 @@ fn compound_element_diag_word(token_raw: &str, assoc: bool) -> CompoundElementDi
         .map(|rhs| ("+=", rhs))
         .or_else(|| after.strip_prefix('=').map(|rhs| ("=", rhs)))
     else {
-        return CompoundElementDiag::Element(token_raw.to_string());
+        return CompoundElementDiag::Element(unhoist_compound_diag_raw(token_raw));
     };
-    // A quoted value is one quoted word: the bad fragment inside keeps its
-    // own diagnostic word. The double-quote-wrap test mirrors
-    // subscripted_parameter_element; the raw-quote / hoisted-squote /
-    // storage-prefix forms are the other deliveries of a quoted value.
-    let dq_wrapped = rhs.starts_with(ASSIGN_DATA_DQUOTE)
-        && crate::executor::markers::ends_with_bare_sentinel(
-            rhs,
-            crate::executor::markers::ASSIGN_DATA_DQUOTE,
-        );
-    if dq_wrapped
-        || rhs.starts_with('"')
-        || rhs.starts_with('\'')
-        || rhs.starts_with(ASSIGN_HOISTED_SQUOTE)
-        || rhs.starts_with(STORAGE_WORD_PREFIX)
-    {
-        return CompoundElementDiag::Fragment;
-    }
+    let clean_rhs = unhoist_compound_diag_raw(rhs);
     if assoc {
-        return CompoundElementDiag::Value(rhs.to_string());
+        return CompoundElementDiag::Value(clean_rhs);
     }
     // GNU quote_assign (arrayfunc.c:938-977): before `=`, the `[sub]` span
     // is copied verbatim between two backslashes; glob/IFS characters
     // before `=` would take one too, but before `=` there is only the
-    // subscript span itself.
+    // subscript span itself. Note that if the bad substitution lies inside
+    // a double-quoted rhs segment (`[0]="pre\"${-x}\""`), the raw-word
+    // extractor will extract that segment (`pre"${-x}"`), matching GNU.
     CompoundElementDiag::Element(format!(
         "\\[{}\\]{}{}",
         &token_raw[1..sub_end],
         operator,
-        rhs
+        clean_rhs
     ))
 }
 
@@ -715,7 +718,14 @@ impl Executor {
         raw: Option<&str>,
     ) -> AssignmentExpansionResult {
         self.last_command_substitution_status.set(None);
-        let expanded = self.expand_assignment_value_with_raw(name, value, raw);
+        let expanded = match raw {
+            Some(raw) if !value.starts_with(COMPOUND_ASSIGNMENT_MARKER) => {
+                crate::executor::expand_word::with_pending_diagnostic_raw(raw, false, || {
+                    self.expand_assignment_value_with_raw(name, value, Some(raw))
+                })
+            }
+            _ => self.expand_assignment_value_with_raw(name, value, raw),
+        };
         let substitution_status = self.last_command_substitution_status.get();
         self.last_command_substitution_status.set(None);
         let arithmetic_error = self.shell_state.arithmetic_expansion_error.replace(false);
@@ -3288,17 +3298,15 @@ impl Executor {
             return fields;
         }
         // rubash#3500: install the element word (or the bare value for an
-        // assoc element) as the pending diagnostic word, so a bad
-        // substitution inside this element names the element, not the
-        // `${...}` fragment (GNU subst.c:10278). A quoted value keeps the
-        // fragment's own word.
+        // assoc element) as the pending diagnostic raw word, so a bad
+        // substitution inside this element names the element/segment, not
+        // the `${...}` fragment (GNU subst.c:10278).
         let expanded = match compound_element_diag_word(token_raw, assoc) {
             CompoundElementDiag::Element(word) | CompoundElementDiag::Value(word) => {
-                crate::executor::expand_word::with_pending_diagnostic_word(&word, false, || {
+                crate::executor::expand_word::with_pending_diagnostic_raw(&word, false, || {
                     self.expand_embedded_parameters_compound(token_raw)
                 })
             }
-            CompoundElementDiag::Fragment => self.expand_embedded_parameters_compound(token_raw),
         };
         if expanded == token_raw {
             // No expansion ran: a literal element word never undergoes word
@@ -3456,11 +3464,10 @@ impl Executor {
         // compound_plain_element_value_fields (see there).
         let expanded = match compound_element_diag_word(token_raw, assoc) {
             CompoundElementDiag::Element(word) | CompoundElementDiag::Value(word) => {
-                crate::executor::expand_word::with_pending_diagnostic_word(&word, false, || {
+                crate::executor::expand_word::with_pending_diagnostic_raw(&word, false, || {
                     self.expand_embedded_parameters_compound(token_raw)
                 })
             }
-            CompoundElementDiag::Fragment => self.expand_embedded_parameters_compound(token_raw),
         };
         if expanded != token_raw {
             *changed = true;
@@ -4082,7 +4089,7 @@ impl Executor {
         // declare context, so no word is installed there.
         let value = match compound_element_diag_word(token_raw, assoc) {
             CompoundElementDiag::Element(word) | CompoundElementDiag::Value(word) if !bare => {
-                crate::executor::expand_word::with_pending_diagnostic_word(&word, false, || {
+                crate::executor::expand_word::with_pending_diagnostic_raw(&word, false, || {
                     self.whole_word_parameter_single_value(unquoted)
                 })
             }

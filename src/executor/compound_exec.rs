@@ -7401,7 +7401,9 @@ impl Executor {
             } else {
                 case_command.word_metadata.raw.as_str()
             };
-            if let Some(error) = self.parameter_expansion_error_in_word_isolated(scan_text) {
+            if let Some(error) =
+                self.parameter_expansion_error_in_word_isolated_with_raw(scan_text, Some(scan_text))
+            {
                 return self.raise_word_expansion_error(error);
             }
         }
@@ -7468,9 +7470,10 @@ impl Executor {
                         return true;
                     }
                     if pattern.text.contains('$') || pattern.text.contains('`') {
+                        let raw = (!pattern.raw_text.is_empty()).then_some(pattern.raw_text.as_str());
                         self.apply_parameter_assignment_expansions_in_word(&pattern.text);
-                        pattern_error =
-                            self.parameter_expansion_error_in_word_isolated(&pattern.text);
+                        pattern_error = self
+                            .parameter_expansion_error_in_word_isolated_with_raw(&pattern.text, raw);
                         if pattern_error.is_some() {
                             return true;
                         }

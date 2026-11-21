@@ -703,8 +703,12 @@ impl Executor {
             if (target.starts_with(">(") || target.starts_with("<(")) && target.ends_with(')') {
                 continue;
             }
+            let raw_target = (!redirect.target_metadata.raw.is_empty())
+                .then_some(redirect.target_metadata.raw.as_str());
             self.apply_parameter_assignment_expansions_in_word(target);
-            if let Some(error) = self.parameter_expansion_error_in_word_isolated(target) {
+            if let Some(error) =
+                self.parameter_expansion_error_in_word_isolated_with_raw(target, raw_target)
+            {
                 return self.raise_word_expansion_error(error);
             }
         }
@@ -1827,7 +1831,9 @@ impl Executor {
             let trimmed = word.trim_start();
             let no_expansion = trimmed.starts_with('\'') || trimmed.starts_with("$'");
             if !no_expansion {
-                if let Some(error) = self.parameter_expansion_error_in_word_isolated(word) {
+                if let Some(error) = self
+                    .parameter_expansion_error_in_word_isolated_with_raw(word, Some(word.as_str()))
+                {
                     return Some(error);
                 }
             }
