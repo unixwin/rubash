@@ -489,6 +489,14 @@ fn word_is_assignment_shaped(word: &str) -> bool {
 pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Option<UnclosedInput> {
     let chars: Vec<char> = input.chars().collect();
     let mut stack: Vec<UnclosedDelim> = Vec::new();
+    // Word-level state for funsub-flagged delimiters, parallel to their
+    // stack order: parse.y:5899 reserved_word_acceptable is a TOKEN-level
+    // predicate — `term_ready` alone sees only the last character class,
+    // so a body ending in a compound command spelled by reserved words
+    // (`... fi`, `... done`, `... esac`, `... ]]`) needs the word itself
+    // classified (the same FunsubWordTracker extract_funsub_body_tail
+    // carries; rubash#4017).
+    let mut funsub_words: Vec<crate::lexer::classification::FunsubWordTracker> = Vec::new();
     let mut line = 1usize;
     let mut comment_start = true;
     // GNU parse.y: a bare `(` only opens a subshell/array-list when the
@@ -667,6 +675,9 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
                 case_word_boundary = true;
                 if let Some(d) = stack.last_mut() {
                     if d.funsub {
+                        if let Some(w) = funsub_words.last_mut() {
+                            w.finish_into(&mut d.term_ready);
+                        }
                         d.term_ready = true;
                     }
                 } else {
@@ -683,6 +694,14 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
             && chars.get(i + 2) == Some(&'<')
             && close_char_operator_context(top)
         {
+            if let Some(d) = stack.last_mut() {
+                if d.funsub {
+                    if let Some(w) = funsub_words.last_mut() {
+                        w.finish_into(&mut d.term_ready);
+                    }
+                    d.term_ready = false;
+                }
+            }
             comment_start = true;
             cur_word.clear();
             i += 3;
@@ -696,6 +715,21 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
                 // inside a body reports its physical line (the
                 // stack-empty arm below counts the same pair).
                 comment_start = false;
+                // The pair is consumed whole below, so the funsub word
+                // tracker never sees either char: an escape makes the
+                // word quoted — never a reserved word
+                // (parse.y:3170 CHECK_FOR_RESERVED_WORD's `quoted` gate).
+                // Only a funsub top owns body text here; a nested unit's
+                // escapes stay word material for its parent's tracker,
+                // which the pop arm's poison_active already covers.
+                if d.funsub {
+                    if let Some(w) = funsub_words.last_mut() {
+                        w.poison(d.term_ready);
+                    }
+                    if let Some(top_d) = stack.last_mut() {
+                        top_d.term_ready = false;
+                    }
+                }
                 if chars.get(i + 1) == Some(&'\n') {
                     line += 1;
                 }
@@ -728,20 +762,42 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
             let case_body_close = (region_before && !content_before)
                 || (word_before == "in" && stage_before == 2)
                 || (case_in_stage == 2 && !region_before && !word_before.is_empty());
+            // parse.y:5407-5416 + 5899-5947: the funsub `}' special case
+            // fires when reserved_word_acceptable(last_read_token) — the
+            // scanner's term_ready — OR the FUNCTION/COPROC-name
+            // fallback (parse.y:5940-5943) holds for this position.
+            let funsub_close_ready = !d.funsub
+                || d.term_ready
+                || funsub_words.last().is_some_and(|w| w.name_ctx_fallback());
             if ch == d.close
-                && !(d.funsub && !d.term_ready)
+                && funsub_close_ready
                 && (d.pattern_paren
                     || !(d.close == ')'
                         && case_depth > d.case_depth_at_push
                         && !case_preamble_unfinished
                         && !case_body_close))
             {
+                let popped_funsub = d.funsub;
+                let popped_command = d.command;
                 stack.pop();
+                if popped_funsub {
+                    funsub_words.pop();
+                }
                 // A closed subshell or brace group is a complete command:
                 // an enclosing function substitution's `}' may now close.
+                // Any other closed unit (quote, `$(`/`${`, backquote) is
+                // word material: it makes an in-progress funsub word
+                // unclean so it can never read as a reserved word
+                // (parse.y:3170 CHECK_FOR_RESERVED_WORD's quoted gate).
                 if let Some(parent) = stack.last_mut() {
-                    if parent.funsub && d.command {
-                        parent.term_ready = true;
+                    if parent.funsub {
+                        if !popped_command {
+                            if let Some(w) = funsub_words.last_mut() {
+                                w.poison_active();
+                            }
+                        } else {
+                            parent.term_ready = true;
+                        }
                     }
                 }
                 // `)` is a shell separator: a following `#` starts a
@@ -789,11 +845,72 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
             if d.funsub {
                 // Track command-terminator state: `${ cmd }' without a
                 // separator before `}' never terminates (parse_comsub).
+                // parse.y:5899 reserved_word_acceptable is token-level:
+                // compound-command keywords and closers (`fi`, `done`,
+                // `esac`, `]]`, a bare `)`, `(`/`{`) leave command
+                // position ready for `}' exactly like `;' does — the
+                // word tracker recovers the last token's class.
                 let d = stack.last_mut().unwrap();
-                match ch {
-                    ';' | '&' | '|' | '\n' => d.term_ready = true,
-                    c if !c.is_whitespace() => d.term_ready = false,
-                    _ => {}
+                if let Some(w) = funsub_words.last_mut() {
+                    match ch {
+                        ';' | '&' | '|' | '\n' => {
+                            w.finish_into(&mut d.term_ready);
+                            w.note_hard_token();
+                            d.term_ready = true;
+                        }
+                        c if c.is_whitespace() => w.finish_into(&mut d.term_ready),
+                        // `(`/`)` are in reserved_word_acceptable
+                        // (parse.y:5907-5920); `{` is handled by its own
+                        // arm below (whole-token + open-context gate).
+                        '(' | ')' => {
+                            w.finish_into(&mut d.term_ready);
+                            w.note_hard_token();
+                            d.term_ready = true;
+                        }
+                        // A lone `{` opens a brace group at command
+                        // position, at the FUNCTION/COPROC-name fallback
+                        // position, or under PST_ALLOWOPNBRC after
+                        // `function` (parse.y:3444-3451 `{'.tokstr ==
+                        // "{"' whole-token gate + parse.y:5940-5943);
+                        // `{x`-glued or mid-word `{` stays word text.
+                        '{' if !w.word_active()
+                            && (d.term_ready || w.brace_open_ctx())
+                            && crate::lexer::classification::brace_token_boundary_next(
+                                chars.get(i + 1).copied(),
+                            ) =>
+                        {
+                            w.finish_into(&mut d.term_ready);
+                            w.note_brace_open();
+                            d.term_ready = true;
+                        }
+                        // A `}' that reached here did not close
+                        // (term_ready was false and no name fallback):
+                        // it is word text.
+                        '}' => w.push('}', d.term_ready),
+                        // Redirect operators are not in
+                        // reserved_word_acceptable: the word after them
+                        // is the redirect target.
+                        '<' | '>' => {
+                            w.finish_into(&mut d.term_ready);
+                            w.note_hard_token();
+                            d.term_ready = false;
+                        }
+                        // Quote/expansion openers are word material.
+                        '\'' | '"' | '`' | '$' | '\\' => {
+                            w.poison(d.term_ready);
+                            d.term_ready = false;
+                        }
+                        _ => {
+                            w.push(ch, d.term_ready);
+                            d.term_ready = false;
+                        }
+                    }
+                } else {
+                    match ch {
+                        ';' | '&' | '|' | '\n' => d.term_ready = true,
+                        c if !c.is_whitespace() => d.term_ready = false,
+                        _ => {}
+                    }
                 }
             }
         } else {
@@ -1044,12 +1161,22 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
                                 report_open: !funsub,
                                 funsub,
                                 command: false,
-                                term_ready: funsub, // rubash#3972: a funsub body starts as a complete (empty) command list; the first word char clears this via the funsub tracker
+                                // The body opens at command position
+                                // (parse.y:1115 funsub -> compound_list):
+                                // `}' is recognizable from the first token,
+                                // which is also what makes a leading
+                                // reserved word (`[[`, `if`, `!`) classify.
+                                term_ready: funsub,
                                 case_depth_at_push: 0,
                                 array_list: false,
                                 pattern_paren: false,
                                 arith: false,
                             });
+                            if funsub {
+                                funsub_words.push(
+                                    crate::lexer::classification::FunsubWordTracker::default(),
+                                );
+                            }
                         }
                         if funsub {
                             comment_start = true;
@@ -1332,9 +1459,22 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
                 });
                 comment_start = true;
             }
-            '{' if top.is_some_and(|d| d.close == '}' && d.funsub) => {
+            '{' if top.is_some_and(|d| {
+                d.close == '}'
+                    && d.funsub
+                    && d.term_ready
+                    && crate::lexer::classification::brace_token_boundary_next(
+                        chars.get(i + 1).copied(),
+                    )
+            }) =>
+            {
                 // `{ cmd; }' group inside a function substitution: `}' only
-                // closes after a command terminator, same rule.
+                // closes after a command terminator, same rule. A command
+                // follows the opening brace, so the group opens at command
+                // position like the funsub body itself. The term_ready +
+                // whole-token gates mirror the tracker arm above: `{x`
+                // glued text and mid-word `{` are word characters, never
+                // group openers (parse.y:3444-3451).
                 stack.push(UnclosedDelim {
                     close: '}',
                     open_line: line,
@@ -1342,12 +1482,13 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
                     report_open: false,
                     funsub: true,
                     command: true,
-                    term_ready: false,
+                    term_ready: true,
                     case_depth_at_push: 0,
                     array_list: false,
                     pattern_paren: false,
                     arith: false,
                 });
+                funsub_words.push(crate::lexer::classification::FunsubWordTracker::default());
             }
             _ => {}
         }
@@ -5274,6 +5415,10 @@ pub(crate) struct CloseCharResidualState {
     pub(crate) case_pattern_paren_depth: usize,
     pub(crate) case_pattern_opener_available: bool,
     pub(crate) case_pattern_region_seen: bool,
+    /// Word-level state for funsub-flagged delimiters, parallel to their
+    /// stack order — the mirror of the one-shot scan's `funsub_words`
+    /// (parse.y:5899 reserved_word_acceptable is token-level; rubash#4017).
+    pub(crate) funsub_words: Vec<crate::lexer::classification::FunsubWordTracker>,
 }
 
 impl Default for CloseCharResidualState {
@@ -5296,6 +5441,7 @@ impl Default for CloseCharResidualState {
             case_pattern_paren_depth: 0,
             case_pattern_opener_available: true,
             case_pattern_region_seen: false,
+            funsub_words: Vec::new(),
         }
     }
 }
@@ -5536,6 +5682,9 @@ pub(crate) fn close_char_residuals_advance(
                 state.word_boundary = true;
                 if let Some(d) = state.stack.last_mut() {
                     if d.funsub {
+                        if let Some(w) = state.funsub_words.last_mut() {
+                            w.finish_into(&mut d.term_ready);
+                        }
                         d.term_ready = true;
                     }
                 } else {
@@ -5553,6 +5702,14 @@ pub(crate) fn close_char_residuals_advance(
             && chars.get(i + 2) == Some(&'<')
             && close_char_operator_context(top)
         {
+            if let Some(d) = state.stack.last_mut() {
+                if d.funsub {
+                    if let Some(w) = state.funsub_words.last_mut() {
+                        w.finish_into(&mut d.term_ready);
+                    }
+                    d.term_ready = false;
+                }
+            }
             state.comment_start = true;
             state.cur_word.clear();
             i += 3;
@@ -5564,6 +5721,18 @@ pub(crate) fn close_char_residuals_advance(
                 // escaped newline still advances the physical line
                 // counter (mirror of the one-shot scan's arm).
                 state.comment_start = false;
+                // Mirror of the one-shot scan's escape arm: the pair is
+                // consumed whole below, so a funsub top's word tracker
+                // never sees it — poison it here (parse.y:3170's quoted
+                // gate) or `\;' would leave the word clean.
+                if d.funsub {
+                    if let Some(w) = state.funsub_words.last_mut() {
+                        w.poison(d.term_ready);
+                    }
+                    if let Some(top_d) = state.stack.last_mut() {
+                        top_d.term_ready = false;
+                    }
+                }
                 if chars.get(i + 1) == Some(&'\n') {
                     state.line += 1;
                 }
@@ -5583,20 +5752,45 @@ pub(crate) fn close_char_residuals_advance(
             let case_body_close = (region_before && !content_before)
                 || (word_before == "in" && stage_before == 2)
                 || (state.case_in_stage == 2 && !region_before && !word_before.is_empty());
+            // Mirror of the one-shot scan's funsub close gate:
+            // term_ready OR the FUNCTION/COPROC-name fallback
+            // (parse.y:5940-5943).
+            let funsub_close_ready = !d.funsub
+                || d.term_ready
+                || state
+                    .funsub_words
+                    .last()
+                    .is_some_and(|w| w.name_ctx_fallback());
             if ch == d.close
-                && !(d.funsub && !d.term_ready)
+                && funsub_close_ready
                 && (d.pattern_paren
                     || !(d.close == ')'
                         && state.case_depth > d.case_depth_at_push
                         && !case_preamble_unfinished
                         && !case_body_close))
             {
+                let popped_funsub = d.funsub;
+                let popped_command = d.command;
                 state.stack.pop();
+                if popped_funsub {
+                    state.funsub_words.pop();
+                }
                 // A closed subshell or brace group is a complete command:
                 // an enclosing function substitution's `}' may now close.
+                // Any other closed unit (quote, `$(`/`${`, backquote) is
+                // word material: it makes an in-progress funsub word
+                // unclean so it can never read as a reserved word
+                // (parse.y:3170 CHECK_FOR_RESERVED_WORD's quoted gate) —
+                // mirror of the one-shot scan's pop arm.
                 if let Some(parent) = state.stack.last_mut() {
-                    if parent.funsub && d.command {
-                        parent.term_ready = true;
+                    if parent.funsub {
+                        if !popped_command {
+                            if let Some(w) = state.funsub_words.last_mut() {
+                                w.poison_active();
+                            }
+                        } else {
+                            parent.term_ready = true;
+                        }
                     }
                 }
                 // `)` is a shell separator: a following `#` starts a
@@ -5642,11 +5836,73 @@ pub(crate) fn close_char_residuals_advance(
             if d.funsub {
                 // Track command-terminator state: `${ cmd }' without a
                 // separator before `}' never terminates (parse_comsub).
+                // parse.y:5899 reserved_word_acceptable is token-level:
+                // compound-command keywords and closers (`fi`, `done`,
+                // `esac`, `]]`, a bare `)`, `(`/`{`) leave command
+                // position ready for `}' exactly like `;' does — the
+                // word tracker recovers the last token's class (mirror
+                // of the one-shot scan's arm; rubash#4017).
                 let d = state.stack.last_mut().unwrap();
-                match ch {
-                    ';' | '&' | '|' | '\n' => d.term_ready = true,
-                    c if !c.is_whitespace() => d.term_ready = false,
-                    _ => {}
+                if let Some(w) = state.funsub_words.last_mut() {
+                    match ch {
+                        ';' | '&' | '|' | '\n' => {
+                            w.finish_into(&mut d.term_ready);
+                            w.note_hard_token();
+                            d.term_ready = true;
+                        }
+                        c if c.is_whitespace() => w.finish_into(&mut d.term_ready),
+                        // `(`/`)` are in reserved_word_acceptable
+                        // (parse.y:5907-5920); `{` is handled by its own
+                        // arm below (whole-token + open-context gate).
+                        '(' | ')' => {
+                            w.finish_into(&mut d.term_ready);
+                            w.note_hard_token();
+                            d.term_ready = true;
+                        }
+                        // A lone `{` opens a brace group at command
+                        // position, at the FUNCTION/COPROC-name fallback
+                        // position, or under PST_ALLOWOPNBRC after
+                        // `function` (parse.y:3444-3451 `{'.tokstr ==
+                        // "{"' whole-token gate + parse.y:5940-5943);
+                        // `{x`-glued or mid-word `{` stays word text.
+                        '{' if !w.word_active()
+                            && (d.term_ready || w.brace_open_ctx())
+                            && crate::lexer::classification::brace_token_boundary_next(
+                                chars.get(i + 1).copied(),
+                            ) =>
+                        {
+                            w.finish_into(&mut d.term_ready);
+                            w.note_brace_open();
+                            d.term_ready = true;
+                        }
+                        // A `}' that reached here did not close
+                        // (term_ready was false and no name fallback):
+                        // it is word text.
+                        '}' => w.push('}', d.term_ready),
+                        // Redirect operators are not in
+                        // reserved_word_acceptable: the word after them
+                        // is the redirect target.
+                        '<' | '>' => {
+                            w.finish_into(&mut d.term_ready);
+                            w.note_hard_token();
+                            d.term_ready = false;
+                        }
+                        // Quote/expansion openers are word material.
+                        '\'' | '"' | '`' | '$' | '\\' => {
+                            w.poison(d.term_ready);
+                            d.term_ready = false;
+                        }
+                        _ => {
+                            w.push(ch, d.term_ready);
+                            d.term_ready = false;
+                        }
+                    }
+                } else {
+                    match ch {
+                        ';' | '&' | '|' | '\n' => d.term_ready = true,
+                        c if !c.is_whitespace() => d.term_ready = false,
+                        _ => {}
+                    }
                 }
             }
         } else {
@@ -5910,12 +6166,22 @@ pub(crate) fn close_char_residuals_advance(
                                 report_open: !funsub,
                                 funsub,
                                 command: false,
-                                term_ready: funsub, // rubash#3972: a funsub body starts as a complete (empty) command list; the first word char clears this via the funsub tracker
+                                // The body opens at command position
+                                // (parse.y:1115 funsub -> compound_list):
+                                // `}' is recognizable from the first token,
+                                // which is also what makes a leading
+                                // reserved word (`[[`, `if`, `!`) classify.
+                                term_ready: funsub,
                                 case_depth_at_push: 0,
                                 array_list: false,
                                 pattern_paren: false,
                                 arith: false,
                             });
+                            if funsub {
+                                state.funsub_words.push(
+                                    crate::lexer::classification::FunsubWordTracker::default(),
+                                );
+                            }
                         }
                         if funsub {
                             state.comment_start = true;
@@ -6183,9 +6449,22 @@ pub(crate) fn close_char_residuals_advance(
                 });
                 state.comment_start = true;
             }
-            '{' if top.is_some_and(|d| d.close == '}' && d.funsub) => {
+            '{' if top.is_some_and(|d| {
+                d.close == '}'
+                    && d.funsub
+                    && d.term_ready
+                    && crate::lexer::classification::brace_token_boundary_next(
+                        chars.get(i + 1).copied(),
+                    )
+            }) =>
+            {
                 // `{ cmd; }' group inside a function substitution: `}' only
-                // closes after a command terminator, same rule.
+                // closes after a command terminator, same rule. A command
+                // follows the opening brace, so the group opens at command
+                // position like the funsub body itself. The term_ready +
+                // whole-token gates mirror the tracker arm above: `{x`
+                // glued text and mid-word `{` are word characters, never
+                // group openers (parse.y:3444-3451).
                 state.stack.push(UnclosedDelim {
                     close: '}',
                     open_line: state.line,
@@ -6193,12 +6472,15 @@ pub(crate) fn close_char_residuals_advance(
                     report_open: false,
                     funsub: true,
                     command: true,
-                    term_ready: false,
+                    term_ready: true,
                     case_depth_at_push: 0,
                     array_list: false,
                     pattern_paren: false,
                     arith: false,
                 });
+                state
+                    .funsub_words
+                    .push(crate::lexer::classification::FunsubWordTracker::default());
             }
             _ => {}
         }

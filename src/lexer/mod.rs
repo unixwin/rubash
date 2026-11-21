@@ -6,7 +6,7 @@ mod alias_stream;
 pub(crate) mod ansi;
 mod brace_scan;
 mod brace_scan_cache;
-mod classification;
+pub(crate) mod classification;
 mod continuation;
 pub(crate) mod dolbrace;
 mod heredoc;

@@ -590,26 +590,28 @@ impl Executor {
         stored.to_string()
     }
 
-    /// rubash#2751: report a `$(`-body parse error in GNU's read-time
-    /// shape. GNU parses the body inside the enclosing reader with
-    /// shell_eof_token = `)' (parse.y:4519-4521), so the report is the
-    /// enclosing command's own yyerror, re-presented at the body
-    /// boundary:
+    /// rubash#2751: report a substitution-body parse error in GNU's
+    /// read-time shape. GNU parses the body inside the enclosing reader
+    /// with shell_eof_token = the construct's closer (parse.y:4519-4521
+    /// for `$(`, parse.y:4727 `closer = shell_eof_token = funsub ? '}' :
+    /// ')'` for `${`), so the report is the enclosing command's own
+    /// yyerror, re-presented at the body boundary — `funsub` selects the
+    /// `}'` closer a `${ cmds; }`/`${| cmds; }` body names (rubash#4017):
     /// - a NEAR error gains the suffix ` while looking for matching
-    ///   `)'` (`echo $(if then)' names `then' with the suffix);
+    ///   `X'` (`echo $(if then)' names `then' with the `)' suffix, a
+    ///   funsub body with `}');
     /// - an error that ran the body into its end (plain EOF,
-    ///   compound-EOF, conditional-EOF) names the `)' itself — the
+    ///   compound-EOF, conditional-EOF) names the closer itself — the
     ///   token the reader actually tripped on at the body boundary
-    ///   (`echo $(if true; then echo)' names `)');
+    ///   (`echo $(if true; then echo)' names `)', a funsub body `}');
     /// - a conditional's follow-on walk (the SHORT near form, which
     ///   GNU computes with error_token_from_text over the enclosing
-    ///   line) extends over the closing paren ONLY when the paren is
-    ///   glued to the conditional's end (`$([[ a == ]])' names
-    ///   `]])'); a stored near that is itself a break character
-    ///   (`;' from a glued separator follower) stands alone, and a
-    ///   conditional that does not end the body keeps its body-level
-    ///   near. `body_text` is the extracted body, whose end is where
-    ///   the enclosing paren sat.
+    ///   line) extends over the closer ONLY when it is glued to the
+    ///   conditional's end (`$([[ a == ]])' names `]])'); a stored
+    ///   near that is itself a break character (`;' from a glued
+    ///   separator follower) stands alone, and a conditional that does
+    ///   not end the body keeps its body-level near. `body_text` is the
+    ///   extracted body, whose end is where the enclosing closer sat.
     /// The echo line is the physical line of the enclosing input at
     /// the error's line, read from the reader unit text the driver
     /// parks on the shell state (see [`Self::comsub_body_echo_source`]);
@@ -618,8 +620,13 @@ impl Executor {
         &self,
         cmd: &crate::parser::CommandNode,
         body_text: Option<&str>,
+        funsub: bool,
     ) {
         let sep = crate::executor::markers::PARSE_ERROR_FIELD_SEP;
+        // GNU's shell_eof_token for this body (parse.y:4727): `}' for a
+        // `${ cmds; }`/`${| cmds; }` funsub, `)' for `$(`.
+        let close = if funsub { '}' } else { ')' };
+        let eof_token = close.to_string();
         if let Some(spec) = cmd.get_assignment("__RUBASH_PARSE_ERROR_COND__") {
             let mut fields = spec.split(sep);
             let shape = fields.next().unwrap_or("near").to_string();
@@ -650,13 +657,13 @@ impl Executor {
                     let paren_line = aux_b.saturating_sub(1).max(1);
                     self.write_diagnostic_fd2(
                         format!(
-                            "{}syntax error near unexpected token `)'\n",
+                            "{}syntax error near unexpected token `{eof_token}'\n",
                             self.parser_error_prefix_for_line(paren_line)
                         )
                         .as_bytes(),
                     );
                     self.record_run_diagnostic(
-                        "syntax error near unexpected token `)'".to_string(),
+                        format!("syntax error near unexpected token `{eof_token}'"),
                         Some(paren_line),
                     );
                 }
@@ -673,7 +680,7 @@ impl Executor {
                     let closer = cmd.words.last().map(String::as_str).unwrap_or(&aux_a);
                     let glued = !break_only && body_text.is_some_and(|text| text.ends_with(closer));
                     let near = if glued {
-                        format!("{aux_a})")
+                        format!("{aux_a}{close}")
                     } else {
                         aux_a.clone()
                     };
@@ -721,10 +728,11 @@ impl Executor {
             // parse.y:4519): name it, without the suffix. An operator
             // followed by a real newline inside the body keeps
             // `newline' with the suffix.
-            // rubash#3306: a literal `)' offender IS the sub-parse's
-            // EOF token itself (parse.y:4519-4521) — same no-suffix
-            // rule, e.g. the empty pattern of `$(case x in ())`.
-            let died_on_body_eof = token == ")"
+            // rubash#3306: a literal closer offender IS the sub-parse's
+            // EOF token itself (parse.y:4519-4521 for `$(`, parse.y:4727
+            // for funsub) — same no-suffix rule, e.g. the empty pattern
+            // of `$(case x in ())`.
+            let died_on_body_eof = token == eof_token
                 || (token == "newline"
                     && body_text.is_some_and(|text| {
                         let trimmed = text.trim_end_matches([' ', '\t', '\r']);
@@ -732,9 +740,9 @@ impl Executor {
                             && matches!(trimmed.chars().last(), Some('>' | '<' | '&' | '|'))
                     }));
             let (token, suffix) = if died_on_body_eof {
-                (")".to_string(), "")
+                (eof_token.clone(), String::new())
             } else {
-                (token, " while looking for matching `)'")
+                (token, format!(" while looking for matching `{close}'"))
             };
             self.write_diagnostic_fd2(
                 format!(
@@ -772,13 +780,13 @@ impl Executor {
             let paren_line = eof_line.saturating_sub(1).max(1);
             self.write_diagnostic_fd2(
                 format!(
-                    "{}syntax error near unexpected token `)'\n",
+                    "{}syntax error near unexpected token `{eof_token}'\n",
                     self.parser_error_prefix_for_line(paren_line)
                 )
                 .as_bytes(),
             );
             self.record_run_diagnostic(
-                "syntax error near unexpected token `)'".to_string(),
+                format!("syntax error near unexpected token `{eof_token}'"),
                 Some(paren_line),
             );
             if self.errexit_active_at_diagnostic() {
@@ -813,13 +821,13 @@ impl Executor {
             let paren_line = cmd.line.unwrap_or(1);
             self.write_diagnostic_fd2(
                 format!(
-                    "{}syntax error near unexpected token `)'\n",
+                    "{}syntax error near unexpected token `{eof_token}'\n",
                     self.parser_error_prefix_for_line(paren_line)
                 )
                 .as_bytes(),
             );
             self.record_run_diagnostic(
-                "syntax error near unexpected token `)'".to_string(),
+                format!("syntax error near unexpected token `{eof_token}'"),
                 Some(paren_line),
             );
             if self.errexit_active_at_diagnostic() {
@@ -850,13 +858,13 @@ impl Executor {
                 let styled = super::command_execute::bash_style_unexpected_token_message(message);
                 self.write_diagnostic_fd2(
                     format!(
-                        "{}syntax error near {styled} while looking for matching `)'\n",
+                        "{}syntax error near {styled} while looking for matching `{close}'\n",
                         self.parser_error_prefix_for_line(line)
                     )
                     .as_bytes(),
                 );
                 self.record_run_diagnostic(
-                    format!("syntax error near {styled} while looking for matching `)'"),
+                    format!("syntax error near {styled} while looking for matching `{close}'"),
                     Some(line),
                 );
                 if self.errexit_active_at_diagnostic() {
@@ -884,13 +892,13 @@ impl Executor {
             let paren_line = cmd.line.unwrap_or(1);
             self.write_diagnostic_fd2(
                 format!(
-                    "{}syntax error near unexpected token `)'\n",
+                    "{}syntax error near unexpected token `{eof_token}'\n",
                     self.parser_error_prefix_for_line(paren_line)
                 )
                 .as_bytes(),
             );
             self.record_run_diagnostic(
-                "syntax error near unexpected token `)'".to_string(),
+                format!("syntax error near unexpected token `{eof_token}'"),
                 Some(paren_line),
             );
             if self.errexit_active_at_diagnostic() {

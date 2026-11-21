@@ -3440,6 +3440,14 @@ fn extract_funsub_body_tail(
     // apostrophe inside a comment (`# don't`) opened a phantom
     // single-quote that swallowed the rest of the input (rubash#3823 f1).
     let mut at_word_start = true;
+    // parse.y:5899 reserved_word_acceptable is a TOKEN-level predicate:
+    // `term` alone sees only the last character class, so a body ending
+    // in a compound command spelled by reserved words (`... fi`,
+    // `... done`, `... esac`, `... ]]`) or a bare `)` needs the word
+    // itself classified — the same tracker the other funsub extent
+    // scanners carry (continuation.rs, alias_stream.rs, skip.rs,
+    // embedded_mutations.rs).
+    let mut word = crate::lexer::classification::FunsubWordTracker::default();
     while let Some(ch) = chars.next() {
         if escaped {
             body.push(ch);
@@ -3450,6 +3458,9 @@ fn extract_funsub_body_tail(
         if ch == '\\' && !single {
             body.push(ch);
             escaped = true;
+            // An escape makes the word quoted — never a reserved word
+            // (parse.y:3170 CHECK_FOR_RESERVED_WORD's `quoted` gate).
+            word.poison(term);
             if !double {
                 term = false;
             }
@@ -3495,6 +3506,9 @@ fn extract_funsub_body_tail(
                 // `${ echo X${ echo nested; }Y; }' ended the outer body at
                 // the inner funsub's `}' (341bf41b follow-up).
                 body.push(ch);
+                // A `$` unit is expansion material: the word is quoted
+                // for reserved-word purposes (parse.y:3170).
+                word.poison(term);
                 consume_nested_dollar_unit(chars, &mut body);
                 term = false;
                 at_word_start = false;
@@ -3502,46 +3516,71 @@ fn extract_funsub_body_tail(
             }
             '\'' => {
                 single = true;
+                word.poison(term);
                 term = false;
                 at_word_start = false;
             }
             '"' => {
                 double = true;
+                word.poison(term);
                 term = false;
                 at_word_start = false;
             }
             '(' => {
+                word.finish_into(&mut term);
+                word.note_hard_token();
                 paren_depth += 1;
                 term = false;
                 at_word_start = true;
             }
             ')' if paren_depth > 0 => {
+                word.finish_into(&mut term);
+                word.note_hard_token();
                 paren_depth -= 1;
                 // A closed outermost `( )` is a complete command.
                 term = paren_depth == 0;
                 at_word_start = true;
             }
             // A bare `)` (no open subshell) is a metacharacter, not word
-            // text: the next token starts after it.
+            // text: `)` itself is in reserved_word_acceptable
+            // (parse.y:5919), so a `}` after it is recognized.
             ')' => {
-                term = false;
+                word.finish_into(&mut term);
+                word.note_hard_token();
+                term = true;
                 at_word_start = true;
             }
-            '{' if term && paren_depth == 0 => {
+            // A lone `{` opens a brace group at command position, at the
+            // FUNCTION/COPROC-name fallback position, or under
+            // PST_ALLOWOPNBRC after `function` (parse.y:3444-3451
+            // `{'.tokstr == "{"' whole-token gate + parse.y:5940-5943);
+            // `{x`-glued text stays word characters.
+            '{' if !word.word_active()
+                && (term || word.brace_open_ctx())
+                && paren_depth == 0
+                && crate::lexer::classification::brace_token_boundary_next(
+                    chars.peek().copied(),
+                ) =>
+            {
+                word.note_brace_open();
                 brace_depth += 1;
                 // A command follows the opening brace.
                 term = true;
             }
-            '}' if term && paren_depth == 0 => {
+            '}' if (term || word.name_ctx_fallback()) && paren_depth == 0 => {
                 // parse.y:5407-5416 read_token_word: a word BEGINNING with
-                // `}` in command position (reserved_word_acceptable)
-                // terminates the substitution even when more characters
-                // follow (`${| REPLY=x; }-tail`); term==false covers the
-                // mid-word case (`a}b`, `\"}`) — those `}` are word text.
+                // `}` in an acceptable position (reserved_word_acceptable —
+                // including the FUNCTION/COPROC-name fallback,
+                // parse.y:5940-5943) terminates the substitution even when
+                // more characters follow (`${| REPLY=x; }-tail`); the
+                // fallback arm covers `${ coproc c }`/`${ function f }`.
+                // term==false covers the mid-word case (`a}b`, `\"}`) —
+                // those `}` are word text.
                 if brace_depth > 0 {
                     // A closed `{ }` group is a complete command: the
                     // funsub's own `}` may follow without another
                     // separator (`${ { echo x; } }`).
+                    word.note_hard_token();
                     brace_depth -= 1;
                     term = true;
                     at_word_start = true;
@@ -3556,6 +3595,8 @@ fn extract_funsub_body_tail(
             // `<` makes `<<<`, a herestring with no body to skip, and
             // stays for the next iteration's plain `<` arm.
             '<' if chars.peek() == Some(&'<') => {
+                word.finish_into(&mut term);
+                word.note_hard_token();
                 body.push(ch);
                 if let Some(second) = chars.next() {
                     body.push(second);
@@ -3585,10 +3626,14 @@ fn extract_funsub_body_tail(
             // untouched — a `}` right after `>` is the redirect's target
             // word, not this body's closer.
             '<' | '>' => {
+                word.finish_into(&mut term);
+                word.note_hard_token();
                 term = false;
                 at_word_start = true;
             }
             ';' | '&' | '|' | '\n' => {
+                word.finish_into(&mut term);
+                word.note_hard_token();
                 // `term` stays false inside a subshell (an inner group's
                 // `}` must not read as this funsub's closer), but the
                 // token boundary is real at any depth: `#` after `;`
@@ -3599,9 +3644,38 @@ fn extract_funsub_body_tail(
                 at_word_start = true;
             }
             ' ' | '\t' | '\r' => {
+                // Whitespace is not a token: the verdict a pending
+                // word earned (`fi` → FI, `x` → WORD) is what a
+                // following `}` sees (parse.y:5899 `term` semantics).
+                word.finish_into(&mut term);
                 at_word_start = true;
             }
-            _ => word_text = true,
+            // A backquote span is one word element (parse.y:5494's
+            // backquote branch → parse_matched_pair P_COMMAND): consume
+            // it whole so `;`/`}`/quotes inside cannot move this scan.
+            '`' => {
+                word.poison(term);
+                term = false;
+                at_word_start = false;
+                body.push(ch);
+                while let Some(inner) = chars.next() {
+                    body.push(inner);
+                    match inner {
+                        '\\' => {
+                            if let Some(escaped_inner) = chars.next() {
+                                body.push(escaped_inner);
+                            }
+                        }
+                        '`' => break,
+                        _ => {}
+                    }
+                }
+                continue;
+            }
+            _ => {
+                word.push(ch, term);
+                word_text = true;
+            }
         }
         if word_text {
             term = false;
@@ -3613,23 +3687,24 @@ fn extract_funsub_body_tail(
 }
 
 /// parse.y:4475-4516 (parse_comsub / xparse_dolparen SX_FUNSUB,
-/// parse.y:4713-4743): the funsub body must be a terminated command list —
-/// a `;` or newline immediately before the closing `}` (after optional
-/// blanks). `${ echo 6 }` is a read-time "unexpected EOF" error in GNU, not
-/// a substitution; rubash's executor cannot raise that read-time error, so
-/// unterminated bodies fall back to the existing parameter diagnostics
-/// instead of silently substituting.
+/// parse.y:4713-4743) + parse.y:5407-5416 read_token_word's
+/// PST_FUNSUBST `}` special case + parse.y:5899-5947
+/// reserved_word_acceptable: the funsub body's closing `}` is recognized
+/// iff the token before it is command-position-acceptable — a command
+/// terminator (`;`, `&`, `|`, newline), a closed compound command (`)`
+/// `}` `]]` `))`), or one of the reserved words themselves. A body that
+/// merely ends in word text (`${ echo x }`) leaves last_read_token a
+/// WORD, so GNU reads on to EOF ("unexpected EOF"); rubash's executor
+/// cannot raise that read-time error, so such bodies fall back to the
+/// existing parameter diagnostics instead of silently substituting.
+///
+/// The verdict is the same scan that extracts the body: append the
+/// synthetic closing `}` and ask whether extract_funsub_body_tail would
+/// have stopped on it — one mechanism for `;`/newline tails, compound
+/// tails, and the empty/whitespace bodies of #3972 alike.
 pub(in crate::executor) fn funsub_body_is_terminated(body: &str) -> bool {
-    // rubash#3972: a blank-only body is an empty command list and needs
-    // no terminator before the closing `}` — the terminator rule binds a
-    // PRECEDING command, and there is none (parse.y parse_comsub reads
-    // the funsub body as a command list; subst.c:6931-6935 already
-    // serves the blank body downstream). Without this arm `${  }` and
-    // `${\n}` fell through to the parameter machinery and reported
-    // `bad substitution` where GNU bash 5.3.20 expands to empty.
-    body.trim().is_empty()
-        || body.trim_end_matches([' ', '\t']).ends_with(';')
-        || body.ends_with('\n')
+    let mut chars = body.chars().chain(std::iter::once('}')).peekable();
+    extract_funsub_body_tail(&mut chars).is_some()
 }
 
 fn command_has_parse_error(command: &CommandNode) -> bool {
@@ -3709,8 +3784,9 @@ impl Executor {
             // GNU's read-time shape — suffixed / re-presented at the
             // body boundary, exactly one diagnostic; the escalation in
             // execute_command stands down because the error is already
-            // reported.
-            self.report_comsub_body_parse_error(command, body_text);
+            // reported. This screen only sees `$(`/backtick bodies —
+            // their shell_eof_token is `)' (parse.y:4727).
+            self.report_comsub_body_parse_error(command, body_text, false);
             self.last_command_substitution_error_reported.set(true);
             self.comsub_error_reported_out.set(true);
         }
@@ -3746,8 +3822,8 @@ impl Executor {
     }
 
     pub fn screen_comsub_bodies_at_read(&mut self, commands: &[CommandNode]) -> Option<i32> {
-        let (command, body_text) = read_time_body_error(commands, 0)?;
-        self.report_comsub_body_parse_error(&command, Some(&body_text));
+        let (command, body_text, funsub) = read_time_body_error(commands, 0)?;
+        self.report_comsub_body_parse_error(&command, Some(&body_text), funsub);
         self.last_command_substitution_error_reported.set(true);
         self.comsub_error_reported_out.set(true);
         self.latch_command_substitution_parse_error();
@@ -3760,8 +3836,8 @@ impl Executor {
 }
 
 /// rubash#2789: first substitution-body parse error in a freshly read
-/// command list, as (marker node, failing body text). The walk is
-/// recursive over everything a reader unit can contain: process
+/// command list, as (marker node, failing body text, funsub). The walk
+/// is recursive over everything a reader unit can contain: process
 /// substitutions carry parsed bodies directly; substitutions inside
 /// word-shaped text are re-extracted on demand (the AST stores no
 /// substitution nodes); nested command bodies are walked in the
@@ -3771,10 +3847,14 @@ impl Executor {
 /// child (see command_substitution_node). Here-document bodies are
 /// data and are never walked: they live in dedicated fields, not in
 /// any text collected here.
+/// The funsub flag is the node's `current_shell` (`${ cmds; }` /
+/// `${| cmds; }`): GNU's parse_comsub sets shell_eof_token to `}' for
+/// it (parse.y:4727 `closer = shell_eof_token = funsub ? '}' : ')'')
+/// instead of the `)' a `$(` body reports.
 fn read_time_body_error(
     commands: &[CommandNode],
     frame_offset: usize,
-) -> Option<(CommandNode, String)> {
+) -> Option<(CommandNode, String, bool)> {
     commands
         .iter()
         .find_map(|command| read_time_body_error_in_command(command, frame_offset))
@@ -3783,7 +3863,7 @@ fn read_time_body_error(
 fn read_time_body_error_in_command(
     command: &CommandNode,
     frame_offset: usize,
-) -> Option<(CommandNode, String)> {
+) -> Option<(CommandNode, String, bool)> {
     // A command's own line is recorded in the frame it was parsed in:
     // the reader unit's frame at the top level (frame_offset 0), a
     // substitution body's frame below it (body line 1 maps to unit
@@ -3795,7 +3875,7 @@ fn read_time_body_error_in_command(
         if let Some(marker) = comsub_body_error_marker(&procsub.commands) {
             let mut marker = marker.clone();
             adjust_marker_line_frame(&mut marker, command_offset);
-            return Some((marker, procsub.source.clone()));
+            return Some((marker, procsub.source.clone(), false));
         }
         if let Some(hit) = read_time_body_error(&procsub.commands, command_offset) {
             return Some(hit);
@@ -3810,7 +3890,7 @@ fn read_time_body_error_in_command(
             if let Some(marker) = comsub_body_error_marker(&node.commands) {
                 let mut marker = marker.clone();
                 adjust_marker_line_frame(&mut marker, node_offset);
-                return Some((marker, node.source.clone()));
+                return Some((marker, node.source.clone(), node.current_shell));
             }
             if let Some(hit) = read_time_body_error(&node.commands, node_offset) {
                 return Some(hit);
