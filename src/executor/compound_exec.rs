@@ -2224,6 +2224,45 @@ impl Executor {
                 env_map.insert(format!("__RUBASH_FD_WHANDLE_{fd}"), format!("{:#x}", dup));
                 env_map.insert(format!("__RUBASH_FD_WPATH_{fd}"), src_path);
             }
+            // rubash#3997: a symbolic FullDevice write endpoint has
+            // no handle for the deliveries above (its
+            // standard_backing is None), so the respawned
+            // background child was born with the slot unbound and
+            // its external children met EBADF where GNU's fork copy
+            // writes ENOSPC. Materialize the device itself for the
+            // env channel, exactly as the command-spawn delivery
+            // does (collect_external_fd_delivery): an independent
+            // open of /dev/full is indistinguishable from the
+            // descriptor GNU's fork inherits (redir.c:725; the
+            // open_spawn_full_device precedent, rubash#3985). A
+            // walk save slot's clone is not a live binding and is
+            // never delivered (fd_is_walk_save_slot). Where no
+            // device backs the spelling the slot stays
+            // undelivered, as before.
+            if matches!(entry.write.as_ref(), Some(FdWriteEndpoint::FullDevice))
+                && !self.fd_is_walk_save_slot(*fd)
+            {
+                if let Some(file) =
+                    crate::executor::external_redirects::open_spawn_full_device("/dev/full", false)
+                {
+                    #[cfg(unix)]
+                    let raw = {
+                        use std::os::unix::io::AsRawFd;
+                        file.as_raw_fd()
+                    };
+                    #[cfg(windows)]
+                    let raw = {
+                        use std::os::windows::io::AsRawHandle;
+                        file.as_raw_handle() as crate::fd::HANDLE
+                    };
+                    if let Ok(dup) = crate::fd::duplicate_handle_inheritable(raw) {
+                        extra_handles.push(dup);
+                        owned_handles.push(dup);
+                        env_map.insert(format!("__RUBASH_FD_WHANDLE_{fd}"), format!("{:#x}", dup));
+                        env_map.insert(format!("__RUBASH_FD_WPATH_{fd}"), "/dev/full".to_string());
+                    }
+                }
+            }
         }
 
         // rubash#3300: hand the proof fd to the whitelist transport
@@ -6117,7 +6156,7 @@ impl Executor {
                             unsafe {
                                 use std::os::unix::process::CommandExt as _;
                                 child.pre_exec(move || {
-                                    super::external_inner::pin_ambient_fds_in_child(&pins)
+                                    super::external_inner::pin_ambient_fds_in_child(&pins, &[])
                                         .map(|_| ())
                                 });
                             }

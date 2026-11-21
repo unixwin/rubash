@@ -6106,6 +6106,9 @@ impl Executor {
             if *fd < 3 || entry.closed {
                 continue;
             }
+            if self.fd_is_walk_save_slot(*fd) {
+                continue;
+            }
             match self.ambient_procsub_spawn_fd(*fd) {
                 super::external_setup::ProcsubSpawnFd::File { read, write } => {
                     if let Some(file) = &read {
@@ -6185,7 +6188,43 @@ impl Executor {
                         ambient_pins.push((dup, *fd));
                     }
                 }
-                _ => {}
+                // rubash#3997: a symbolic device write endpoint has no
+                // handle for ambient_procsub_spawn_fd to return — it
+                // resolves Inherit and the slot would drop. Materialize
+                // the device for the respawned child exactly like the
+                // File arms: env transport for a rubash child, the
+                // inheritable dup's pin for a foreign one (the
+                // exec_spawn_table_binding FullDevice precedent,
+                // rubash#3985).
+                _ => {
+                    if matches!(
+                        self.fd_table.write_endpoint(*fd),
+                        Some(FdWriteEndpoint::FullDevice)
+                    ) {
+                        if let Some(file) =
+                            crate::executor::external_redirects::open_spawn_full_device(
+                                "/dev/full",
+                                false,
+                            )
+                        {
+                            let handle = crate::fd::into_handle(file);
+                            if let Ok(dup) = crate::fd::duplicate_handle_inheritable(handle) {
+                                env_entries.push((
+                                    format!("__RUBASH_FD_WHANDLE_{fd}"),
+                                    format!("{dup:#x}"),
+                                ));
+                                env_entries.push((
+                                    format!("__RUBASH_FD_WPATH_{fd}"),
+                                    "/dev/full".to_string(),
+                                ));
+                                ambient_fd_dups.push(dup);
+                                #[cfg(unix)]
+                                ambient_pins.push((dup, *fd));
+                            }
+                            crate::fd::close_handle(handle);
+                        }
+                    }
+                }
             }
         }
         // rubash#3300: the parent's proof copy closes with the other
@@ -6216,7 +6255,7 @@ impl Executor {
             let pins = ambient_pins;
             unsafe {
                 child.pre_exec(move || {
-                    super::external_inner::pin_ambient_fds_in_child(&pins).map(|_| ())
+                    super::external_inner::pin_ambient_fds_in_child(&pins, &[]).map(|_| ())
                 });
             }
         }
