@@ -3620,7 +3620,16 @@ fn extract_funsub_body_tail(
 /// unterminated bodies fall back to the existing parameter diagnostics
 /// instead of silently substituting.
 pub(in crate::executor) fn funsub_body_is_terminated(body: &str) -> bool {
-    body.trim_end_matches([' ', '\t']).ends_with(';') || body.ends_with('\n')
+    // rubash#3972: a blank-only body is an empty command list and needs
+    // no terminator before the closing `}` — the terminator rule binds a
+    // PRECEDING command, and there is none (parse.y parse_comsub reads
+    // the funsub body as a command list; subst.c:6931-6935 already
+    // serves the blank body downstream). Without this arm `${  }` and
+    // `${\n}` fell through to the parameter machinery and reported
+    // `bad substitution` where GNU bash 5.3.20 expands to empty.
+    body.trim().is_empty()
+        || body.trim_end_matches([' ', '\t']).ends_with(';')
+        || body.ends_with('\n')
 }
 
 fn command_has_parse_error(command: &CommandNode) -> bool {
