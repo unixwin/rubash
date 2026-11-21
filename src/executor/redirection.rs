@@ -1166,8 +1166,18 @@ impl Executor {
                         continue;
                     }
                     if !dup_source_fd_open(&self.fd_table, fd, &opened) {
+                        let emit_cannot_dup_fd = move_fd
+                            && self.dup_move_walk_is_undoable(cmd)
+                            && dup_source_fd_open(&self.fd_table, redirector, &opened);
                         return self
-                            .reject_with_dup_bad_fd(cmd, index, fd, move_fd, raw_word, redirector)
+                            .reject_with_dup_bad_fd(
+                                cmd,
+                                index,
+                                fd,
+                                emit_cannot_dup_fd,
+                                raw_word,
+                                redirector,
+                            )
                             .map(|_| Some(RedirectRejection::Command));
                     }
                     // The dup itself succeeds (GNU dup2 at redir.c:1153);
@@ -1810,24 +1820,27 @@ impl Executor {
     }
 
     /// The dup bad-fd rejection. GNU `>&7-`/`<&7-` with fd 7 closed fails
-    /// in TWO steps (verified against WSL GNU 5.3.0, rubash#263/#266):
-    /// redir.c:1137-1143's add_undo_redirect of the moved fd sys_errors
-    /// `script: redirection error: cannot duplicate fd: ...` (error.c
-    /// get_name_for_error prolog, no line segment), then
-    /// REDIRECTION_ERROR returns EBADF and redirection_error
-    /// (redir.c:149-158) prints the fd with the full prefix. Plain dups
-    /// (`>&7`, redir.c:1153 dup2) report only the second line.
+    /// in TWO steps when `RX_UNDOABLE` is set and the redirector is open
+    /// (verified against WSL GNU 5.3.x, rubash#263/#266/#4046):
+    /// `redir.c:1169-1178` (`add_undo_redirect`, `redir.c:1296-1316`) sys_errors
+    /// `script: redirection error: cannot duplicate fd: ...` (`error.c`
+    /// `get_name_for_error` prolog, no line segment), then
+    /// `REDIRECTION_ERROR` returns `EBADF` and `redirection_error`
+    /// (`redir.c:149-158`) prints the fd with the full prefix. Plain dups
+    /// (`>&7`, `redir.c:1193` `dup2`) and non-undoable or closed-redirector
+    /// moves report only the second line. `{var}>&7` (`REDIR_VARASSIGN`,
+    /// `redir.c:1142-1149`) always emits both lines under `RX_ACTIVE`.
     fn reject_with_dup_bad_fd(
         &mut self,
         cmd: &CommandNode,
         index: usize,
         fd: u32,
-        move_fd: bool,
+        emit_cannot_dup_fd: bool,
         raw_word: &str,
         redirector: u32,
     ) -> Result<(), ExecuteError> {
         let mut stderr = Vec::new();
-        if move_fd {
+        if emit_cannot_dup_fd {
             writeln!(
                 &mut stderr,
                 "{}redirection error: cannot duplicate fd: Bad file descriptor",

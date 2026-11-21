@@ -538,8 +538,9 @@ impl Executor {
         // left-to-right walk reports the FIRST failing dup in list order
         // like GNU do_redirections (output side rubash#263/#266, input
         // side rubash#2030).
-        if let Some((index, name)) = self.compound_dup_bad_fd(cmd) {
-            let abandoned = self.abandon_compound_for_dup_bad_fd(cmd, index, &name);
+        if let Some((index, name, move_open_redirector)) = self.compound_dup_bad_fd(cmd) {
+            let abandoned =
+                self.abandon_compound_for_dup_bad_fd(cmd, index, &name, move_open_redirector);
             self.unwind_dynamic_fd_pass(&bound_dynamic_fds, saved_dynamic_closes);
             return abandoned;
         }
@@ -3394,8 +3395,8 @@ impl Executor {
         // Same preflight-first discipline as with_command_input_redirects:
         // the walk is pure, and the abandonment it triggers must not race
         // half-applied binds.
-        if let Some((index, name)) = self.compound_dup_bad_fd(cmd) {
-            return self.abandon_compound_for_dup_bad_fd(cmd, index, &name);
+        if let Some((index, name, move_open_redirector)) = self.compound_dup_bad_fd(cmd) {
+            return self.abandon_compound_for_dup_bad_fd(cmd, index, &name, move_open_redirector);
         }
         let saved_numbered = self.open_compound_numbered_input_redirects(cmd)?;
         let saved_output = self.open_compound_output_redirects(cmd)?;
@@ -3446,8 +3447,16 @@ impl Executor {
         cmd: &CommandNode,
         index: usize,
         name: &str,
+        move_open_redirector: bool,
     ) -> Result<T, ExecuteError> {
         let mut stderr = Vec::new();
+        if move_open_redirector && self.dup_move_walk_is_undoable(cmd) {
+            writeln!(
+                stderr,
+                "{}redirection error: cannot duplicate fd: Bad file descriptor",
+                self.script_name_prefix()
+            )?;
+        }
         writeln!(
             stderr,
             "{}{name}: Bad file descriptor",
@@ -3485,7 +3494,7 @@ impl Executor {
     pub(in crate::executor) fn compound_dup_bad_fd(
         &self,
         cmd: &CommandNode,
-    ) -> Option<(usize, String)> {
+    ) -> Option<(usize, String, bool)> {
         let mut opened: HashMap<u32, bool> = HashMap::new();
         // rubash#3991: the undo saves a fixed entry earns are real
         // descriptors in GNU's walk (see fd_walk_register_saves), so
@@ -3543,7 +3552,7 @@ impl Executor {
                         opened.insert(fd, false);
                         continue;
                     }
-                    if let Some((source_fd, _move_source)) = redirect_target_fd_and_move(&target) {
+                    if let Some((source_fd, move_source)) = redirect_target_fd_and_move(&target) {
                         // Self-dup/self-move is a no-op that succeeds even
                         // for a closed fd (redir.c `redir_fd !=
                         // redirector` guard; rubash#1236) and leaves the
@@ -3557,7 +3566,13 @@ impl Executor {
                                 .raw
                                 .trim_start_matches('&')
                                 .trim_end_matches('-');
-                            return Some((index, dup_bad_fd_name(raw_word, fd, source_fd)));
+                            let move_open_redirector =
+                                move_source && dup_source_fd_open(&self.fd_table, fd, &opened);
+                            return Some((
+                                index,
+                                dup_bad_fd_name(raw_word, fd, source_fd),
+                                move_open_redirector,
+                            ));
                         }
                         let open = dup_source_fd_open(&self.fd_table, source_fd, &opened);
                         opened.insert(fd, open);
