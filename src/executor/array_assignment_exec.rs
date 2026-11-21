@@ -286,6 +286,7 @@ impl Executor {
             self.shell_state
                 .aliases
                 .insert(alias_name.to_string(), Alias::new(value));
+            self.shell_state.bump_alias_generation();
             self.sync_dynamic_assoc_vars();
             self.exit_code = 0;
             return true;

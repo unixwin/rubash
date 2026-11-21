@@ -1483,6 +1483,7 @@ impl Executor {
                     self.shell_state
                         .aliases
                         .insert("0".to_string(), Alias::new(&bound));
+                    self.shell_state.bump_alias_generation();
                 } else {
                     crate::builtins::hash::set_hashed_path(
                         &mut self.shell_state.env_vars,
