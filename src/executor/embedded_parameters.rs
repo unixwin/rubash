@@ -1495,6 +1495,28 @@ impl Executor {
                             }
                         }
                         match source_ch {
+                            '$' if !single && !double && chars.peek().copied() == Some('{') => {
+                                let rest: String = chars.clone().collect();
+                                if rest
+                                    .as_bytes()
+                                    .get(1)
+                                    .is_some_and(|b| matches!(b, b' ' | b'\t' | b'\n' | b'|'))
+                                {
+                                    if let Some(len) =
+                                        crate::lexer::skip_funsub_body_byte_len(&rest)
+                                    {
+                                        source.push(source_ch);
+                                        source.push_str(&rest[..len]);
+                                        for _ in rest[..len].chars() {
+                                            chars.next();
+                                        }
+                                        word.push('\u{1}');
+                                        token_boundary = false;
+                                        continue;
+                                    }
+                                }
+                                source.push(source_ch);
+                            }
                             '\'' if !double => {
                                 single = !single;
                                 source.push(source_ch);
