@@ -2568,6 +2568,7 @@ pub fn has_unclosed_input_syntax(input: &str) -> bool {
 /// rubash#380: shared `esac` previous-token witness predicate (see
 /// skip.rs) — re-exported for the executor's copies of the case word
 /// machine.
+pub(crate) use alias_stream::{skip_funsub_body, skip_funsub_body_byte_len};
 pub(crate) use skip::esac_prev_token_char;
 pub(crate) use skip::update_command_substitution_case_depth;
 

@@ -19,7 +19,6 @@ impl<'a> Lexer<'a> {
         let mut word = String::new();
         let mut word_boundary = true;
         let mut current_word_boundary = true;
-        let mut parameter_depth = 0usize;
         // `case WORD in' chain tracker (GNU special_case_tokens,
         // parse.y:3369-3386 + 3433-3441) — see
         // update_command_substitution_case_depth.
@@ -84,7 +83,7 @@ impl<'a> Lexer<'a> {
                 token_boundary = false;
                 continue;
             }
-            if c == '#' && token_boundary && parameter_depth == 0 {
+            if c == '#' && token_boundary {
                 while self.peek().is_some_and(|ch| ch != '\n') {
                     self.advance();
                 }
@@ -93,11 +92,6 @@ impl<'a> Lexer<'a> {
                 current_word_boundary = true;
                 token_boundary = true;
                 continue;
-            }
-            if c == '$' && self.peek() == Some('{') {
-                parameter_depth += 1;
-            } else if c == '}' && parameter_depth > 0 {
-                parameter_depth -= 1;
             }
             let next = self.peek();
             // rubash#3307: pre-update snapshots for the close arm's
@@ -234,6 +228,19 @@ impl<'a> Lexer<'a> {
                 }
                 ')' if case_depth > 0 && !region_before => {
                     case_body_paren_depth = case_body_paren_depth.saturating_sub(1);
+                }
+                '$' if self.peek() == Some('{') => {
+                    // GNU read_token_word (parse.y:5494-5514): `${ ... }'
+                    // (funsub via parse_comsub or parameter expansion via
+                    // parse_matched_pair) is consumed as one opaque word unit,
+                    // with its own parser state (parse.y:4511 clears
+                    // PST_CASEPAT) — its inner `case`/`in`/`)`/`;;`/`esac`
+                    // must never reach the outer `$(...)` case tracker.
+                    self.advance();
+                    self.skip_braced(false);
+                    word.push('\u{1}');
+                    token_boundary = false;
+                    continue;
                 }
                 '$' if self.peek() == Some('\'') => {
                     self.advance();
@@ -2321,6 +2328,23 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
                     token_boundary = false;
                     continue;
                 }
+            }
+            '$' if chars.get(index + 1) == Some(&'{')
+                && chars
+                    .get(index + 2)
+                    .is_some_and(|c| matches!(c, ' ' | '\t' | '\n' | '|')) =>
+            {
+                // GNU read_token_word (parse.y:5506-5509 -> parse_comsub):
+                // consume nested `${ ... }' funsubs atomically so their
+                // inner `case`/`in`/`)`/`;;`/`esac` never touch the outer
+                // `$(...)` case tracker.
+                if let Some(end) = super::alias_stream::skip_funsub_body(chars, index + 1) {
+                    word.push('\u{1}');
+                    index = end;
+                    token_boundary = false;
+                    continue;
+                }
+                return None;
             }
             '$' if chars.get(index + 1) == Some(&'\'') => {
                 index += 2;
