@@ -3006,6 +3006,20 @@ impl Executor {
         // records the entry as the walk passes it.
         let mut route_walk = super::trap_exec::FdWalkSpace::new();
         let mut route_occupied: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        // rubash#4027: the fds an earlier entry's undo save will
+        // restore after this walk — the `source` of every
+        // add_undo_redirect the registration below records. GNU
+        // replays the whole undo chain at command end
+        // (cleanup_redirects, execute_cmd.c:507 → do_redirections on
+        // redirection_undo_list), so a move's unpersistable close —
+        // no save of its own when the target was closed
+        // (redir.c:1169-1177) — still leaves fd N open when an
+        // EARLIER entry saved it: `echo a 9>other.txt 8>&9-` with fd
+        // 9 ambient ends with fd 9 restored to its pre-list binding,
+        // not closed. Populated only on undoable_walks; an RX_ACTIVE
+        // walk earns no saves at all.
+        let mut walk_restored_fds: std::collections::HashSet<u32> =
+            std::collections::HashSet::new();
         for (index, redirect) in cmd.redirects.iter().enumerate() {
             if let Some(fd) = redirect.fd {
                 route_occupied.insert(fd);
@@ -3027,6 +3041,7 @@ impl Executor {
                         self.fd_walk_register_saves(&mut route_walk, redirect, &route_occupied)
                     {
                         route_occupied.insert(slot);
+                        walk_restored_fds.insert(source);
                         if let Some(target) = self.walk_dup_source_target(state, source) {
                             let target = match (source, target) {
                                 (1, OutputTarget::Stdout) => OutputTarget::ProcessStdout,
@@ -3527,7 +3542,23 @@ impl Executor {
                             state.fds.insert(source_fd, OutputTarget::Closed);
                             state.list_binds.insert(source_fd, ListBound::Closed);
                             state.shared_with.remove(&source_fd);
-                            if state.persist_move_closes && !target_was_open {
+                            // rubash#4027: the rubash#1235 persist
+                            // close applies only when NO undo record
+                            // will restore the source — i.e. the
+                            // target was closed at apply time (so the
+                            // move itself registers no save,
+                            // redir.c:1169-1177) AND no earlier entry
+                            // of this list saved the source
+                            // (add_undo_redirect, redir.c:1296; e.g.
+                            // `9>other.txt` before `8>&9-`). With a
+                            // save pending, GNU's undo replay puts
+                            // the pre-list binding back; persisting
+                            // the close here left later `>&N` writes
+                            // failing EBADF.
+                            if state.persist_move_closes
+                                && !target_was_open
+                                && !walk_restored_fds.contains(&source_fd)
+                            {
                                 self.close_persistent_output_fd(source_fd)?;
                                 self.shell_state
                                     .env_vars
