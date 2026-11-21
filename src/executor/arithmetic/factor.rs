@@ -222,7 +222,7 @@ impl ConditionalArithParser<'_> {
 /// GNU expr.c:1551-1636 strlong: base-prefixed integer literal parsing.
 /// `VALID_NUMCHAR(c)` is ISALNUM plus `_` and `@` (expr.c:1549). Returns
 /// the value or the evalerror message.
-fn strlong_value(num: &[u8]) -> Result<i128, &'static str> {
+pub(super) fn strlong_value(num: &[u8]) -> Result<i128, &'static str> {
     let mut index = 0usize;
     let mut base = 10u32;
     let mut foundbase = false;
