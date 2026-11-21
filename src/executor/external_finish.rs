@@ -15,6 +15,46 @@ pub(in crate::executor) fn cat_closed_stdout_error() -> ExecuteError {
 }
 
 impl Executor {
+    /// GNU redir.c r_duplicating_output (redir.c:1193): `>&N` / `>&N-`
+    /// dup2s fd N's open file description onto the command's fd 1, so
+    /// the write shares N's description — its offset and append mode —
+    /// and never re-opens N's path (that fresh open is the /dev/fd/N
+    /// alias face, redir.c:725, owned by write_dev_stdio_redirect_output).
+    /// An open-but-write-less source (a read-only file fd, a pipe read
+    /// end, the procsub body's plan-restored read slot) passes the dup2
+    /// and fails the write EBADF — the command reports
+    /// `<name>: write error: Bad file descriptor` (coreutils cat.c) —
+    /// where the alias face used to re-open the source's path for
+    /// writing and silently succeed, even truncating the file
+    /// (rubash#3980). A closed source fails the dup at setup
+    /// (`N: Bad file descriptor`, redir.c redirection_error) — the
+    /// reject gate reports it before dispatch; reached anyway the same
+    /// verdict is returned here. Returns None for non-dup targets.
+    pub(in crate::executor) fn write_cat_dup_fd_output(
+        &mut self,
+        cmd: &CommandNode,
+        target: &str,
+        output: &[u8],
+    ) -> Option<Result<(), ExecuteError>> {
+        if !crate::executor::execution_misc::redirect_target_is_dup_spelling(target) {
+            return None;
+        }
+        let (source_fd, _move_fd) =
+            crate::executor::execution_misc::redirect_target_fd_and_move(target)?;
+        if !self.fd_table.is_open(source_fd) {
+            return Some(Err(ExecuteError::IoError(std::io::Error::other(format!(
+                "{source_fd}: Bad file descriptor"
+            )))));
+        }
+        if self.fd_table.output_endpoint(source_fd).is_some() {
+            return Some(self.write_fd_endpoint(source_fd, output));
+        }
+        let command = cmd.words.first().map(String::as_str).unwrap_or("cat");
+        Some(Err(ExecuteError::IoError(std::io::Error::other(format!(
+            "{command}: write error: Bad file descriptor"
+        )))))
+    }
+
     /// rubash#3875: the retained preflight walk (the rubash#3828
     /// probe channel) may already hold this entry's one open -
     /// adopt it instead of re-opening the mirror target by path
@@ -62,6 +102,13 @@ impl Executor {
             let target = self.expand_redirect_target(redirect);
             if crate::executor::execution_misc::is_closed_redirect_target(&target) {
                 return Err(cat_closed_stdout_error());
+            }
+            // rubash#3980: `>&N` is a dup2 of fd N's description, not
+            // an fd-alias open — serve it before the alias face below
+            // (which would fresh-open N's path and clobber a
+            // write-less source instead of failing the write EBADF).
+            if let Some(result) = self.write_cat_dup_fd_output(cmd, &target, output) {
+                return result;
             }
             // rubash#2329: an fd-alias PATH spelling resolves against
             // the descriptor bound at the entry's own list position
