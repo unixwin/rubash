@@ -1015,6 +1015,23 @@ impl Executor {
         } else {
             cmd
         };
+        // GNU execute_cmd.c:4628-4635 execute_simple_command ->
+        // execute_null_command (4203-4278) -> do_redirections (redir.c:237) ->
+        // redirection_expand (redir.c:298) -> expand_word_internal ->
+        // process_substitute (subst.c:6362): redirections on a wordless
+        // command (such as `x=1 < <(sleep 1)` or `< <(echo hi)`) expand
+        // their process substitutions before opening the redirect targets.
+        let procsub_owned;
+        let (cmd, process_substitution_files) = if command_has_redirect_process_substitution(cmd) {
+            let (materialized, files) = self.command_with_process_substitution_files(cmd)?;
+            procsub_owned = materialized;
+            (&procsub_owned, files)
+        } else {
+            (
+                cmd,
+                super::external_setup::ProcessSubstitutionFiles::default(),
+            )
+        };
         // GNU applies a null command's redirections too (execute_cmd.c
         // execute_null_command -> do_redirections), so `> $nope` under set
         // -u reports the unbound redirect word and ends the script — the
@@ -1029,6 +1046,7 @@ impl Executor {
         if let Some(rejection) =
             self.reject_invalid_redirects(cmd, settle_superseded_net_outputs)?
         {
+            self.cleanup_process_substitution_files(process_substitution_files);
             if rejection == super::redirection::RedirectRejection::FatalNounset {
                 self.finish_heredoc_expansion_error(cmd, Self::FATAL_PARAMETER_EXPANSION_STATUS)?;
             }
@@ -1086,6 +1104,7 @@ impl Executor {
             }
             Err(error) => return Err(error),
         }
+        self.finish_process_substitutions(process_substitution_files)?;
         // rubash#1523: an assignment-only command owns the output
         // process substitutions its RHSs materialized — finish
         // them here, at this command's own completion (GNU forks
@@ -1133,7 +1152,26 @@ impl Executor {
         }
         Ok(())
     }
+}
 
+fn command_has_redirect_process_substitution(cmd: &CommandNode) -> bool {
+    [
+        cmd.redirect_in.as_deref(),
+        cmd.redirect_out.as_deref(),
+        cmd.append.as_deref(),
+        cmd.redirect_err.as_deref(),
+        cmd.redirect_err_append.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .chain(cmd.redirects.iter())
+    .any(|redirect| {
+        redirect.fd_var.is_none()
+            && super::external_setup::redirect_target_span_is_recorded(redirect)
+    })
+}
+
+impl Executor {
     pub(in crate::executor) fn validate_command_parameter_expansions(
         &mut self,
         cmd: &CommandNode,
