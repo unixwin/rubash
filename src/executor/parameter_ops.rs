@@ -39,7 +39,15 @@ pub(in crate::executor) fn mark_escaped_glob_metachars(word: &str) -> String {
 /// fragment positions exactly like in the whole-word argument position.
 /// mark_escaped_glob_metachars runs first so `\*` keeps its CTLESC port;
 /// the remaining `\X` pairs (ordinary X) then lose the backslash.
-pub(in crate::executor) fn unescape_unquoted_rhs_escapes(word: &str) -> String {
+///
+/// `ifs` is the ambient IFS field splitting will use (current_ifs): the
+/// escaped char is CTLESC-quoted data in GNU, so a NON-BLANK IFS char
+/// keeps its split protection through the \x1c carrier exactly like the
+/// whitespace case (rubash#4003: `${w:-a\:b}` under IFS=': ' must stay
+/// one field). For the glob-metacharacter class the CTLESC port goes
+/// first and the glue second so the splitter protects the char while
+/// the CTLESC+char pair still dequotes to the literal.
+pub(in crate::executor) fn unescape_unquoted_rhs_escapes(word: &str, ifs: &str) -> String {
     let mut output = String::with_capacity(word.len());
     let mut chars = word.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -49,8 +57,11 @@ pub(in crate::executor) fn unescape_unquoted_rhs_escapes(word: &str) -> String {
                     chars.next();
                     if matches!(next, '*' | '?' | '[' | ']' | '@' | '+' | '!') {
                         output.push(crate::executor::markers::CTLESC);
-                    } else if matches!(next, ' ' | '\t' | '\n') {
-                        // Escaped whitespace keeps its quoted status for
+                        if ifs.contains(next) {
+                            output.push(crate::executor::markers::IFS_GLUE);
+                        }
+                    } else if matches!(next, ' ' | '\t' | '\n') || ifs.contains(next) {
+                        // Escaped IFS chars keep their quoted status for
                         // field splitting — the same \x1c sentinel the
                         // alternate-rhs walker emits (posixexp2 37:
                         // ${x:-a\ b} stays one field in argument position).

@@ -376,7 +376,10 @@ impl Executor {
         // otherwise (`${x:+a\qb}` is `aqb`; rubash#209). The former
         // admission-list unescape kept `\@`/`\q` pairs outside the
         // whole-word argument position.
-        let expanded = unescape_unquoted_rhs_escapes(&decode_parameter_word_quotes(&expanded));
+        let expanded = unescape_unquoted_rhs_escapes(
+            &decode_parameter_word_quotes(&expanded),
+            self.current_ifs(),
+        );
         let expanded = restore_deferred_operator_backslashes(&expanded);
         let expanded = tilde_expand::expand_assignment_tilde_value(
             &expanded,

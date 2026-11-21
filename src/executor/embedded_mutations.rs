@@ -717,9 +717,18 @@ impl Executor {
                 quoted_site = true;
                 continue;
             }
-            // Alternate rhs: whitespace inside a quoted region is quote
-            // data for the field splitter even after quote removal.
-            if alternate && in_double && matches!(ch, ' ' | '\t' | '\n') {
+            // Alternate rhs: quoted chars are CTLESC-protected data in
+            // GNU (subst.c:11639-11673 quoted-character path /
+            // 11882-11886 add_quoted_string), so ANY IFS char inside a
+            // "..." span keeps its split protection — not only
+            // whitespace (rubash#4003: `${w:-"a:b"}` under IFS=': ').
+            // `$ ` " \ ' stay live syntax / need their own arms below.
+            if alternate
+                && in_double
+                && (matches!(ch, ' ' | '\t' | '\n')
+                    || (self.current_ifs().contains(ch)
+                        && !matches!(ch, '$' | '`' | '\\' | '"' | '\'')))
+            {
                 output.push(crate::executor::markers::IFS_GLUE);
                 output.push(ch);
                 continue;
@@ -861,7 +870,16 @@ impl Executor {
                         closed = true;
                         break;
                     }
-                    if alternate && matches!(quoted_ch, ' ' | '\t' | '\n') {
+                    // Every char of a '...' span is CTLESC-protected
+                    // literal data in GNU (subst.c:11882-11886
+                    // add_quoted_string), so ANY IFS char — not only
+                    // whitespace — keeps its split protection
+                    // (rubash#4003: `x${w:-'a:b'}` under IFS=': ' split
+                    // to `xa` `b` without it).
+                    if alternate
+                        && (matches!(quoted_ch, ' ' | '\t' | '\n')
+                            || self.current_ifs().contains(quoted_ch))
+                    {
                         output.push(crate::executor::markers::IFS_GLUE);
                     }
                     // rubash#2999: the non-mut walker's #2216 twin for
@@ -924,11 +942,20 @@ impl Executor {
                             // quote/dollar that reopens syntax.
                             output.push('\\');
                         }
+                        // The escaped char is CTLESC-quoted data in GNU
+                        // (subst.c:11671-11674); glue it when it is an
+                        // IFS delimiter (rubash#4003).
+                        if self.current_ifs().contains(next) {
+                            output.push(crate::executor::markers::IFS_GLUE);
+                        }
                         output.push(next);
                         continue;
                     }
                     Some('\\') => {
                         chars.next();
+                        if self.current_ifs().contains('\\') {
+                            output.push(crate::executor::markers::IFS_GLUE);
+                        }
                         output.push('\\');
                         continue;
                     }
@@ -945,6 +972,9 @@ impl Executor {
                             // GNU dquote rule: a backslash before an
                             // ordinary character is literal data.
                             output.push('\\');
+                        }
+                        if self.current_ifs().contains('\'') {
+                            output.push(crate::executor::markers::IFS_GLUE);
                         }
                         output.push('\'');
                         continue;
@@ -981,6 +1011,16 @@ impl Executor {
                             // (glob.rs dequote_pathname / command_prepare
                             // materialize_expanded_command_word).
                             output.push(crate::executor::markers::CTLESC);
+                        }
+                        // The escaped char is CTLESC-quoted data in GNU —
+                        // a NON-BLANK IFS char keeps its split protection
+                        // (rubash#4003: `${w:-a\:b}` under IFS=': ' split
+                        // to `a` `b` without it). For the glob class the
+                        // CTLESC port goes first and the glue second so
+                        // the splitter protects the char while the
+                        // CTLESC+char pair still dequotes to the literal.
+                        if self.current_ifs().contains(other) {
+                            output.push(crate::executor::markers::IFS_GLUE);
                         }
                         output.push(other);
                         continue;
