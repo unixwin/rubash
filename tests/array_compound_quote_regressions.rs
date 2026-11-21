@@ -156,6 +156,80 @@ fn scalar_append_keeps_expansion_result_backslashes() {
     );
 }
 
+#[test]
+fn single_quoted_brace_element_stays_literal() {
+    // unixwin/niubash#1060: a single-quoted `{m,n}` / `{m..n}` inside a
+    // compound array literal is quoted DATA for GNU — brace_gobbler
+    // (braces.c:638) opens its quoted state on the `'` characters in the
+    // raw word (braces.c:729-734) and skips the braces, so
+    // expand_compound_array_assignment (arrayfunc.c:557 -> 581
+    // parse_string_to_word_list -> 610 expand_words_no_vars) stores the
+    // element verbatim. Rubash stores the `'...'` span wrapped in the
+    // ASSIGN_HOISTED_SQUOTE (U+E307) carrier pair; the brace scanners in
+    // expand/braces.rs must honor that delimiter exactly like the E301 /
+    // literal `'` forms — and the unquoted brace groups in the same word
+    // must still expand (rubash#3970).
+    // Every expectation below verified against WSL GNU bash 5.3.20
+    // (/usr/local/bin/bash) script-file probes.
+    assert_eq!(
+        rubash_raw("a=('X{16,}Y')\nprintf '<%s> %s' \"${a[0]}\" \"${#a[@]}\""),
+        b"<X{16,}Y> 1"
+    );
+    assert_eq!(
+        rubash_raw("a=('a{1,2}b')\nprintf '<%s> %s' \"${a[0]}\" \"${#a[@]}\""),
+        b"<a{1,2}b> 1"
+    );
+    assert_eq!(
+        rubash_raw("a=('a{1..3}b')\nprintf '<%s> %s' \"${a[0]}\" \"${#a[@]}\""),
+        b"<a{1..3}b> 1"
+    );
+    // A quoted span containing whitespace braces keeps both the braces
+    // and the single element.
+    assert_eq!(
+        rubash_raw("a=('a b{1,2}')\nprintf '<%s> %s' \"${a[0]}\" \"${#a[@]}\""),
+        b"<a b{1,2}> 1"
+    );
+    // declare -a and += take the same compound expansion path.
+    assert_eq!(
+        rubash_raw("declare -a a=('X{16,}Y')\nprintf '<%s> %s' \"${a[0]}\" \"${#a[@]}\""),
+        b"<X{16,}Y> 1"
+    );
+    assert_eq!(
+        rubash_raw("a=(x)\na+=('X{16,}Y')\nprintf '<%s> %s' \"${a[1]}\" \"${#a[@]}\""),
+        b"<X{16,}Y> 2"
+    );
+    // A [sub]= element's quoted braces stay literal too.
+    assert_eq!(
+        rubash_raw("a=([3]='x{1,2}y')\nprintf '<%s> %s' \"${a[3]}\" \"${#a[@]}\""),
+        b"<x{1,2}y> 1"
+    );
+    // Mixed quoting: the UNQUOTED brace group still expands while the
+    // quoted half stays literal — one check for the whole class, not per
+    // symptom (AGENTS.md rubash#117 rule).
+    assert_eq!(
+        rubash_raw("a=('a'{1,2})\nprintf '<%s> %s' \"${a[*]}\" \"${#a[@]}\""),
+        b"<a1 a2> 2"
+    );
+    assert_eq!(
+        rubash_raw("a=('pre'{1,2}'post')\nprintf '<%s> %s' \"${a[*]}\" \"${#a[@]}\""),
+        b"<pre1post pre2post> 2"
+    );
+    assert_eq!(
+        rubash_raw("a=('x{a,b}'{1,2})\nprintf '<%s> %s' \"${a[*]}\" \"${#a[@]}\""),
+        b"<x{a,b}1 x{a,b}2> 2"
+    );
+    // Both halves quoted braces + unquoted braces on one element.
+    assert_eq!(
+        rubash_raw("a=('pre'{a,b}'mid'{1,2}'post')\nprintf '<%s> %s' \"${a[*]}\" \"${#a[@]}\""),
+        b"<preamid1post preamid2post prebmid1post prebmid2post> 4"
+    );
+    // Unquoted brace expansion inside a compound literal is unchanged.
+    assert_eq!(
+        rubash_raw("a=(x{1,2}y)\nprintf '<%s> %s' \"${a[*]}\" \"${#a[@]}\""),
+        b"<x1y x2y> 2"
+    );
+}
+
 /// Bind `element` (a `V...` compound-assignment fragment) in a for-loop over
 /// `for_word` and return element 0's bytes.
 fn for_element_zero(for_word: &str, element: &str) -> Vec<u8> {

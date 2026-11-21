@@ -246,6 +246,16 @@ const DQUOTE_CARRIER: &[u8] = crate::executor::markers::ASSIGN_DATA_DQUOTE_STR.a
 /// of a `'` in de-quoted assignment text.
 const SQUOTE_CARRIER: &[u8] = crate::executor::markers::ASSIGN_DATA_SQUOTE_STR.as_bytes();
 
+/// UTF-8 bytes of markers.rs ASSIGN_HOISTED_SQUOTE (U+E307) — the compound
+/// -assignment hoisted single-quote DELIMITER: the lexer wraps a `'...'`
+/// span's data in a pair of these sentinels, so the pair plays the role
+/// GNU braces.c:729-734 gives the two `'` characters — everything between
+/// them is opaque quoted data that brace syntax never sees
+/// (niubash#1060: `a=('X{16,}Y')` stored the span E307-wrapped and the
+/// scanner brace-expanded inside the quotes).
+const HOISTED_SQUOTE_CARRIER: &[u8] =
+    crate::executor::markers::ASSIGN_HOISTED_SQUOTE_STR.as_bytes();
+
 /// True for a `$` byte OR its cooked-word carrier DATA_DOLLAR (U+001F,
 /// markers.rs): quoting already turned this dollar into data, so the brace
 /// scanners must give a following `{` the same treatment GNU gives `${` —
@@ -260,7 +270,9 @@ fn is_dollar_or_carrier(byte: u8) -> bool {
 /// UTF-8 byte of markers.rs DATA_DOLLAR (U+001F) — single-byte C0 carrier.
 const DATA_DOLLAR_BYTE: u8 = 0x1f;
 
-/// Returns the DATA-quote carrier starting at `i`, if any.
+/// Returns the quote carrier starting at `i`, if any — the assignment
+/// storage sentinels whose PAIRS delimit the quoted spans GNU braces.c
+/// brace_gobbler skips (E301/E302 data quotes, E307 hoisted `'` span).
 fn data_quote_carrier_at(bytes: &[u8], i: usize) -> Option<&'static [u8]> {
     if bytes.len() >= i + DQUOTE_CARRIER.len()
         && &bytes[i..i + DQUOTE_CARRIER.len()] == DQUOTE_CARRIER
@@ -270,6 +282,10 @@ fn data_quote_carrier_at(bytes: &[u8], i: usize) -> Option<&'static [u8]> {
         && &bytes[i..i + SQUOTE_CARRIER.len()] == SQUOTE_CARRIER
     {
         Some(SQUOTE_CARRIER)
+    } else if bytes.len() >= i + HOISTED_SQUOTE_CARRIER.len()
+        && &bytes[i..i + HOISTED_SQUOTE_CARRIER.len()] == HOISTED_SQUOTE_CARRIER
+    {
+        Some(HOISTED_SQUOTE_CARRIER)
     } else {
         None
     }
@@ -425,10 +441,13 @@ fn find_first_valid_brace(text: &str) -> Option<(usize, usize, i32)> {
             if let Some(carrier) = data_quote_carrier_at(bytes, j) {
                 // GNU braces.c brace_gobbler: inside quote state only the
                 // same quote character closes it; the other quote kind is
-                // data and never opens nested state.
+                // data and never opens nested state. The hoisted E307
+                // single-quote delimiter toggles the same `'` state.
                 if carrier == DQUOTE_CARRIER && !j_single {
                     j_double = !j_double;
-                } else if carrier == SQUOTE_CARRIER && !j_double {
+                } else if (carrier == SQUOTE_CARRIER || carrier == HOISTED_SQUOTE_CARRIER)
+                    && !j_double
+                {
                     j_single = !j_single;
                 }
                 j += carrier.len();
@@ -650,15 +669,18 @@ fn split_brace_commas(s: &str) -> Vec<&str> {
             b'\'' if !double => single = !single,
             b'"' if !single => double = !double,
             b'`' if !single && !double => backtick = true,
-            // Data-quote sentinels (markers.rs E301/E302) are the stored
-            // form of the quotes GNU braces.c skips while splitting commas
-            // (braces.c:189-193 quoted-state handling in brace_gobbler).
+            // Data-quote sentinels (markers.rs E301/E302) and the hoisted
+            // single-quote delimiter (E307) are the stored form of the
+            // quotes GNU braces.c skips while splitting commas
+            // (braces.c:712-734 quoted-state handling in brace_gobbler).
             // Only the same carrier kind toggles its state; the other kind
             // is data inside the active quote.
             b'\xEE' if data_quote_carrier_at(bytes, i).is_some() => {
                 match data_quote_carrier_at(bytes, i) {
                     Some(DQUOTE_CARRIER) if !single => double = !double,
-                    Some(SQUOTE_CARRIER) if !double => single = !single,
+                    Some(SQUOTE_CARRIER) | Some(HOISTED_SQUOTE_CARRIER) if !double => {
+                        single = !single
+                    }
                     _ => {}
                 }
                 i += DQUOTE_CARRIER.len();
@@ -948,6 +970,46 @@ mod tests {
         );
         // Literal `${` keeps its GNU skip.
         assert_eq!(expand_braces("${V}r{a,b}"), vec!["${V}ra", "${V}rb"]);
+    }
+
+    /// unixwin/niubash#1060: a compound-assignment `'...'` element rides to
+    /// this scanner wrapped in the ASSIGN_HOISTED_SQUOTE (U+E307) carrier
+    /// pair. That pair is the stored form of the `'` delimiters GNU
+    /// brace_gobbler opens its quoted state on (braces.c:712-734), so the
+    /// braces inside the span are data while a brace group OUTSIDE the
+    /// span still expands — `a=('X{16,}Y')` is one literal element and
+    /// `a=('a'{1,2})` is two.
+    #[test]
+    fn hoisted_squote_carrier_span_is_opaque_to_braces() {
+        const SQ: char = crate::executor::markers::ASSIGN_HOISTED_SQUOTE;
+        let quoted = format!("{SQ}X{{16,}}Y{SQ}");
+        assert_eq!(expand_braces(&quoted), vec![quoted]);
+        let quoted_seq = format!("{SQ}a{{1..3}}b{SQ}");
+        assert_eq!(expand_braces(&quoted_seq), vec![quoted_seq]);
+        // Mixed quoting: the unquoted group expands around the quoted
+        // data, carriers preserved for the downstream dequote.
+        assert_eq!(
+            expand_braces(&format!("{SQ}a{SQ}{{1,2}}")),
+            vec![format!("{SQ}a{SQ}1"), format!("{SQ}a{SQ}2"),]
+        );
+        assert_eq!(
+            expand_braces(&format!("{SQ}pre{SQ}{{1,2}}{SQ}post{SQ}")),
+            vec![
+                format!("{SQ}pre{SQ}1{SQ}post{SQ}"),
+                format!("{SQ}pre{SQ}2{SQ}post{SQ}"),
+            ]
+        );
+        // A comma inside the carrier span is member text of the quote,
+        // not a separator: {'a,b',c} -> 'a,b' c in GNU's member walk.
+        assert_eq!(
+            expand_braces(&format!("{{{SQ}a,b{SQ},c}}")),
+            vec![format!("{SQ}a,b{SQ}"), "c".to_string()]
+        );
+        // A sequence-looking body inside the span is quoted data too.
+        assert_eq!(
+            expand_braces(&format!("{{{SQ}a..b{SQ},c}}")),
+            vec![format!("{SQ}a..b{SQ}"), "c".to_string()]
+        );
     }
 
     #[test]
