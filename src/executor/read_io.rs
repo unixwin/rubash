@@ -755,7 +755,7 @@ impl Executor {
         // the list's winner here, before any serve: an output-class
         // winner records the hard read error the builtin renders,
         // and no transport runs.
-        if self.own_list_leaves_fd_write_only(cmd, read_fd.unwrap_or(0)) {
+        if self.own_list_leaves_fd_write_only(cmd, read_fd.unwrap_or(0), cmd.redirects.len()) {
             if self.fd_table.read_error.is_none() {
                 self.fd_table.read_error = Some("Bad file descriptor".to_string());
             }
@@ -913,6 +913,25 @@ impl Executor {
                     escape_aware,
                     raw,
                 );
+            }
+            // rubash#3999: `fd` may name an undo save an earlier
+            // entry earned — a live descriptor GNU's walk holds at
+            // end of list but the fd table cannot see
+            // (add_undo_redirect, redir.c:1296). Resolve it through
+            // the same walk space (fd_walk_register_saves) before
+            // the ambient transports.
+            if let Some(line) = self.read_walk_bound_fd_input(
+                cmd,
+                fd,
+                cmd.redirects.len(),
+                silent,
+                delimiter,
+                char_limit,
+                exact_char_limit,
+                escape_aware,
+                raw,
+            ) {
+                return Some(line);
             }
             return self
                 .read_virtual_fd_stdin(
@@ -1217,6 +1236,25 @@ impl Executor {
                     raw,
                 ) {
                     return Some(output);
+                }
+                // rubash#3999: `fd` may name an undo save an earlier
+                // entry earned — a live descriptor GNU's walk holds
+                // at this dup's position but the fd table cannot see
+                // (add_undo_redirect, redir.c:1296). Resolve it
+                // through the same walk space (fd_walk_register_saves)
+                // before the ambient transports.
+                if let Some(line) = self.read_walk_bound_fd_input(
+                    cmd,
+                    fd,
+                    self.redirect_list_position(cmd, redirect),
+                    silent,
+                    delimiter,
+                    char_limit,
+                    exact_char_limit,
+                    escape_aware,
+                    raw,
+                ) {
+                    return Some(line);
                 }
                 if let Some(line) = self.read_virtual_fd_stdin(
                     fd,

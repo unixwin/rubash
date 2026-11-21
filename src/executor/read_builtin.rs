@@ -2267,7 +2267,7 @@ impl Executor {
         }
 
         if let Some(fd) = read_fd {
-            if !self.read_fd_is_available(cmd, fd) {
+            if !self.read_fd_is_available(cmd, fd, cmd.redirects.len()) {
                 // GNU read.def:378-380: sh_validfd failing means the
                 // descriptor is not open at all — "invalid file
                 // descriptor". A descriptor that IS open but not
@@ -2311,7 +2311,16 @@ impl Executor {
                         && redirect_target_fd_and_move(&expanded)
                             .is_some_and(|(source, _)| source == fd)
                 });
-                if !self_dup && !self.read_fd_is_available(cmd, fd) {
+                // rubash#3999: the dup source is judged at the dup
+                // entry's own list position — GNU's do_redirections
+                // runs the dup2 there, seeing only the entries (and
+                // undo saves) before it.
+                let dup_before = cmd
+                    .redirect_in
+                    .as_deref()
+                    .map(|redirect| self.redirect_list_position(cmd, redirect))
+                    .unwrap_or(cmd.redirects.len());
+                if !self_dup && !self.read_fd_is_available(cmd, fd, dup_before) {
                     let _ = writeln!(
                         &mut stderr,
                         "{}{fd}: Bad file descriptor",
@@ -3149,7 +3158,16 @@ impl Executor {
         }
     }
 
-    fn read_fd_is_available(&self, cmd: &CommandNode, fd: u32) -> bool {
+    /// `before` is the list position the descriptor's state is judged
+    /// at (rubash#3999): `cmd.redirects.len()` for a `-u fd` read —
+    /// GNU applies the whole list before the builtin runs
+    /// (redir.c:237 do_redirections) — and the dup entry's own index
+    /// for a `<&N` source, whose dup2 sees only the entries before
+    /// it. Undo saves an earlier entry earned are live descriptors
+    /// at that position (add_undo_redirect, redir.c:1296), resolved
+    /// through the same walk space the #3998 gate uses
+    /// (fd_walk_register_saves) — never a second save channel.
+    fn read_fd_is_available(&self, cmd: &CommandNode, fd: u32, before: usize) -> bool {
         if self.coproc_read_file(fd).is_some() || (fd == 0 && self.first_coproc_read().is_some()) {
             return true;
         }
@@ -3181,9 +3199,22 @@ impl Executor {
         // do_redirections), so availability is judged on the
         // REDIRECTED state: an own close makes the fd invalid even
         // over an ambient entry, and an own dup defers to its
-        // source's availability.
-        if let Some(available) = self.own_input_binding_availability(cmd, fd) {
+        // source's availability. rubash#3999: positioned at `before`
+        // — a dup source is judged where its dup2 runs, not against
+        // the whole list's final state.
+        if let Some(available) = self.own_input_binding_availability_before(cmd, fd, Some(before)) {
             return available;
+        }
+        // rubash#3999: an undo save an earlier entry earned is a live
+        // descriptor at this position — the fd table cannot see it,
+        // so the walk space (fd_walk_register_saves) judges it: a
+        // TableSlot or File binding is open, a Closed binding is
+        // not, and an absent binding defers to the ambient checks.
+        match self.in_list_walk_binding(cmd, before, fd) {
+            Some(super::trap_exec::FdWalkBinding::TableSlot(_))
+            | Some(super::trap_exec::FdWalkBinding::File(_)) => return true,
+            Some(super::trap_exec::FdWalkBinding::Closed) => return false,
+            _ => {}
         }
         // rubash#3774: an own OUTPUT winner leaves the descriptor
         // open but write-only (`read -u 3 x 3>file`). sh_validfd
@@ -3192,7 +3223,7 @@ impl Executor {
         // fails EBADF in the funnel (read.def:911) — reporting it
         // unavailable at this gate would misstate an open fd as an
         // invalid one.
-        if self.own_list_leaves_fd_write_only(cmd, fd) {
+        if self.own_list_leaves_fd_write_only(cmd, fd, before) {
             return true;
         }
         if self.fd_table.is_open_for_read(fd) {
