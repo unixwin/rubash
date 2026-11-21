@@ -704,6 +704,7 @@ impl Executor {
         self.shell_state
             .aliases
             .insert(name.to_string(), crate::builtins::alias::Alias::new(value));
+        self.shell_state.bump_alias_generation();
         self.sync_dynamic_assoc_vars();
     }
 
@@ -711,6 +712,7 @@ impl Executor {
     pub(crate) fn view_undefine_alias(&mut self, name: &str) -> bool {
         let removed = self.shell_state.aliases.remove(name).is_some();
         if removed {
+            self.shell_state.bump_alias_generation();
             self.sync_dynamic_assoc_vars();
         }
         removed

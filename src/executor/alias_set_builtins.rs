@@ -19,6 +19,10 @@ impl Executor {
             &mut stderr,
             prolog,
         )?;
+        // rubash#2828: the runtime parse cache keys on this generation —
+        // every alias-table mutation must advance it (over-bumping is
+        // safe; a missed bump serves a stale AST).
+        self.shell_state.bump_alias_generation();
         self.clear_alias_definition_lines(&cmd.words[1..]);
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
         Ok(status)
@@ -78,6 +82,9 @@ impl Executor {
             posix,
             prolog,
         )?;
+        // rubash#2828: see execute_unalias — alias-table mutations bump
+        // the generation so cached runtime ASTs can never go stale.
+        self.shell_state.bump_alias_generation();
         self.record_alias_definition_lines(&cmd.words[1..], cmd.line);
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
         Ok(status)

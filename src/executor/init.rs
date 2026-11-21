@@ -1404,9 +1404,8 @@ impl Executor {
         // record a runtime `unset` leaves behind (rubash#3909).
         // Computed here because the ShellState literal below moves
         // env_vars.
-        let import_severed_arg_arrays =
-            is_marked_var(&env_vars, UNSET_DYNAMIC_VARS, "BASH_ARGC")
-                || is_marked_var(&env_vars, UNSET_DYNAMIC_VARS, "BASH_ARGV");
+        let import_severed_arg_arrays = is_marked_var(&env_vars, UNSET_DYNAMIC_VARS, "BASH_ARGC")
+            || is_marked_var(&env_vars, UNSET_DYNAMIC_VARS, "BASH_ARGV");
 
         let mut executor = Self {
             shell_state: ShellState {
@@ -1458,6 +1457,7 @@ impl Executor {
                 forced_interactive: false,
                 history_comment_char_armed: history_comment_char_armed_seed,
                 aliases: HashMap::new(),
+                alias_generation: 0,
                 functions: imported_functions,
                 function_definition_redirects: HashMap::new(),
                 function_def_infos: imported_function_def_infos,
@@ -1675,6 +1675,7 @@ impl Executor {
             debug_trap_running: false,
             debug_action_running: false,
             debug_trap_action_cache: std::cell::RefCell::new(None),
+            runtime_parse_cache: std::cell::RefCell::new(RuntimeParseCache::new()),
             debug_driver: None,
             debug_syntax_unit_file: None,
             line_env_os_value: std::cell::RefCell::new(None),
