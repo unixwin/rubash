@@ -2961,7 +2961,31 @@ impl Executor {
         if cmd.redirect_in.is_some() || cmd.heredoc.is_some() || cmd.here_string.is_some() {
             return false;
         }
-        if self.stdin_string_for_command(cmd).is_some() {
+        // rubash#3995: classify from non-consuming facts only. The
+        // earlier probe called stdin_string_for_command, whose
+        // fd-table arm DRAINS a File endpoint's shared-offset stream
+        // (read_fd_read_endpoint_bytes read_to_end): for a `cat -`
+        // inside a compound whose redirect bound fd 0 in the table,
+        // or after an exec rebind (the cat node itself carries no
+        // redirect), the probe ate the bytes and the operand serve
+        // in cat_stdin_operand_bytes then read an exhausted stream
+        // -- the grouped `cat -` printed nothing. Every Some-arm of
+        // that text ladder has a presence-level twin: an fd-0
+        // redirect winner on the command (heredoc / here-string /
+        // dup / file / close), a closed fd 0, a staged FUNCTION_STDIN
+        // buffer, or an in-memory fd-0 endpoint (the Text /
+        // ProcessSubstitution snapshot). What remains is settled by
+        // the endpoint-class check below, exactly as before.
+        if super::shell_options::fd0_stdin_redirect_winner(cmd).is_some() {
+            return false;
+        }
+        if self.fd_table.is_closed(0) {
+            return false;
+        }
+        if self.function_stdin_remaining().is_some() {
+            return false;
+        }
+        if self.fd_table.input_snapshot_bytes(0).is_some() {
             return false;
         }
         matches!(
