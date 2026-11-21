@@ -96,7 +96,36 @@ fn main() {
         .spawn(run_main)
         .expect("spawn rubash main thread");
     let code = handle.join().unwrap_or(1);
+    #[cfg(feature = "alloc-counter")]
+    emit_alloc_stats_if_configured();
     std::process::exit(code);
+}
+
+#[cfg(feature = "alloc-counter")]
+fn emit_alloc_stats_if_configured() {
+    let stats = rubash::alloc_stats();
+    let Some(target) = env::var_os("RUBASH_ALLOC_STATS") else {
+        return;
+    };
+    if target.is_empty() || target == "0" {
+        return;
+    }
+    let line = format!(
+        "alloc_count={} dealloc_count={} realloc_count={} alloc_bytes={} live_bytes={} peak_bytes={}\n",
+        stats.alloc_count,
+        stats.dealloc_count,
+        stats.realloc_count,
+        stats.alloc_bytes,
+        stats.live_bytes,
+        stats.peak_bytes,
+    );
+    if target == "1" || target == "stderr" || target == "-" {
+        let _ = io::stderr().write_all(line.as_bytes());
+    } else if let Ok(mut file) = fs::File::create(&target) {
+        let _ = file.write_all(line.as_bytes());
+    } else {
+        let _ = io::stderr().write_all(line.as_bytes());
+    }
 }
 
 fn run_main() -> i32 {
