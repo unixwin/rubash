@@ -8061,7 +8061,7 @@ impl Executor {
             }
         }
         let stage_redirect_rejected =
-            match self.reject_invalid_redirects(command, settle_superseded_net_outputs) {
+            match self.reject_invalid_redirects(command, settle_superseded_net_outputs, false) {
                 Ok(rejected) => rejected,
                 Err(error) => {
                     if stage_has_varfd {

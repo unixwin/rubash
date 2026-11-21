@@ -72,8 +72,9 @@ impl Executor {
         // itself would lose them.
         let settle_superseded_net_outputs =
             self.superseded_net_output_settlement_applies(cmd, false);
+        let undoable_walk = self.fd_var_walk_undoable(cmd);
         let redirect_rejection =
-            self.reject_invalid_redirects(cmd, settle_superseded_net_outputs)?;
+            self.reject_invalid_redirects(cmd, settle_superseded_net_outputs, undoable_walk)?;
         let mut skip_command = redirect_rejection.is_some();
         if redirect_rejection == Some(super::redirection::RedirectRejection::FatalNounset) {
             // rubash#535: an unbound variable in a redirect word is a fatal

@@ -538,8 +538,8 @@ impl Executor {
         // left-to-right walk reports the FIRST failing dup in list order
         // like GNU do_redirections (output side rubash#263/#266, input
         // side rubash#2030).
-        if let Some((index, name)) = self.compound_dup_bad_fd(cmd) {
-            let abandoned = self.abandon_compound_for_dup_bad_fd(cmd, index, &name);
+        if let Some((index, name, is_emfile)) = self.compound_dup_bad_fd(cmd) {
+            let abandoned = self.abandon_compound_for_dup_bad_fd(cmd, index, &name, is_emfile);
             self.unwind_dynamic_fd_pass(&bound_dynamic_fds, saved_dynamic_closes);
             return abandoned;
         }
@@ -3394,8 +3394,8 @@ impl Executor {
         // Same preflight-first discipline as with_command_input_redirects:
         // the walk is pure, and the abandonment it triggers must not race
         // half-applied binds.
-        if let Some((index, name)) = self.compound_dup_bad_fd(cmd) {
-            return self.abandon_compound_for_dup_bad_fd(cmd, index, &name);
+        if let Some((index, name, is_emfile)) = self.compound_dup_bad_fd(cmd) {
+            return self.abandon_compound_for_dup_bad_fd(cmd, index, &name, is_emfile);
         }
         let saved_numbered = self.open_compound_numbered_input_redirects(cmd)?;
         let saved_output = self.open_compound_output_redirects(cmd)?;
@@ -3446,13 +3446,27 @@ impl Executor {
         cmd: &CommandNode,
         index: usize,
         name: &str,
+        is_undo_save_emfile: bool,
     ) -> Result<T, ExecuteError> {
         let mut stderr = Vec::new();
-        writeln!(
-            stderr,
-            "{}{name}: Bad file descriptor",
-            self.diagnostic_prefix()
-        )?;
+        if is_undo_save_emfile {
+            writeln!(
+                stderr,
+                "{}redirection error: cannot duplicate fd: Too many open files",
+                self.script_name_prefix()
+            )?;
+            writeln!(
+                stderr,
+                "{}{name}: Too many open files",
+                self.diagnostic_prefix()
+            )?;
+        } else {
+            writeln!(
+                stderr,
+                "{}{name}: Bad file descriptor",
+                self.diagnostic_prefix()
+            )?;
+        }
         let mut prefix_cmd = cmd.clone();
         prefix_cmd.redirects.truncate(index);
         let _ = self.write_redirect_diagnostic_routed(&prefix_cmd, &stderr)?;
@@ -3485,8 +3499,10 @@ impl Executor {
     pub(in crate::executor) fn compound_dup_bad_fd(
         &self,
         cmd: &CommandNode,
-    ) -> Option<(usize, String)> {
+    ) -> Option<(usize, String, bool)> {
         let mut opened: HashMap<u32, bool> = HashMap::new();
+        let undoable_walk =
+            cmd.subshell_command.is_none() && cmd.pipe.is_none() && cmd.pipeline_command.is_none();
         // rubash#3991: the undo saves a fixed entry earns are real
         // descriptors in GNU's walk (see fd_walk_register_saves), so
         // a dup naming a save slot is not a bad-fd dup. Mirror the
@@ -3497,12 +3513,22 @@ impl Executor {
         // sees them all.
         let mut walk_space = super::trap_exec::FdWalkSpace::new();
         let mut walk_occupied: std::collections::HashSet<u32> = std::collections::HashSet::new();
-        let mut prev_fixed: Option<&Redirect> = None;
+        let mut prev_fixed: Option<(usize, &Redirect)> = None;
         for (index, redirect) in cmd.redirects.iter().enumerate() {
-            if let Some(prev) = prev_fixed.take() {
-                for (slot, _source) in
+            if let Some((prev_index, prev)) = prev_fixed.take() {
+                let saves = if undoable_walk {
+                    let Some(saves) =
+                        self.try_fd_walk_register_saves(&mut walk_space, prev, &walk_occupied)
+                    else {
+                        let prev_target = self.expand_redirect_target(prev);
+                        let err_name = self.undo_save_error_target_name(prev, &prev_target);
+                        return Some((prev_index, err_name, true));
+                    };
+                    saves
+                } else {
                     self.fd_walk_register_saves(&mut walk_space, prev, &walk_occupied)
-                {
+                };
+                for (slot, _source) in saves {
                     walk_occupied.insert(slot);
                     opened.insert(slot, true);
                 }
@@ -3514,7 +3540,7 @@ impl Executor {
             if let Some(fd) = redirect.fd {
                 walk_occupied.insert(fd);
             }
-            prev_fixed = Some(redirect);
+            prev_fixed = Some((index, redirect));
             let fd = match redirect.kind {
                 crate::parser::RedirectKind::Output
                 | crate::parser::RedirectKind::Append
@@ -3557,7 +3583,7 @@ impl Executor {
                                 .raw
                                 .trim_start_matches('&')
                                 .trim_end_matches('-');
-                            return Some((index, dup_bad_fd_name(raw_word, fd, source_fd)));
+                            return Some((index, dup_bad_fd_name(raw_word, fd, source_fd), false));
                         }
                         let open = dup_source_fd_open(&self.fd_table, source_fd, &opened);
                         opened.insert(fd, open);
@@ -3589,6 +3615,18 @@ impl Executor {
                     } else {
                         opened.insert(fd, true);
                     }
+                }
+            }
+        }
+        if undoable_walk {
+            if let Some((prev_index, prev)) = prev_fixed.take() {
+                if self
+                    .try_fd_walk_register_saves(&mut walk_space, prev, &walk_occupied)
+                    .is_none()
+                {
+                    let prev_target = self.expand_redirect_target(prev);
+                    let err_name = self.undo_save_error_target_name(prev, &prev_target);
+                    return Some((prev_index, err_name, true));
                 }
             }
         }

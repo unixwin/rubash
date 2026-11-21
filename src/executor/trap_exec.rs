@@ -4747,8 +4747,8 @@ impl Executor {
         // redirection_error), the command is not exec'd, and the shell
         // continues at status 1 (GNU exec.def exec_builtin: a failed
         // do_redirections returns before the execve).
-        if let Some((index, name)) = self.compound_dup_bad_fd(cmd) {
-            self.abandon_compound_for_dup_bad_fd::<()>(cmd, index, &name)?;
+        if let Some((index, name, is_emfile)) = self.compound_dup_bad_fd(cmd) {
+            self.abandon_compound_for_dup_bad_fd::<()>(cmd, index, &name, is_emfile)?;
             return Ok(1);
         }
         // `<&N` dups and numbered input redirects are real descriptor
@@ -6520,9 +6520,29 @@ impl Executor {
             // kernel-placed, so the placement commit and the
             // scoped table restore are unaffected.
             if redirect.fd_var.is_none() {
-                for (slot, source) in
-                    self.fd_walk_register_saves(&mut walk_space, redirect, &occupied_slots)
-                {
+                let Some(saves) =
+                    self.try_fd_walk_register_saves(&mut walk_space, redirect, &occupied_slots)
+                else {
+                    let err_name = self.undo_save_error_target_name(redirect, &target);
+                    let mut stderr = Vec::new();
+                    writeln!(
+                        &mut stderr,
+                        "{}redirection error: cannot duplicate fd: Too many open files",
+                        self.script_name_prefix()
+                    )?;
+                    writeln!(
+                        &mut stderr,
+                        "{}{err_name}: Too many open files",
+                        self.error_prefix()
+                    )?;
+                    self.write_default_stderr(&stderr)?;
+                    self.exit_code = 1;
+                    if self.posix_special_redirect_failure_exits(cmd) {
+                        return Err(ExecuteError::ExitCode(1));
+                    }
+                    return Ok(Some(1));
+                };
+                for (slot, source) in saves {
                     occupied_slots.insert(slot);
                     let occupied_now = self.fd_table.entries.get(&slot).is_some_and(|current| {
                         !current.closed && (current.read.is_some() || current.write.is_some())
@@ -6533,17 +6553,41 @@ impl Executor {
                         // marker cloned as the symbolic alias would die
                         // with the redirector's own close, and the
                         // dup-back would bind a dead endpoint.
-                        if let Some(entry) = self.fd_table.exec_walk_saved_entry(
+                        match self.fd_table.exec_walk_saved_entry(
                             source,
                             self.stdout_marker_names_process(source),
                             self.stderr_capture.is_none(),
-                        )? {
-                            if !entry.closed && (entry.read.is_some() || entry.write.is_some()) {
-                                self.fd_table.entries.insert(slot, entry.clone());
-                                inserted_saves.push((slot, entry));
-                                if !self.exec_walk_save_slots.contains(&slot) {
-                                    self.exec_walk_save_slots.push(slot);
+                        ) {
+                            Ok(Some(entry)) => {
+                                if !entry.closed && (entry.read.is_some() || entry.write.is_some())
+                                {
+                                    self.fd_table.entries.insert(slot, entry.clone());
+                                    inserted_saves.push((slot, entry));
+                                    if !self.exec_walk_save_slots.contains(&slot) {
+                                        self.exec_walk_save_slots.push(slot);
+                                    }
                                 }
+                            }
+                            Ok(None) => {}
+                            Err(_) => {
+                                let err_name = self.undo_save_error_target_name(redirect, &target);
+                                let mut stderr = Vec::new();
+                                writeln!(
+                                    &mut stderr,
+                                    "{}redirection error: cannot duplicate fd: Too many open files",
+                                    self.script_name_prefix()
+                                )?;
+                                writeln!(
+                                    &mut stderr,
+                                    "{}{err_name}: Too many open files",
+                                    self.error_prefix()
+                                )?;
+                                self.write_default_stderr(&stderr)?;
+                                self.exit_code = 1;
+                                if self.posix_special_redirect_failure_exits(cmd) {
+                                    return Err(ExecuteError::ExitCode(1));
+                                }
+                                return Ok(Some(1));
                             }
                         }
                     }
@@ -8719,12 +8763,33 @@ impl Executor {
     /// only a close-undo (add_undo_close_redirect) and occupies
     /// nothing. `{var}` entries never reach here — a varassign's own
     /// undo is the varredir_close close record, never a save.
-    pub(in crate::executor) fn fd_walk_undo_save_slots(
+    pub(in crate::executor) fn undo_save_error_target_name(
+        &self,
+        redirect: &Redirect,
+        target: &str,
+    ) -> String {
+        match redirect.kind {
+            crate::parser::RedirectKind::DuplicateInput
+            | crate::parser::RedirectKind::DuplicateOutput => {
+                if let Some((source_fd, _)) = redirect_target_fd_and_move(target) {
+                    source_fd.to_string()
+                } else {
+                    target.strip_prefix('&').unwrap_or(target).to_string()
+                }
+            }
+            crate::parser::RedirectKind::CloseInput | crate::parser::RedirectKind::CloseOutput => {
+                "0".to_string()
+            }
+            _ => target.to_string(),
+        }
+    }
+
+    pub(in crate::executor) fn try_fd_walk_undo_save_slots(
         &self,
         walk: &FdWalkSpace,
         redirect: &Redirect,
         occupied_slots: &std::collections::HashSet<u32>,
-    ) -> Vec<(u32, u32)> {
+    ) -> Option<Vec<(u32, u32)>> {
         let effective_fd = redirect
             .fd
             .unwrap_or(if redirect.is_input_side() { 0 } else { 1 });
@@ -8732,19 +8797,39 @@ impl Executor {
             self.fd_walk_resolve(walk, effective_fd),
             FdWalkBinding::TableSlot(_) | FdWalkBinding::File(_)
         ) {
-            return Vec::new();
+            return Some(Vec::new());
         }
         let mut occupied = self.fd_walk_occupied_set(occupied_slots, walk);
         let mut saves: Vec<(u32, u32)> = Vec::new();
-        let mut claim = |base: u32, source: u32, occupied: &mut std::collections::HashSet<u32>| {
-            if let Some(slot) = self.fd_walk_lowest_free(base, occupied) {
-                occupied.insert(slot);
-                saves.push((slot, source));
-            }
-        };
+        let mut claim =
+            |base: u32, source: u32, occupied: &mut std::collections::HashSet<u32>| -> bool {
+                // GNU redir.c:1303-1315 add_undo_redirect:
+                // try fdbase+1 / SHELL_FD_BASE, then SHELL_FD_BASE (10), then 0.
+                let slot = self
+                    .fd_walk_lowest_free(base, occupied)
+                    .or_else(|| {
+                        (base > 10)
+                            .then(|| self.fd_walk_lowest_free(10, occupied))
+                            .flatten()
+                    })
+                    .or_else(|| {
+                        (base > 0)
+                            .then(|| self.fd_walk_lowest_free(0, occupied))
+                            .flatten()
+                    });
+                if let Some(slot) = slot {
+                    occupied.insert(slot);
+                    saves.push((slot, source));
+                    true
+                } else {
+                    false
+                }
+            };
         match redirect.kind {
             crate::parser::RedirectKind::CloseInput | crate::parser::RedirectKind::CloseOutput => {
-                claim(10, effective_fd, &mut occupied);
+                if !claim(10, effective_fd, &mut occupied) {
+                    return None;
+                }
             }
             crate::parser::RedirectKind::DuplicateInput
             | crate::parser::RedirectKind::DuplicateOutput => {
@@ -8752,10 +8837,12 @@ impl Executor {
                 if let Some((source_fd, move_source)) = redirect_target_fd_and_move(&target) {
                     if source_fd != effective_fd {
                         let base = if source_fd >= 10 { source_fd + 1 } else { 10 };
-                        claim(base, effective_fd, &mut occupied);
+                        if !claim(base, effective_fd, &mut occupied) {
+                            return None;
+                        }
                     }
-                    if move_source {
-                        claim(10, source_fd, &mut occupied);
+                    if move_source && !claim(10, source_fd, &mut occupied) {
+                        return None;
                     }
                 }
             }
@@ -8768,11 +8855,30 @@ impl Executor {
             | crate::parser::RedirectKind::HereString
             | crate::parser::RedirectKind::CombinedOutput
             | crate::parser::RedirectKind::CombinedAppend => {
-                claim(10, effective_fd, &mut occupied);
+                // GNU redir.c:950/1072 opens the target fd BEFORE
+                // add_undo_redirect (redir.c:983/1101), so if a slot is
+                // available for the open it is occupied when the save
+                // dup runs.
+                if let Some(open_slot) = self.fd_walk_lowest_free(0, &occupied) {
+                    occupied.insert(open_slot);
+                }
+                if !claim(10, effective_fd, &mut occupied) {
+                    return None;
+                }
             }
             crate::parser::RedirectKind::Unknown => {}
         }
-        saves
+        Some(saves)
+    }
+
+    pub(in crate::executor) fn fd_walk_undo_save_slots(
+        &self,
+        walk: &FdWalkSpace,
+        redirect: &Redirect,
+        occupied_slots: &std::collections::HashSet<u32>,
+    ) -> Vec<(u32, u32)> {
+        self.try_fd_walk_undo_save_slots(walk, redirect, occupied_slots)
+            .unwrap_or_default()
     }
 
     /// rubash#3991: register one fixed entry's undo saves into the
@@ -8792,18 +8898,28 @@ impl Executor {
     /// (fd_walk_record_fixed_entry). Returns the claimed
     /// (slot, source) pairs so callers keeping an occupancy ledger
     /// can fold the slots in.
+    pub(in crate::executor) fn try_fd_walk_register_saves(
+        &self,
+        walk: &mut FdWalkSpace,
+        redirect: &Redirect,
+        occupied_slots: &std::collections::HashSet<u32>,
+    ) -> Option<Vec<(u32, u32)>> {
+        let saves = self.try_fd_walk_undo_save_slots(walk, redirect, occupied_slots)?;
+        for (slot, source) in &saves {
+            let binding = self.fd_walk_resolve(walk, *source);
+            walk.insert(*slot, binding);
+        }
+        Some(saves)
+    }
+
     pub(in crate::executor) fn fd_walk_register_saves(
         &self,
         walk: &mut FdWalkSpace,
         redirect: &Redirect,
         occupied_slots: &std::collections::HashSet<u32>,
     ) -> Vec<(u32, u32)> {
-        let saves = self.fd_walk_undo_save_slots(walk, redirect, occupied_slots);
-        for (slot, source) in &saves {
-            let binding = self.fd_walk_resolve(walk, *source);
-            walk.insert(*slot, binding);
-        }
-        saves
+        self.try_fd_walk_register_saves(walk, redirect, occupied_slots)
+            .unwrap_or_default()
     }
 
     /// rubash#3991: whether `fd` names a live descriptor recorded

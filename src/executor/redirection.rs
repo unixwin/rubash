@@ -689,6 +689,7 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
         settle_superseded_net_outputs: bool,
+        undoable_walk: bool,
     ) -> Result<Option<RedirectRejection>, ExecuteError> {
         // rubash#3828: this gate is an early redirect walk of the
         // command — retire pending preopened handles an earlier
@@ -865,7 +866,7 @@ impl Executor {
         // mirrors ARE the list and do advance it).
         let mut gate_walk = super::trap_exec::FdWalkSpace::new();
         let mut gate_occupied: std::collections::HashSet<u32> = std::collections::HashSet::new();
-        let mut prev_fixed: Option<&Redirect> = None;
+        let mut prev_fixed: Option<(usize, &Redirect)> = None;
 
         for (index, redirect) in candidates.iter().enumerate() {
             // rubash#2281: fold this command's recorded {var} closes
@@ -897,10 +898,33 @@ impl Executor {
             // saves into the scan (see the shadow's declaration
             // above): each save slot joins the open set, carrying
             // the endpoint class of the descriptor the save copies.
-            if let Some(prev) = prev_fixed.take() {
-                for (slot, source) in
+            if let Some((prev_index, prev)) = prev_fixed.take() {
+                let saves = if undoable_walk {
+                    let Some(saves) =
+                        self.try_fd_walk_register_saves(&mut gate_walk, prev, &gate_occupied)
+                    else {
+                        let prev_target = self.expand_redirect_target(prev);
+                        let err_name = self.undo_save_error_target_name(prev, &prev_target);
+                        let mut stderr = Vec::new();
+                        writeln!(
+                            &mut stderr,
+                            "{}redirection error: cannot duplicate fd: Too many open files",
+                            self.script_name_prefix()
+                        )?;
+                        writeln!(
+                            &mut stderr,
+                            "{}{err_name}: Too many open files",
+                            self.compound_redirect_error_prefix(cmd)
+                        )?;
+                        self.write_redirect_diagnostic_at(cmd, prev_index, &stderr)?;
+                        self.exit_code = 1;
+                        return Ok(Some(RedirectRejection::Command));
+                    };
+                    saves
+                } else {
                     self.fd_walk_register_saves(&mut gate_walk, prev, &gate_occupied)
-                {
+                };
+                for (slot, source) in saves {
                     gate_occupied.insert(slot);
                     opened.insert(slot, true);
                     let socket = scan_endpoint_is_socket(self, source, &opened_socket);
@@ -914,7 +938,7 @@ impl Executor {
                 if let Some(fd) = redirect.fd {
                     gate_occupied.insert(fd);
                 }
-                prev_fixed = Some(redirect);
+                prev_fixed = Some((index, redirect));
             }
             if matches!(redirect.kind, crate::parser::RedirectKind::HereString) {
                 // rubash#2292: a here-string DOES bind its redirector
@@ -1683,6 +1707,32 @@ impl Executor {
                     redirector,
                     crate::special_paths::is_net_redirect_target(&target),
                 );
+            }
+        }
+
+        if undoable_walk {
+            if let Some((prev_index, prev)) = prev_fixed.take() {
+                if self
+                    .try_fd_walk_register_saves(&mut gate_walk, prev, &gate_occupied)
+                    .is_none()
+                {
+                    let prev_target = self.expand_redirect_target(prev);
+                    let err_name = self.undo_save_error_target_name(prev, &prev_target);
+                    let mut stderr = Vec::new();
+                    writeln!(
+                        &mut stderr,
+                        "{}redirection error: cannot duplicate fd: Too many open files",
+                        self.script_name_prefix()
+                    )?;
+                    writeln!(
+                        &mut stderr,
+                        "{}{err_name}: Too many open files",
+                        self.compound_redirect_error_prefix(cmd)
+                    )?;
+                    self.write_redirect_diagnostic_at(cmd, prev_index, &stderr)?;
+                    self.exit_code = 1;
+                    return Ok(Some(RedirectRejection::Command));
+                }
             }
         }
 
