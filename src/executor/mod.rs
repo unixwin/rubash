@@ -1057,6 +1057,17 @@ pub struct Executor {
     /// restore state, not walk currency, and are never recorded
     /// here.
     exec_walk_save_slots: Vec<u32>,
+    /// rubash#4044: depth of SCOPED exec-redirect walks currently
+    /// running (execute_stdio_only_exec_redirect with
+    /// place_persistent=false — `builtin exec`, an exec inside a
+    /// compound redirect bracket, or a nested-context exec routed
+    /// through execute_stdio_only_exec_redirect_scoped). A scoped
+    /// walk restores only the fd TABLE on exit (the wrapper replays
+    /// saved_fd_table), so a kernel close inside it is irreversible
+    /// corruption of the outer scope's descriptors — the same
+    /// table-only-restore invariant close_orphaned_process_fd's
+    /// process-scope gate carries.
+    exec_scoped_redirect_walk_depth: u32,
     /// GNU `command -p` (builtins/command.def CDESC_STDPATH): the
     /// standard path for the re-dispatched command's OWN lookup only.
     /// Set for the duration of the re-dispatch and consulted by the

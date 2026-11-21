@@ -6406,6 +6406,14 @@ impl Executor {
         let prev = std::mem::replace(&mut self.fd_table.kernel_place_persistent, arm);
         let prev_close = std::mem::replace(&mut self.fd_table.kernel_close_persistent, arm);
         let prev_save_slots = std::mem::take(&mut self.exec_walk_save_slots);
+        // rubash#4044: a SCOPED walk (place_persistent=false —
+        // `builtin exec`, compound-bracket or nested-context exec)
+        // restores only the fd table on exit, so a kernel close
+        // inside it would be irreversible — mark the span for
+        // close_orphaned_process_fd's process-scope gate.
+        if !place_persistent {
+            self.exec_scoped_redirect_walk_depth += 1;
+        }
         // rubash#3991: the saves the walk materializes (see the
         // inner walk) are disposed when the list stands, on every
         // exit path — GNU's exec undo list is disposed once the
@@ -6426,6 +6434,9 @@ impl Executor {
         self.exec_walk_save_slots = prev_save_slots;
         self.fd_table.kernel_place_persistent = prev;
         self.fd_table.kernel_close_persistent = prev_close;
+        if !place_persistent {
+            self.exec_scoped_redirect_walk_depth -= 1;
+        }
         result
     }
 
@@ -8211,6 +8222,34 @@ impl Executor {
         // that number belongs to the runtime (self-pipes, inherited
         // handles), never to this table entry.
         if fd >= 3 {
+            return;
+        }
+        // rubash#4044: the kernel descriptor belongs to this executor's
+        // OWN process scope only. Inside a region whose boundary
+        // restores the fd TABLE only — a flat `( )` layer above the
+        // level this process realized (subshell_depth >
+        // bashpid_origin_depth; execute_cmd.c:1576 execute_in_subshell
+        // runs the body in a real fork), a fork-copy executor
+        // (command_substitution_executor clones, !owns_process_image —
+        // subst.c:7143 command_substitute forks too), an emulated child
+        // region (in-process pipeline elements / ${THIS_SH} children,
+        // emulated_child_depth), or a scoped exec walk
+        // (exec_scoped_redirect_walk_depth — `builtin exec`, whose
+        // redirects GNU undoes after the command) — a close(2) of the
+        // shared number kills a descriptor the outer scope cannot
+        // bring back: `( exec >&- )` left the parent's fd 1 dead and
+        // `x=$(exec >&-; ...)` lost every later write, where GNU's
+        // r_close_this (redir.c:1239/1267 close_buffered_fd) drops the
+        // descriptor in the child's own space and dies with it. A
+        // respawned process passes: its subshell_depth IS
+        // bashpid_origin_depth, the level the spawn realized (a coproc
+        // body's `exec >&-` must still close the real c2p writer,
+        // rubash#3633).
+        if !self.owns_process_image
+            || self.emulated_child_depth.get() > 0
+            || self.exec_scoped_redirect_walk_depth > 0
+            || self.shell_state.subshell_depth.get() > self.bashpid_origin_depth
+        {
             return;
         }
         let target = fd as crate::fd::HANDLE;
