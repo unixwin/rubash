@@ -3647,6 +3647,24 @@ impl Executor {
             );
             let expanded = crate::expand::braces::expand_braces_tagged(&word);
             if expanded.len() > 1 || expanded.first().is_some_and(|p| p.text != word) {
+                // rubash#3969: expand_words_no_vars hands every product
+                // to expand_word_internal as a fresh word
+                // (subst.c:13240-13256), so a raw backquote that never
+                // closes — a sequence's `` ` `` element glued to more
+                // text, `{a..A}x` / `{a..A}{1..2}` — is the same
+                // expand_word_error the command-word path reports
+                // (subst.c:11587 `bad substitution: no closing "`" in
+                // …`), abandoning the whole assignment. The lone `` ` ``
+                // product stays a literal element (subst.c:11574-11576).
+                // Judge each product in GNU's expansion order and stop
+                // at the first verdict.
+                if let Some(tail) = expanded.iter().find_map(|p| {
+                    crate::expand::braces::unclosed_backquote_index(&p.text)
+                        .map(|index| &p.text[index..])
+                }) {
+                    self.report_brace_product_backquote_failure(tail);
+                    return value.to_string();
+                }
                 changed = true;
                 products.extend(expanded.iter().map(compound_brace_product_transport));
             } else {

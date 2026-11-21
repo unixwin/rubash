@@ -726,6 +726,22 @@ pub struct ShellState {
     /// substitution's command list, never the enclosing word's command.
     /// TODO: Move to ShellState::clone() for automatic isolation (requires &mut self API change)
     pub(crate) parameter_bad_substitution: Cell<bool>,
+    /// rubash#3969: class marker for the verdict currently held by
+    /// `parameter_bad_substitution`. GNU returns two different sentinels
+    /// for the two bad-substitution classes: the `${...}` class is
+    /// &expand_wdesc_fatal under posixly_correct (subst.c:10277-10288),
+    /// but expand_word_internal's `` ` `` case — the brace-product
+    /// unclosed-backquote verdict — returns the plain
+    /// &expand_wdesc_error in every mode (subst.c:11568-11593), so its
+    /// exp_jump_to_top_level(DISCARD) is never promoted to FORCE_EOF
+    /// (oracle: GNU-as-sh prints the diagnostic, continues the script,
+    /// exits 0). `report_brace_product_backquote_failure` sets this
+    /// marker when it raises the latch (first verdict wins, like GNU's
+    /// first expansion failure of a word list); the posix-fatal
+    /// consumers gate their FORCE_EOF arm on it, and every site that
+    /// clears or restores the latch clears or restores the marker
+    /// with it.
+    pub(crate) bad_substitution_discard_only: Cell<bool>,
     /// One-shot print budget for the `bad substitution` diagnostic
     /// (rubash#3499). GNU subst.c:10277-10288 reports the FIRST
     /// expansion failure of a word list and abandons the rest, so a
@@ -949,6 +965,7 @@ pub(crate) struct InteriorSnapshot {
     conditional_nounset_error: bool,
     arithmetic_last_error_category: Option<crate::executor::arithmetic::ArithmeticErrorCategory>,
     parameter_bad_substitution: bool,
+    bad_substitution_discard_only: bool,
     bad_substitution_reported: bool,
     redirect_failglob_error: bool,
     redirect_failglob_seen: bool,
@@ -1028,6 +1045,7 @@ impl ShellState {
             conditional_nounset_error: self.conditional_nounset_error.get(),
             arithmetic_last_error_category: self.arithmetic_last_error_category.get(),
             parameter_bad_substitution: self.parameter_bad_substitution.get(),
+            bad_substitution_discard_only: self.bad_substitution_discard_only.get(),
             bad_substitution_reported: self.bad_substitution_reported.get(),
             redirect_failglob_error: self.redirect_failglob_error.get(),
             redirect_failglob_seen: self.redirect_failglob_seen.get(),
@@ -1101,6 +1119,8 @@ impl ShellState {
             .set(snapshot.arithmetic_last_error_category);
         self.parameter_bad_substitution
             .set(snapshot.parameter_bad_substitution);
+        self.bad_substitution_discard_only
+            .set(snapshot.bad_substitution_discard_only);
         self.bad_substitution_reported
             .set(snapshot.bad_substitution_reported);
         self.redirect_failglob_error
@@ -1214,6 +1234,7 @@ impl Clone for ShellState {
             conditional_nounset_error: Cell::new(self.conditional_nounset_error.get()),
             arithmetic_last_error_category: Cell::new(self.arithmetic_last_error_category.get()),
             parameter_bad_substitution: Cell::new(self.parameter_bad_substitution.get()),
+            bad_substitution_discard_only: Cell::new(self.bad_substitution_discard_only.get()),
             bad_substitution_reported: Cell::new(self.bad_substitution_reported.get()),
             redirect_failglob_error: Cell::new(self.redirect_failglob_error.get()),
             redirect_failglob_seen: Cell::new(self.redirect_failglob_seen.get()),

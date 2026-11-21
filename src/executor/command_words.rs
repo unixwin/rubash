@@ -571,15 +571,26 @@ impl Executor {
         // scanner skips dollar-brace bodies, so a dollar-brace in the word
         // does not suppress the split (foo{bar,${var.} -> foobar foobaz.).
         if self.is_brace_expand_enabled() {
-            let braced = super::command_prepare::expand_braces_with_optional_raw(word, raw);
+            let braced = super::command_prepare::expand_braces_with_optional_raw_tagged(word, raw);
             if braced.len() > 1 {
-                let values = braced
-                    .into_iter()
-                    .map(|word| self.expand_for_brace_word_values(&word, raw, suppress_glob))
-                    .collect::<Result<Vec<_>, _>>()?
-                    .into_iter()
-                    .flatten()
-                    .collect();
+                let mut values = Vec::new();
+                for product in braced {
+                    // rubash#3969: the same product-level expansion
+                    // verdict the command-word path owns (subst.c:11587
+                    // `bad substitution: no closing "`" in …`) — the
+                    // parameter_bad_substitution latch is consumed by the
+                    // caller, which abandons the list like GNU's
+                    // expand_word_error DISCARD.
+                    if let Some(tail) = &product.unclosed_backquote_tail {
+                        self.report_brace_product_backquote_failure(tail);
+                        break;
+                    }
+                    values.extend(self.expand_for_brace_word_values(
+                        &product.text,
+                        raw,
+                        suppress_glob,
+                    )?);
+                }
                 return Ok(values);
             }
         }

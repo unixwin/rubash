@@ -711,6 +711,36 @@ impl Executor {
             {
                 return self.raise_word_expansion_error(error);
             }
+            // rubash#3969: a brace product carrying an unclosed raw
+            // backquote fails redirection_expand the same way a command
+            // word fails (redir.c:298 redirection_expand ->
+            // expand_words_no_vars -> expand_word_internal's '`' case,
+            // subst.c:11587 `bad substitution: no closing "`" in …` ->
+            // expand_word_error DISCARD). The verdict must land before
+            // the file is opened; the diagnostic is the same tail the
+            // word path reports, and the Err abandons the command list.
+            for product in super::command_prepare::expand_braces_with_optional_raw_tagged(
+                target,
+                Some(&redirect.target_metadata.raw),
+            ) {
+                if let Some(tail) = &product.unclosed_backquote_tail {
+                    self.report_brace_product_backquote_failure(tail);
+                    // The latch consumers above this pre-pass already
+                    // ran; consume the verdict here and surface it as the
+                    // command-level expand_word_error GNU's DISCARD
+                    // produces (subst.c:13093-13110) — the reader-level
+                    // abort keeps `{ echo x > {a..A}y; }; echo after`
+                    // from running `after` where the bare Err would be
+                    // absorbed at the group boundary.
+                    self.shell_state.parameter_bad_substitution.set(false);
+                    self.shell_state.bad_substitution_discard_only.set(false);
+                    self.shell_state.bad_substitution_reported.set(false);
+                    self.raise_evalerror_abort();
+                    self.exit_code = 1;
+                    self.command_expansion_failed.set(true);
+                    return Err(ExecuteError::ExpansionFailure(1));
+                }
+            }
         }
         if alias_expansion_changed_words
             && !original_words_had_command_substitution
@@ -2204,7 +2234,16 @@ impl Executor {
             // budget with it, so the next command reports its own
             // failure.
             self.shell_state.bad_substitution_reported.set(false);
-            if self.posix_mode_enabled()
+            // rubash#3969: the brace-product backquote class is
+            // discard-only in GNU (see the marker in shell/state.rs) —
+            // the FORCE_EOF arm below belongs to the `${...}` class
+            // alone.
+            let discard_only = self
+                .shell_state
+                .bad_substitution_discard_only
+                .replace(false);
+            if !discard_only
+                && self.posix_mode_enabled()
                 && !self.invocation_interactive()
                 && crate::builtins::shopt::compatibility_level(&self.shell_state.env_vars) > 43
             {

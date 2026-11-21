@@ -365,7 +365,7 @@ fn find_first_valid_brace(text: &str) -> Option<(usize, usize, i32)> {
         // $()/backtick body to parse_comsub, never to brace_expand). Skip
         // the whole substitution body here.
         if bytes[i] == b'`' {
-            i = skip_backtick_body(bytes, i);
+            i = skip_backtick_body(bytes, i).unwrap_or(bytes.len());
             continue;
         }
         if (bytes[i] == b'<' || bytes[i] == b'>') && i + 1 < bytes.len() && bytes[i + 1] == b'(' {
@@ -476,7 +476,7 @@ fn find_first_valid_brace(text: &str) -> Option<(usize, usize, i32)> {
                     continue;
                 }
                 b'`' => {
-                    j = skip_backtick_body(bytes, j);
+                    j = skip_backtick_body(bytes, j).unwrap_or(bytes.len());
                     continue;
                 }
                 b'{' => depth += 1,
@@ -555,9 +555,13 @@ fn skip_dollar_brace_body(bytes: &[u8], start: usize) -> usize {
     bytes.len()
 }
 
-/// Index just past the closing backtick starting at `start`. Backslash
-/// escapes are honored (parse.y lexes \` inside a word as escaped data).
-fn skip_backtick_body(bytes: &[u8], start: usize) -> usize {
+/// Index just past the backquote closing the `` ` `` at `start`
+/// (string_extract's `` ` `` terminator honoring only `\x` escapes,
+/// subst.c:791-844), or None when no closing backquote exists. The
+/// Option distinguishes a pair whose close is the last byte from an
+/// unclosed open — expand_word_internal's bare-backquote compatibility
+/// test (`sindex - 1 == t_index`, subst.c:11574-11576) needs that.
+fn skip_backtick_body(bytes: &[u8], start: usize) -> Option<usize> {
     let mut i = start + 1;
     while i < bytes.len() {
         if bytes[i] == b'\\' {
@@ -565,11 +569,11 @@ fn skip_backtick_body(bytes: &[u8], start: usize) -> usize {
             continue;
         }
         if bytes[i] == b'`' {
-            return i + 1;
+            return Some(i + 1);
         }
         i += 1;
     }
-    bytes.len()
+    None
 }
 
 /// Index just past the matching close paren of the $( at `start` (which
@@ -628,6 +632,167 @@ fn skip_single_quoted(bytes: &[u8], start: usize) -> usize {
         i += 1;
     }
     bytes.len()
+}
+
+/// Index just past the `}` closing the `${` at `start` (which points at
+/// the `$`), or end when unclosed — the backquote-aware twin of
+/// `skip_dollar_brace_body`: GNU delimits the parameter body through
+/// extract_dollar_brace_string -> extract_delimited_string
+/// (subst.c:1361), which passes `` `...` `` bodies, `'...'` and `"..."`
+/// spans through verbatim (subst.c:1469-1486), so a `}` or `{` inside
+/// any of those units is data. A backquote group is its own quote
+/// state: a quote inside it is ordinary text.
+fn skip_dollar_brace_body_expansion(bytes: &[u8], start: usize) -> usize {
+    let mut i = start + 2;
+    let mut depth = 1usize;
+    let mut single = false;
+    let mut double = false;
+    let mut in_backtick = false;
+    while i < bytes.len() {
+        let ch = bytes[i];
+        if ch == b'\\' && !single {
+            i += 2;
+            continue;
+        }
+        if ch == b'\'' && !double && !in_backtick {
+            single = !single;
+        } else if ch == b'"' && !single && !in_backtick {
+            double = !double;
+        } else if ch == b'`' && !single {
+            in_backtick = !in_backtick;
+        } else if !single && !double && !in_backtick {
+            if ch == b'{' {
+                depth += 1;
+            } else if ch == b'}' {
+                depth -= 1;
+                if depth == 0 {
+                    return i + 1;
+                }
+            }
+        }
+        i += 1;
+    }
+    bytes.len()
+}
+
+/// Byte index in `text` of the backquote GNU's expansion scan would
+/// reject, if any — the product-level port of `expand_word_internal`'s
+/// `` ` `` case (subst.c:11568-11593). brace_expand_word_list hands
+/// every brace product to expansion as a fresh word (subst.c:12750-
+/// 12763 -> make_word_flags, make_cmd.c:101); the expansion scan then
+/// string_extracts from a raw backquote to its closing backquote
+/// honoring ONLY backslash escapes (string_extract, subst.c:791 — a
+/// quote byte inside a backquote body is ordinary text). SX_REQMATCH
+/// turns an unclosed backquote into the expansion failure
+/// `bad substitution: no closing "`" in …` — expand_word_error, which
+/// abandons the whole word list (subst.c:13093-13110
+/// exp_jump_to_top_level(DISCARD)) — UNLESS the backquote is the word's
+/// last character, which passes through as literal data for backwards
+/// compatibility ("bare instances of `", subst.c:11574-11576).
+///
+/// The scan mirrors expand_word_internal's top-level cases for every
+/// byte that changes where a backquote is seen:
+/// - `\x` quotes x — never opens a construct.
+/// - `'...'` is one quoted unit; an unclosed `'` swallows the rest of
+///   the word as quoted data (string_extract_single_quoted), so a
+///   backquote inside single quotes is never reached.
+/// - `"..."` keeps backquotes live: string_extract_double_quoted hands
+///   the quoted content to a recursive expand_word_internal
+///   (subst.c:11692-11724) where the same `` ` `` case applies, and a
+///   `"` cannot close while a backquote span is open. An unclosed
+///   inner backquote therefore reports the same tail-to-end-of-word
+///   the recursive call's string+t_index shows.
+/// - `$(...)`, `${...}`, `$'...'` and `<(...)`/`>(...)` are extracted
+///   atomically by their own cases (extract_delimited_string passes
+///   `` ` `` bodies through verbatim, subst.c:1469-1474); a backquote
+///   inside belongs to that body's own parse, never this scan.
+///
+/// Data-carrier bytes (DATA_DOLLAR, the PUA quote sentinels) are
+/// literal text here — none of them opens a construct for this scan.
+pub(crate) fn unclosed_backquote_index(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 2,
+            b'\'' => {
+                // Plain single quote: everything to the next `'` (or to
+                // the end of the word) is quoted data.
+                match bytes[i + 1..].iter().position(|&b| b == b'\'') {
+                    Some(offset) => i += offset + 2,
+                    None => return None,
+                }
+            }
+            b'"' => match double_quoted_unclosed_backquote(bytes, i + 1) {
+                DoubleQuotedScan::Closed(end) => i = end,
+                DoubleQuotedScan::Unclosed => return None,
+                DoubleQuotedScan::Backquote(at) => return Some(at),
+            },
+            b'`' => match skip_backtick_body(bytes, i) {
+                Some(close) => i = close,
+                // Bare trailing backquote: literal data (subst.c:11574).
+                None if i + 1 == bytes.len() => i += 1,
+                None => return Some(i),
+            },
+            b'$' if i + 1 < bytes.len() && bytes[i + 1] == b'(' => {
+                i = skip_dollar_paren_body(bytes, i);
+            }
+            b'$' if i + 1 < bytes.len() && bytes[i + 1] == b'{' => {
+                i = skip_dollar_brace_body_expansion(bytes, i);
+            }
+            b'$' if i + 1 < bytes.len() && bytes[i + 1] == b'\'' => {
+                i = skip_single_quoted(bytes, i + 1);
+            }
+            b'<' | b'>' if i + 1 < bytes.len() && bytes[i + 1] == b'(' => {
+                i = skip_dollar_paren_body(bytes, i);
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Result of scanning the inside of a `"..."` span for the
+/// `unclosed_backquote_index` port.
+enum DoubleQuotedScan {
+    /// Index just past the closing `"`.
+    Closed(usize),
+    /// The `"` never closed; the rest of the word is quoted content and
+    /// no unclosed backquote was seen inside it.
+    Unclosed,
+    /// Byte index of a backquote the recursive expansion scan of the
+    /// quoted content would reject.
+    Backquote(usize),
+}
+
+/// Scan the inside of a `"..."` span (starting just past the opening
+/// `"` at `open`) for `unclosed_backquote_index`. Mirrors
+/// string_extract_double_quoted's discipline (subst.c:846+): `\x` skips
+/// x, a `"` outside an open `` ` `` span closes, and `` ` `` bodies are
+/// their own unit — inside the double-quoted content a single quote is
+/// ordinary data (subst.c:11882-11886) but `$`/`(`, `${` and backquote
+/// expansions are live.
+fn double_quoted_unclosed_backquote(bytes: &[u8], open: usize) -> DoubleQuotedScan {
+    let mut i = open;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 2,
+            b'"' => return DoubleQuotedScan::Closed(i + 1),
+            b'`' => match skip_backtick_body(bytes, i) {
+                Some(close) => i = close,
+                None if i + 1 == bytes.len() => i += 1,
+                None => return DoubleQuotedScan::Backquote(i),
+            },
+            b'$' if i + 1 < bytes.len() && bytes[i + 1] == b'(' => {
+                i = skip_dollar_paren_body(bytes, i);
+            }
+            b'$' if i + 1 < bytes.len() && bytes[i + 1] == b'{' => {
+                i = skip_dollar_brace_body_expansion(bytes, i);
+            }
+            _ => i += 1,
+        }
+    }
+    DoubleQuotedScan::Unclosed
 }
 
 fn split_brace_commas(s: &str) -> Vec<&str> {
@@ -1162,5 +1327,51 @@ mod tests {
         assert_eq!(expand_braces("{<(echo a,b),x}"), vec!["<(echo a,b)", "x"]);
         assert_eq!(expand_braces("{>(echo a,b),x}"), vec![">(echo a,b)", "x"]);
         assert_eq!(expand_braces("<(echo {a,b})"), vec!["<(echo {a,b})"]);
+    }
+
+    /// rubash#3969: the product-level port of expand_word_internal's
+    /// `` ` `` case (subst.c:11568-11593) — string_extract honors only
+    /// `\x` escapes inside a backquote body, the bare trailing backquote
+    /// is literal data (subst.c:11574-11576), and a backquote pair whose
+    /// close is the word's last byte is CLOSED, not unclosed.
+    #[test]
+    fn unclosed_backquote_index_matches_gnu_rescan() {
+        // Unclosed opens report the open's index.
+        assert_eq!(unclosed_backquote_index("`x"), Some(0));
+        assert_eq!(unclosed_backquote_index("a`b"), Some(1));
+        assert_eq!(unclosed_backquote_index("`$x"), Some(0));
+        assert_eq!(unclosed_backquote_index("`'x'"), Some(0));
+        // The lone `` ` `` product and any word ending in a bare
+        // backquote keep the compatibility exception.
+        assert_eq!(unclosed_backquote_index("`"), None);
+        assert_eq!(unclosed_backquote_index("x`"), None);
+        // A pair that closes on the last byte is a real substitution,
+        // not an unclosed open (the `close < len` ambiguity).
+        assert_eq!(unclosed_backquote_index("a`echo hi`"), None);
+        assert_eq!(unclosed_backquote_index("`x`"), None);
+        // An escaped backquote neither opens nor closes.
+        assert_eq!(unclosed_backquote_index("\\`x"), None);
+        assert_eq!(unclosed_backquote_index("`x\\`"), Some(0));
+        // Single quotes are opaque to the scan; an unclosed `'` swallows
+        // the rest of the word as quoted data.
+        assert_eq!(unclosed_backquote_index("'`x'"), None);
+        assert_eq!(unclosed_backquote_index("'`x"), None);
+        // Inside `"..."` the scan recurses: a closed pair is fine, a
+        // `"` inside an open backquote cannot close the quote (the
+        // dquote's content then runs to the end of the word and the
+        // backquote is unclosed there).
+        assert_eq!(unclosed_backquote_index("\"a`b`c\""), None);
+        assert_eq!(unclosed_backquote_index("\"a`b"), Some(2));
+        assert_eq!(unclosed_backquote_index("\"a`\""), Some(2));
+        assert_eq!(unclosed_backquote_index("\"a`"), None);
+        // $()/${}/$'..'/<(/> (bodies are extracted atomically; a
+        // backquote inside belongs to that body's own parse.
+        assert_eq!(unclosed_backquote_index("$(`x"), None);
+        assert_eq!(unclosed_backquote_index("${a`b}"), None);
+        assert_eq!(unclosed_backquote_index("$'`'"), None);
+        // A closed pair followed by a second bare backquote stays
+        // literal (`{a..A}`echo Q``'s `` ` `` element product).
+        assert_eq!(unclosed_backquote_index("``echo Q`"), None);
+        assert_eq!(unclosed_backquote_index("`x`y`"), None);
     }
 }

@@ -147,6 +147,10 @@ impl Executor {
             // string; the reader's status words are restored below either
             // way (rubash#604 probes).
             let bad_sub_before = self.shell_state.parameter_bad_substitution.replace(false);
+            let bad_sub_discard_before = self
+                .shell_state
+                .bad_substitution_discard_only
+                .replace(false);
             // rubash#3499: the print budget rides with the verdict (see
             // expand_embedded_parameters_double_quoted).
             let bad_sub_reported_before = self.shell_state.bad_substitution_reported.replace(false);
@@ -183,6 +187,9 @@ impl Executor {
             self.shell_state
                 .bad_substitution_reported
                 .set(bad_sub_reported_before);
+            self.shell_state
+                .bad_substitution_discard_only
+                .set(bad_sub_discard_before);
             if failed {
                 decoded
             } else {

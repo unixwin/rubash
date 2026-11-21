@@ -1569,7 +1569,7 @@ impl Executor {
     /// re-expansion cannot print the diagnostic a second time.
     pub(in crate::executor) fn snapshot_discard_latches(
         &self,
-    ) -> (bool, Option<i32>, bool, bool, bool, bool, bool, bool) {
+    ) -> (bool, Option<i32>, bool, bool, bool, bool, bool, bool, bool) {
         (
             self.parameter_assignment_failure.get(),
             self.parameter_assignment_failure_prev_status.get(),
@@ -1579,12 +1579,13 @@ impl Executor {
             self.evalerror_subscript_pending.get(),
             self.command_expansion_failed.get(),
             self.shell_state.parameter_bad_substitution.get(),
+            self.shell_state.bad_substitution_discard_only.get(),
         )
     }
 
     pub(in crate::executor) fn restore_discard_latches(
         &self,
-        saved: &(bool, Option<i32>, bool, bool, bool, bool, bool, bool),
+        saved: &(bool, Option<i32>, bool, bool, bool, bool, bool, bool, bool),
     ) {
         self.parameter_assignment_failure.set(saved.0);
         self.parameter_assignment_failure_prev_status.set(saved.1);
@@ -1594,6 +1595,7 @@ impl Executor {
         self.evalerror_subscript_pending.set(saved.5);
         self.command_expansion_failed.set(saved.6);
         self.shell_state.parameter_bad_substitution.set(saved.7);
+        self.shell_state.bad_substitution_discard_only.set(saved.8);
     }
 
     /// rubash#1564: could expanding this element's words (or its
@@ -7225,6 +7227,7 @@ impl Executor {
         // and the re-expansion below must not print it again.
         let stage_bad_sub_reported_before = self.shell_state.bad_substitution_reported.get();
         self.shell_state.parameter_bad_substitution.set(false);
+        self.shell_state.bad_substitution_discard_only.set(false);
         // rubash#3605: GNU's element child ORs the async-stdin flag
         // with its own pipe-fed fd 0 (execute_cmd.c:4570,
         // `stdin_redir |= (pipe_in != NO_PIPE)`, in the forked element
@@ -7546,6 +7549,7 @@ impl Executor {
             // verdict must not leak to the parent).
             self.shell_state.parameter_bad_substitution.set(false);
             self.shell_state.bad_substitution_reported.set(false);
+            self.shell_state.bad_substitution_discard_only.set(false);
         } else if saved_discard.7 {
             // The inner consumed a verdict it inherited: the
             // diagnostic that verdict carried is spent, so the print

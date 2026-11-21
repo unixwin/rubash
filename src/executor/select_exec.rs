@@ -174,7 +174,24 @@ impl Executor {
                     self.expand_for_word_values_result(word, raw, metadata)
                 };
                 match result {
-                    Ok(expanded) => values.extend(expanded),
+                    Ok(expanded) => {
+                        // rubash#3969: same brace-product backquote
+                        // verdict the for head consumes — an
+                        // expand_word_error DISCARD (subst.c:11587 ->
+                        // subst.c:13093-13110), so the select fails with
+                        // status 1 and the rest of its source line is
+                        // discarded; consume the latch here.
+                        if self.shell_state.parameter_bad_substitution.replace(false) {
+                            self.shell_state.bad_substitution_reported.set(false);
+                            self.shell_state.bad_substitution_discard_only.set(false);
+                            self.finish_compound_output_process_substitutions(group_outputs)?;
+                            self.raise_evalerror_abort();
+                            self.command_expansion_failed.set(true);
+                            self.exit_code = 1;
+                            return Err(ExecuteError::ExpansionFailure(1));
+                        }
+                        values.extend(expanded);
+                    }
                     Err(pattern) => {
                         self.report_failglob(&pattern);
                         self.finish_compound_output_process_substitutions(group_outputs)?;
