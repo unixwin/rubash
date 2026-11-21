@@ -120,40 +120,6 @@ pub(in crate::executor) fn function_definition_command_uses_source_text(
         || command.function_command.is_some()
 }
 
-pub(in crate::executor) fn append_function_redirect(
-    line: &mut String,
-    redirect: Option<&crate::parser::Redirect>,
-    op: &str,
-) {
-    let Some(redirect) = redirect else {
-        return;
-    };
-
-    // A dynamic varredir already contributes its fd word (for example
-    // {fd}<&0); Bash keeps the operator adjacent to that word.
-    if redirect.fd_var.is_none() {
-        line.push(' ');
-    }
-    let target = redirect_target_source_text(redirect);
-    let target = target.as_str();
-    if target.starts_with('&') {
-        // Bash keeps fd duplication operators adjacent to their raw token.
-        if redirect.fd.is_none()
-            && redirect.fd_var.is_none()
-            && matches!(op, "<" | ">")
-            && target[1..].chars().all(|ch| ch.is_ascii_digit())
-        {
-            line.push_str(if op == "<" { "0" } else { "1" });
-        }
-        line.push_str(op);
-        line.push_str(target);
-    } else {
-        line.push_str(op);
-        line.push(' ');
-        line.push_str(target);
-    }
-}
-
 pub(in crate::executor) fn fd_stdin_key(fd: u32) -> String {
     format!("{FD_STDIN_PREFIX}{fd}")
 }
@@ -414,19 +380,6 @@ pub(in crate::executor) fn procsub_body_seed_line(
     ambient.or(cmd.end_line).or(cmd.line)
 }
 
-/// GNU print_cmd.c prints the command node's OWN redirection list. A
-/// redirect cloned into this node by an enclosing compound's splice
-/// (support_names::injected_group_redirect — the mark's own contract is
-/// "NOT the command's own redirect") is fd-routing state, not text:
-/// rendering it made trap-visible text inside `{ ...; } >>f 2>>f` read
-/// `body_fn >> f 2>> f` where GNU reports `body_fn` (rubash#1872).
-/// Every redirect-to-text funnel filters through here so no render of
-/// the node can re-attach an ancestor's redirections.
-fn own_redirect(redirect: Option<&Redirect>) -> Option<&Redirect> {
-    redirect
-        .filter(|redirect| !crate::executor::support_names::is_injected_group_redirect(redirect))
-}
-
 // rubash#2388: heredoc rendering for the respawn text renderer. GNU's
 // printer emits a heredoc's HEADER inline in the redirect list and
 // defers its BODY past the whole command line — past `|', `&&'/`||'
@@ -471,24 +424,56 @@ pub(in crate::executor) fn render_ended_with_heredoc() -> bool {
     RENDER_ENDED_WITH_HEREDOC.with(|flag| flag.get())
 }
 
-/// The (headers, bodies) of `cmd`'s own heredocs, correlated exactly
-/// like the parser-side printer (heredoc_redirect_info): the header
-/// spells `[fd]<<[-]['DELIM']`; each body is the stored body text plus
-/// its delimiter line, ready to be flushed after the command line.
-fn heredoc_headers_and_bodies(cmd: &CommandNode) -> (Vec<String>, Vec<String>) {
-    let mut headers = Vec::new();
+/// The node's OWN redirections printed the way print_redirection_list
+/// walks them (print_cmd.c:1070, called from print_simple_command at
+/// :1013 and from the make_command_string_internal switch tail for
+/// compound commands): the ordered `redirects` list — the stdio mirror
+/// fields only when the list is absent on a synthesized node
+/// (collect_redirects parity) — each entry through the shared
+/// print_redirection owner (print_cmd.c:1150,
+/// [`crate::parser::ast_print::print_redirection_text`]) in list order,
+/// and each here-document through its header/deferred-body correlation
+/// (heredoc_redirect_info, the same index discipline the parser-side
+/// printer keeps). Returns (redirect text parts, deferred heredoc
+/// bodies) for attach_heredoc_bodies.
+///
+/// This replaced the mirror-field reconstruction
+/// (redirect_in/out/err/append rendered in fixed fd order), which
+/// re-implemented a subset of print_redirection and diverged from it:
+/// it reordered the list (`2>&1 >f` printed `> f 2>&1` — a semantic
+/// change when the text is re-parsed), split `&>`/`&>>` into
+/// `> f 2>> f`, spelled dup/move/close wrong (`>&2` for `1>&2`,
+/// `<&-` for `0>&-`), lost `<>`/`|`-clobber fidelity, and dropped
+/// every redirect outside fds 0-2 (`3>&2-`, `{v}>f`) outright
+/// (rubash#3539).
+///
+/// GNU print_cmd.c prints the command node's OWN redirection list. A
+/// redirect cloned into this node by an enclosing compound's splice
+/// (support_names::injected_group_redirect — the mark's own contract is
+/// "NOT the command's own redirect") is fd-routing state, not text:
+/// rendering it made trap-visible text inside `{ ...; } >>f 2>>f` read
+/// `body_fn >> f 2>> f` where GNU reports `body_fn` (rubash#1872).
+/// Every redirect-to-text funnel filters through here so no render of
+/// the node can re-attach an ancestor's redirections.
+fn own_redirect_parts(cmd: &CommandNode) -> (Vec<String>, Vec<String>) {
+    let mut parts = Vec::new();
     let mut bodies = Vec::new();
     let mut heredoc_index = 0usize;
-    for redirect in &cmd.redirects {
-        if redirect.kind != crate::parser::RedirectKind::HereDoc {
+    for redirect in crate::parser::ast_print::collected_redirects(cmd) {
+        if crate::executor::support_names::is_injected_group_redirect(&redirect) {
             continue;
         }
-        let info = crate::parser::ast_print::heredoc_redirect_info(cmd, redirect, heredoc_index);
-        heredoc_index += 1;
-        headers.push(crate::parser::ast_print::heredoc_header(&info));
-        bodies.push(crate::parser::ast_print::heredoc_body_text(cmd, &info));
+        if redirect.kind == crate::parser::RedirectKind::HereDoc {
+            let info =
+                crate::parser::ast_print::heredoc_redirect_info(cmd, &redirect, heredoc_index);
+            heredoc_index += 1;
+            parts.push(crate::parser::ast_print::heredoc_header(&info));
+            bodies.push(crate::parser::ast_print::heredoc_body_text(cmd, &info));
+        } else {
+            parts.push(crate::parser::ast_print::print_redirection_text(&redirect));
+        }
     }
-    (headers, bodies)
+    (parts, bodies)
 }
 
 /// Attach rendered heredoc bodies to `text`: queued while a connector
@@ -563,69 +548,17 @@ pub(in crate::executor) fn bash_command_text(cmd: &CommandNode) -> String {
         parts.push(words);
     }
 
-    if let Some(redirect) = own_redirect(cmd.redirect_in.as_deref()) {
-        parts.push(format_redirect("<", redirect));
-    }
-    if let Some(redirect) = own_redirect(cmd.redirect_out.as_deref()) {
-        parts.push(format_redirect(
-            if redirect.clobber { ">|" } else { ">" },
-            redirect,
-        ));
-    }
-    if let Some(redirect) = own_redirect(cmd.append.as_deref()) {
-        parts.push(format_redirect(">>", redirect));
-    }
-    if let Some(redirect) = own_redirect(cmd.redirect_err.as_deref()) {
-        parts.push(format_redirect("2>", redirect));
-    }
-    if let Some(redirect) = own_redirect(cmd.redirect_err_append.as_deref()) {
-        parts.push(err_append_source_text(cmd, redirect));
-    }
-    // Numbered redirects (fd>=3) and `{var}` dynamic fds live only in the
-    // ordered `redirects` list — the mirror fields above cannot represent
-    // them. GNU print_cmd.c:1013 print_simple_command prints every
-    // redirection via print_redirection_list, so reprint them here too or a
-    // `-c` respawn child drops `8>&10-` / `{v}>&10-` inside simple commands
-    // (rubash#4047).
-    for redirect in &cmd.redirects {
-        if own_redirect(Some(redirect)).is_some()
-            && redirect.is_list_only_redirect()
-            && redirect.kind != crate::parser::RedirectKind::HereDoc
-        {
-            parts.push(format_redirect(&redirect.operator, redirect));
-        }
-    }
-    // rubash#2388: heredoc headers ride the redirect parts (the bodies
-    // attach after the joined line, print_cmd.c-style).
-    let (heredoc_headers, heredoc_bodies) = heredoc_headers_and_bodies(cmd);
-    parts.extend(heredoc_headers);
-    if let Some(here_string) = &cmd.here_string {
-        parts.push(format!("<<< {here_string}"));
-    }
+    // print_cmd.c:1009-1014: after the words, print_simple_command runs
+    // print_redirection_list over the node's OWN redirects — rendered
+    // through the shared print_redirection owner (print_cmd.c:1150)
+    // by own_redirect_parts; heredoc headers ride the redirect parts
+    // with bodies attached after the joined line (rubash#2388).
+    let (redirect_parts, heredoc_bodies) = own_redirect_parts(cmd);
+    parts.extend(redirect_parts);
 
     let mut text = parts.join(" ");
     attach_heredoc_bodies(&mut text, heredoc_bodies);
     text
-}
-
-/// `2>&1` after `>file` is mirrored into `redirect_err_append` as a
-/// synthesized `2>>file` (parser/redirect_assign.rs assign_redirect_err_target)
-/// so legacy consumers can route fd 2 to the resolved file — but the ordered
-/// `redirects` list keeps the real `2>&1` dup. Reprints must use the real
-/// entry (GNU print_cmd.c prints `r_instruction` literally): a serialized
-/// `2>>file` re-opened by a `-c` child loses the shared open file
-/// description (redir7.sub's `eval \`...\`` spawned `( sleep > /dev/null
-/// 2>> /dev/null & )` instead of `2>&1`).
-fn err_append_source_text(cmd: &CommandNode, redirect: &Redirect) -> String {
-    if !cmd.redirects.contains(redirect) {
-        if let Some(dup) = cmd.redirects.iter().find(|entry| {
-            matches!(entry.kind, crate::parser::RedirectKind::DuplicateOutput)
-                && entry.fd.unwrap_or(1) == 2
-        }) {
-            return format_redirect(&dup.operator, dup);
-        }
-    }
-    format_redirect("2>>", redirect)
 }
 
 pub(in crate::executor) fn command_words_source_text_for_command(cmd: &CommandNode) -> String {
@@ -669,25 +602,6 @@ fn command_word_source_text(index: usize, word: &str, metadata: &[WordMetadata])
     // serialization in GNU (parse.y:4632), not the raw source text
     // (rubash#274).
     super::print_comsub::canonicalize_comsub_spans(&text)
-}
-
-/// The SOURCE spelling a respawned child must re-lex for a redirect
-/// target. GNU never re-lexes (a fork-shaped child carries the AST), so
-/// every text rubash re-renders has to be source text: the word's raw
-/// source slice when the parser kept one (the `command_word_source_text`
-/// rule), otherwise the cooked target decoded out of transport — CTLESC
-/// pairs to their data characters, the DATA_* quote carriers to what
-/// they denote and the `$name` terminator PARAM_NAME_END_MARKER to
-/// nothing (the `heredoc_delimiter_text` chain, rubash#1151). Shipping
-/// the transport carriers made a respawned background child re-tag the
-/// `\023` terminator of `>> "$V"` as literal data (rubash#3816), so the
-/// open(2) landed on `/tmp/x\023` and the redirect silently missed.
-pub(in crate::executor) fn redirect_target_source_text(redirect: &Redirect) -> String {
-    // The cooked target is what GNU print_cmd prints (the dequoted word:
-    // `declare -p X > "$OUT/f"` renders as `> $OUT/f`), so the source
-    // spelling is NOT the raw slice here; only the engine carriers have
-    // to come back out for the child's re-lex.
-    super::markers::decode_transport_word_text(&redirect.target)
 }
 
 fn compound_assignment_source_text(assignment: &crate::parser::CompoundAssignment) -> String {
@@ -1430,74 +1344,24 @@ fn function_command_source_text(function_command: &crate::parser::FunctionComman
     }
 }
 
+/// A compound node's own redirections print after its body — the switch
+/// tail in make_command_string_internal (print_cmd.c:374-378 calls
+/// print_redirection_list :1070). Same own-redirects walk as
+/// bash_command_text: every entry through the shared print_redirection
+/// owner (print_cmd.c:1150) via own_redirect_parts — the mirror-field
+/// pass this replaced reordered the list (`{ ...; } 2>&1 >f` serialized
+/// `> f 2>&1`, rebinding fd 2 differently on re-parse), split `&>`,
+/// lost `<>`, and dropped numbered/`{var}` entries it could not mirror
+/// (rubash#3539).
 pub(in crate::executor) fn append_source_redirects(text: &mut String, cmd: &CommandNode) {
-    append_function_redirect(text, own_redirect(cmd.redirect_in.as_deref()), "<");
-    let combined = own_redirect(cmd.redirect_out.as_deref())
-        .filter(|redirect| {
-            matches!(
-                redirect.kind,
-                crate::parser::RedirectKind::CombinedOutput
-                    | crate::parser::RedirectKind::CombinedAppend
-            )
-        })
-        .or_else(|| {
-            own_redirect(cmd.redirect_err_append.as_deref()).filter(|redirect| {
-                matches!(
-                    redirect.kind,
-                    crate::parser::RedirectKind::CombinedOutput
-                        | crate::parser::RedirectKind::CombinedAppend
-                )
-            })
-        });
-    if let Some(redirect) = combined {
-        let op = if redirect.kind == crate::parser::RedirectKind::CombinedAppend {
-            "&>>"
-        } else {
-            "&>"
-        };
-        append_function_redirect(text, Some(redirect), op);
-    } else {
-        append_function_redirect(
-            text,
-            own_redirect(cmd.redirect_out.as_deref()),
-            own_redirect(cmd.redirect_out.as_deref())
-                .filter(|redirect| redirect.clobber)
-                .map(|_| ">|")
-                .unwrap_or(">"),
-        );
-        append_function_redirect(text, own_redirect(cmd.append.as_deref()), ">>");
-        append_function_redirect(text, own_redirect(cmd.redirect_err.as_deref()), "2>");
-        if let Some(redirect) = own_redirect(cmd.redirect_err_append.as_deref()) {
-            text.push(' ');
-            text.push_str(&err_append_source_text(cmd, redirect));
-        }
-    }
-    // Numbered redirects (fd>=3) and `{var}` dynamic fds live only in the
-    // ordered `redirects` list — the mirror fields above cannot represent
-    // them. GNU print_cmd prints every redirection, so reprint them too or
-    // a `-c` child loses `3>f` entirely.
-    for redirect in &cmd.redirects {
-        // HereDoc entries render through the heredoc header/body path
-        // below (a bare format_redirect would print the delimiter as a
-        // filename target and lose the body) — rubash#2388.
-        if redirect.is_list_only_redirect() && redirect.kind != crate::parser::RedirectKind::HereDoc
-        {
-            text.push(' ');
-            text.push_str(&format_redirect(&redirect.operator, redirect));
-        }
+    let (redirect_parts, heredoc_bodies) = own_redirect_parts(cmd);
+    for part in redirect_parts {
+        text.push(' ');
+        text.push_str(&part);
     }
     // rubash#2388: a compound node's own heredocs (`( ... ) <<EOF',
-    // `while ...; done <<EOF') — headers here, bodies after the whole
-    // compound text (attach_heredoc_bodies defers under a hold).
-    let (heredoc_headers, heredoc_bodies) = heredoc_headers_and_bodies(cmd);
-    for header in heredoc_headers {
-        text.push(' ');
-        text.push_str(&header);
-    }
-    if let Some(here_string) = &cmd.here_string {
-        text.push_str(" <<< ");
-        text.push_str(here_string);
-    }
+    // `while ...; done <<EOF') — headers rode the parts above; bodies
+    // attach after the whole compound text (deferred under a hold).
     attach_heredoc_bodies(text, heredoc_bodies);
 }
 
@@ -1665,6 +1529,109 @@ mod literal_render_tests {
             if let Some(fast) = try_render_raw_join_command(&cmd) {
                 assert_eq!(fast, bash_command_source_text(&cmd), "{src:?} fast != slow");
             }
+        }
+    }
+
+    /// rubash#3539: a simple command's OWN redirections print through the
+    /// shared print_redirection owner (print_cmd.c:1150,
+    /// ast_print::print_redirection_text) — fd duplication/move/close
+    /// spelled the GNU way with both descriptors, `&>`/`&>>` kept whole,
+    /// `<>`/`>|` preserved, numbered and `{var}` fds rendered, every
+    /// entry in list order, and the redirectee word printed raw (quotes
+    /// intact). Expected strings measured on WSL GNU Bash 5.3.x via
+    /// `trap 'printf "%s\n" "$BASH_COMMAND"' DEBUG`.
+    #[test]
+    fn simple_command_redirects_print_gnu_forms() {
+        let cases = [
+            // r_duplicating_* / r_move_* / r_close_this print BOTH fds.
+            ("echo a >&2 2>/dev/null", "echo a 1>&2 2> /dev/null"),
+            ("echo j >&2", "echo j 1>&2"),
+            ("echo k 2>&1", "echo k 2>&1"),
+            ("echo i 0<&0", "echo i 0<&0"),
+            ("echo b <&3 3</dev/null", "echo b 0<&3 3< /dev/null"),
+            ("echo g 3>&2-", "echo g 3>&2-"),
+            ("echo a >&2-", "echo a 1>&2-"),
+            ("echo c <&-", "echo c 0>&-"),
+            ("echo m 2>&- >&-", "echo m 2>&- 1>&-"),
+            (
+                "echo o 1>&2- 2>&- 0<&- 3<&0-",
+                "echo o 1>&2- 2>&- 0>&- 3<&0-",
+            ),
+            // &>/&>> stay single operators — never split into 1> + 2>>.
+            ("echo l &>/dev/null", "echo l &> /dev/null"),
+            ("echo n &>>/dev/null", "echo n &>> /dev/null"),
+            // Numbered fds and {var} dynamic fds are own redirects too.
+            ("echo h 3>/dev/null", "echo h 3> /dev/null"),
+            ("echo t 4<>f", "echo t 4<> f"),
+            ("exec {v}>>f", "exec {v}>> f"),
+            ("exec {v}>&2 {w}<&0", "exec {v}>&2 {w}<&0"),
+            // Operator fidelity and source order.
+            ("cat 0</dev/null", "cat < /dev/null"),
+            ("echo u <> f", "echo u <> f"),
+            ("echo v >| f", "echo v >| f"),
+            ("echo w >> f", "echo w >> f"),
+            ("echo a >f 2>&1", "echo a > f 2>&1"),
+            (": < /dev/null 3>&1", ": < /dev/null 3>&1"),
+            // The redirectee word prints its raw (quoted) spelling.
+            ("echo x > \"my file\"", "echo x > \"my file\""),
+            ("echo y > 'a b'", "echo y > 'a b'"),
+            ("echo z > $HOME/f", "echo z > $HOME/f"),
+            ("echo p >&$v", "echo p >&$v"),
+            ("echo s <<< \"hi there\"", "echo s <<< \"hi there\""),
+            ("echo q > >(cat > /dev/null)", "echo q > >(cat > /dev/null)"),
+            // GNU decodes ANSI-C spans at parse time (parse.y:5566-5575
+            // ansiexpand + sh_single_quote), so the redirectee word prints
+            // the decoded bytes re-wrapped in single quotes.
+            ("echo x > $'a\\tb'", "echo x > 'a\tb'"),
+            ("cat <<< $'a\\tb'", "cat <<< 'a\tb'"),
+        ];
+        for (src, expected) in cases {
+            let cmd = parse_one(src);
+            assert_eq!(bash_command_source_text(&cmd), expected, "{src:?}");
+        }
+    }
+
+    /// rubash#3539, compound arm: a compound node's own redirections
+    /// print after its body (the make_command_string_internal switch
+    /// tail, print_cmd.c:374-378) through the same print_redirection
+    /// owner — list order and operator spellings identical to the
+    /// simple-command case (the old mirror-field pass reordered the
+    /// list, which re-parses to different fd bindings). Expected
+    /// strings measured on WSL GNU Bash 5.3.x `jobs` output.
+    #[test]
+    fn compound_command_redirects_print_gnu_forms() {
+        let cases = [
+            (
+                "( : ) 3>/dev/null >/dev/null",
+                "( : ) 3> /dev/null > /dev/null",
+            ),
+            ("{ :; } 2>&1 >/dev/null", "{ :; } 2>&1 > /dev/null"),
+            ("( : ) >&- <&-", "( : ) 1>&- 0>&-"),
+            ("( : ) <> /dev/null", "( : ) <> /dev/null"),
+            ("{ :; } &>/dev/null", "{ :; } &> /dev/null"),
+            ("( : ) {v}>/dev/null", "( : ) {v}> /dev/null"),
+        ];
+        for (src, expected) in cases {
+            let cmd = parse_one(src);
+            assert_eq!(bash_command_source_text(&cmd), expected, "{src:?}");
+        }
+    }
+
+    /// rubash#3539: the serialized text must re-parse to the same
+    /// redirection semantics — the respawn/-c consumers lex it again,
+    /// so `>&2` staying fused and `2>&1 >f` keeping order is a
+    /// correctness requirement, not cosmetics.
+    #[test]
+    fn rendered_redirect_text_reparses() {
+        for src in [
+            "echo a 1>&2 2> /dev/null",
+            "echo g 3>&2-",
+            "echo l &> /dev/null",
+            "exec {v}>> f",
+            "( : ) 1>&- 0>&-",
+        ] {
+            let cmd = parse_one(src);
+            assert_eq!(bash_command_source_text(&cmd), src, "{src:?} not stable");
         }
     }
 }

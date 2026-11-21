@@ -472,15 +472,17 @@ fn act2_inspection_snapshot_matches_debuggee_own_output() {
     // one-command lag this fixture originally recorded, under
     // which the read was the pipeline's last stage, `false`).
     // The snapshot's dynamic read equals the stop's own frozen
-    // command text — the engine's dequoted rendering of line
-    // 12's command, the command this stop precedes.
+    // command text — line 12's command rendered the way
+    // print_cmd.c:1150 print_redirection prints it (the redirectee
+    // word keeps its source quotes — rubash#3539), the command
+    // this stop precedes.
     let stop_text = command_texts
         .borrow()
         .iter()
         .find(|(stop_line, _)| *stop_line == Some(12))
         .and_then(|(_, text)| text.clone())
         .expect("the line-12 stop recorded its command text");
-    assert_eq!(stop_text, "declare -p PIPESTATUS > $OUT/pipe.txt");
+    assert_eq!(stop_text, "declare -p PIPESTATUS > \"$OUT/pipe.txt\"");
     assert_eq!(
         pipe_stop.dynamic.bash_command.as_deref(),
         Some(stop_text.as_str()),

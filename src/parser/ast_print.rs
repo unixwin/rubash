@@ -1227,10 +1227,19 @@ pub(crate) fn print_redirection_text(redirect: &Redirect) -> String {
             String::new()
         }
     };
+    // print_redirection prints `redirectee->word`, in which GNU has already
+    // decoded ANSI-C spans at parse time (parse.y:5566-5575 ansiexpand +
+    // sh_single_quote re-wrap). Apply the same decode to the stored raw
+    // target so `> $'a\tb'` prints `> 'a<TAB>b'` (rubash#3539). Marker-zone
+    // literals arrive E400-escaped from script entry (#856): fold the escape
+    // back so the printed target shows the user's source chars, the same
+    // post-pass render_standalone_word applies to command words.
     let target = if redirect.target_metadata.raw.is_empty() {
-        redirect.target.as_str()
+        redirect.target.clone()
     } else {
-        redirect.target_metadata.raw.as_str()
+        crate::executor::markers::fold_literal_char_escapes(&decode_ansi_c_word_spans(
+            &redirect.target_metadata.raw,
+        ))
     };
     match redirect.kind {
         RedirectKind::Input => format!("{}< {target}", fd_prefix(redirect, 0)),
@@ -1239,8 +1248,8 @@ pub(crate) fn print_redirection_text(redirect: &Redirect) -> String {
         RedirectKind::Append => format!("{}>> {target}", fd_prefix(redirect, 1)),
         RedirectKind::ReadWrite => format!("{}<> {target}", fd_prefix(redirect, 0)),
         RedirectKind::HereString => format!("{}<<< {target}", fd_prefix(redirect, 0)),
-        RedirectKind::DuplicateInput => duplication_text(redirect, target, '<', 0),
-        RedirectKind::DuplicateOutput => duplication_text(redirect, target, '>', 1),
+        RedirectKind::DuplicateInput => duplication_text(redirect, &target, '<', 0),
+        RedirectKind::DuplicateOutput => duplication_text(redirect, &target, '>', 1),
         RedirectKind::CloseInput | RedirectKind::CloseOutput => {
             if let Some(var) = &redirect.fd_var {
                 format!("{{{var}}}>&-")
