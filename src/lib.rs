@@ -12,6 +12,8 @@
 #![allow(unreachable_patterns)]
 #![allow(clashing_extern_declarations)]
 
+#[cfg(feature = "alloc-counter")]
+pub mod alloc_counter;
 pub mod api;
 pub mod build_info;
 pub mod builtins;
@@ -48,6 +50,9 @@ pub use debugger::{
     run_dap_server, run_dap_stdio, run_debug_cli, run_debug_cli_with_stream, DapLaunchPreset,
     DebugCliPreset,
 };
+
+#[cfg(feature = "alloc-counter")]
+pub use alloc_counter::{alloc_stats, reset_alloc_stats, AllocStats};
 
 // Re-export commonly used types
 #[cfg(windows)]
