@@ -2352,6 +2352,7 @@ impl Executor {
             builtin_wrapper_depth: self.builtin_wrapper_depth,
             compound_redirect_scope_depth: self.compound_redirect_scope_depth,
             compound_binder_saves: None,
+            exec_walk_save_slots: Vec::new(),
             standard_path_scope: self.standard_path_scope.clone(),
             // rubash#2991: the fork copy inherits the DEBUG trap's
             // in-progress state verbatim, the way GNU's fork image

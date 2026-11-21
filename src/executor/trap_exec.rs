@@ -6382,6 +6382,7 @@ impl Executor {
             && self.compound_redirect_scope_depth == 0;
         let prev = std::mem::replace(&mut self.fd_table.kernel_place_persistent, arm);
         let prev_close = std::mem::replace(&mut self.fd_table.kernel_close_persistent, arm);
+        let prev_save_slots = std::mem::take(&mut self.exec_walk_save_slots);
         // rubash#3991: the saves the walk materializes (see the
         // inner walk) are disposed when the list stands, on every
         // exit path — GNU's exec undo list is disposed once the
@@ -6399,6 +6400,7 @@ impl Executor {
                 self.fd_table.entries.remove(slot);
             }
         }
+        self.exec_walk_save_slots = prev_save_slots;
         self.fd_table.kernel_place_persistent = prev;
         self.fd_table.kernel_close_persistent = prev_close;
         result
@@ -6507,6 +6509,9 @@ impl Executor {
                             if !entry.closed && (entry.read.is_some() || entry.write.is_some()) {
                                 self.fd_table.entries.insert(slot, entry.clone());
                                 inserted_saves.push((slot, entry));
+                                if !self.exec_walk_save_slots.contains(&slot) {
+                                    self.exec_walk_save_slots.push(slot);
+                                }
                             }
                         }
                     }
@@ -7944,14 +7949,41 @@ impl Executor {
         // (rubash#1336).
         if let (Some(target_text), Some(source_text)) = (&target, &source) {
             let carrier = shell_path_to_windows(target_text, &self.shell_state.env_vars);
-            let still_referenced = self.fd_table.entries.values().any(|entry| {
-                !entry.closed
-                    && matches!(
-                        entry.write.as_ref(),
-                        Some(FdWriteEndpoint::ProcessSubstitution { path, command, .. })
-                            if *path == carrier && command == source_text
-                    )
-            });
+            // rubash#3991: a walk-materialized undo save clones this
+            // endpoint into the table at the save slot, but the save
+            // is walk-local currency — the open/dup arms never wrote
+            // a ledger registration for the save slot, and the walk
+            // disposes / restores the slot silently when the list
+            // stands, so counting it would defer this close forever
+            // (the deferred body never runs). GNU's save descriptor
+            // does hold the pipe, but GNU disposes it inside the
+            // same do_redirections, before any subsequent close is
+            // decided; this flush IS the close decision, so only
+            // registered holders defer it — the same registration
+            // identity the fork-boundary sweep consults (see
+            // flush_region_owned_output_process_substitutions).
+            let mut still_referenced = false;
+            for (holder_fd, entry) in &self.fd_table.entries {
+                if entry.closed {
+                    continue;
+                }
+                let references = matches!(
+                    entry.write.as_ref(),
+                    Some(FdWriteEndpoint::ProcessSubstitution { path, command, .. })
+                        if *path == carrier && command == source_text
+                );
+                if references
+                    && self
+                        .shell_state
+                        .env_vars
+                        .get(&fd_output_process_substitution_key(*holder_fd))
+                        .map(String::as_str)
+                        == Some(source_text.as_str())
+                {
+                    still_referenced = true;
+                    break;
+                }
+            }
             if still_referenced {
                 return Ok(());
             }
@@ -8128,8 +8160,21 @@ impl Executor {
             return;
         }
         let target = fd as crate::fd::HANDLE;
-        let referenced = self.fd_table.entries.values().any(|entry| {
-            !entry.closed
+        // rubash#3998 (rework): an entry the current exec walk
+        // materialized as an undo save is not a holder of the
+        // descriptor it aliases — the wrapper disposes it when
+        // the list stands (see execute_stdio_only_exec_redirect),
+        // so the close is judged against the standing table, the
+        // same registration-as-identity rule
+        // close_persistent_output_fd applies to procsub carriers.
+        // A save of fd 1 clones the symbolic Stdout endpoint,
+        // whose OS identity is process descriptor 1 itself;
+        // counting it would strand the real descriptor open for
+        // the process's whole life (a coproc child's `exec >&-`
+        // never delivering EOF).
+        let referenced = self.fd_table.entries.iter().any(|(slot, entry)| {
+            !self.exec_walk_save_slots.contains(slot)
+                && !entry.closed
                 && (entry
                     .read
                     .as_ref()

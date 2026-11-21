@@ -1041,6 +1041,22 @@ pub struct Executor {
     /// slot). Both binder restores clear the field. None outside
     /// that bracket.
     compound_binder_saves: Option<(usize, usize, Vec<(usize, u32, u32)>)>,
+    /// rubash#3998 (rework): the fd slots the CURRENT exec walk
+    /// (execute_stdio_only_exec_redirect) has materialized as undo
+    /// saves into the fd table. A walk save is walk-local currency
+    /// — the wrapper disposes it when the list stands — so it is
+    /// not a genuine holder of the descriptor its endpoint aliases,
+    /// and close_orphaned_process_fd's still-referenced scan must
+    /// not let it defer the kernel close of an orphaned stdio
+    /// descriptor (a save of fd 1 clones the symbolic Stdout
+    /// endpoint, whose OS identity IS process descriptor 1). The
+    /// registration-as-identity rule, twin of the procsub ledger
+    /// check in close_persistent_output_fd. Armed empty by the
+    /// exec wrapper and restored on exit, so it names exactly the
+    /// live walk's saves; compound brackets' saves are scope
+    /// restore state, not walk currency, and are never recorded
+    /// here.
+    exec_walk_save_slots: Vec<u32>,
     /// GNU `command -p` (builtins/command.def CDESC_STDPATH): the
     /// standard path for the re-dispatched command's OWN lookup only.
     /// Set for the duration of the re-dispatch and consulted by the
