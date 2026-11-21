@@ -3618,7 +3618,11 @@ fn extract_funsub_body_tail(
 /// unterminated bodies fall back to the existing parameter diagnostics
 /// instead of silently substituting.
 pub(in crate::executor) fn funsub_body_is_terminated(body: &str) -> bool {
-    body.trim_end_matches([' ', '\t']).ends_with(';') || body.ends_with('\n')
+    let trimmed = body.trim_end_matches([' ', '\t']);
+    // parse.y:1115 `funsub: DOLBRACE newline_list '}'` / parse.y:4545
+    // `current_token = '\n'`: an empty or whitespace-only body is already
+    // at command-terminator position.
+    trimmed.is_empty() || trimmed.ends_with(';') || trimmed.ends_with('\n')
 }
 
 fn command_has_parse_error(command: &CommandNode) -> bool {

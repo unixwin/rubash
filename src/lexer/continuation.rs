@@ -1044,7 +1044,11 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
                                 report_open: !funsub,
                                 funsub,
                                 command: false,
-                                term_ready: false,
+                                // parse.y:1115 (`funsub: DOLBRACE newline_list '}'`) and
+                                // parse.y:4545 (`current_token = '\n'`): a funsub starts
+                                // at command-terminator position so empty `${ }` / `${\t}`
+                                // closes on the same line without a `;` or `\n`.
+                                term_ready: funsub,
                                 case_depth_at_push: 0,
                                 array_list: false,
                                 pattern_paren: false,
@@ -5910,7 +5914,11 @@ pub(crate) fn close_char_residuals_advance(
                                 report_open: !funsub,
                                 funsub,
                                 command: false,
-                                term_ready: false,
+                                // parse.y:1115 (`funsub: DOLBRACE newline_list '}'`) and
+                                // parse.y:4545 (`current_token = '\n'`): a funsub starts
+                                // at command-terminator position so empty `${ }` / `${\t}`
+                                // closes on the same line without a `;` or `\n`.
+                                term_ready: funsub,
                                 case_depth_at_push: 0,
                                 array_list: false,
                                 pattern_paren: false,
@@ -7191,6 +7199,14 @@ mod close_char_residual_incremental_tests {
         // term_ready funsub closure across lines (`${ a` then `; }`).
         assert_both_modes(&["echo ${ a", "; }"]);
         assert_both_modes(&["echo ${ a; }", ""]);
+        // Empty same-line funsub (`${ }`, `${  }`, `${\t}`, `${| }`) closes immediately
+        // (parse.y:1115 `funsub: DOLBRACE newline_list '}'`, rubash#3972).
+        assert_both_modes(&["echo ${ }", ""]);
+        assert_both_modes(&["echo ${  }", ""]);
+        assert_both_modes(&["echo ${\t}", ""]);
+        assert_both_modes(&["echo ${| }", ""]);
+        // Non-empty funsub without terminator still stays open across lines.
+        assert_both_modes(&["echo ${ a }", ""]);
         // The funsub `}` only closes at command position after a
         // terminator; a closed subshell inside arms it.
         assert_both_modes(&["echo ${ (a)", "; }"]);
