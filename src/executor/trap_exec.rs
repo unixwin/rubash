@@ -1486,12 +1486,6 @@ impl Executor {
         cmd: &CommandNode,
     ) -> Result<(), ExecuteError> {
         let saved_read_generation = self.enter_read_unit();
-        // rubash#2773: a parse_and_execute string is a fresh READ unit
-        // (evalstring.c pushes it as parser input), so its lines are
-        // echoed at this read boundary when verbose is on (flags.c:284
-        // echo_input_at_read = verbose_flag; parse.y:2712 prints the
-        // line as read) — never per command at execution time.
-        crate::script_driver::echo_verbose_input_lines(self, source);
         // rubash#1563: the string runs through GNU's parse_and_execute
         // (evalstring.c) — push its frame (the DISCARD fold catch, and
         // the CMD_IGNORE_RETURN errexit-clearing frame when this eval
@@ -1526,7 +1520,19 @@ impl Executor {
         // restore below runs on every path out of the unit.
         self.nohist_parse_depth
             .set(self.nohist_parse_depth.get() + 1);
-        let result = self.execute_eval_source_inner(source, caller_line, cmd);
+        // rubash#3320: GNU builtins/evalstring.c:359-451 parse_and_execute
+        // loops command-by-command, calling shell_getc (parse.y:2712) to
+        // read physical lines on demand so mid-string `set -v` / `set +v`
+        // toggles take effect for subsequent lines. Single-line evals
+        // are read all at once at entry; multi-line evals gather and
+        // execute group-by-group via `read_next_source_group`.
+        let result = if source.contains('\n') {
+            self.execute_eval_source_grouped(source, caller_line, cmd)
+        } else {
+            crate::script_driver::echo_verbose_input_lines(self, source);
+            self.execute_eval_source_inner(source, caller_line, cmd, true, true)
+                .0
+        };
         self.nohist_parse_depth
             .set(self.nohist_parse_depth.get() - 1);
         self.pin_extglob_gate_to_live();
@@ -1540,12 +1546,50 @@ impl Executor {
         result
     }
 
-    fn execute_eval_source_inner(
+    fn execute_eval_source_grouped(
         &mut self,
         source: &str,
         caller_line: usize,
         cmd: &CommandNode,
     ) -> Result<(), ExecuteError> {
+        self.with_compound_output_redirects(cmd, |executor| {
+            let raw_lines: Vec<&str> = source.split_inclusive('\n').collect();
+            let mut index = 0usize;
+            let mut any_commands = false;
+            while let Some((pending, start_line, _group, _feeder_tokens, _gather_info)) =
+                crate::script_driver::read_next_source_group(executor, &raw_lines, &mut index)
+            {
+                let group_caller_line = caller_line + start_line.saturating_sub(1);
+                let (res, had_commands, had_parse_error) = executor.execute_eval_source_inner(
+                    &pending,
+                    group_caller_line,
+                    cmd,
+                    false,
+                    false,
+                );
+                if had_commands {
+                    any_commands = true;
+                }
+                res?;
+                if had_parse_error {
+                    break;
+                }
+            }
+            if !any_commands {
+                executor.exit_code = 0;
+            }
+            Ok(())
+        })
+    }
+
+    fn execute_eval_source_inner(
+        &mut self,
+        source: &str,
+        caller_line: usize,
+        cmd: &CommandNode,
+        wrap_redirects: bool,
+        reset_empty_exit: bool,
+    ) -> (Result<(), ExecuteError>, bool, bool) {
         // The extglob gate for this unit is pinned by the caller
         // (execute_eval_source) for the unit's whole duration, parse
         // AND execution (rubash#2876). GNU evalstring.c
@@ -1592,13 +1636,17 @@ impl Executor {
                 source_line_offset: caller_line.saturating_sub(1),
             },
         );
-        self.apply_command_output_redirects(cmd, &mut ast)?;
+        if wrap_redirects {
+            if let Err(err) = self.apply_command_output_redirects(cmd, &mut ast) {
+                return (Err(err), false, false);
+            }
+        }
         crate::script_driver::apply_parse_error_unit_voiding(&mut ast);
         // GNU builtins/evalstring.c:351 parse_and_execute: last_result starts
         // at EXECUTION_SUCCESS, so a string that parses to zero commands
         // (empty, blank, or comment-only) returns 0 instead of preserving $?
         // (rubash#1013: `false; eval ""; echo $?` -> 0).
-        if ast.commands.is_empty() {
+        if ast.commands.is_empty() && reset_empty_exit {
             self.exit_code = 0;
         }
         // A syntax error inside the eval string makes eval return 2;
@@ -1635,9 +1683,13 @@ impl Executor {
         // indirection_level around the eval'd list, so under `set -x`
         // the body's traces render one PS4 level deeper than the eval
         // line itself (`++ echo ...`) — rubash#1341.
-        let result = self.with_compound_output_redirects(cmd, |executor| {
-            executor.with_xtrace_indirection(|executor| executor.execute_ast(&ast))
-        });
+        let result = if wrap_redirects {
+            self.with_compound_output_redirects(cmd, |executor| {
+                executor.with_xtrace_indirection(|executor| executor.execute_ast(&ast))
+            })
+        } else {
+            self.with_xtrace_indirection(|executor| executor.execute_ast(&ast))
+        };
         self.eval_list_depth.set(saved_eval_list_depth);
 
         self.resume_alias_streamed(saved_alias_streamed);
@@ -1735,7 +1787,11 @@ impl Executor {
                 // runs (pe_dispose), then the Err keeps unwinding.
                 if self.in_subshell_environment() {
                     self.absorb_failglob_discard();
-                    return Err(ExecuteError::ExpansionFailure(code));
+                    return (
+                        Err(ExecuteError::ExpansionFailure(code)),
+                        !no_commands,
+                        false,
+                    );
                 }
                 self.exit_code = code;
                 // rubash#753: the escaped Err can only be a failglob /
@@ -1803,7 +1859,7 @@ impl Executor {
                 // break, not an exit jump.
                 if parser_error_errexited {
                     if let Err(ExecuteError::ExitCode(code)) = other {
-                        return Err(self.errexit_exit(code));
+                        return (Err(self.errexit_exit(code)), !no_commands, true);
                     }
                 }
                 other
@@ -1811,10 +1867,14 @@ impl Executor {
         };
         // rubash#1013: see `no_commands` above — an empty eval string
         // that ran without error reports success, not the stale status.
-        if eval_result.is_ok() && no_commands {
+        if eval_result.is_ok() && no_commands && reset_empty_exit {
             self.exit_code = 0;
         }
-        eval_result
+        (
+            eval_result,
+            !no_commands,
+            has_parse_error || parse_error_raised_during_eval,
+        )
     }
 
     pub fn run_exit_trap(&mut self) -> Result<i32, ExecuteError> {
@@ -2001,6 +2061,9 @@ impl Executor {
         // per action command with $BASH_COMMAND unchanged). The window
         // bit's only job is the BASH_COMMAND freeze, which
         // run_debug_trap consults (exit_trap_running below).
+        // rubash#3320: GNU trap.c:1071 runs the EXIT trap action through
+        // parse_and_execute, so verbose echoes the action lines at read time.
+        crate::script_driver::echo_verbose_input_lines(self, &action);
         let saved_exit_trap_running = std::mem::replace(&mut self.exit_trap_running, true);
         let mut result = self.with_xtrace_indirection(|executor| executor.execute_ast(&ast));
         finish_trap_action_eof(self, trap_eof_diag, &mut result);
@@ -2251,6 +2314,12 @@ impl Executor {
         // window (debugger consults and their evaluations run under
         // debug_trap_running but outside this flag, and keep the
         // unwind channel).
+        // rubash#3320: GNU trap.c:1285-1290 runs the DEBUG trap action
+        // through _run_trap_internal -> parse_and_execute, echoing under
+        // verbose unless suppress_debug_trap_verbose is set (fc.def:540).
+        if !self.suppress_debug_trap_verbose.get() {
+            crate::script_driver::echo_verbose_input_lines(self, &action);
+        }
         let saved_debug_action = std::mem::replace(&mut self.debug_action_running, true);
         let mut result = self.with_xtrace_indirection(|executor| executor.execute_ast(&ast));
         finish_trap_action_eof(self, trap_eof_diag, &mut result);
@@ -2420,6 +2489,9 @@ impl Executor {
         let saved_inherited = self.shell_state.inherited_loop_depth;
         self.shell_state.loop_depth = 0;
         self.shell_state.inherited_loop_depth = 0;
+        // rubash#3320: GNU trap.c:1340,1200 runs the RETURN trap action
+        // through _run_trap_internal -> parse_and_execute.
+        crate::script_driver::echo_verbose_input_lines(self, &action);
         let mut result = self.with_xtrace_indirection(|executor| executor.execute_ast(&ast));
         finish_trap_action_eof(self, trap_eof_diag, &mut result);
         self.shell_state.loop_depth = saved_loop_depth;
@@ -3102,6 +3174,9 @@ impl Executor {
             }
             // trap.c:496 runs the action through parse_and_execute: the
             // xtrace indirection level rises by one for the action.
+            // rubash#3320: GNU trap.c:496 runs the signal trap action
+            // through parse_and_execute.
+            crate::script_driver::echo_verbose_input_lines(self, &action);
             let mut result = self.with_xtrace_indirection(|executor| executor.execute_ast(&ast));
             finish_trap_action_eof(self, trap_eof_diag, &mut result);
             match old_trap_context {
@@ -3973,6 +4048,9 @@ impl Executor {
             trap_eof_diag = Some((close, report_line, word_pair));
         }
         let saved_alias_streamed = self.mark_alias_streamed();
+        // rubash#3320: GNU trap.c:1324,1200 runs the ERR trap action
+        // through _run_trap_internal -> parse_and_execute.
+        crate::script_driver::echo_verbose_input_lines(self, &action);
         let mut result = self.with_xtrace_indirection(|executor| executor.execute_ast(&ast));
         finish_trap_action_eof(self, trap_eof_diag, &mut result);
         self.resume_alias_streamed(saved_alias_streamed);
@@ -4111,6 +4189,9 @@ impl Executor {
                 );
                 trap_eof_diag = Some((close, report_line, word_pair));
             }
+            // rubash#3320: GNU trap.c:496 runs the SIGCHLD trap action through
+            // parse_and_execute, so verbose echoes the action lines at read time.
+            crate::script_driver::echo_verbose_input_lines(self, &action);
             result = self.with_xtrace_indirection(|executor| executor.execute_ast(&ast));
             finish_trap_action_eof(self, trap_eof_diag, &mut result);
             if result.is_err() {

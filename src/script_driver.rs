@@ -6331,6 +6331,11 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
     macro_rules! accept_line {
         ($line:expr) => {{
             let line: &str = $line;
+            // rubash#3320: GNU parse.y:2712 shell_getc echoes the accepted
+            // input line at the read point when verbose (echo_input_at_read)
+            // is active, before command execution (covering both history
+            // and fallback run_source_with_line_offset routes).
+            echo_verbose_input_lines(executor, line);
             if pending.is_empty() {
                 pending_start_line = next_line;
             }
