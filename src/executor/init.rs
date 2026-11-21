@@ -1609,7 +1609,6 @@ impl Executor {
             disposal_wait_count: Cell::new(0),
             disposal_prev_mark: Cell::new(0),
             coproc_stderr_forwarders: HashMap::new(),
-            coproc_displaced_stdout_writers: HashMap::new(),
             assignment_output_process_substitutions: Vec::new(),
             assignment_input_process_substitution_files: Vec::new(),
             defer_locale_assignment_warnings: Cell::new(false),

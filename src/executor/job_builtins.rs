@@ -2550,10 +2550,11 @@ impl Executor {
             return;
         }
 
-        // rubash#1632: the displaced stdout writer's lifetime ends with
-        // the coproc (on Unix the child's own copy already died with
-        // it; this drops the parent-held copy where one was kept).
-        self.coproc_displaced_stdout_writers.remove(&pid);
+        // rubash#4008: the displaced stdout writer's lifetime already
+        // ended with the child — it rode a save-slot fd into the child
+        // (Unix) or a detached waiter dropped it at the child's exit
+        // (other hosts), matching GNU's child-held save fd. Nothing to
+        // settle here.
         self.close_coproc_endpoints(pid);
 
         let endpoint_fds = self
