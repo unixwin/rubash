@@ -368,25 +368,6 @@ golden_fixture!(golden_k4_declare_options => "k4-declare-options", timeout 60, c
 golden_fixture!(golden_k4_getopts_state => "k4-getopts-state", timeout 60, corpus []);
 golden_fixture!(golden_k4_expansion_fixes => "k4-expansion-fixes", timeout 60, corpus []);
 
-/// Upstream suite slices pinned as rubash snapshots (coordinator list,
-/// 2026-09-27): the slices the lanes rely on for parity ledgers.
-#[cfg(windows)]
-const SNAPSHOT_SUITES: &[&str] = &[
-    "arith-for",
-    "braces",
-    "case",
-    "comsub",
-    "comsub2",
-    "dbg-support",
-    "errors",
-    "exp",
-    "heredoc",
-    "nquote",
-    "quote",
-    "redir",
-    "rhs-exp",
-];
-
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -409,10 +390,12 @@ fn minimal_path() -> String {
         // it when present (System32 keeps precedence; on a machine
         // without Git the path degrades to the old System32-only shape).
         let mut path = r"C:\Windows\System32".to_string();
-        let git_usr_bin = r"C:\Program Files\Git\usr\bin";
-        if Path::new(git_usr_bin).is_dir() {
-            path.push(';');
-            path.push_str(git_usr_bin);
+        for git_usr_bin in [r"C:\Program Files\Git\usr\bin", r"D:\Git\usr\bin"] {
+            if Path::new(git_usr_bin).is_dir() {
+                path.push(';');
+                path.push_str(git_usr_bin);
+                break;
+            }
         }
         path
     } else {
@@ -994,6 +977,11 @@ fn space_free_this_sh(scratch: &Path) -> (PathBuf, Option<PathBuf>) {
 
 #[cfg(windows)]
 fn run_suite_snapshot(suite: &str) {
+    let _heavy_guard = if suite == "comsub2" {
+        Some(heavy_lock())
+    } else {
+        None
+    };
     let root = manifest_dir();
     let src = root.join(UPSTREAM_TESTS);
     // rubash#812: anchor the scratch at a space-free root so the suite's
@@ -1171,14 +1159,43 @@ fn run_suite_snapshot(suite: &str) {
 }
 
 #[cfg(windows)]
-#[test]
-fn upstream_suite_slice_snapshots() {
-    let root = manifest_dir();
-    std::env::set_current_dir(&root).expect("cwd to manifest dir");
-    for suite in SNAPSHOT_SUITES {
-        run_suite_snapshot(suite);
-    }
+macro_rules! snapshot_slice {
+    ($fn_name:ident => $suite:literal) => {
+        #[test]
+        fn $fn_name() {
+            let root = manifest_dir();
+            std::env::set_current_dir(&root).expect("cwd to manifest dir");
+            run_suite_snapshot($suite);
+        }
+    };
 }
+
+#[cfg(windows)]
+snapshot_slice!(upstream_suite_slice_snapshots_arith_for => "arith-for");
+#[cfg(windows)]
+snapshot_slice!(upstream_suite_slice_snapshots_braces => "braces");
+#[cfg(windows)]
+snapshot_slice!(upstream_suite_slice_snapshots_case => "case");
+#[cfg(windows)]
+snapshot_slice!(upstream_suite_slice_snapshots_comsub => "comsub");
+#[cfg(windows)]
+snapshot_slice!(upstream_suite_slice_snapshots_comsub2 => "comsub2");
+#[cfg(windows)]
+snapshot_slice!(upstream_suite_slice_snapshots_dbg_support => "dbg-support");
+#[cfg(windows)]
+snapshot_slice!(upstream_suite_slice_snapshots_errors => "errors");
+#[cfg(windows)]
+snapshot_slice!(upstream_suite_slice_snapshots_exp => "exp");
+#[cfg(windows)]
+snapshot_slice!(upstream_suite_slice_snapshots_heredoc => "heredoc");
+#[cfg(windows)]
+snapshot_slice!(upstream_suite_slice_snapshots_nquote => "nquote");
+#[cfg(windows)]
+snapshot_slice!(upstream_suite_slice_snapshots_quote => "quote");
+#[cfg(windows)]
+snapshot_slice!(upstream_suite_slice_snapshots_redir => "redir");
+#[cfg(windows)]
+snapshot_slice!(upstream_suite_slice_snapshots_rhs_exp => "rhs-exp");
 
 // ---------------------------------------------------------------------------
 // Perf canaries: generous absolute bounds that only fail on the O(N^2)
