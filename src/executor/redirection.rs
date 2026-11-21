@@ -685,6 +685,89 @@ impl Executor {
         in_pipeline_stage
     }
 
+    /// The ordered candidate list the reject gate walks: `cmd.redirects`
+    /// plus the legacy mirror fields, deduplicated by semantic identity.
+    /// Semantic identity of a redirect for this scan (the same key the
+    /// expand_redirect_target memo uses): the ordered `redirects` list
+    /// plus the legacy mirror fields may carry THE SAME source redirect
+    /// twice with cosmetic differences — re-validating a duplicate
+    /// would see the first copy's ordered fd effects (a move marks its
+    /// source fd closed) and misreport a dup that already succeeded.
+    /// GNU has exactly one do_redirections list (redir.c:246).
+    fn redirect_gate_candidates<'a>(cmd: &'a CommandNode) -> Vec<&'a Redirect> {
+        let semantic_key = |redirect: &Redirect| {
+            format!(
+                "{:?}\x1f{}\x1f{:?}\x1f{}",
+                redirect.kind, redirect.operator, redirect.fd, redirect.target
+            )
+        };
+        let mut candidates: Vec<&Redirect> = cmd.redirects.iter().collect();
+        let mut seen_keys: std::collections::HashSet<String> = candidates
+            .iter()
+            .map(|redirect| semantic_key(redirect))
+            .collect();
+        for redirect in [
+            cmd.redirect_in.as_deref(),
+            cmd.redirect_out.as_deref(),
+            cmd.append.as_deref(),
+            cmd.redirect_err.as_deref(),
+            cmd.redirect_err_append.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if seen_keys.insert(semantic_key(redirect)) {
+                candidates.push(redirect);
+            }
+        }
+        candidates
+    }
+
+    /// rubash#4036: GNU execute_simple_command expands the command's
+    /// words (execute_cmd.c:4617 expand_words — command words first, then
+    /// do_assignment_statements binds the prefix assignments into the
+    /// still-invisible temporary_env, subst.c:13219/13141) and prints the
+    /// xtrace head (execute_cmd.c:4648-4649 xtrace_print_word_list)
+    /// BEFORE any do_redirections call (execute_builtin_or_function
+    /// execute_cmd.c:5606, execute_disk_command execute_cmd.c:4938+,
+    /// execute_null_command execute_cmd.c:4268). Redirect words expand
+    /// inside that later do_redirections walk (redir.c:298
+    /// redirection_expand) with expanding_redir set, which hides the
+    /// temporary environment from the expansion (redir.c:310-315,
+    /// variables.c:1978) — so `a=9 echo hi > f$a` still names the OUTER
+    /// a's file.
+    ///
+    /// Rubash reaches the same invisibility by ordering instead of a
+    /// flag: this pre-pass expands every redirect target the reject gate
+    /// will validate — in the gate's own left-to-right candidate order —
+    /// BEFORE apply_temporary_assignments binds the prefix assignments.
+    /// The results ride the redirect_target_memo, so the gate's later
+    /// expand_redirect_target calls (redirection.rs reject walk) are
+    /// memo hits and never re-expand against the bound tempenv. Running
+    /// the expansion here (rather than inside the gate) is what lets the
+    /// simple-command xtrace head move ahead of the gate's diagnostics:
+    /// `set -x; echo hi 1>&3` traces `+ echo hi` before `3: Bad file
+    /// descriptor`, matching GNU. Expansion side effects (command
+    /// substitutions inside redirect words) keep their pre-existing
+    /// position ahead of the head line — the same position the gate's
+    /// own expansion occupied before this change — while every
+    /// diagnostic the gate renders now lands after the trace, which is
+    /// the ordering GNU's do_redirections-after-xtrace_print_word_list
+    /// produces.
+    ///
+    /// The here-string target is the one candidate the gate never
+    /// expands (its `continue` precedes the expand site): its word is
+    /// expanded at apply time, after the head line — the GNU position —
+    /// so it is skipped here too.
+    pub(in crate::executor) fn preexpand_redirect_targets(&self, cmd: &CommandNode) {
+        for redirect in Self::redirect_gate_candidates(cmd) {
+            if matches!(redirect.kind, crate::parser::RedirectKind::HereString) {
+                continue;
+            }
+            let _ = self.expand_redirect_target(redirect);
+        }
+    }
+
     pub(in crate::executor) fn reject_invalid_redirects(
         &mut self,
         cmd: &CommandNode,
@@ -715,40 +798,7 @@ impl Executor {
                 .borrow_mut()
                 .retain(|_, (_, _, parked_generation)| *parked_generation == generation);
         }
-        // Semantic identity of a redirect for this scan (the same key the
-        // expand_redirect_target memo uses): the ordered `redirects` list
-        // plus the legacy mirror fields may carry THE SAME source redirect
-        // twice with cosmetic differences — re-validating a duplicate
-        // would see the first copy's ordered fd effects (a move marks its
-        // source fd closed) and misreport a dup that already succeeded.
-        // GNU has exactly one do_redirections list (redir.c:246).
-        let semantic_key = |redirect: &Redirect| {
-            format!(
-                "{:?}\x1f{}\x1f{:?}\x1f{}",
-                redirect.kind, redirect.operator, redirect.fd, redirect.target
-            )
-        };
-        let mut redirects = cmd.redirects.iter();
-        let mut candidates = Vec::new();
-        candidates.extend(redirects.by_ref());
-        let mut seen_keys: std::collections::HashSet<String> = candidates
-            .iter()
-            .map(|redirect| semantic_key(redirect))
-            .collect();
-        for redirect in [
-            cmd.redirect_in.as_deref(),
-            cmd.redirect_out.as_deref(),
-            cmd.append.as_deref(),
-            cmd.redirect_err.as_deref(),
-            cmd.redirect_err_append.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if seen_keys.insert(semantic_key(redirect)) {
-                candidates.push(redirect);
-            }
-        }
+        let candidates = Self::redirect_gate_candidates(cmd);
 
         // GNU applies the list left to right (redir.c:246 do_redirections
         // for-loop); a dup only sees fds opened by redirects BEFORE it
