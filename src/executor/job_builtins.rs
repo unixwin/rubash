@@ -5076,7 +5076,10 @@ impl Executor {
                     // re-executed text runs — GNU's echo_input_at_read
                     // order (fc.def:539).
                     executor.write_default_stderr(&echo)?;
-                    executor.execute_ast(&ast)
+                    let saved_suppress = executor.suppress_debug_trap_verbose.replace(true);
+                    let res = executor.execute_ast(&ast);
+                    executor.suppress_debug_trap_verbose.set(saved_suppress);
+                    res
                 })?;
                 Ok(self.exit_code)
             }

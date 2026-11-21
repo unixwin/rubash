@@ -2373,6 +2373,7 @@ impl Executor {
             // break/continue in the child's own loops is a plain loop
             // exit there (GNU prints the post-loop body verbatim).
             debug_action_running: false,
+            suppress_debug_trap_verbose: std::cell::Cell::new(false),
             debug_trap_action_cache: std::cell::RefCell::new(None),
             // WP-3: a command-substitution child never inherits the
             // debug session (DE-12: its frames are synthesized in a

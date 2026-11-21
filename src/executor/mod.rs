@@ -1077,6 +1077,9 @@ pub struct Executor {
     /// a condition that unwinds is a failed condition; a typed
     /// `break 1` preempts the pending command like script text).
     debug_action_running: bool,
+    /// GNU trap.c:1286 + builtins/fc.def:540: `fc` suppresses verbose
+    /// echo for DEBUG trap actions while re-executing the edited list.
+    pub(in crate::executor) suppress_debug_trap_verbose: std::cell::Cell<bool>,
     /// rubash#375: parse-once cache for the DEBUG trap action. GNU parses a
     /// trap action once at `trap` invocation (trap.c read_trap_action) and
     /// runs the cached parse per firing; re-tokenizing + re-parsing the same
