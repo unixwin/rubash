@@ -1874,8 +1874,10 @@ impl Executor {
         ) {
             return None;
         }
-        if is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, &resolved) {
-            return Some(None);
+        if is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, &resolved)
+            || self.dynamic_name_shadowed(&resolved)
+        {
+            return None;
         }
         Some(
             self.dynamic_stack_array_values(&resolved)

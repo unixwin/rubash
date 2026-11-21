@@ -502,7 +502,8 @@ impl Executor {
                 // the class-2 status (rubash#2369). Readonly is tested
                 // first — a user-marked readonly carrier reports
                 // err_readonly in GNU too.
-                let noassign = !readonly && is_noassign_bash_array(&target);
+                let noassign =
+                    !readonly && is_live_noassign_bash_array(&self.shell_state.env_vars, &target);
                 if (is_positional || readonly || noassign)
                     && self.parameter_assignment_required(name, require_non_empty)
                 {
@@ -2390,7 +2391,7 @@ impl Executor {
                     .unwrap_or_else(|| name.to_string())
             });
         if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, &target)
-            || is_noassign_bash_array(&target)
+            || is_live_noassign_bash_array(&self.shell_state.env_vars, &target)
         {
             return;
         }

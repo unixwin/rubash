@@ -463,7 +463,7 @@ impl Executor {
         // and the store below, whose tail syncs the shape state
         // (rubash#1364, rubash#2369). The carriers stay swallowed
         // (the dedicated GROUPS arm above is subsumed by this check).
-        if is_noassign_bash_array(name) {
+        if is_live_noassign_bash_array(&self.shell_state.env_vars, name) {
             self.exit_code = 0;
             return true;
         }

@@ -2350,21 +2350,54 @@ impl Executor {
             .or_insert_with(bash_path_value);
         store_indexed_array(env_vars, "BASH_VERSINFO", bash_versinfo_values());
         mark_env_name(env_vars, READONLY_VARS, "BASH_VERSINFO");
-        store_indexed_array(env_vars, "BASH_ARGC", Vec::new());
-        store_indexed_array(env_vars, "BASH_ARGV", Vec::new());
-        store_indexed_array(env_vars, "BASH_LINENO", vec!["0".to_string()]);
-        store_indexed_array(env_vars, "BASH_SOURCE", Vec::new());
-        env_vars.insert("BASH_CMDS".to_string(), "()".to_string());
-        mark_env_name(env_vars, ASSOC_VARS, "BASH_CMDS");
-        env_vars.insert("BASH_ALIASES".to_string(), "()".to_string());
-        mark_env_name(env_vars, ASSOC_VARS, "BASH_ALIASES");
+        let preserve_imported_or_unset = |env_vars: &mut crate::shell::var_table::VarTable,
+                                          name: &str| {
+            if !keep_shlvl && env_vars.contains_key(name) {
+                // GNU variables.c:516 + 1255-1280 + 1831-1833: an imported
+                // environment entry is bound att_exported|att_imported as an
+                // ordinary scalar before initialize_dynamic_variables runs, so
+                // init_dynamic_array_var/init_dynamic_assoc_var/init_funcname_var
+                // find the existing cell and return without installing the
+                // dynamic hooks or att_noassign/att_nounset.
+                mark_env_name(env_vars, EXPORTED_VARS, name);
+                mark_env_name(env_vars, UNSET_DYNAMIC_VARS, name);
+                true
+            } else {
+                is_marked_var(env_vars, UNSET_DYNAMIC_VARS, name)
+            }
+        };
+        if !preserve_imported_or_unset(env_vars, "BASH_ARGC") {
+            store_indexed_array(env_vars, "BASH_ARGC", Vec::new());
+        }
+        if !preserve_imported_or_unset(env_vars, "BASH_ARGV") {
+            store_indexed_array(env_vars, "BASH_ARGV", Vec::new());
+        }
+        if !preserve_imported_or_unset(env_vars, "BASH_LINENO") {
+            store_indexed_array(env_vars, "BASH_LINENO", vec!["0".to_string()]);
+        }
+        if !preserve_imported_or_unset(env_vars, "BASH_SOURCE") {
+            store_indexed_array(env_vars, "BASH_SOURCE", Vec::new());
+        }
+        if !preserve_imported_or_unset(env_vars, "BASH_CMDS") {
+            env_vars.insert("BASH_CMDS".to_string(), "()".to_string());
+            mark_env_name(env_vars, ASSOC_VARS, "BASH_CMDS");
+        }
+        if !preserve_imported_or_unset(env_vars, "BASH_ALIASES") {
+            env_vars.insert("BASH_ALIASES".to_string(), "()".to_string());
+            mark_env_name(env_vars, ASSOC_VARS, "BASH_ALIASES");
+        }
         // The stored DIRSTACK cell starts as an empty indexed array, not
         // scalar-empty: a bare `declare -a` listing prints the last
         // materialized cell (variables.c get_dirstack runs on named access
         // only), and GNU shows `declare -a DIRSTACK=()` there.
-        store_indexed_array(env_vars, "DIRSTACK", Vec::new());
-        env_vars.insert("FUNCNAME".to_string(), String::new());
-        mark_env_name(env_vars, ARRAY_VARS, "FUNCNAME");
+        if !preserve_imported_or_unset(env_vars, "DIRSTACK") {
+            store_indexed_array(env_vars, "DIRSTACK", Vec::new());
+        }
+        if !preserve_imported_or_unset(env_vars, "FUNCNAME") {
+            env_vars.insert("FUNCNAME".to_string(), String::new());
+            mark_env_name(env_vars, ARRAY_VARS, "FUNCNAME");
+        }
+        let _ = preserve_imported_or_unset(env_vars, "GROUPS");
         env_vars
             .entry("HOSTTYPE".to_string())
             .or_insert_with(hosttype_value);

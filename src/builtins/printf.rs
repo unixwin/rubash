@@ -584,7 +584,8 @@ fn assign_printf_output(
     if matches!(
         readonly_name,
         "BASH_ARGC" | "BASH_ARGV" | "BASH_LINENO" | "BASH_SOURCE" | "FUNCNAME" | "GROUPS"
-    ) {
+    ) && !is_marked(env_vars, "__RUBASH_UNSET_DYNAMIC_VARS", readonly_name)
+    {
         return Ok(Some(1));
     }
     if let Some((base, subscript)) = parse_printf_array_target(name) {
