@@ -581,6 +581,20 @@ pub(in crate::executor) fn bash_command_text(cmd: &CommandNode) -> String {
     if let Some(redirect) = own_redirect(cmd.redirect_err_append.as_deref()) {
         parts.push(err_append_source_text(cmd, redirect));
     }
+    // Numbered redirects (fd>=3) and `{var}` dynamic fds live only in the
+    // ordered `redirects` list — the mirror fields above cannot represent
+    // them. GNU print_cmd.c:1013 print_simple_command prints every
+    // redirection via print_redirection_list, so reprint them here too or a
+    // `-c` respawn child drops `8>&10-` / `{v}>&10-` inside simple commands
+    // (rubash#4047).
+    for redirect in &cmd.redirects {
+        if own_redirect(Some(redirect)).is_some()
+            && redirect.is_list_only_redirect()
+            && redirect.kind != crate::parser::RedirectKind::HereDoc
+        {
+            parts.push(format_redirect(&redirect.operator, redirect));
+        }
+    }
     // rubash#2388: heredoc headers ride the redirect parts (the bodies
     // attach after the joined line, print_cmd.c-style).
     let (heredoc_headers, heredoc_bodies) = heredoc_headers_and_bodies(cmd);
