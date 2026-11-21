@@ -217,6 +217,23 @@ fn validate_respawn_proof_fd(fd: std::os::unix::io::RawFd, nonce_hex: &str) -> b
     n == 0
 }
 
+/// Device+inode identity of a live descriptor, for distinguishing
+/// internal standard-stream transport duplicates from independent user
+/// descriptors. GNU's forked subshell copies the parent's descriptor
+/// table as-is (`execute_cmd.c:1576 execute_in_subshell`); it never
+/// mints extra aliases of stdin/stdout/stderr. The spawned-child
+/// plumbing around rubash's exec-emulated fork sometimes does, so an
+/// unstamped alias at respawn birth is transport residue rather than a
+/// user redirection.
+#[cfg(unix)]
+fn fd_device_inode(fd: u32) -> Option<(u64, u64)> {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd as std::os::unix::io::RawFd, &mut st) } != 0 {
+        return None;
+    }
+    Some((st.st_dev as u64, st.st_ino as u64))
+}
+
 /// The parent process id of this process, where the platform exposes it
 /// cheaply. Windows enumerates a Toolhelp snapshot, so callers invoke
 /// this only when a provenance claim is actually present.
@@ -1312,6 +1329,14 @@ impl Executor {
         // NOT in FORK_TRANSPORT_KEYS: the proof is per-spawn, never
         // forwarded — a grandchild's proof is minted fresh by its own
         // spawner.)
+        // The proof fd is transport plumbing, never a user slot. Keep
+        // its number for the birth-fd coverage verdict below: validation
+        // has already closed the live descriptor, but the construction-
+        // start snapshot still names it.
+        #[cfg(unix)]
+        let respawn_proof_fd = env_vars
+            .get(RESPAWN_PROOF_FD_KEY)
+            .and_then(|value| value.parse::<u32>().ok());
         env_vars.remove(RESPAWN_PROOF_FD_KEY);
         env_vars.remove(RESPAWN_PROOF_KEY);
         mirror_env_remove(RESPAWN_PROOF_FD_KEY);
@@ -1875,6 +1900,57 @@ impl Executor {
             history_provider: None,
             provider_stamp_ledger: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
         };
+        // rubash#4045: a stamped handle names the SPAWNER's carrier
+        // duplicate — transport staging, not the descriptor GNU's
+        // forked child ends up with (execute_cmd.c:1576
+        // execute_in_subshell runs in the make_child fork, which
+        // copies the parent's fd table wholesale at the user slot
+        // numbers and closes only the redirect bitmap,
+        // execute_cmd.c:1709/:377). On Unix the carrier arrives open
+        // in this process — at its stamped number under
+        // FD_DELIVERY_AT_STAMPED, or at its own number as the pin
+        // contract's restore fallback — and left open after the
+        // restore it leaks twice: the process-inherited adoption
+        // below installs its number as a user slot, and the
+        // non-CLOEXEC descriptor rides every spawned child raw
+        // (`( ls /proc/self/fd ) &` showed `fd 12 -> file` where
+        // GNU has only 0/1/2/3). The restore therefore installs
+        // its own CLOEXEC duplicate of each carrier (the same
+        // dup_adopted_fd contract as the slot adoption) and records
+        // the carrier number; the staging descriptors are retired
+        // after the whole table is installed — deferred because one
+        // carrier can serve several slots (a shared read/write
+        // description dups onto each arm) and a later consume must
+        // still find it open.
+        #[cfg(unix)]
+        let mut spent_carriers: std::collections::BTreeSet<crate::fd::HANDLE> =
+            std::collections::BTreeSet::new();
+        // The slot numbers this delivery names: a carrier whose
+        // stamped number lands on one of them is NOT retired (see the
+        // keep rules in restore_handle).
+        #[cfg(unix)]
+        let delivered_slots: std::collections::BTreeSet<u32> =
+            inherited_fd_handles.keys().copied().collect();
+        #[cfg(unix)]
+        let stamped_carrier_numbers: std::collections::BTreeSet<u32> = inherited_fd_handles
+            .values()
+            .flat_map(|(read_h, write_h, _)| [read_h, write_h])
+            .flatten()
+            .map(|handle| *handle as u32)
+            .collect();
+        // rubash#4045: descriptor numbers the restore itself installed.
+        // A pin transport can already have retired its carrier in
+        // pre_exec, in which case the restore's CLOEXEC duplicate often
+        // reuses the carrier's just-freed number. The number is then no
+        // longer a spent carrier — it is the table's only copy — and
+        // closing it as transport residue is the EBADF regression the
+        // retirement pass exists to avoid. The set also keeps a raw
+        // stamped descriptor open when the fallback could not duplicate
+        // it: until EVERY slot the carrier serves owns a copy, the
+        // carrier is still delivery, not residue.
+        #[cfg(unix)]
+        let mut restored_transport_handles: std::collections::BTreeSet<crate::fd::HANDLE> =
+            std::collections::BTreeSet::new();
         for (fd, (read_h, write_h, path)) in inherited_fd_handles {
             let path = PathBuf::from(path.unwrap_or_default());
             // rubash#2333: on Unix the stamped handle is the PARENT's
@@ -1891,7 +1967,15 @@ impl Executor {
             // transfer verbatim across CreateProcess inheritance —
             // dup_adopted_fd returns None there, and the stamped
             // value stays authoritative.
-            let adopted = crate::fd::dup_adopted_fd(fd);
+            // rubash#4045: the slot-fd probe is only consulted by the
+            // pin contract; the AT_STAMPED transport never reads it —
+            // the probe's dup would just linger as an unowned
+            // descriptor.
+            let adopted = if fd_delivery_at_stamped {
+                None
+            } else {
+                crate::fd::dup_adopted_fd(fd)
+            };
             // rubash#2212/#2521: which descriptor a stamp names in
             // THIS process is a fact of the transport that delivered
             // it, declared by the spawner (FD_DELIVERY_AT_STAMPED_KEY):
@@ -1909,10 +1993,49 @@ impl Executor {
             // ("prefer the stamped descriptor when it is open")
             // adopted exactly those leftovers and rotated every
             // carrier by one (#2521).
-            let restore_handle = |stamped: crate::fd::HANDLE| {
+            // mut is needed only on unix (spent_carriers is
+            // unix-only state; Windows restores stamped verbatim).
+            #[allow(unused_mut)]
+            let mut restore_handle = |stamped: crate::fd::HANDLE| {
                 #[cfg(unix)]
-                if fd_delivery_at_stamped {
-                    return crate::fd::dup_adopted_fd(stamped as u32).unwrap_or(stamped);
+                {
+                    if fd_delivery_at_stamped || adopted.is_none() {
+                        // The carrier sits at `stamped` in this
+                        // process (the AT_STAMPED contract, or the
+                        // uninstalled pin's fallback): install the
+                        // table's own CLOEXEC duplicate and retire
+                        // the carrier — see the spent_carriers note
+                        // above the loop. A stamp whose number is a
+                        // delivered slot is kept, not retired:
+                        // AT_STAMPED delivers each carrier at its own
+                        // number, so a stamp coinciding with THIS
+                        // entry's slot is the slot's own descriptor —
+                        // while one coinciding with ANOTHER slot's
+                        // number still shows that slot a foreign
+                        // description and must close. Under the pin
+                        // contract the pin pass already overwrote
+                        // every delivered slot number with that
+                        // slot's descriptor.
+                        if let Some(handle) = crate::fd::dup_adopted_fd(stamped as u32) {
+                            let keep = stamped as u32 == fd
+                                || (!fd_delivery_at_stamped
+                                    && delivered_slots.contains(&(stamped as u32)));
+                            if !keep {
+                                spent_carriers.insert(stamped);
+                            }
+                            return handle;
+                        }
+                    } else if !delivered_slots.contains(&(stamped as u32)) {
+                        // rubash#4045: the pin landed — `adopted`
+                        // restores the slot and the carrier left at
+                        // `stamped` is spent staging: the same
+                        // retire-after-pin contract the external
+                        // child's pin_ambient_fds_and_close_carriers
+                        // applies, run here because a rubash child's
+                        // pin pass keeps the carrier open as the
+                        // adopted.is_none() fallback.
+                        spent_carriers.insert(stamped);
+                    }
                 }
                 adopted.unwrap_or(stamped)
             };
@@ -1938,6 +2061,15 @@ impl Executor {
                 },
                 None => None,
             };
+            #[cfg(unix)]
+            {
+                if let Some(rc) = &read_rc {
+                    restored_transport_handles.insert(rc.handle);
+                }
+                if let Some(rc) = &write_rc {
+                    restored_transport_handles.insert(rc.handle);
+                }
+            }
             // rubash#3655: when both arms restore, they are ONE
             // description — a single open_readwrite install, or the
             // output restore would retire the read arm (dup2
@@ -1965,12 +2097,84 @@ impl Executor {
                 (None, None) => {}
             }
         }
+        // rubash#4045: the carriers the restore consumed are spent —
+        // each is a spawner-side duplicate whose role ended when the
+        // table installed its own CLOEXEC copy (the
+        // pin_ambient_fds_and_close_carriers contract, applied to
+        // deliveries that arrive at their staging number rather than
+        // at their slot). Retire them now, before the
+        // process-inherited adoption below reclaims their numbers as
+        // user slots and before any spawn can inherit the raw
+        // non-CLOEXEC descriptors.
+        #[cfg(unix)]
+        for carrier in spent_carriers {
+            if !restored_transport_handles.contains(&carrier) {
+                crate::fd::close_handle(carrier);
+            }
+        }
         // rubash#1557: adopt whatever descriptors the process itself
         // inherited open (CI log channels, socket activation, a parent
         // shell's `3>file`) that the respawn channel did not claim.
+        //
+        // rubash#4045 narrows that rule for a validated internal
+        // respawn rather than abolishing it. GNU's forked child holds
+        // exactly the parent's descriptor table
+        // (execute_cmd.c:1576 execute_in_subshell); in rubash that
+        // table is the serialized __RUBASH_FD_* delivery. Therefore an
+        // unclaimed descriptor is ignorable ONLY when the coverage set
+        // (delivered slot numbers plus stamped carrier numbers) accounts
+        // for every still-live birth descriptor. When a face is not
+        // covered — the ambient/nested-body fallback shapes pinned by
+        // rubash#3560/#2305 — adoption stays enabled so the descriptor
+        // is not silently severed.
+        //
+        // Two birth entries are transport plumbing rather than coverage
+        // gaps: the already-consumed proof fd, and unstamped aliases of
+        // stdin/stdout/stderr minted by spawn/stdio plumbing. GNU's
+        // fork never mints such aliases (execute_cmd.c:1576), while
+        // shell-owned save descriptors are CLOEXEC implementation detail
+        // (redir.c:1296 add_undo_redirect). Close those aliases and do
+        // not let them force adoption. Any OTHER uncovered live
+        // descriptor keeps the #1557 fallback.
+        #[cfg(unix)]
+        let adopt_unclaimed_process_fds = if !internal_respawn {
+            true
+        } else {
+            let mut covered = delivered_slots.clone();
+            covered.extend(stamped_carrier_numbers.iter().copied());
+            let stdio_identities: std::collections::BTreeSet<(u64, u64)> =
+                (0u32..=2).filter_map(fd_device_inode).collect();
+            let mut stdio_aliases = Vec::new();
+            let mut has_uncovered_face = false;
+            for (fd, _, _) in &inherited_fds_snapshot {
+                if covered.contains(fd)
+                    || Some(*fd) == respawn_proof_fd
+                    || crate::fd::fd_directions(*fd).is_none()
+                {
+                    continue;
+                }
+                if fd_device_inode(*fd).is_some_and(|identity| stdio_identities.contains(&identity))
+                {
+                    stdio_aliases.push(*fd);
+                    continue;
+                }
+                has_uncovered_face = true;
+            }
+            // Retire the aliases only when they are the last residue:
+            // with any other coverage gap the #1557 fallback below must
+            // see the birth set intact.
+            if !has_uncovered_face {
+                for fd in stdio_aliases {
+                    crate::fd::close_handle(fd as crate::fd::HANDLE);
+                }
+            }
+            !has_uncovered_face
+        };
+        #[cfg(not(unix))]
+        let adopt_unclaimed_process_fds = !internal_respawn;
         executor
             .fd_table
-            .register_inherited_process_fds(&inherited_fds_snapshot);
+            .register_inherited_process_fds(&inherited_fds_snapshot, adopt_unclaimed_process_fds);
         executor
     }
 
