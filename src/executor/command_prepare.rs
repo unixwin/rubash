@@ -5051,15 +5051,21 @@ impl Executor {
         // `f <&"${X[0]}"` with an anchored empty expansion reported the
         // apply-layer fallback (`&<0x1d>: Invalid argument`) instead of the
         // gate's `"${X[0]}": Bad file descriptor` (issue #518). Placement
-        // mirrors execute_materialized_command: before the tempenv applies,
-        // because redirect words expand against the caller's bindings.
+        // mirrors execute_materialized_command (rubash#4036): the gate's
+        // diagnostics belong AFTER the xtrace head line
+        // (execute_cmd.c:4648-4649 xtrace_print_word_list precedes every
+        // do_redirections call), while its redirect-word expansion must
+        // still see the pre-tempenv bindings (redir.c:298
+        // redirection_expand, variables.c:1978) — secured for a command
+        // carrying prefix assignments by snapshotting the gate-reachable
+        // expansions into redirect_target_memo before
+        // apply_temporary_assignments binds, so the gate's own
+        // expand_redirect_target calls hit the memo. With no prefix
+        // assignments the pre-pass is a no-op and the gate expands at the
+        // GNU do_redirections position.
         let settle_superseded_net_outputs =
             self.superseded_net_output_settlement_applies(&materialized_cmd, false);
-        let redirect_rejection =
-            match self.reject_invalid_redirects(&materialized_cmd, settle_superseded_net_outputs) {
-                Ok(rejection) => rejection,
-                Err(error) => return Some(Err(error)),
-            };
+        self.preexpand_redirect_targets(&materialized_cmd);
         let assignment_raws = (materialized_cmd.assignment_raws.len()
             == materialized_cmd.assignments.len())
         .then(|| materialized_cmd.assignment_raws.as_slice());
@@ -5068,6 +5074,78 @@ impl Executor {
             assignment_raws,
             &materialized_cmd.words,
         );
+        // POSIX-mode notes item 36 (GNU 5.3 cell matrix): a failed readonly
+        // tempenv assignment before a FUNCTION skips the function and
+        // abandons the rest of the command list with status 1 (subshell
+        // forms exit the subshell with 1, the parent continues) — same
+        // skip-and-abandon contract as the execute_materialized_command
+        // path; only a SPECIAL builtin command word would exit the shell.
+        if assignments_failed && self.posix_assignment_failure_is_fatal() {
+            self.exit_code = 1;
+            // Restore the partial tempenv binds before unwinding — the
+            // skip-and-abandon contract keeps the shell (or the enclosing
+            // subshell boundary) alive, and an unbalanced tempenv mark would
+            // corrupt every later restore. The process-substitution carriers
+            // are finished best-effort, same as the rejection arm below.
+            self.restore_temporary_assignments(temporary_assignments);
+            let _ = self.finish_process_substitutions(process_substitution_files);
+            let _ =
+                self.finish_assignment_output_process_substitutions_for_command(&materialized_cmd);
+            // A DISCARD-class expansion error (evalerror pending) is
+            // expand_wdesc_fatal under posixly_correct — FORCE_EOF, not the
+            // skip-and-abandon (subst.c:10881-10888, rubash#1226).
+            if self.evalerror_pending.get() {
+                let code = self.expansion_fatal_status();
+                self.exit_code = code;
+                return Some(Err(ExecuteError::ExitCode(code)));
+            }
+            return Some(Err(ExecuteError::ExpansionFailure(1)));
+        }
+        // rubash#1226: a DISCARD-class expansion error raised inside the
+        // prefix expansion armed the reader-level abort — GNU's jump fires
+        // inside expand_words, so the function is SKIPPED in every mode and
+        // the rest of the list is abandoned.
+        if assignments_failed && self.evalerror_pending.get() {
+            self.exit_code = 1;
+            self.restore_temporary_assignments(temporary_assignments);
+            let _ = self.finish_process_substitutions(process_substitution_files);
+            let _ =
+                self.finish_assignment_output_process_substitutions_for_command(&materialized_cmd);
+            return Some(Err(ExecuteError::ExpansionFailure(1)));
+        }
+        // GNU execute_cmd.c:4648-4649: the simple-command xtrace head line
+        // (`xtrace_print_word_list (words, 1)`) prints BEFORE builtin/function
+        // lookup (func found at execute_cmd.c:4675) and before
+        // execute_builtin_or_function (execute_cmd.c:4856-4858) applies the
+        // call's redirections around the body through do_redirections
+        // (execute_cmd.c:5606) — so a function invocation traces its
+        // head (`+ f one 'two three'`) to the pre-redirect stderr, and the
+        // body's own commands trace afterwards at the same level. This fast
+        // path runs instead of execute_materialized_command, whose xtrace
+        // block it must mirror (issue #247; recursion nests one head line per
+        // call, `f | cat` stages already trace via pipeline_exec).
+        if self.xtrace_enabled() && materialized_cmd.arithmetic_command.is_none() {
+            let prefix = self.xtrace_prefix();
+            let mut xtrace_output = Vec::new();
+            for line in self.xtrace_command_lines(&materialized_cmd) {
+                writeln!(xtrace_output, "{prefix}{line}").ok();
+            }
+            if let Some(redirect) = &materialized_cmd.redirect_err_append {
+                let target = self.expand_redirect_target(redirect);
+                if self.has_output_fd_target(&target) {
+                    let _ = self.write_output_fd_redirect(&target, &xtrace_output);
+                } else {
+                    self.xtrace_write(&xtrace_output);
+                }
+            } else {
+                self.xtrace_write(&xtrace_output);
+            }
+        }
+        let redirect_rejection =
+            match self.reject_invalid_redirects(&materialized_cmd, settle_superseded_net_outputs) {
+                Ok(rejection) => rejection,
+                Err(error) => return Some(Err(error)),
+            };
         if let Some(rejection) = redirect_rejection {
             // Only the FatalNounset class routes through the expansion-error
             // classifier (rubash#535): an unbound variable in a function
@@ -5098,45 +5176,6 @@ impl Executor {
                 self.finish_assignment_output_process_substitutions_for_command(&materialized_cmd);
             return Some(finish_result.and(assignment_finish_result));
         }
-        // POSIX-mode notes item 36 (GNU 5.3 cell matrix): a failed readonly
-        // tempenv assignment before a FUNCTION skips the function and
-        // abandons the rest of the command list with status 1 (subshell
-        // forms exit the subshell with 1, the parent continues) — same
-        // skip-and-abandon contract as the execute_materialized_command
-        // path; only a SPECIAL builtin command word would exit the shell.
-        if assignments_failed && self.posix_assignment_failure_is_fatal() {
-            self.exit_code = 1;
-            // Restore the partial tempenv binds before unwinding — the
-            // skip-and-abandon contract keeps the shell (or the enclosing
-            // subshell boundary) alive, and an unbalanced tempenv mark would
-            // corrupt every later restore. The process-substitution carriers
-            // are finished best-effort, same as the rejection arm above.
-            self.restore_temporary_assignments(temporary_assignments);
-            let _ = self.finish_process_substitutions(process_substitution_files);
-            let _ =
-                self.finish_assignment_output_process_substitutions_for_command(&materialized_cmd);
-            // A DISCARD-class expansion error (evalerror pending) is
-            // expand_wdesc_fatal under posixly_correct — FORCE_EOF, not the
-            // skip-and-abandon (subst.c:10881-10888, rubash#1226).
-            if self.evalerror_pending.get() {
-                let code = self.expansion_fatal_status();
-                self.exit_code = code;
-                return Some(Err(ExecuteError::ExitCode(code)));
-            }
-            return Some(Err(ExecuteError::ExpansionFailure(1)));
-        }
-        // rubash#1226: a DISCARD-class expansion error raised inside the
-        // prefix expansion armed the reader-level abort — GNU's jump fires
-        // inside expand_words, so the function is SKIPPED in every mode and
-        // the rest of the list is abandoned.
-        if assignments_failed && self.evalerror_pending.get() {
-            self.exit_code = 1;
-            self.restore_temporary_assignments(temporary_assignments);
-            let _ = self.finish_process_substitutions(process_substitution_files);
-            let _ =
-                self.finish_assignment_output_process_substitutions_for_command(&materialized_cmd);
-            return Some(Err(ExecuteError::ExpansionFailure(1)));
-        }
         // rubash#2126: every skip path above (redirect rejection,
         // failed tempenv) returns before this point, so reaching here is
         // the function dispatch itself — execute_cmd.c:4813 assigns
@@ -5155,33 +5194,6 @@ impl Executor {
                 .map(|(name, _)| assignment_name_and_append(name).0.to_string())
                 .collect(),
         );
-        // GNU execute_cmd.c:4648-4649: the simple-command xtrace head line
-        // (`xtrace_print_word_list (words, 1)`) prints BEFORE builtin/function
-        // lookup (func found at execute_cmd.c:4675) and before
-        // execute_builtin_or_function (execute_cmd.c:4842) applies the call's
-        // redirections around the body — so a function invocation traces its
-        // head (`+ f one 'two three'`) to the pre-redirect stderr, and the
-        // body's own commands trace afterwards at the same level. This fast
-        // path runs instead of execute_materialized_command, whose xtrace
-        // block it must mirror (issue #247; recursion nests one head line per
-        // call, `f | cat` stages already trace via pipeline_exec).
-        if self.xtrace_enabled() && materialized_cmd.arithmetic_command.is_none() {
-            let prefix = self.xtrace_prefix();
-            let mut xtrace_output = Vec::new();
-            for line in self.xtrace_command_lines(&materialized_cmd) {
-                writeln!(xtrace_output, "{prefix}{line}").ok();
-            }
-            if let Some(redirect) = &materialized_cmd.redirect_err_append {
-                let target = self.expand_redirect_target(redirect);
-                if self.has_output_fd_target(&target) {
-                    let _ = self.write_output_fd_redirect(&target, &xtrace_output);
-                } else {
-                    self.xtrace_write(&xtrace_output);
-                }
-            } else {
-                self.xtrace_write(&xtrace_output);
-            }
-        }
         // rubash#2280: this fast path bypasses
         // execute_materialized_command, so the call's recorded
         // {var} closes are this hook's charge (the funnel hook's
