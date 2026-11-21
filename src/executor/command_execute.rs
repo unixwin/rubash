@@ -1913,7 +1913,7 @@ impl Executor {
     /// any other option word (-v/-V included) or a missing name stops
     /// the peel, leaving `command` itself as the effective word — the
     /// builtin is what runs, with the command's redirections.
-    fn effective_command_word(words: &[String]) -> Option<&str> {
+    pub(in crate::executor) fn effective_command_word(words: &[String]) -> Option<&str> {
         let mut rest = words;
         while let Some((first, tail)) = rest.split_first() {
             // The executor's own assignment() ports (general.c:480):
@@ -1954,7 +1954,7 @@ impl Executor {
     /// (execute_cmd.c:5522 execute_disk_command). A disabled builtin
     /// dispatches to disk in GNU, so it classifies as a child context
     /// here too.
-    fn command_word_runs_in_current_shell(&self, name: &str) -> bool {
+    pub(in crate::executor) fn command_word_runs_in_current_shell(&self, name: &str) -> bool {
         if self.function_name_for_command_word(name).is_some() {
             return true;
         }

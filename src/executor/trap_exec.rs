@@ -4747,8 +4747,8 @@ impl Executor {
         // redirection_error), the command is not exec'd, and the shell
         // continues at status 1 (GNU exec.def exec_builtin: a failed
         // do_redirections returns before the execve).
-        if let Some((index, name)) = self.compound_dup_bad_fd(cmd) {
-            self.abandon_compound_for_dup_bad_fd::<()>(cmd, index, &name)?;
+        if let Some((index, name, cannot_duplicate)) = self.compound_dup_bad_fd(cmd) {
+            self.abandon_compound_for_dup_bad_fd::<()>(cmd, index, &name, cannot_duplicate)?;
             return Ok(1);
         }
         // `<&N` dups and numbered input redirects are real descriptor
