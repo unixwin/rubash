@@ -1876,12 +1876,15 @@ impl Executor {
     /// This is the same bound-ness `nounset_variable_bound` already
     /// applies for the nounset scan. PIPESTATUS is excluded: its sparse
     /// cell keeps its own element-0-by-index fetch (rubash#1364).
-    /// A lifetime `unset` (variables.c:3839 unbind_variable) also
-    /// reads as absent. The outer Option is the applicability verdict:
-    /// None means the name is not one of the five stack arrays (the
-    /// caller falls through to the generic fetches); Some(fetch)
-    /// means the stack-array fetch DECIDES the value — fetch itself
-    /// is None when element 0 is absent.
+    /// A name severed by UNSET_DYNAMIC_VARS (either a lifetime `unset`
+    /// per variables.c:3839 unbind_variable, or an imported scalar cell
+    /// preserved at init per variables.c:1255-1277) is no longer a
+    /// dynamic stack array and returns None so the caller falls through
+    /// to the plain cell or its absence (rubash#4062). The outer Option
+    /// is the applicability verdict: None means the name is not one of
+    /// the live five stack arrays (the caller falls through to the
+    /// generic fetches); Some(fetch) means the stack-array fetch DECIDES
+    /// the value — fetch itself is None when element 0 is absent.
     pub(in crate::executor) fn dynamic_stack_array_scalar(
         &self,
         name: &str,
@@ -1894,7 +1897,7 @@ impl Executor {
             return None;
         }
         if is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, &resolved) {
-            return Some(None);
+            return None;
         }
         Some(
             self.dynamic_stack_array_values(&resolved)

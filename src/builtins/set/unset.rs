@@ -221,7 +221,9 @@ fn unset_name(
         _ => (name, false),
     };
 
-    if is_unsettable_bash_variable(unset_name) {
+    if is_unsettable_bash_variable(unset_name)
+        && !is_marked_variable(env_vars, crate::executor::UNSET_DYNAMIC_VARS, unset_name)
+    {
         diag.free(format_args!("{unset_name}: cannot unset"));
         // GNU set.def:930-931 increments posix_utility_error → EX_UTILERROR.
         return Ok(EX_UTILERROR);
