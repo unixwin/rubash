@@ -571,6 +571,10 @@ impl Executor {
         // chdir standing (pushd.rs G-02), and a no-move success
         // (pushd -n, dirs) needs no refresh.
         let cwd_before = self.shell_state.cwd.clone();
+        let stack_top_before =
+            crate::builtins::pushd::load_stack_carrier(&self.shell_state.env_vars)
+                .into_iter()
+                .next();
         let status = {
             let mut diag = super::builtin_diag::Diag::new(row, &mut stderr);
             let status = crate::builtins::pushd::execute_with_io(
@@ -615,11 +619,15 @@ impl Executor {
         // deleted-dot arm never fired and the getcwd diagnostic was
         // lost; `pwd -L` likewise read the stale spelling.
         let moved = self.shell_state.cwd != cwd_before;
-        if moved {
-            let logical = crate::builtins::pushd::load_stack_carrier(&self.shell_state.env_vars)
+        let stack_top_after =
+            crate::builtins::pushd::load_stack_carrier(&self.shell_state.env_vars)
                 .into_iter()
-                .next()
-                .or_else(|| self.shell_state.env_vars.get("PWD").cloned());
+                .next();
+        let logical_moved = stack_top_after
+            .as_ref()
+            .is_some_and(|top| Some(top) != stack_top_before.as_ref());
+        if moved || logical_moved {
+            let logical = stack_top_after.or_else(|| self.shell_state.env_vars.get("PWD").cloned());
             if let Some(logical) = logical {
                 self.shell_state.logical_cwd = Some(logical);
             }
