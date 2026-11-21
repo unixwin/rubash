@@ -373,7 +373,11 @@ impl Executor {
         // allocations count none; in-process compounds (groups,
         // loops, function bodies) walk undoable
         // (execute_cmd.c:854/5606), so theirs count.
-        let undoable_walk = cmd.subshell_command.is_none();
+        // rubash#3991: a pipeline element's own list is the fork
+        // child's RX_ACTIVE pass (see fd_var_walk_undoable in
+        // command_execute.rs), so it earns no saves either.
+        let undoable_walk =
+            cmd.subshell_command.is_none() && cmd.pipe.is_none() && cmd.pipeline_command.is_none();
         let mut apply_error: Option<ExecuteError> = None;
         // rubash#2612: the walk space of this list (see FdWalkBinding
         // in trap_exec.rs). This loop used to service the `{var}`
@@ -493,7 +497,7 @@ impl Executor {
                 // undoable walk only (see `undoable_walk` above).
                 if undoable_walk {
                     for (slot, source) in
-                        self.fd_walk_undo_save_slots(&walk_space, redirect, &occupied_slots)
+                        self.fd_walk_register_saves(&mut walk_space, redirect, &occupied_slots)
                     {
                         occupied_slots.insert(slot);
                         if let super::trap_exec::FdWalkBinding::TableSlot(table_slot) =
@@ -1390,13 +1394,27 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<Vec<SavedNumberedFd>, ExecuteError> {
+        // rubash#3991: the walk's undo saves are real descriptors
+        // for the walk itself (see compound_list_saves_by_index):
+        // capture each save slot's pre-scope state first, then the
+        // binding loop materializes every entry's saves at its
+        // position, so a later entry of this list can dup from a
+        // save slot. The claim itself is shared with the sibling
+        // output binder through compound_binder_saves_for: only
+        // the first binder on this list claims (against the
+        // pre-list table) and captures.
+        let saves_by_index = self.compound_binder_saves_for(cmd);
         let mut saved: Vec<SavedNumberedFd> = Vec::new();
+        for (_, slot, _) in &saves_by_index {
+            self.save_compound_numbered_input_fd(&mut saved, *slot)?;
+        }
         if let Err(error) = self.open_compound_numbered_input_redirects_in(
             cmd,
             0,
             cmd.redirects.len(),
             &mut saved,
             MoveSourceSave::GnuUndoable,
+            &saves_by_index,
         ) {
             // GNU undo_partial_redirects (execute_cmd.c:855 via
             // redir.c's undo list, add_undo_redirect:1326): a
@@ -1424,8 +1442,21 @@ impl Executor {
         end: usize,
         saved: &mut Vec<SavedNumberedFd>,
         move_source_save: MoveSourceSave,
+        saves_by_index: &[(usize, u32, u32)],
     ) -> Result<(), ExecuteError> {
-        for redirect in &cmd.redirects[start..end] {
+        for (offset, redirect) in cmd.redirects[start..end].iter().enumerate() {
+            // rubash#3991: materialize this entry's undo saves
+            // before the entry itself binds (see
+            // open_compound_numbered_input_redirects): a later
+            // entry of this list can then dup from a save slot,
+            // exactly GNU's walk. Segmented callers pass no saves —
+            // their face is an RX_ACTIVE child walk, which earns
+            // none.
+            for (index, slot, source) in saves_by_index {
+                if *index == start + offset {
+                    self.materialize_compound_save_at_position(*slot, *source)?;
+                }
+            }
             // The fd before the operator defaults like GNU: input-side
             // redirects without an explicit number target fd 0
             // (`{ list; } <&3` dups fd 3 onto the group's stdin).
@@ -1779,6 +1810,10 @@ impl Executor {
         &mut self,
         saved: Vec<SavedNumberedFd>,
     ) {
+        // rubash#3991 backstop: the shared save claim belongs to
+        // the binder bracket that just ended; no later list may
+        // observe it.
+        self.compound_binder_saves = None;
         for saved in saved {
             match saved.entry {
                 Some(entry) => {
@@ -1835,6 +1870,87 @@ impl Executor {
     /// touched slots for restore_compound_output_redirects; on a mid-list
     /// open failure the already-applied slots are unwound before the error
     /// propagates, like GNU abandoning the compound.
+    /// rubash#3991: this binder's share of the list's undo-save
+    /// claim. The first binder on a list claims its saves (see
+    /// compound_list_saves_by_index), records the claim on the
+    /// executor keyed by the list's identity, and returns it; the
+    /// sibling binder on the SAME list recognizes the recorded
+    /// claim and returns an empty share — the saves are already
+    /// materialized in the table by the first binder, and a
+    /// second claim, computed against that polluted table, would
+    /// land on different slots (the two binders run in either
+    /// order: a function call binds outputs and inputs through
+    /// separate wrappers).
+    fn compound_binder_saves_for(&mut self, cmd: &CommandNode) -> Vec<(usize, u32, u32)> {
+        let identity = (cmd.redirects.as_ptr() as usize, cmd.redirects.len());
+        if let Some((ptr, len, _)) = &self.compound_binder_saves {
+            if (*ptr, *len) == identity {
+                return Vec::new();
+            }
+        }
+        let saves = self.compound_list_saves_by_index(cmd);
+        self.compound_binder_saves = Some((identity.0, identity.1, saves.clone()));
+        saves
+    }
+
+    /// rubash#3991: the undo saves of `cmd`'s whole list, grouped
+    /// by the index of the entry that earns them — (entry index,
+    /// save slot, saved source fd) — computed with the shared walk
+    /// (fd_walk_register_saves). An undoable walk only: a
+    /// subshell-headed list is applied by the forked child with
+    /// RX_ACTIVE (execute_cmd.c:1761), so it earns no saves.
+    fn compound_list_saves_by_index(&self, cmd: &CommandNode) -> Vec<(usize, u32, u32)> {
+        // A pipeline element's list is the fork child's RX_ACTIVE
+        // pass (see fd_var_walk_undoable in command_execute.rs).
+        if cmd.subshell_command.is_some() || cmd.pipe.is_some() || cmd.pipeline_command.is_some() {
+            return Vec::new();
+        }
+        let mut walk_space = super::trap_exec::FdWalkSpace::new();
+        let mut occupied_slots: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut saves: Vec<(usize, u32, u32)> = Vec::new();
+        for (index, redirect) in cmd.redirects.iter().enumerate() {
+            if let Some(fd) = redirect.fd {
+                occupied_slots.insert(fd);
+            }
+            if redirect.fd_var.is_none() {
+                for (slot, source) in
+                    self.fd_walk_register_saves(&mut walk_space, redirect, &occupied_slots)
+                {
+                    occupied_slots.insert(slot);
+                    saves.push((index, slot, source));
+                }
+                self.fd_walk_record_fixed_entry(&mut walk_space, redirect);
+            }
+        }
+        saves
+    }
+
+    /// rubash#3991: materialize one undo save into the fd table at
+    /// its entry's walk position — the save is a dup of the
+    /// source's CURRENT table entry (the entries before this one
+    /// are already bound, so a same-list source reads its new
+    /// binding, exactly GNU's dup2 when add_undo_redirect runs). A
+    /// slot already bound for real at this position keeps the real
+    /// bind. The caller has captured the slot's pre-scope state
+    /// for restore before the walk began.
+    fn materialize_compound_save_at_position(
+        &mut self,
+        slot: u32,
+        source: u32,
+    ) -> Result<(), ExecuteError> {
+        let occupied_now = self.fd_table.entries.get(&slot).is_some_and(|current| {
+            !current.closed && (current.read.is_some() || current.write.is_some())
+        });
+        if !occupied_now {
+            if let Some(entry) = self.fd_table.saved_entry(source)? {
+                if !entry.closed && (entry.read.is_some() || entry.write.is_some()) {
+                    self.fd_table.entries.insert(slot, entry);
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(in crate::executor) fn open_compound_output_redirects(
         &mut self,
         cmd: &CommandNode,
@@ -1846,44 +1962,25 @@ impl Executor {
         // descriptor space for the body's whole duration — a `{var}`
         // allocation inside the body counts it, exactly like one in
         // the list itself (see Executor::fd_walk_undo_save_slots).
-        // Compute the saves with a walk over the list before binding
-        // and materialize the ones whose source the persistent table
-        // holds, mirroring the command-input scope pass; the slots'
-        // pre-scope state is captured into `saved` first, so the
-        // scope restore returns each slot to exactly what it held.
-        // A subshell-headed list earns no saves at all: its walk is
+        // rubash#3991: the saves are also real descriptors FOR THE
+        // WALK ITSELF — a later entry of this same list can dup from
+        // a save slot — so the binding loop materializes each
+        // entry's saves into the table at that entry's position
+        // (see compound_list_saves_by_index and the `_in` loop);
+        // they then simply stay for the body's duration, and the
+        // slots' pre-scope state, captured into `saved` first,
+        // returns each slot to exactly what it held. A
+        // subshell-headed list earns no saves at all: its walk is
         // the forked child's RX_ACTIVE pass (execute_cmd.c:1761).
-        let undoable_walk = cmd.subshell_command.is_none();
-        let mut walk_space = super::trap_exec::FdWalkSpace::new();
-        let mut occupied_slots: std::collections::HashSet<u32> = std::collections::HashSet::new();
-        let mut materialized_saves: Vec<(u32, FdEntry)> = Vec::new();
-        for redirect in &cmd.redirects {
-            if let Some(fd) = redirect.fd {
-                occupied_slots.insert(fd);
-            }
-            if redirect.fd_var.is_none() {
-                if undoable_walk {
-                    for (slot, source) in
-                        self.fd_walk_undo_save_slots(&walk_space, redirect, &occupied_slots)
-                    {
-                        occupied_slots.insert(slot);
-                        if let super::trap_exec::FdWalkBinding::TableSlot(table_slot) =
-                            self.fd_walk_resolve(&walk_space, source)
-                        {
-                            if let Some(entry) = self.fd_table.saved_entry(table_slot)? {
-                                if !entry.closed && (entry.read.is_some() || entry.write.is_some())
-                                {
-                                    materialized_saves.push((slot, entry));
-                                }
-                            }
-                        }
-                    }
-                }
-                self.fd_walk_record_fixed_entry(&mut walk_space, redirect);
-            }
-        }
+        // rubash#3991: the claim is shared with the sibling
+        // numbered-input binder through compound_binder_saves_for:
+        // only the first binder on this list claims (against the
+        // pre-list table), captures the slots' pre-scope state,
+        // and materializes; the sibling finds the saves already in
+        // the table and claims nothing.
+        let saves_by_index = self.compound_binder_saves_for(cmd);
         let mut saved: Vec<SavedOutputFd> = Vec::new();
-        for (slot, _entry) in &materialized_saves {
+        for (_, slot, _) in &saves_by_index {
             self.save_compound_output_fd(&mut saved, *slot)?;
         }
         if let Err(error) = self.open_compound_output_redirects_in(
@@ -1892,20 +1989,10 @@ impl Executor {
             cmd.redirects.len(),
             &mut saved,
             MoveSourceSave::GnuUndoable,
+            &saves_by_index,
         ) {
             self.restore_compound_output_redirects(saved);
             return Err(error);
-        }
-        // Materialize the saves the real binds did not take over: a
-        // slot the list itself bound keeps the real bind — GNU's walk
-        // would have clobbered the save with that same bind.
-        for (slot, entry) in &materialized_saves {
-            let occupied_now = self.fd_table.entries.get(slot).is_some_and(|current| {
-                !current.closed && (current.read.is_some() || current.write.is_some())
-            });
-            if !occupied_now {
-                self.fd_table.entries.insert(*slot, entry.clone());
-            }
         }
         Ok(saved)
     }
@@ -1946,8 +2033,20 @@ impl Executor {
         end: usize,
         saved: &mut Vec<SavedOutputFd>,
         move_source_save: MoveSourceSave,
+        saves_by_index: &[(usize, u32, u32)],
     ) -> Result<(), ExecuteError> {
         for (offset, redirect) in cmd.redirects[start..end].iter().enumerate() {
+            // rubash#3991: materialize this entry's undo saves
+            // before the entry itself binds (see
+            // open_compound_output_redirects): a later entry of
+            // this list can then dup from a save slot, exactly
+            // GNU's walk. Segmented callers pass no saves — their
+            // face is an RX_ACTIVE child walk, which earns none.
+            for (index, slot, source) in saves_by_index {
+                if *index == start + offset {
+                    self.materialize_compound_save_at_position(*slot, *source)?;
+                }
+            }
             // `{var}`-targeted redirections allocate a persistent dynamic fd
             // (redir.c: the variable keeps the descriptor after the command)
             // and are handled by execute_dynamic_fd_var_redirect above.
@@ -2408,6 +2507,9 @@ impl Executor {
         &mut self,
         saved: Vec<SavedOutputFd>,
     ) {
+        // rubash#3991 backstop, twin of the numbered restore: the
+        // shared save claim belongs to the bracket that just ended.
+        self.compound_binder_saves = None;
         for saved in saved {
             match saved.entry {
                 Some(entry) => {
@@ -3385,10 +3487,34 @@ impl Executor {
         cmd: &CommandNode,
     ) -> Option<(usize, String)> {
         let mut opened: HashMap<u32, bool> = HashMap::new();
+        // rubash#3991: the undo saves a fixed entry earns are real
+        // descriptors in GNU's walk (see fd_walk_register_saves), so
+        // a dup naming a save slot is not a bad-fd dup. Mirror the
+        // walk in the shared space and fold each entry's saves into
+        // `opened` as the walk passes it — deferred by one entry,
+        // like the gate in reject_invalid_redirects: an entry's own
+        // dup check never sees its own saves, every later entry
+        // sees them all.
+        let mut walk_space = super::trap_exec::FdWalkSpace::new();
+        let mut walk_occupied: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut prev_fixed: Option<&Redirect> = None;
         for (index, redirect) in cmd.redirects.iter().enumerate() {
+            if let Some(prev) = prev_fixed.take() {
+                for (slot, _source) in
+                    self.fd_walk_register_saves(&mut walk_space, prev, &walk_occupied)
+                {
+                    walk_occupied.insert(slot);
+                    opened.insert(slot, true);
+                }
+                self.fd_walk_record_fixed_entry(&mut walk_space, prev);
+            }
             if redirect.fd_var.is_some() {
                 continue;
             }
+            if let Some(fd) = redirect.fd {
+                walk_occupied.insert(fd);
+            }
+            prev_fixed = Some(redirect);
             let fd = match redirect.kind {
                 crate::parser::RedirectKind::Output
                 | crate::parser::RedirectKind::Append

@@ -1629,6 +1629,8 @@ impl Executor {
             command_builtin_depth: 0,
             builtin_wrapper_depth: 0,
             compound_redirect_scope_depth: 0,
+            compound_binder_saves: None,
+            exec_walk_save_slots: Vec::new(),
             standard_path_scope: None,
             debug_trap_running: false,
             debug_action_running: false,

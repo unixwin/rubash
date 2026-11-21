@@ -26,6 +26,13 @@ impl Executor {
         if open {
             return Ok(());
         }
+        // rubash#3991: an undo save earned by an earlier entry of
+        // this list is a live descriptor at this position too (see
+        // fd_walk_register_saves) — `read x 9<f 0<&10` dups the
+        // save of fd 9 at slot 10.
+        if self.in_list_save_open(cmd, before, source_fd) {
+            return Ok(());
+        }
         // rubash#2562: a binding EARLIER in this command's own list
         // also opens the source — GNU's one ordered walk
         // (redir.c:237 do_redirections) has applied it by the time
