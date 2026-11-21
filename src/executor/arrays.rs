@@ -1855,3 +1855,14 @@ pub(super) fn is_noassign_bash_array(name: &str) -> bool {
         "BASH_ARGC" | "BASH_ARGV" | "BASH_LINENO" | "BASH_SOURCE" | "FUNCNAME" | "GROUPS"
     )
 }
+
+/// True when `name` still refers to a live `att_noassign` dynamic array
+/// (i.e. not severed by `unset` or imported as an ordinary scalar at startup
+/// per GNU `variables.c:1255-1266` / `1827-1841`).
+pub(in crate::executor) fn is_live_noassign_bash_array(
+    env_vars: &crate::shell::var_table::VarTable,
+    name: &str,
+) -> bool {
+    let base = name.split('[').next().unwrap_or(name);
+    is_noassign_bash_array(base) && !is_marked_var(env_vars, super::UNSET_DYNAMIC_VARS, base)
+}

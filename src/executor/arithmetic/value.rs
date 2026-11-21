@@ -5,12 +5,12 @@ use crate::executor::arithmetic::{
 use crate::executor::{
     array_value_at, assoc_entries, assoc_value_at, current_epoch_seconds,
     env_derived_dynamic_parameter_value, format_assoc_storage, format_indexed_array_storage,
-    indexed_array_entries, is_array_storage, is_marked_var, is_noassign_bash_array, is_shell_name,
-    is_shell_name_char, mark_env_name, next_random_from_state, next_srandom_from_state,
-    parse_array_subscript, resolve_indexed_array_subscript, set_process_env,
-    sync_shell_assignment_process_env, unmark_env_name, ARRAY_VARS, ASSOC_128_VARS, ASSOC_VARS,
-    DECLARED_UNSET_VARS, NAMEREF_VARS, READONLY_VARS, SECONDS_OFFSET, SHELL_START_EPOCH,
-    UNSET_DYNAMIC_VARS,
+    indexed_array_entries, is_array_storage, is_live_noassign_bash_array, is_marked_var,
+    is_shell_name, is_shell_name_char, mark_env_name, next_random_from_state,
+    next_srandom_from_state, parse_array_subscript, resolve_indexed_array_subscript,
+    set_process_env, sync_shell_assignment_process_env, unmark_env_name, ARRAY_VARS,
+    ASSOC_128_VARS, ASSOC_VARS, DECLARED_UNSET_VARS, NAMEREF_VARS, READONLY_VARS, SECONDS_OFFSET,
+    SHELL_START_EPOCH, UNSET_DYNAMIC_VARS,
 };
 
 impl ConditionalArithParser<'_> {
@@ -920,7 +920,7 @@ impl ConditionalArithParser<'_> {
         // (sh_longjmp out of evalexp) but with NO diagnostic — the
         // drain in arithmetic/mod.rs latches the failure silently
         // (rubash#2369).
-        if is_noassign_bash_array(name) {
+        if is_live_noassign_bash_array(self.env_vars, name) {
             self.env_vars
                 .insert("__RUBASH_ARITH_NOASSIGN_ERROR".to_string(), name.clone());
             return false;
@@ -1001,7 +1001,7 @@ impl ConditionalArithParser<'_> {
     }
 
     pub(super) fn set_variable(&mut self, name: &str, value: i128) {
-        if is_noassign_bash_array(name) {
+        if is_live_noassign_bash_array(self.env_vars, name) {
             return;
         }
         // A scalar bind over an array-shaped binding replaces the
@@ -1156,7 +1156,7 @@ impl ConditionalArithParser<'_> {
             }
             // GNU expr.c:350: a nameref chain ending at an att_noassign
             // variable fails the bind silently (rubash#2369).
-            if is_noassign_bash_array(base_target) {
+            if is_live_noassign_bash_array(self.env_vars, base_target) {
                 self.env_vars.insert(
                     "__RUBASH_ARITH_NOASSIGN_ERROR".to_string(),
                     base_target.to_string(),
@@ -1206,7 +1206,7 @@ impl ConditionalArithParser<'_> {
         value: i128,
         bind_display: &str,
     ) {
-        if is_noassign_bash_array(name) {
+        if is_live_noassign_bash_array(self.env_vars, name) {
             return;
         }
         let mut entries = self

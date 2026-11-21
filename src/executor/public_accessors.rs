@@ -1794,7 +1794,17 @@ impl Executor {
             // fixup; cli_tests function_call_stack_* encode the GNU
             // shape). The SCRIPT_NAME branch below guards the reverse
             // seeding order.
-            store_indexed_array_state(&mut self.shell_state, "BASH_SOURCE", Vec::<String>::new());
+            if !is_marked_var(
+                &self.shell_state.env_vars,
+                UNSET_DYNAMIC_VARS,
+                "BASH_SOURCE",
+            ) {
+                store_indexed_array_state(
+                    &mut self.shell_state,
+                    "BASH_SOURCE",
+                    Vec::<String>::new(),
+                );
+            }
         }
         if name == "__RUBASH_SCRIPT_NAME" {
             let source_value = if self
@@ -1818,8 +1828,14 @@ impl Executor {
             // ./dbg-support.tests"), so only a top-level script-name change
             // (startup, -c, bashdb launcher) rebinds BASH_SOURCE.
             if self.shell_state.env_vars.contains_key("__RUBASH_IN_SOURCE") {
-                let values = self.shell_state.bash_source_stack.clone();
-                store_indexed_array_state(&mut self.shell_state, "BASH_SOURCE", values);
+                if !is_marked_var(
+                    &self.shell_state.env_vars,
+                    UNSET_DYNAMIC_VARS,
+                    "BASH_SOURCE",
+                ) {
+                    let values = self.shell_state.bash_source_stack.clone();
+                    store_indexed_array_state(&mut self.shell_state, "BASH_SOURCE", values);
+                }
                 return;
             }
             if self.shell_state.env_vars.contains_key("__RUBASH_IS_C") {
@@ -1832,18 +1848,30 @@ impl Executor {
                 // this seed.
                 self.shell_state.bash_source_stack = vec![source_value.clone()];
                 self.shell_state.bash_source_seed = Some(source_value.clone());
-                store_indexed_array_state(
-                    &mut self.shell_state,
+                if !is_marked_var(
+                    &self.shell_state.env_vars,
+                    UNSET_DYNAMIC_VARS,
                     "BASH_SOURCE",
-                    Vec::<String>::new(),
-                );
+                ) {
+                    store_indexed_array_state(
+                        &mut self.shell_state,
+                        "BASH_SOURCE",
+                        Vec::<String>::new(),
+                    );
+                }
                 return;
             }
             // rubash#3125: record the seed alongside the stack
             // (see the field doc on `bash_source_seed`).
             self.shell_state.bash_source_stack = vec![source_value.clone()];
             self.shell_state.bash_source_seed = Some(source_value.clone());
-            store_indexed_array_state(&mut self.shell_state, "BASH_SOURCE", vec![source_value]);
+            if !is_marked_var(
+                &self.shell_state.env_vars,
+                UNSET_DYNAMIC_VARS,
+                "BASH_SOURCE",
+            ) {
+                store_indexed_array_state(&mut self.shell_state, "BASH_SOURCE", vec![source_value]);
+            }
         }
     }
 

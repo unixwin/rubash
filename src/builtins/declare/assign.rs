@@ -538,7 +538,9 @@ pub(super) fn assign_declare_names(
                 continue;
             }
         }
-        if is_noassign_bash_array(var_name) {
+        if is_noassign_bash_array(var_name)
+            && !variables.is_marked(crate::executor::UNSET_DYNAMIC_VARS, var_name)
+        {
             continue;
         }
         if variables.is_marked(READONLY_VARS, var_name) {

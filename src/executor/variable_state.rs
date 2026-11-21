@@ -551,7 +551,11 @@ impl Executor {
         // ("\x1d()" / "\x1d([0]=\"0\")") parked there by the startup /
         // materialization writes, while indexed reads (which divert to
         // the view) were correct.
-        if matches!(name, "BASH_ARGC" | "BASH_ARGV" | "BASH_LINENO") && !attrs.assoc {
+        if matches!(name, "BASH_ARGC" | "BASH_ARGV" | "BASH_LINENO")
+            && !attrs.assoc
+            && !is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, name)
+            && !self.dynamic_name_shadowed(name)
+        {
             if let Some(values) = self.dynamic_stack_array_values(name) {
                 // GNU subst.c:10131: the scalar read of a bare array
                 // name is element 0 — absent (NULL) when the view is
@@ -601,12 +605,14 @@ impl Executor {
         if attrs.declared_unset && !self.shell_state.env_vars.contains_key(name) {
             return None;
         }
-        if let Some(crate::shell::Variable {
-            value: crate::shell::ShellValue::Scalar(value),
-            ..
-        }) = self.shell_state.variables.get(name)
-        {
-            return Some(value.clone());
+        if !attrs.assoc && !attrs.array {
+            if let Some(crate::shell::Variable {
+                value: crate::shell::ShellValue::Scalar(value),
+                ..
+            }) = self.shell_state.variables.get(name)
+            {
+                return Some(value.clone());
+            }
         }
         // Same verdicts as scalar_parameter_value (assoc `0`-key, array
         // element 0, else the stored bytes) answered from the fused flags.
