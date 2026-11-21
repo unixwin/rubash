@@ -2942,6 +2942,16 @@ impl Executor {
             if braced.len() > 1 || (braced.len() == 1 && braced[0].text != word) {
                 let mut values = Vec::new();
                 for product in braced {
+                    // rubash#3969: GNU expands every brace product as a
+                    // fresh word (subst.c:13062 shell_expand_word_list);
+                    // a raw backquote with no closing backquote is the
+                    // expand_word_error `bad substitution: no closing
+                    // "`" in …` (subst.c:11587), abandoning the rest of
+                    // the word list — later products never expand.
+                    if let Some(tail) = &product.unclosed_backquote_tail {
+                        self.report_brace_product_backquote_failure(tail);
+                        break;
+                    }
                     if product.text.is_empty() {
                         // GNU braces.c brace_expand emits every member as
                         // a word, and expand_word_list_internal
@@ -5428,6 +5438,55 @@ pub(in crate::executor) struct BraceExpansionWord {
     /// nulls (`{a,}`) are discarded as unquoted null results
     /// (rubash#337).
     pub quoted_null: bool,
+    /// rubash#3969: the expansion-layer failure GNU's re-scan of this
+    /// product reaches — expand_word_internal's `` ` `` case
+    /// (subst.c:11568-11593) string_extracts a raw backquote to its
+    /// closing backquote and reports
+    /// `bad substitution: no closing "`" in …` when none exists,
+    /// abandoning the whole word list (subst.c:13093-13110
+    /// exp_jump_to_top_level(DISCARD)). The value is the diagnostic
+    /// tail — the product's RAW text from the backquote byte to the
+    /// end of the word (string+t_index), quotes and escapes intact —
+    /// so it is computed before the quote-removal strip; a backquote
+    /// that closes (`{a..A}`cmd``) or that is the word's last
+    /// character (the lone `` ` `` product, kept literal by
+    /// subst.c:11574-11576) yields no verdict. See
+    /// crate::expand::braces::unclosed_backquote_index.
+    pub unclosed_backquote_tail: Option<String>,
+}
+
+/// rubash#3969: for a `name=(` ... `)` / `name+=(` ... `)` word (the
+/// declare-family compound-assignment shape) GNU never hands the parens
+/// to brace_expand — the parser strips them as compound delimiters and
+/// expand_words_no_vars expands the BODY words (arrayfunc.c:581-605), so
+/// expand_word_internal's `` ` `` diagnostic (subst.c:11587
+/// `string+t_index`) stops at the end of the body product, not the glued
+/// `)`: `declare -a i=(p{a..A}q)` reports `` `q ``, not `` `q) ``. When
+/// the product is not `name=(` … `)` whole — `h=(a)y`, or `x=h=(` —
+/// the parens are word text and the tail runs to the real end
+/// (`declare -a h=({a..A}x)y` reports `` `x)y ``). Only the diagnostic
+/// text changes; the verdict is identical either way.
+fn compound_paren_diagnostic_tail<'a>(text: &'a str, index: usize) -> &'a str {
+    let bytes = text.as_bytes();
+    let Some(open) = bytes.iter().position(|&b| b == b'(') else {
+        return &text[index..];
+    };
+    if open == 0 || bytes[open - 1] != b'=' || index <= open || !text.ends_with(')') {
+        return &text[index..];
+    }
+    // A compound `(` follows `name=` or `name+=`; the text before `=`
+    // must be a shell identifier (optionally `+`-suffixed). `x=h=(`
+    // leaves the `(` as ordinary word text.
+    let name = text[..open - 1]
+        .strip_suffix('+')
+        .unwrap_or(&text[..open - 1]);
+    let is_name = !name.is_empty()
+        && !name.as_bytes()[0].is_ascii_digit()
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+    if !is_name {
+        return &text[index..];
+    }
+    &text[index..text.len() - 1]
 }
 
 fn tag_brace_products(
@@ -5437,6 +5496,14 @@ fn tag_brace_products(
     products
         .into_iter()
         .map(|product| {
+            // Judge the verdict on the product's raw text: GNU scans
+            // the pre-dequote word, so `'x'`/`"`/`\) bytes are still
+            // present (a quote inside the extraction is ordinary data;
+            // `\' is an escaped char that cannot close). Quote removal
+            // below would erase exactly the structure the scan reads.
+            let unclosed_backquote_tail =
+                crate::expand::braces::unclosed_backquote_index(&product.text)
+                    .map(|index| compound_paren_diagnostic_tail(&product.text, index).to_string());
             let text = if strip {
                 crate::lexer::remove_shell_quotes(&product.text)
             } else {
@@ -5444,7 +5511,11 @@ fn tag_brace_products(
             };
             let quoted_null =
                 text.is_empty() && (!product.text.is_empty() || product.sequence_null);
-            BraceExpansionWord { text, quoted_null }
+            BraceExpansionWord {
+                text,
+                quoted_null,
+                unclosed_backquote_tail,
+            }
         })
         .collect()
 }
@@ -5453,6 +5524,7 @@ fn untagged_brace_word(text: String) -> BraceExpansionWord {
     BraceExpansionWord {
         text,
         quoted_null: false,
+        unclosed_backquote_tail: None,
     }
 }
 
