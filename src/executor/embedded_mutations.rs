@@ -1421,16 +1421,30 @@ impl Executor {
                 }
                 Some('{') => {
                     chars.next();
+                    let this_frag = frag_index;
+                    frag_index += 1;
                     // A bad-substitution diagnostic raised while expanding
                     // this fragment must name the whole enclosing word (GNU
                     // subst.c:10278), not the `${...}` span (rubash#758).
                     // A here-document body is runtime text GNU never ran
                     // parse_comsub on — its `$(` spans cite raw
-                    // (rubash#3543).
-                    let _diag_word = crate::executor::expand_word::PendingDiagnosticWordGuard::new(
-                        word,
-                        matches!(context, SubstitutionQuoteContext::HereDocument),
-                    );
+                    // (rubash#3543). When a raw source word is recorded,
+                    // the citation is rebuilt from it instead, keeping
+                    // quote delimiters and backslashes (rubash#4029).
+                    let raw_diag =
+                        crate::executor::expand_word::diagnostic_word_for_fragment(this_frag);
+                    let _diag_word = match raw_diag.as_deref() {
+                        Some(diag) => {
+                            crate::executor::expand_word::PendingDiagnosticWordGuard::new_rendered(
+                                diag,
+                                matches!(context, SubstitutionQuoteContext::HereDocument),
+                            )
+                        }
+                        None => crate::executor::expand_word::PendingDiagnosticWordGuard::new(
+                            word,
+                            matches!(context, SubstitutionQuoteContext::HereDocument),
+                        ),
+                    };
                     // GNU param_expand resolves one `${}` expansion once:
                     // memoize array-element fetches for this fragment so a
                     // subscript's side effects run once (AEPV_MEMO).
@@ -1444,8 +1458,6 @@ impl Executor {
                     // instead of re-keying on the synthetic string.
                     let whole_braced = crate::executor::expand_braced_indices::sub_site_active()
                         && crate::executor::parameter_ops::braced_parameter_spans_whole_word(word);
-                    let this_frag = frag_index;
-                    frag_index += 1;
                     let _site_guard = (!whole_braced).then(|| {
                         crate::executor::expand_braced_indices::SubSiteGuard::new(this_frag)
                     });

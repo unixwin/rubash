@@ -1221,7 +1221,8 @@ pub fn decode_to_visible_text(text: &str) -> String {
             | crate::executor::markers::STORAGE_WORD_PREFIX
             | crate::executor::markers::ARRAYREF_FLAG
             | crate::executor::markers::PATSUB_QUOTED_VALUE_START
-            | crate::executor::markers::PATSUB_QUOTED_VALUE_END => {}
+            | crate::executor::markers::PATSUB_QUOTED_VALUE_END
+            | crate::executor::markers::ANSI_C_IFS_GUARD => {}
             c if crate::executor::markers::FAILED_SUBSCRIPT_SENTINEL.contains(c) => {}
             crate::executor::markers::PATSUB_QUOTED_AMP => out.push('&'),
             crate::executor::markers::PATSUB_QUOTED_BACKSLASH => out.push('\\'),

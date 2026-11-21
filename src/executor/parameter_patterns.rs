@@ -684,116 +684,124 @@ impl Executor {
         }) {
             return pattern.to_string();
         }
-        // GNU parse.y parse_matched_pair: an unclosed quote inside the
-        // ${...} word is an EOF syntax error, so expansion aborts the
-        // command (`${c%' z'}` is fine; `${c%\' z'}` leaves an unclosed '
-        // after the escaped quote and the whole command fails).
-        if let Some(quote) = unclosed_pattern_quote(pattern) {
-            eprintln!(
-                "{}unexpected EOF while looking for matching `{}'",
-                self.diagnostic_prefix(),
-                quote
+        // rubash#3501/#4039: a pattern word is an operator-word family and
+        // must re-root the pending diagnostic raw at its own text, like the
+        // operator-word entries in parameter_words.rs do. Without this the
+        // embedded walker's fragment arm rebuilds the citation from slot 0
+        // of the still-live OUTER word record and cites the whole outer
+        // word for a bad fragment nested in the pattern.
+        crate::executor::expand_word::with_pending_diagnostic_raw(pattern, false, || {
+            // GNU parse.y parse_matched_pair: an unclosed quote inside the
+            // ${...} word is an EOF syntax error, so expansion aborts the
+            // command (`${c%' z'}` is fine; `${c%\' z'}` leaves an unclosed '
+            // after the escaped quote and the whole command fails).
+            if let Some(quote) = unclosed_pattern_quote(pattern) {
+                eprintln!(
+                    "{}unexpected EOF while looking for matching `{}'",
+                    self.diagnostic_prefix(),
+                    quote
+                );
+                self.shell_state.arithmetic_fatal_error.set(true);
+                self.shell_state.arithmetic_expansion_error.set(true);
+                return String::new();
+            }
+            // Decode quotes before embedded expansion so quoted glob
+            // metacharacters stay marked, but mask nested braced parameters
+            // first so the decoder does not tag glob chars inside an inner
+            // expansion (keeps ? a glob in the inner removal).
+            let mut masked = String::with_capacity(pattern.len());
+            let mut slots: Vec<String> = Vec::new();
+            // GNU subst.c: a double-quoted span in a pattern word expands its
+            // substitutions with quoting live, so the OUTPUT chars carry CTLESC
+            // (`"${x//"$p"/!}"` with p='*' matches a literal `*`, and `p='\'`
+            // matches a literal `\` — an unquoted `$p` instead feeds a live
+            // escape to the matcher). The shared embedded expander strips the
+            // marker context, so expand the span here and emit every output
+            // char literal-marked through the slot mechanism below.
+            let pre_masked = mask_quoted_pattern_spans(pattern, self, &mut slots);
+            let mut rest: &str = &pre_masked;
+            while let Some(pos) = rest.find("${") {
+                masked.push_str(&rest[..pos]);
+                let after = &rest[pos + 2..];
+                match matching_parameter_brace(after) {
+                    Some(end) => {
+                        slots.push(format!("${{{}}}", &after[..end]));
+                        masked.push(crate::executor::markers::IFS_GLUE);
+                        masked.push_str(&(slots.len() - 1).to_string());
+                        rest = &after[end + 1..];
+                    }
+                    None => {
+                        masked.push_str("${");
+                        rest = after;
+                    }
+                }
+            }
+            masked.push_str(rest);
+
+            // GNU subst.c: an escaped anchor char `\%` or `\#` in a pattern
+            // substitution pattern is a literal character, not a suffix/prefix
+            // anchor. `decode_parameter_pattern_quotes` strips the backslash and
+            // leaves a bare `%`/`#` which `replace_parameter_pattern` would
+            // misinterpret as an anchor (subst.c parameter_brace_patsub:9451-
+            // 9465). Mark the escaped anchor with \x11 so the backslash survives
+            // as a glob escape (`\%`) after the final `.replace(crate::executor::markers::CTLESC, "\\")`,
+            // routing through the glob matcher for a literal match instead of
+            // the anchor fast path. Only mark backslashes that are not
+            // themselves escaped (`\\%` keeps `\\` for the decoder).
+            let masked = mark_escaped_pattern_anchors(&masked);
+
+            let decoded = decode_parameter_pattern_quotes(&masked)
+                .replace(crate::executor::markers::QUOTED_WORD_PREFIX, "");
+
+            let mut restored = String::with_capacity(decoded.len());
+            let mut rest = decoded.as_str();
+            while let Some(pos) = rest.find(crate::executor::markers::IFS_GLUE) {
+                restored.push_str(&rest[..pos]);
+                let digits: String = rest[pos + 1..]
+                    .chars()
+                    .take_while(|ch| ch.is_ascii_digit())
+                    .collect();
+                if digits.is_empty() {
+                    restored.push(crate::executor::markers::IFS_GLUE);
+                    rest = &rest[pos + 1..];
+                    continue;
+                }
+                let index: usize = digits.parse().unwrap_or(0);
+                if let Some(slot) = slots.get(index) {
+                    restored.push_str(slot);
+                }
+                rest = &rest[pos + 1 + digits.len()..];
+            }
+            restored.push_str(rest);
+
+            // \x18 is the literal-backslash marker from decode_parameter_pattern_quotes,
+            // but expand_embedded_parameters_preserving_escaped_single_quotes treats \x18
+            // as a double-quote marker and converts it to `"`.  Protect it by mapping
+            // to \x14 (which the expander preserves as a literal backslash) and restore
+            // after expansion so the pattern matcher sees the correct marker.
+            let protected = restored.replace(
+                crate::executor::markers::PATTERN_LITERAL_BACKSLASH,
+                crate::executor::markers::DATA_BACKSLASH_STR,
             );
-            self.shell_state.arithmetic_fatal_error.set(true);
-            self.shell_state.arithmetic_expansion_error.set(true);
-            return String::new();
-        }
-        // Decode quotes before embedded expansion so quoted glob
-        // metacharacters stay marked, but mask nested braced parameters
-        // first so the decoder does not tag glob chars inside an inner
-        // expansion (keeps ? a glob in the inner removal).
-        let mut masked = String::with_capacity(pattern.len());
-        let mut slots: Vec<String> = Vec::new();
-        // GNU subst.c: a double-quoted span in a pattern word expands its
-        // substitutions with quoting live, so the OUTPUT chars carry CTLESC
-        // (`"${x//"$p"/!}"` with p='*' matches a literal `*`, and `p='\'`
-        // matches a literal `\` — an unquoted `$p` instead feeds a live
-        // escape to the matcher). The shared embedded expander strips the
-        // marker context, so expand the span here and emit every output
-        // char literal-marked through the slot mechanism below.
-        let pre_masked = mask_quoted_pattern_spans(pattern, self, &mut slots);
-        let mut rest: &str = &pre_masked;
-        while let Some(pos) = rest.find("${") {
-            masked.push_str(&rest[..pos]);
-            let after = &rest[pos + 2..];
-            match matching_parameter_brace(after) {
-                Some(end) => {
-                    slots.push(format!("${{{}}}", &after[..end]));
-                    masked.push(crate::executor::markers::IFS_GLUE);
-                    masked.push_str(&(slots.len() - 1).to_string());
-                    rest = &after[end + 1..];
-                }
-                None => {
-                    masked.push_str("${");
-                    rest = after;
-                }
-            }
-        }
-        masked.push_str(rest);
+            let expanded =
+                crate::executor::expand_braced_replacement::with_no_split_dollar_star(|| {
+                    // GNU expand_string_for_pat (subst.c:4518): a pattern word
+                    // expands with expand_no_split_dollar_star set — an unquoted
+                    // `$*` inside the pattern takes string_list_dollar_star
+                    // (null-IFS concatenation, subst.c:3048), not the dollar_at
+                    // ' '-join + W_SPLITSPACE treatment of a split context.
+                    self.expand_embedded_parameters_preserving_escaped_single_quotes(&protected)
+                });
 
-        // GNU subst.c: an escaped anchor char `\%` or `\#` in a pattern
-        // substitution pattern is a literal character, not a suffix/prefix
-        // anchor. `decode_parameter_pattern_quotes` strips the backslash and
-        // leaves a bare `%`/`#` which `replace_parameter_pattern` would
-        // misinterpret as an anchor (subst.c parameter_brace_patsub:9451-
-        // 9465). Mark the escaped anchor with \x11 so the backslash survives
-        // as a glob escape (`\%`) after the final `.replace(crate::executor::markers::CTLESC, "\\")`,
-        // routing through the glob matcher for a literal match instead of
-        // the anchor fast path. Only mark backslashes that are not
-        // themselves escaped (`\\%` keeps `\\` for the decoder).
-        let masked = mark_escaped_pattern_anchors(&masked);
-
-        let decoded = decode_parameter_pattern_quotes(&masked)
-            .replace(crate::executor::markers::QUOTED_WORD_PREFIX, "");
-
-        let mut restored = String::with_capacity(decoded.len());
-        let mut rest = decoded.as_str();
-        while let Some(pos) = rest.find(crate::executor::markers::IFS_GLUE) {
-            restored.push_str(&rest[..pos]);
-            let digits: String = rest[pos + 1..]
-                .chars()
-                .take_while(|ch| ch.is_ascii_digit())
-                .collect();
-            if digits.is_empty() {
-                restored.push(crate::executor::markers::IFS_GLUE);
-                rest = &rest[pos + 1..];
-                continue;
-            }
-            let index: usize = digits.parse().unwrap_or(0);
-            if let Some(slot) = slots.get(index) {
-                restored.push_str(slot);
-            }
-            rest = &rest[pos + 1 + digits.len()..];
-        }
-        restored.push_str(rest);
-
-        // \x18 is the literal-backslash marker from decode_parameter_pattern_quotes,
-        // but expand_embedded_parameters_preserving_escaped_single_quotes treats \x18
-        // as a double-quote marker and converts it to `"`.  Protect it by mapping
-        // to \x14 (which the expander preserves as a literal backslash) and restore
-        // after expansion so the pattern matcher sees the correct marker.
-        let protected = restored.replace(
-            crate::executor::markers::PATTERN_LITERAL_BACKSLASH,
-            crate::executor::markers::DATA_BACKSLASH_STR,
-        );
-        let expanded =
-            crate::executor::expand_braced_replacement::with_no_split_dollar_star(|| {
-                // GNU expand_string_for_pat (subst.c:4518): a pattern word
-                // expands with expand_no_split_dollar_star set — an unquoted
-                // `$*` inside the pattern takes string_list_dollar_star
-                // (null-IFS concatenation, subst.c:3048), not the dollar_at
-                // ' '-join + W_SPLITSPACE treatment of a split context.
-                self.expand_embedded_parameters_preserving_escaped_single_quotes(&protected)
-            });
-
-        // Quoted glob metacharacters remain pattern literals. Preserve the
-        // escape for the parameter matcher instead of exposing a raw marker.
-        expanded
-            .replace(crate::executor::markers::CTLESC, "\\")
-            .replace(
-                crate::executor::markers::DATA_BACKSLASH,
-                crate::executor::markers::PATTERN_LITERAL_BACKSLASH_STR,
-            )
+            // Quoted glob metacharacters remain pattern literals. Preserve the
+            // escape for the parameter matcher instead of exposing a raw marker.
+            expanded
+                .replace(crate::executor::markers::CTLESC, "\\")
+                .replace(
+                    crate::executor::markers::DATA_BACKSLASH,
+                    crate::executor::markers::PATTERN_LITERAL_BACKSLASH_STR,
+                )
+        })
     }
 
     /// The key of an associative-array subscript, expanded through the one

@@ -264,9 +264,11 @@ impl Executor {
             // bodies the hoist guard excludes (assoc11.sub quote elements,
             // `d=(x $(echo 'y z') w)` assoc glue).
             let expanded = if compound_assignment {
-                self.expand_compound_assignment_parameters_mut(&format!(
-                    "{COMPOUND_ASSIGNMENT_MARKER}{raw_value}"
-                ))
+                crate::executor::expand_word::without_pending_diagnostic_raw(|| {
+                    self.expand_compound_assignment_parameters_mut(&format!(
+                        "{COMPOUND_ASSIGNMENT_MARKER}{raw_value}"
+                    ))
+                })
             } else {
                 let needs_hoist = !raw_value.contains("$(") && !raw_value.contains('`');
                 let hoisted = if needs_hoist {
@@ -287,11 +289,17 @@ impl Executor {
                 // there (`[0]=${-x}` for `a=([0]=${-x})`), which needs
                 // element-boundary tracking of its own. A here-document
                 // body is runtime text GNU never ran parse_comsub on —
-                // its `$(` spans cite raw (rubash#3543).
-                let _diag_word = crate::executor::expand_word::PendingDiagnosticWordGuard::new(
-                    word,
-                    matches!(context, SubstitutionQuoteContext::HereDocument),
-                );
+                // its `$(` spans cite raw (rubash#3543). When a raw
+                // record is active the citation is rebuilt from the raw
+                // word instead, so no cooked record is installed
+                // (rubash#4029).
+                let _diag_word = (!crate::executor::expand_word::pending_diagnostic_raw_active())
+                    .then(|| {
+                        crate::executor::expand_word::PendingDiagnosticWordGuard::new(
+                            word,
+                            matches!(context, SubstitutionQuoteContext::HereDocument),
+                        )
+                    });
                 crate::executor::assignment_expansion::restore_sq_content_markers(
                     self.expand_embedded_parameters_mut(&hoisted)
                         .replace(DQ_DATA, "\"")

@@ -537,6 +537,10 @@ impl Executor {
                     &marked_expanded.replace(crate::executor::markers::IFS_GLUE, ""),
                 ),
             }
+        } else if !redirect.target_metadata.raw.is_empty() {
+            with_pending_diagnostic_raw(&redirect.target_metadata.raw, false, || {
+                self.expand_word(&redirect.target)
+            })
         } else {
             self.expand_word(&redirect.target)
         };
@@ -1078,7 +1082,9 @@ impl Executor {
             return self.expand_embedded_parameters(word);
         }
         if let Some(resolved) = resolve_dollar_quoted_parameter_name(name) {
-            return self.expand_braced_parameter_word(word, &resolved);
+            return without_pending_diagnostic_raw(|| {
+                self.expand_braced_parameter_word(word, &resolved)
+            });
         }
 
         // rubash#1169: a pure fragment that precedes a `:=`/`=` assignment
@@ -1101,8 +1107,7 @@ impl Executor {
         // a `${...}` fragment handed to expand_word directly — is parser
         // text by construction (runtime strings always arrive through a
         // walker that records), so it cites canonical comsub spans.
-        let (diagnostic_word, diagnostic_runtime) =
-            take_pending_diagnostic_word().unwrap_or_else(|| (word.to_string(), false));
+        let diagnostic_word = take_pending_diagnostic_word_for_display(word, false);
 
         // GNU subst.c:10272-10288 (parameter_brace_expand): the parameter
         // name is terminated by the first character that cannot be part of
@@ -1122,7 +1127,7 @@ impl Executor {
                     format!(
                         "{}{}: bad substitution\n",
                         self.diagnostic_prefix(),
-                        bad_substitution_display(&diagnostic_word, diagnostic_runtime)
+                        diagnostic_word
                     )
                     .as_bytes(),
                 );
@@ -1145,7 +1150,7 @@ impl Executor {
                     format!(
                         "{}{}: bad substitution\n",
                         self.diagnostic_prefix(),
-                        bad_substitution_display(&diagnostic_word, diagnostic_runtime)
+                        diagnostic_word
                     )
                     .as_bytes(),
                 );
@@ -1314,8 +1319,11 @@ impl Executor {
         // `expand_word` only ever sees parser-read text (here-document
         // bodies and prompt strings expand through the embedded walkers,
         // never this entry), so the record is never runtime text
-        // (rubash#3543).
-        let _diag_word = PendingDiagnosticWordGuard::new(word, false);
+        // (rubash#3543). When a raw record is active the citation is
+        // rebuilt from the raw word instead, so no cooked record is
+        // installed (rubash#4029).
+        let _diag_word = (!pending_diagnostic_raw_active())
+            .then(|| PendingDiagnosticWordGuard::new(word, false));
         Some(self.expand_plain_assignment_word(name, value))
     }
 
@@ -1659,6 +1667,14 @@ thread_local! {
     /// `$(` spans GNU cites raw (rubash#3543).
     static PENDING_DIAGNOSTIC_WORD: std::cell::Cell<Option<(*const u8, usize, bool)>> =
         const { std::cell::Cell::new(None) };
+    /// The raw source word of the enclosing expansion level, recorded by
+    /// [`PendingDiagnosticRawGuard`]: the citation for a fragment is
+    /// rebuilt from it by `bad_substitution_diagnostic_word_from_raw`, so
+    /// quote delimiters and backslashes survive into the diagnostic
+    /// (rubash#4029). The bool is the outer-double-quoted state at the
+    /// record site.
+    static PENDING_DIAGNOSTIC_RAW: std::cell::Cell<Option<(*const u8, usize, bool)>> =
+        const { std::cell::Cell::new(None) };
 }
 
 /// Run `f` with `word` recorded as the enclosing word for a walked `${}`
@@ -1752,6 +1768,95 @@ pub(in crate::executor) fn take_pending_diagnostic_word() -> Option<(String, boo
     })
 }
 
+/// Consume the pending diagnostic word (or fall back to the active raw word /
+/// `fallback_word`) and return it ready for `bad substitution` display.
+///
+/// Captain graft synthesis (rubash#4029 × rubash#3543): the raw channel
+/// names WHICH word is cited — a word rebuilt from the raw source keeps
+/// its quote delimiters and backslashes — and `bad_substitution_display`
+/// decides how a parser word's comsub spans print (canonicalized,
+/// rubash#3543), with runtime text cited raw. A rebuilt word therefore
+/// goes through the same display as a cooked parser word.
+/// `fallback_runtime_text` is the caller's own runtime classification of
+/// `fallback_word` for the no-record case (a record, when present, carries
+/// its own flag; a rebuilt word is a parser word by construction).
+pub(in crate::executor) fn take_pending_diagnostic_word_for_display(
+    fallback_word: &str,
+    fallback_runtime_text: bool,
+) -> String {
+    if let Some((word, runtime_text)) = take_pending_diagnostic_word() {
+        return bad_substitution_display(&word, runtime_text);
+    }
+    if let Some(rendered) = diagnostic_word_for_fragment(0) {
+        return bad_substitution_display(&rendered, false);
+    }
+    bad_substitution_display(fallback_word, fallback_runtime_text)
+}
+
+/// Compute the GNU-accurate diagnostic word for fragment `frag_index` from the
+/// active `PENDING_DIAGNOSTIC_RAW` slot, if any (without consuming the slot,
+/// because sibling fragments in the same outer word share it).
+pub(in crate::executor) fn diagnostic_word_for_fragment(frag_index: usize) -> Option<String> {
+    if PENDING_DIAGNOSTIC_WORD.with(|slot| slot.get().is_some()) {
+        return None;
+    }
+    PENDING_DIAGNOSTIC_RAW.with(|slot| {
+        slot.get().map(|(ptr, len, outer_dq)| {
+            // SAFETY: `PendingDiagnosticRawGuard` borrows `raw` for its whole scope.
+            let raw =
+                unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len)) };
+            let offset =
+                nth_quoted_parameter_expansion_start(raw, frag_index, outer_dq).unwrap_or(0);
+            bad_substitution_diagnostic_word_from_raw(raw, offset, outer_dq)
+        })
+    })
+}
+
+pub(in crate::executor) fn pending_diagnostic_raw_active() -> bool {
+    PENDING_DIAGNOSTIC_RAW.with(|slot| slot.get().is_some())
+}
+
+/// RAII scope arm: records `raw` as the raw source word for the enclosing
+/// expansion level, restoring the previous record on drop. Unlike
+/// `PendingDiagnosticWordGuard`, an inner raw guard overrides any outer one
+/// (e.g. expanding an operator RHS word `${v:-...}` replaces the outer word).
+pub(in crate::executor) struct PendingDiagnosticRawGuard {
+    previous: Option<(*const u8, usize, bool)>,
+}
+
+impl PendingDiagnosticRawGuard {
+    pub(in crate::executor) fn new(raw: &str, outer_double_quoted: bool) -> Self {
+        let previous = PENDING_DIAGNOSTIC_RAW
+            .with(|slot| slot.replace(Some((raw.as_ptr(), raw.len(), outer_double_quoted))));
+        Self { previous }
+    }
+
+    pub(in crate::executor) fn suppressed() -> Self {
+        let previous = PENDING_DIAGNOSTIC_RAW.with(|slot| slot.replace(None));
+        Self { previous }
+    }
+}
+
+impl Drop for PendingDiagnosticRawGuard {
+    fn drop(&mut self) {
+        PENDING_DIAGNOSTIC_RAW.with(|slot| slot.set(self.previous));
+    }
+}
+
+pub(in crate::executor) fn with_pending_diagnostic_raw<T>(
+    raw: &str,
+    outer_double_quoted: bool,
+    f: impl FnOnce() -> T,
+) -> T {
+    let _guard = PendingDiagnosticRawGuard::new(raw, outer_double_quoted);
+    f()
+}
+
+pub(in crate::executor) fn without_pending_diagnostic_raw<T>(f: impl FnOnce() -> T) -> T {
+    let _guard = PendingDiagnosticRawGuard::suppressed();
+    f()
+}
+
 /// RAII scope arm: records `word` as the enclosing word for the duration of
 /// one `${}` fragment in a walker, restoring the previous record on drop.
 /// The record is install-if-absent: an outer record belongs to a word the
@@ -1772,6 +1877,21 @@ impl PendingDiagnosticWordGuard {
     /// or a prompt string (parse.y:6689 expand_prompt_string) — whose
     /// `$(` spans the diagnostic cites raw (rubash#3543).
     pub(in crate::executor) fn new(word: &str, runtime_text: bool) -> Self {
+        Self::install(word, runtime_text)
+    }
+
+    /// Record a word already rebuilt from the raw source text by
+    /// `bad_substitution_diagnostic_word_from_raw` (rubash#4029): the
+    /// citation keeps the raw word's quote delimiters and backslashes.
+    /// Display still runs through `bad_substitution_display`, so a parser
+    /// word's comsub spans print canonicalized (rubash#3543) and runtime
+    /// text stays raw — the `runtime_text` flag means the same here as
+    /// in [`PendingDiagnosticWordGuard::new`].
+    pub(in crate::executor) fn new_rendered(word: &str, runtime_text: bool) -> Self {
+        Self::install(word, runtime_text)
+    }
+
+    fn install(word: &str, runtime_text: bool) -> Self {
         let previous = PENDING_DIAGNOSTIC_WORD.with(|slot| {
             let previous = slot.get();
             if previous.is_none() {
@@ -1817,6 +1937,613 @@ pub(in crate::executor) fn bad_substitution_display(word: &str, runtime_text: bo
     crate::locale::decode_to_visible_text(&display)
         .replace("${$'", "${'")
         .replace("${$\"", "${\"")
+}
+
+/// GNU `sh_single_quote` (`parse.y:5572`): wrap `text` in single quotes,
+/// escaping each embedded `'` as `'\''`.
+fn sh_single_quote_for_diag(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('\'');
+    for ch in text.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+fn skip_diag_backtick(text: &str, start_after_tick: usize) -> usize {
+    let bytes = text.as_bytes();
+    let mut i = start_after_tick;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            if i + 1 < bytes.len() {
+                let ch = text[i + 1..].chars().next().unwrap();
+                i += 1 + ch.len_utf8();
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if bytes[i] == b'`' {
+            return i + 1;
+        }
+        let ch = text[i..].chars().next().unwrap();
+        i += ch.len_utf8();
+    }
+    bytes.len()
+}
+
+fn skip_diag_ansi_c(text: &str, start_after_quote: usize) -> (usize, bool) {
+    let bytes = text.as_bytes();
+    let mut i = start_after_quote;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            if i + 1 < bytes.len() {
+                let ch = text[i + 1..].chars().next().unwrap();
+                i += 1 + ch.len_utf8();
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if bytes[i] == b'\'' {
+            return (i, true);
+        }
+        let ch = text[i..].chars().next().unwrap();
+        i += ch.len_utf8();
+    }
+    (bytes.len(), false)
+}
+
+fn skip_diag_dollar_paren(text: &str, start_after_open: usize) -> usize {
+    let bytes = text.as_bytes();
+    let mut i = start_after_open;
+    let mut depth = 1usize;
+    let mut single = false;
+    let mut double = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'\\' && !single {
+            if i + 1 < bytes.len() {
+                let ch = text[i + 1..].chars().next().unwrap();
+                i += 1 + ch.len_utf8();
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if b == b'$' && bytes.get(i + 1) == Some(&b'\'') && !single && !double {
+            let (end, closed) = skip_diag_ansi_c(text, i + 2);
+            i = if closed { end + 1 } else { end };
+            continue;
+        }
+        match b {
+            b'\'' if !double => {
+                single = !single;
+                i += 1;
+            }
+            b'"' if !single => {
+                double = !double;
+                i += 1;
+            }
+            b'(' if !single && !double => {
+                depth += 1;
+                i += 1;
+            }
+            b')' if !single && !double => {
+                depth -= 1;
+                i += 1;
+                if depth == 0 {
+                    return i;
+                }
+            }
+            _ => {
+                let ch = text[i..].chars().next().unwrap();
+                i += ch.len_utf8();
+            }
+        }
+    }
+    bytes.len()
+}
+
+fn skip_diag_dollar_bracket(text: &str, start_after_open: usize) -> usize {
+    let bytes = text.as_bytes();
+    let mut i = start_after_open;
+    let mut depth = 1usize;
+    let mut single = false;
+    let mut double = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'\\' && !single {
+            if i + 1 < bytes.len() {
+                let ch = text[i + 1..].chars().next().unwrap();
+                i += 1 + ch.len_utf8();
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        match b {
+            b'\'' if !double => {
+                single = !single;
+                i += 1;
+            }
+            b'"' if !single => {
+                double = !double;
+                i += 1;
+            }
+            b'[' if !single && !double => {
+                depth += 1;
+                i += 1;
+            }
+            b']' if !single && !double => {
+                depth -= 1;
+                i += 1;
+                if depth == 0 {
+                    return i;
+                }
+            }
+            _ => {
+                let ch = text[i..].chars().next().unwrap();
+                i += ch.len_utf8();
+            }
+        }
+    }
+    bytes.len()
+}
+
+fn skip_diag_dollar_brace(text: &str, start_after_open: usize, outer_double: bool) -> usize {
+    let bytes = text.as_bytes();
+    let mut i = start_after_open;
+    let mut quote_stack: Vec<(bool, bool)> = Vec::new();
+    let mut single = false;
+    let mut double = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'\\' && !single {
+            if i + 1 < bytes.len() {
+                let ch = text[i + 1..].chars().next().unwrap();
+                i += 1 + ch.len_utf8();
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if b == b'$' && bytes.get(i + 1) == Some(&b'\'') && !single && !double {
+            let (end, closed) = skip_diag_ansi_c(text, i + 2);
+            i = if closed { end + 1 } else { end };
+            continue;
+        }
+        if b == b'$' && bytes.get(i + 1) == Some(&b'{') && !single {
+            quote_stack.push((single, double));
+            single = false;
+            double = false;
+            i += 2;
+            continue;
+        }
+        let effective_outer_double = outer_double && quote_stack.is_empty();
+        if b == b'\'' && !double && !effective_outer_double {
+            single = !single;
+            i += 1;
+            continue;
+        }
+        if b == b'"' && !single {
+            double = !double;
+            i += 1;
+            continue;
+        }
+        if b == b'}' && !single && !double {
+            i += 1;
+            match quote_stack.pop() {
+                Some((prev_single, prev_double)) => {
+                    single = prev_single;
+                    double = prev_double;
+                }
+                None => return i,
+            }
+            continue;
+        }
+        let ch = text[i..].chars().next().unwrap();
+        i += ch.len_utf8();
+    }
+    bytes.len()
+}
+
+/// Find the end of a double-quoted segment starting at `seg_start` (byte after
+/// the opening `"`). Returns `(seg_end, closed)` where `seg_end` is the byte
+/// index of the closing `"` (or `text.len()` if unterminated). Mirrors
+/// `subst.c:852 string_extract_double_quoted`.
+fn find_diag_double_quote_end(text: &str, seg_start: usize) -> (usize, bool) {
+    let bytes = text.as_bytes();
+    let mut i = seg_start;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => {
+                if i + 1 < bytes.len() {
+                    let ch = text[i + 1..].chars().next().unwrap();
+                    i += 1 + ch.len_utf8();
+                } else {
+                    i += 1;
+                }
+            }
+            b'`' => {
+                i = skip_diag_backtick(text, i + 1);
+            }
+            b'$' if bytes.get(i + 1) == Some(&b'(') => {
+                i = skip_diag_dollar_paren(text, i + 2);
+            }
+            b'$' if bytes.get(i + 1) == Some(&b'{') => {
+                i = skip_diag_dollar_brace(text, i + 2, false);
+            }
+            b'"' => return (i, true),
+            _ => {
+                let ch = text[i..].chars().next().unwrap();
+                i += ch.len_utf8();
+            }
+        }
+    }
+    (bytes.len(), false)
+}
+
+/// GNU `subst.c:852 string_extract_double_quoted` for diagnostic formatting:
+/// extracts the text inside a double-quoted segment, removing `\<newline>` and
+/// (when `stripdq == false`) removing `\` only before `"` (`subst.c:901`),
+/// while preserving `\$`, `\\`, `` \` ``, and `\other`. When `stripdq == true`
+/// (`subst.c:7985 parameter_brace_expand_rhs` under `Q_DOUBLE_QUOTES`),
+/// unescaped `"` delimiters are stripped and `dquote` governs backslash
+/// retention (`subst.c:901-902`).
+pub(in crate::executor) fn extract_double_quoted_diagnostic_segment(
+    segment: &str,
+    stripdq: bool,
+) -> String {
+    let bytes = segment.as_bytes();
+    let mut out = String::with_capacity(segment.len());
+    let mut i = 0usize;
+    let mut dquote = false;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => {
+                if i + 1 >= bytes.len() {
+                    out.push('\\');
+                    break;
+                }
+                let next_ch = segment[i + 1..].chars().next().unwrap();
+                if next_ch == '\n' {
+                    i += 2;
+                    continue;
+                }
+                let keep_bs = if stripdq {
+                    !dquote || matches!(next_ch, '$' | '`' | '"' | '\\' | '\n')
+                } else {
+                    next_ch != '"'
+                };
+                if keep_bs {
+                    out.push('\\');
+                }
+                out.push(next_ch);
+                i += 1 + next_ch.len_utf8();
+            }
+            b'`' => {
+                let end = skip_diag_backtick(segment, i + 1);
+                out.push_str(&segment[i..end]);
+                i = end;
+            }
+            b'$' if bytes.get(i + 1) == Some(&b'(') => {
+                let end = skip_diag_dollar_paren(segment, i + 2);
+                out.push_str(&segment[i..end]);
+                i = end;
+            }
+            b'$' if bytes.get(i + 1) == Some(&b'{') => {
+                let end = skip_diag_dollar_brace(segment, i + 2, true);
+                out.push_str(&segment[i..end]);
+                i = end;
+            }
+            b'"' if stripdq => {
+                dquote = !dquote;
+                i += 1;
+            }
+            _ => {
+                let ch = segment[i..].chars().next().unwrap();
+                out.push(ch);
+                i += ch.len_utf8();
+            }
+        }
+    }
+    out
+}
+
+fn normalize_top_level_dollar_brace_for_diag(span: &str) -> String {
+    let bytes = span.as_bytes();
+    let mut out = String::with_capacity(span.len());
+    let mut i = 0usize;
+    let mut single = false;
+    let mut double = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'\\' && !single {
+            if bytes.get(i + 1) == Some(&b'\n') {
+                i += 2;
+                continue;
+            }
+            out.push('\\');
+            if i + 1 < bytes.len() {
+                let ch = span[i + 1..].chars().next().unwrap();
+                out.push(ch);
+                i += 1 + ch.len_utf8();
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if b == b'$' && bytes.get(i + 1) == Some(&b'\'') && !single && !double {
+            let (end, closed) = skip_diag_ansi_c(span, i + 2);
+            if closed {
+                let decoded = crate::locale::decode_to_visible_text(
+                    &crate::lexer::ansi::decode_ansi_c_quoted(&span[i + 2..end]),
+                );
+                out.push_str(&sh_single_quote_for_diag(&decoded));
+                i = end + 1;
+                continue;
+            }
+        }
+        if b == b'$' && bytes.get(i + 1) == Some(&b'"') && !single && !double {
+            out.push('"');
+            double = true;
+            i += 2;
+            continue;
+        }
+        if b == b'\'' && !double {
+            single = !single;
+            out.push('\'');
+            i += 1;
+            continue;
+        }
+        if b == b'"' && !single {
+            double = !double;
+            out.push('"');
+            i += 1;
+            continue;
+        }
+        let ch = span[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// Find the byte offset of the `ordinal`-th top-level `${` in `raw` using the
+/// same quote/escape/arithmetic/command-substitution skipping rules as
+/// `parameter_errors.rs:next_quoted_parameter_expansion_start`.
+pub(in crate::executor) fn nth_quoted_parameter_expansion_start(
+    raw: &str,
+    ordinal: usize,
+    outer_double_quoted: bool,
+) -> Option<usize> {
+    nth_quoted_parameter_expansion_start_and_quote_state(raw, ordinal, outer_double_quoted)
+        .map(|(offset, _)| offset)
+}
+
+pub(in crate::executor) fn nth_quoted_parameter_expansion_start_and_quote_state(
+    raw: &str,
+    ordinal: usize,
+    outer_double_quoted: bool,
+) -> Option<(usize, bool)> {
+    let bytes = raw.as_bytes();
+    let mut i = 0usize;
+    let mut in_double = outer_double_quoted;
+    let mut seen = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => {
+                if i + 1 < bytes.len() {
+                    let ch = raw[i + 1..].chars().next().unwrap();
+                    i += 1 + ch.len_utf8();
+                } else {
+                    i += 1;
+                }
+            }
+            b'\'' if !in_double => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'\'' {
+                    let ch = raw[i..].chars().next().unwrap();
+                    i += ch.len_utf8();
+                }
+                if i < bytes.len() {
+                    i += 1;
+                }
+            }
+            b'$' if bytes.get(i + 1) == Some(&b'\'') && !in_double => {
+                let (end, closed) = skip_diag_ansi_c(raw, i + 2);
+                i = if closed { end + 1 } else { end };
+            }
+            b'$' if bytes.get(i + 1) == Some(&b'"') && !in_double => {
+                in_double = true;
+                i += 2;
+            }
+            b'$' if bytes.get(i + 1) == Some(&b'{') => {
+                if seen == ordinal {
+                    return Some((i, in_double));
+                }
+                seen += 1;
+                i = skip_diag_dollar_brace(raw, i + 2, in_double);
+            }
+            b'$' if bytes.get(i + 1) == Some(&b'(') && bytes.get(i + 2) == Some(&b'(') => {
+                i = skip_diag_dollar_paren(raw, i + 2);
+            }
+            b'$' if bytes.get(i + 1) == Some(&b'[') => {
+                i = skip_diag_dollar_bracket(raw, i + 2);
+            }
+            b'$' if bytes.get(i + 1) == Some(&b'(') => {
+                i = skip_diag_dollar_paren(raw, i + 2);
+            }
+            b'`' => {
+                i = skip_diag_backtick(raw, i + 1);
+            }
+            b'"' if !outer_double_quoted => {
+                in_double = !in_double;
+                i += 1;
+            }
+            _ => {
+                let ch = raw[i..].chars().next().unwrap();
+                i += ch.len_utf8();
+            }
+        }
+    }
+    None
+}
+
+pub(in crate::executor) fn raw_dollar_brace_body_slice(
+    raw: &str,
+    dollar_offset: usize,
+    in_double: bool,
+) -> Option<&str> {
+    let body_start = dollar_offset.checked_add(2)?;
+    if raw.as_bytes().get(dollar_offset..body_start) != Some(b"${") {
+        return None;
+    }
+    let end = skip_diag_dollar_brace(raw, body_start, in_double);
+    if end > body_start && raw.as_bytes().get(end - 1) == Some(&b'}') {
+        Some(&raw[body_start..end - 1])
+    } else {
+        None
+    }
+}
+
+/// Compute the GNU `subst.c:10278` `report_error(_("%s: bad substitution"), string)`
+/// word from the raw word token `raw` and the byte offset `dollar_offset` of
+/// the failing `${` in `raw`.
+///
+/// GNU anchors:
+/// - `parse.y:5305 read_token_word()`: preserves `'...'`, `"..."`, and `\x`
+///   escapes (dropping only `\<newline>`), converts `$'...'` via `ansiexpand` +
+///   `sh_single_quote`, and converts `$"..."` via `locale_expand` + `sh_mkdoublequoted`.
+/// - `subst.c:11229 expand_word_internal()`: at top level passes `word->word`
+///   to `param_expand` (`10464`) -> `parameter_brace_expand` (`9777`); when
+///   entering `"..."` (`11687`), calls `string_extract_double_quoted` (`852`,
+///   stripping outer `"` and `\"` -> `"`, keeping `\$`/`\\`/`\`/`\other`) and
+///   expands that extracted segment as its own word.
+pub(in crate::executor) fn bad_substitution_diagnostic_word_from_raw(
+    raw: &str,
+    dollar_offset: usize,
+    outer_double_quoted: bool,
+) -> String {
+    if outer_double_quoted {
+        return extract_double_quoted_diagnostic_segment(raw, true);
+    }
+    let bytes = raw.as_bytes();
+    let mut out = String::with_capacity(raw.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => {
+                if bytes.get(i + 1) == Some(&b'\n') {
+                    i += 2;
+                    continue;
+                }
+                out.push('\\');
+                if i + 1 < bytes.len() {
+                    let ch = raw[i + 1..].chars().next().unwrap();
+                    out.push(ch);
+                    i += 1 + ch.len_utf8();
+                } else {
+                    i += 1;
+                }
+            }
+            b'\'' => {
+                let start = i;
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'\'' {
+                    let ch = raw[i..].chars().next().unwrap();
+                    i += ch.len_utf8();
+                }
+                if i < bytes.len() {
+                    i += 1;
+                }
+                out.push_str(&raw[start..i]);
+            }
+            b'$' if bytes.get(i + 1) == Some(&b'\'') => {
+                let (end, closed) = skip_diag_ansi_c(raw, i + 2);
+                if closed {
+                    let decoded = crate::locale::decode_to_visible_text(
+                        &crate::lexer::ansi::decode_ansi_c_quoted(&raw[i + 2..end]),
+                    );
+                    out.push_str(&sh_single_quote_for_diag(&decoded));
+                    i = end + 1;
+                } else {
+                    out.push_str(&raw[i..]);
+                    break;
+                }
+            }
+            b'$' if bytes.get(i + 1) == Some(&b'"') => {
+                let seg_start = i + 2;
+                let (seg_end, closed) = find_diag_double_quote_end(raw, seg_start);
+                if dollar_offset >= seg_start && dollar_offset < seg_end {
+                    return extract_double_quoted_diagnostic_segment(
+                        &raw[seg_start..seg_end],
+                        false,
+                    );
+                }
+                out.push('"');
+                for ch in raw[seg_start..seg_end].chars() {
+                    out.push(ch);
+                }
+                if closed {
+                    out.push('"');
+                }
+                i = if closed { seg_end + 1 } else { seg_end };
+            }
+            b'"' => {
+                let seg_start = i + 1;
+                let (seg_end, closed) = find_diag_double_quote_end(raw, seg_start);
+                if dollar_offset >= seg_start && dollar_offset < seg_end {
+                    return extract_double_quoted_diagnostic_segment(
+                        &raw[seg_start..seg_end],
+                        false,
+                    );
+                }
+                out.push('"');
+                let mut k = seg_start;
+                while k < seg_end {
+                    if bytes[k] == b'\\' && k + 1 < seg_end && bytes[k + 1] == b'\n' {
+                        k += 2;
+                        continue;
+                    }
+                    let ch = raw[k..].chars().next().unwrap();
+                    out.push(ch);
+                    k += ch.len_utf8();
+                }
+                if closed {
+                    out.push('"');
+                }
+                i = if closed { seg_end + 1 } else { seg_end };
+            }
+            b'`' => {
+                let end = skip_diag_backtick(raw, i + 1);
+                out.push_str(&raw[i..end]);
+                i = end;
+            }
+            b'$' if bytes.get(i + 1) == Some(&b'(') => {
+                let end = skip_diag_dollar_paren(raw, i + 2);
+                out.push_str(&raw[i..end]);
+                i = end;
+            }
+            b'$' if bytes.get(i + 1) == Some(&b'{') => {
+                let end = skip_diag_dollar_brace(raw, i + 2, false);
+                out.push_str(&normalize_top_level_dollar_brace_for_diag(&raw[i..end]));
+                i = end;
+            }
+            _ => {
+                let ch = raw[i..].chars().next().unwrap();
+                out.push(ch);
+                i += ch.len_utf8();
+            }
+        }
+    }
+    out
 }
 
 /// The parameter-name terminator set GNU scans for in
