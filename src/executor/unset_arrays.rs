@@ -354,10 +354,14 @@ impl Executor {
             // record the unbind in UNSET_DYNAMIC_VARS; readonly names
             // (SHELLOPTS/BASHOPTS) keep their attribute and fall through
             // to the readonly diagnostic below.
+            // An imported cell preserved as a plain scalar (UNSET_DYNAMIC_VARS,
+            // variables.c:1255 init_dynamic_array_var) never received
+            // att_nounset, so it unsets like an ordinary variable (rubash#4062).
             if matches!(
                 name,
                 "BASH_SOURCE" | "BASH_LINENO" | "BASH_ARGC" | "BASH_ARGV"
-            ) {
+            ) && !is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, &name)
+            {
                 diag.free(format_args!("{name}: cannot unset"));
                 element_status = element_status.max(1);
                 continue;
