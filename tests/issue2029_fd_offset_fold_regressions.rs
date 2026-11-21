@@ -37,12 +37,22 @@ fn run_script(body: &str) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
-const FIVE: &str = "\
-exec 3<five.txt
-";
+/// The script line that opens the fixture on fd 3. The fixture
+/// filename carries the test-process pid (see `five_fixture`), so the
+/// line is built at run time instead of held in a const.
+fn five_open() -> String {
+    format!("exec 3<five_{}.txt\n", std::process::id())
+}
 
 fn five_fixture(dir: &std::path::Path) -> String {
-    let path = dir.join("five.txt");
+    // Process-unique filename: a fixed `five.txt` in the shared temp
+    // root is truncated and rewritten by every concurrent test process
+    // of this stem, and a process whose rubash opens it inside another
+    // process's truncation window reads an empty or short file (the
+    // false-red race classified in the #4019 CI differential). The
+    // script files in `run_script` already carry the pid; the fixture
+    // now does the same.
+    let path = dir.join(format!("five_{}.txt", std::process::id()));
     std::fs::write(&path, b"l1\nl2\nl3\nl4\nl5\n").expect("write fixture");
     dir.to_string_lossy().replace('\\', "/")
 }
@@ -53,8 +63,9 @@ fn five_fixture(dir: &std::path::Path) -> String {
 fn head_pipe_fold_leaves_the_remainder() {
     let dir = std::env::temp_dir();
     let base = five_fixture(&dir);
+    let five = five_open();
     let out = run_script(&format!(
-        "{base}\n{FIVE}head -1 <&3 | wc -l\ncat <&3\nexec 3<&-\n"
+        "{base}\n{five}head -1 <&3 | wc -l\ncat <&3\nexec 3<&-\n"
     ));
     assert_eq!(out, "1\nl2\nl3\nl4\nl5\n");
 }
@@ -64,8 +75,9 @@ fn head_pipe_fold_leaves_the_remainder() {
 fn head_two_lines_then_read_continues() {
     let dir = std::env::temp_dir();
     let base = five_fixture(&dir);
+    let five = five_open();
     let out = run_script(&format!(
-        "{base}\n{FIVE}head -2 <&3 | wc -l\nread x <&3; echo next=[$x]\nexec 3<&-\n"
+        "{base}\n{five}head -2 <&3 | wc -l\nread x <&3; echo next=[$x]\nexec 3<&-\n"
     ));
     assert_eq!(out, "2\nnext=[l3]\n");
 }
@@ -76,8 +88,9 @@ fn head_two_lines_then_read_continues() {
 fn head_zero_leaves_the_payload_intact() {
     let dir = std::env::temp_dir();
     let base = five_fixture(&dir);
+    let five = five_open();
     let out = run_script(&format!(
-        "{base}\n{FIVE}head -0 <&3 | wc -l\ncat <&3\nexec 3<&-\n"
+        "{base}\n{five}head -0 <&3 | wc -l\ncat <&3\nexec 3<&-\n"
     ));
     assert_eq!(out, "0\nl1\nl2\nl3\nl4\nl5\n");
 }
@@ -88,8 +101,9 @@ fn head_zero_leaves_the_payload_intact() {
 fn head_all_but_last_folds_the_prefix() {
     let dir = std::env::temp_dir();
     let base = five_fixture(&dir);
+    let five = five_open();
     let out = run_script(&format!(
-        "{base}\n{FIVE}head -n -1 <&3 | wc -l\ncat <&3\nexec 3<&-\n"
+        "{base}\n{five}head -n -1 <&3 | wc -l\ncat <&3\nexec 3<&-\n"
     ));
     assert_eq!(out, "4\nl5\n");
 }
@@ -123,8 +137,9 @@ fn procsub_source_zero_head_keeps_the_stream() {
 fn full_consumer_wc_drains_the_endpoint() {
     let dir = std::env::temp_dir();
     let base = five_fixture(&dir);
+    let five = five_open();
     let out = run_script(&format!(
-        "{base}\n{FIVE}wc -l <&3 | wc -l\ncat <&3\nexec 3<&-\n"
+        "{base}\n{five}wc -l <&3 | wc -l\ncat <&3\nexec 3<&-\n"
     ));
     assert_eq!(out, "1\n");
 }
@@ -134,8 +149,9 @@ fn full_consumer_wc_drains_the_endpoint() {
 fn grep_stage_drains_the_endpoint() {
     let dir = std::env::temp_dir();
     let base = five_fixture(&dir);
+    let five = five_open();
     let out = run_script(&format!(
-        "{base}\n{FIVE}grep l3 <&3 | wc -l\ncat <&3\nexec 3<&-\n"
+        "{base}\n{five}grep l3 <&3 | wc -l\ncat <&3\nexec 3<&-\n"
     ));
     assert_eq!(out, "1\n");
 }
@@ -146,8 +162,9 @@ fn grep_stage_drains_the_endpoint() {
 fn compound_read_stage_folds_the_remainder() {
     let dir = std::env::temp_dir();
     let base = five_fixture(&dir);
+    let five = five_open();
     let out = run_script(&format!(
-        "{base}\n{FIVE}{{ read x; echo \"got=[$x]\"; }} <&3 | wc -l\ncat <&3\nexec 3<&-\n"
+        "{base}\n{five}{{ read x; echo \"got=[$x]\"; }} <&3 | wc -l\ncat <&3\nexec 3<&-\n"
     ));
     assert_eq!(out, "1\nl2\nl3\nl4\nl5\n");
 }
@@ -158,8 +175,9 @@ fn compound_read_stage_folds_the_remainder() {
 fn cat_stage_still_drains_once() {
     let dir = std::env::temp_dir();
     let base = five_fixture(&dir);
+    let five = five_open();
     let out = run_script(&format!(
-        "{base}\n{FIVE}cat <&3 | wc -l\ncat <&3\nexec 3<&-\n"
+        "{base}\n{five}cat <&3 | wc -l\ncat <&3\nexec 3<&-\n"
     ));
     assert_eq!(out, "5\n");
 }
