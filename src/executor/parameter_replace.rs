@@ -998,8 +998,10 @@ fn is_ansic_printable(ch: char, utf8: bool) -> bool {
         // but only in a UTF-8 locale: ansic_quote's multibyte pass-through
         // (strtrans.c:266-282) is the UTF-8-locale branch, and under
         // LC_ALL=C every byte >= 0x80 is escaped octal instead
-        // (rubash#1464).
-        utf8 && !ch.is_control()
+        // (rubash#1464). The iswprint verdict is glibc's print class —
+        // locale.rs is_glibc_cntrl adds the line/paragraph separators
+        // U+2028/U+2029 that Rust's is_control() misses (rubash#3946).
+        utf8 && !crate::locale::is_glibc_cntrl(ch)
     }
 }
 
