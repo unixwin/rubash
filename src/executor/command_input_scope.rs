@@ -538,8 +538,9 @@ impl Executor {
         // left-to-right walk reports the FIRST failing dup in list order
         // like GNU do_redirections (output side rubash#263/#266, input
         // side rubash#2030).
-        if let Some((index, name)) = self.compound_dup_bad_fd(cmd) {
-            let abandoned = self.abandon_compound_for_dup_bad_fd(cmd, index, &name);
+        if let Some((index, name, cannot_duplicate)) = self.compound_dup_bad_fd(cmd) {
+            let abandoned =
+                self.abandon_compound_for_dup_bad_fd(cmd, index, &name, cannot_duplicate);
             self.unwind_dynamic_fd_pass(&bound_dynamic_fds, saved_dynamic_closes);
             return abandoned;
         }
@@ -3394,8 +3395,8 @@ impl Executor {
         // Same preflight-first discipline as with_command_input_redirects:
         // the walk is pure, and the abandonment it triggers must not race
         // half-applied binds.
-        if let Some((index, name)) = self.compound_dup_bad_fd(cmd) {
-            return self.abandon_compound_for_dup_bad_fd(cmd, index, &name);
+        if let Some((index, name, cannot_duplicate)) = self.compound_dup_bad_fd(cmd) {
+            return self.abandon_compound_for_dup_bad_fd(cmd, index, &name, cannot_duplicate);
         }
         let saved_numbered = self.open_compound_numbered_input_redirects(cmd)?;
         let saved_output = self.open_compound_output_redirects(cmd)?;
@@ -3440,14 +3441,27 @@ impl Executor {
     /// (`compound_dup_bad_fd`) and route the failure here. The diagnostic
     /// goes through the fd 2 binding only the redirects BEFORE the failing
     /// dup installed (`{ :; } 2>/dev/null 2>&3` is silent), because
-    /// do_redirections stops at the failing step.
+    /// do_redirections stops at the failing step. `cannot_duplicate` is
+    /// the move-undo verdict compound_dup_bad_fd computed (rubash#4028):
+    /// on an RX_UNDOABLE compound walk whose move redirector was open,
+    /// redir.c:1171-1175's source-close save fails first and sys_errors
+    /// `redirection error: cannot duplicate fd` ahead of the
+    /// `N: Bad file descriptor` line.
     pub(in crate::executor) fn abandon_compound_for_dup_bad_fd<T: Default>(
         &mut self,
         cmd: &CommandNode,
         index: usize,
         name: &str,
+        cannot_duplicate: bool,
     ) -> Result<T, ExecuteError> {
         let mut stderr = Vec::new();
+        if cannot_duplicate {
+            writeln!(
+                stderr,
+                "{}redirection error: cannot duplicate fd: Bad file descriptor",
+                self.script_name_prefix()
+            )?;
+        }
         writeln!(
             stderr,
             "{}{name}: Bad file descriptor",
@@ -3485,8 +3499,20 @@ impl Executor {
     pub(in crate::executor) fn compound_dup_bad_fd(
         &self,
         cmd: &CommandNode,
-    ) -> Option<(usize, String)> {
+    ) -> Option<(usize, String, bool)> {
         let mut opened: HashMap<u32, bool> = HashMap::new();
+        // rubash#4028: whether this compound's redirect list is applied
+        // with GNU's RX_UNDOABLE saves — the only walks where
+        // add_undo_redirect (redir.c:1296) runs and a move's
+        // source-close save can sys_error `cannot duplicate fd`
+        // (redir.c:1171-1175). A `( )` subshell head's own list is the
+        // fork child's RX_ACTIVE pass (execute_cmd.c:1761), and a
+        // respawned background/procsub payload root replays that same
+        // child face, so neither earns the first diagnostic line.
+        let undoable_walk = cmd.subshell_command.is_none()
+            && cmd.pipe.is_none()
+            && cmd.pipeline_command.is_none()
+            && self.respawn_payload_face.get() == 0;
         // rubash#3991: the undo saves a fixed entry earns are real
         // descriptors in GNU's walk (see fd_walk_register_saves), so
         // a dup naming a save slot is not a bad-fd dup. Mirror the
@@ -3543,7 +3569,15 @@ impl Executor {
                         opened.insert(fd, false);
                         continue;
                     }
-                    if let Some((source_fd, _move_source)) = redirect_target_fd_and_move(&target) {
+                    // The raw word keeps its trailing dash:
+                    // dup_bad_fd_name reads move-ness off it
+                    // (make_cmd.c:704-716), the same signal the
+                    // simple-command gate uses — and so does the
+                    // move verdict here: a dash the expansion alone
+                    // produced is not a move.
+                    let raw_word = redirect.target_metadata.raw.trim_start_matches('&');
+                    if let Some((source_fd, expanded_move)) = redirect_target_fd_and_move(&target) {
+                        let move_source = expanded_move && raw_word.ends_with('-');
                         // Self-dup/self-move is a no-op that succeeds even
                         // for a closed fd (redir.c `redir_fd !=
                         // redirector` guard; rubash#1236) and leaves the
@@ -3552,12 +3586,19 @@ impl Executor {
                             continue;
                         }
                         if !dup_source_fd_open(&self.fd_table, source_fd, &opened) {
-                            let raw_word = redirect
-                                .target_metadata
-                                .raw
-                                .trim_start_matches('&')
-                                .trim_end_matches('-');
-                            return Some((index, dup_bad_fd_name(raw_word, fd, source_fd)));
+                            // redir.c:1171-1175: the move's source-close
+                            // undo save — whose failed fcntl prints
+                            // `cannot duplicate fd` — runs only on an
+                            // RX_UNDOABLE walk whose redirector is open
+                            // at this position.
+                            let cannot_duplicate = move_source
+                                && undoable_walk
+                                && dup_source_fd_open(&self.fd_table, fd, &opened);
+                            return Some((
+                                index,
+                                dup_bad_fd_name(raw_word, fd, source_fd),
+                                cannot_duplicate,
+                            ));
                         }
                         let open = dup_source_fd_open(&self.fd_table, source_fd, &opened);
                         opened.insert(fd, open);
