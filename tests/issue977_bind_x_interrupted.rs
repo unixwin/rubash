@@ -327,32 +327,30 @@ fn widget_without_signal_is_not_interrupted() {
     assert!(run.log.contains("done"), "log: {:?}", run.log);
 }
 
-/// The builtin-sleep boundary: the widget's `sleep` is the
-/// in-process virtual child, and a delivery that lands
-/// mid-sleep is consumed by the mid-wait drain and FORGOTTEN
-/// with its classification — the virtual child cannot die, so
-/// a shell-directed delivery neither cuts the sleep nor
-/// discards the list (rubash#1640, pinned by
-/// issue698_forgotten_mid_sleep_sigint_leaves_no_discard_mark;
-/// re-adjudicating that fold is #1640's own question, not this
-/// flag's). No unwind occurs in this spelling, so the flag
-/// must stay false and the widget completes: this cell locks
-/// the boundary between the two mechanisms, so a change to
-/// either side has to move it consciously.
+/// Post-rubash#3488: `sleep` on unix is a real spawned child (not the
+/// in-process virtual child), so a shell-directed SIGINT during `sleep 4`
+/// follows the same real-child path as `{SLEEP} 6` above — the child
+/// finishes its sleep and the boundary discards the rest of the widget
+/// with status 130 and `interrupted == true` (GNU parity).
 #[test]
 fn builtin_sleep_mid_wait_fold_leaves_no_unwind_to_report() {
     let _guard = serial();
     let run = drive("builtin-sleep", "", "sleep 4; echo done >> \"{LOG}\"", true);
     assert!(
-        !run.interrupted,
-        "the mid-wait fold produces no unwind to report \
+        run.interrupted,
+        "an untrapped SIGINT unwind after real sleep on unix must set interrupted \
          (status {}, log {:?}, elapsed {:?})",
         run.status, run.log, run.elapsed
     );
-    assert_eq!(run.status, 0);
+    assert_eq!(run.status, 130);
     assert!(
-        run.log.contains("done"),
-        "the widget must run to completion under the fold: {:?}",
+        !run.log.contains("done"),
+        "the widget's post-sleep commands must not run: {:?}",
         run.log
+    );
+    assert!(
+        run.elapsed >= Duration::from_millis(3500),
+        "a shell-directed delivery must not cut the child's 4s sleep: {:?}",
+        run.elapsed
     );
 }

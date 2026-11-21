@@ -411,14 +411,15 @@ mod unix_faces {
         );
     }
 
-    // ---- The mid-sleep fold bookkeeping (unix): a queued
-    // kill(2)-class SIGINT that lands during an interactive
-    // session's builtin sleep is consumed by the mid-wait drain and
-    // then FORGOTTEN (GNU: the shell-only delivery leaves the real
-    // child running; the virtual child sleeps on, rubash#1640). Its
-    // discard classification must be forgotten with it — a mark left
-    // pending would misclassify a later genuine `exit` in the same
-    // unit as a discard and the session would refuse to exit.
+    // ---- Real-child sleep boundary (unix, post-rubash#3488):
+    // `sleep` on unix is a real spawned foreground child, not the
+    // in-process virtual child. A queued kill(2)-class / mailbox
+    // SIGINT that lands while an interactive session waits on `sleep`
+    // does not kill the real child, and is NOT forgotten mid-sleep —
+    // it is adjudicated at the command boundary as an interactive
+    // DISCARD (GNU jobs.c:3315 ADDINTERRUPT / throw_to_top_level:
+    // status 130, Flow::Completed, subsequent commands in the unit
+    // such as `exit 3` do not run).
 
     struct DrivenRun {
         status: i32,
@@ -467,18 +468,19 @@ mod unix_faces {
     #[test]
     fn issue698_forgotten_mid_sleep_sigint_leaves_no_discard_mark() {
         let _guard = serial();
-        // The queued SIGINT lands mid-sleep and is forgotten there;
-        // the unit's real `exit 3` must still classify as an exit.
+        // Post-rubash#3488: `sleep 3` is a real child on unix, so the
+        // mailbox SIGINT is deferred until `sleep 3` finishes and then
+        // discards the rest of the unit (`exit 3` does not run).
         let run = drive_interactive_unit("sleep 3; exit 3", "fold-bookkeeping");
         assert!(
             run.elapsed >= Duration::from_millis(2500),
             "the shell-only delivery must not abort the sleep: {:?}",
             run.elapsed
         );
-        assert_eq!(run.status, 3);
+        assert_eq!(run.status, 130);
         assert!(
-            matches!(run.flow, Flow::ExitRequested(3)),
-            "a genuine exit after a forgotten interrupt stays an exit: {:?}",
+            matches!(run.flow, Flow::Completed),
+            "interactive untrapped SIGINT after foreground sleep discards the unit: {:?}",
             run.flow
         );
     }
@@ -492,10 +494,10 @@ mod unix_faces {
             "the sleep must run to completion: {:?}",
             run.elapsed
         );
-        assert_eq!(run.status, 0);
+        assert_eq!(run.status, 130);
         assert!(
             matches!(run.flow, Flow::Completed),
-            "a forgotten delivery changes nothing: {:?}",
+            "interactive untrapped SIGINT settles at 130 as a discard: {:?}",
             run.flow
         );
     }
