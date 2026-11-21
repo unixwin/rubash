@@ -1761,6 +1761,25 @@ impl Executor {
         name: &str,
     ) -> Option<Vec<String>> {
         let name = self.resolved_variable_name(name)?;
+        // rubash#3534: a stack name severed by UNSET_DYNAMIC_VARS -
+        // a lifetime `unset` (variables.c:3839), or an imported cell
+        // preserved as an ordinary scalar at init (variables.c:
+        // 1255-1277) - is no longer a dynamic stack array: every
+        // consumer of this view must fall through to the plain cell
+        // (or its absence), exactly as for any ordinary name. The
+        // FUNCNAME joins the gate as well: its in-view arm renders
+        // the marked state as an empty array for frame composition,
+        // but a severed name with a surviving scalar cell (the
+        // imported case) must read as that scalar here too - and for
+        // a genuinely unbound name None and an empty view are
+        // indistinguishable to every caller audited for this gate.
+        if matches!(
+            name.as_str(),
+            "BASH_ARGC" | "BASH_ARGV" | "BASH_LINENO" | "BASH_SOURCE" | "FUNCNAME"
+        ) && is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, &name)
+        {
+            return None;
+        }
         let values = match name.as_str() {
             "PIPESTATUS" => self.pipestatus_values(),
             "FUNCNAME" => {
@@ -1989,33 +2008,78 @@ impl Executor {
                 // function the whole array reads as unset, including the
                 // evalfile.c:257 "source" frame at the top level. `unset
                 // FUNCNAME` unbinds the cell permanently (rubash#541).
-                if self.shell_state.function_depth == 0
-                    || is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, "FUNCNAME")
-                {
-                    return Some(String::new());
+                // rubash#3534: an import-severed FUNCNAME still holds its
+                // imported scalar cell - fall through to the plain
+                // variable read at the bottom so element reads see that
+                // scalar, exactly like the guarded BASH_SOURCE arm below.
+                // A genuine `unset FUNCNAME` unbinds the cell entirely,
+                // so the #541 empty result stands whenever no scalar
+                // cell exists.
+                let funcname_imported_scalar =
+                    is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, "FUNCNAME")
+                        && matches!(
+                            self.shell_state
+                                .variables
+                                .get("FUNCNAME")
+                                .map(|variable| &variable.value),
+                            Some(crate::shell::ShellValue::Scalar(_))
+                        );
+                if !funcname_imported_scalar {
+                    if self.shell_state.function_depth == 0
+                        || is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, "FUNCNAME")
+                    {
+                        return Some(String::new());
+                    }
+                    let mut stack = self.shell_state.function_name_stack.clone();
+                    // The "main" bottom frame exists only in script-file mode
+                    // (shell.c:1647 array_push(funcname_a, "main") inside
+                    // shell_execscript); `bash -c` and stdin scripts have only
+                    // real function frames.
+                    if self.has_script_main_frame()
+                        && !stack.is_empty()
+                        && stack.last().map(String::as_str) != Some("main")
+                    {
+                        stack.push("main".to_string());
+                    }
+                    return Some(format_indexed_array_values(stack));
                 }
-                let mut stack = self.shell_state.function_name_stack.clone();
-                // The "main" bottom frame exists only in script-file mode
-                // (shell.c:1647 array_push(funcname_a, "main") inside
-                // shell_execscript); `bash -c` and stdin scripts have only
-                // real function frames.
-                if self.has_script_main_frame()
-                    && !stack.is_empty()
-                    && stack.last().map(String::as_str) != Some("main")
-                {
-                    stack.push("main".to_string());
-                }
-                return Some(format_indexed_array_values(stack));
             }
-            "BASH_ARGC" => return Some(format_indexed_array_values(self.bash_argc_view())),
-            "BASH_ARGV" => {
+            // rubash#3534: the four stack arms below are guarded by
+            // UNSET_DYNAMIC_VARS - a severed name (lifetime `unset`,
+            // variables.c:3839, or an imported cell preserved as an
+            // ordinary scalar at init, variables.c:1255-1277) skips
+            // the live-stack render and falls through to the plain
+            // variable read at the bottom, exactly like the
+            // BASH_ALIASES/BASH_CMDS arm further down.
+            "BASH_ARGC"
+                if !is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, "BASH_ARGC") =>
+            {
+                return Some(format_indexed_array_values(self.bash_argc_view()))
+            }
+            "BASH_ARGV"
+                if !is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, "BASH_ARGV") =>
+            {
                 // rubash#1110 item 4: same composed view as the direct
                 // arm in dynamic_stack_array_values (no call frames
                 // without extdebug; bottom frame once materialized).
                 return Some(format_indexed_array_values(self.bash_argv_view()));
             }
-            "BASH_LINENO" => return Some(format_indexed_array_values(self.bash_lineno_view())),
-            "BASH_SOURCE" => {
+            "BASH_LINENO"
+                if !is_marked_var(
+                    &self.shell_state.env_vars,
+                    UNSET_DYNAMIC_VARS,
+                    "BASH_LINENO",
+                ) =>
+            {
+                return Some(format_indexed_array_values(self.bash_lineno_view()))
+            }
+            "BASH_SOURCE"
+                if !is_marked_var(
+                    &self.shell_state.env_vars,
+                    UNSET_DYNAMIC_VARS,
+                    "BASH_SOURCE",
+                ) =>
+            {
                 let mut stack = self.shell_state.bash_source_stack.clone();
                 // Without a main frame (`bash -c`, stdin scripts) the
                 // script-name bottom entry installed with $0 is not a

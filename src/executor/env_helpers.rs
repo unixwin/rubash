@@ -143,75 +143,38 @@ pub(in crate::executor) fn initialize_shell_level(env_vars: &mut VarTable) {
 }
 
 pub(in crate::executor) fn is_initial_export_candidate(name: &str) -> bool {
-    // GNU variables.c:368 initialize_shell_variables: EVERY environment
-    // entry that becomes a shell variable is bound with
-    // att_exported|att_imported (the ordinary-variable branch,
-    // variables.c:513-516), whatever the name's case or length — the
-    // environment's exported-ness is imported as-is. An earlier
-    // uppercase-first heuristic (plus a length<=1 exclusion) de-exported
-    // every lowercase-first name for executors constructed inside a
-    // shared process, on the theory that a sibling executor's shell-local
-    // mirror writes could accumulate in the process environment; that
-    // surface no longer exists — set_process_env mirrors only a fixed
-    // uppercase/internal whitelist (shell_assignment_needs_process_env),
-    // so no lowercase name in the environment can be a mirror write
-    // (rubash#2723: `http_proxy`, `my_var`, `x=1` reached GNU's children
-    // but not an embedded session's). What stays excluded is only what
-    // never came from the caller's environment at all: rubash's internal
-    // transport names and the bash-managed names the shell re-derives.
+    // GNU variables.c:506-517 initialize_shell_variables: EVERY
+    // environment entry that becomes a shell variable is bound with
+    // att_exported|att_imported (the ordinary-variable branch),
+    // whatever the name — there is no "bash-managed" exclusion list.
+    // Each name's own initializer then decides whether the mark
+    // survives: set_ppid (variables.c:970-982) removes it, uidset
+    // (variables.c:984-1008) keeps it on an imported UID/EUID, the
+    // INIT_DYNAMIC_VAR rebuilds (variables.c:1844-1897) keep it while
+    // discarding the imported VALUE, and the early-return array
+    // initializers (init_dynamic_array_var/assoc_var
+    // variables.c:1255-1277, init_funcname_var variables.c:1831) keep
+    // both. Those per-name decisions live in
+    // initialize_fresh_shell_env_vars — the mark itself always lands.
+    //
+    // An earlier uppercase-first heuristic (plus a length<=1
+    // exclusion) de-exported every lowercase-first name for executors
+    // constructed inside a shared process, on the theory that a
+    // sibling executor's shell-local mirror writes could accumulate in
+    // the process environment; that surface no longer exists —
+    // set_process_env mirrors only a fixed uppercase/internal
+    // whitelist (shell_assignment_needs_process_env), so no lowercase
+    // name in the environment can be a mirror write (rubash#2723:
+    // `http_proxy`, `my_var`, `x=1` reached GNU's children but not an
+    // embedded session's). What stays excluded is only what never came
+    // from the caller's environment at all: rubash's internal
+    // transport names.
     // GNU variables.c:3307 bind_invalid_envvar covers the invalid-name
     // arm of the same rule: an entry whose name is not a valid
     // identifier never becomes a shell variable but stays in the export
     // environment — `env 'v[0]=help' sh -c ...` propagates `v[0]` to the
     // child (varenv13.sub).
-    !(name.starts_with("__RUBASH_") || is_bash_managed_shell_var(name))
-}
-
-/// Names the shell re-derives at birth and that an inherited environment
-/// value does not mark exported.
-///
-/// SHELLOPTS and BASHOPTS are deliberately NOT here (rubash#3517): GNU
-/// variables.c:506-517 initialize_shell_variables binds an imported
-/// SHELLOPTS/BASHOPTS like every other valid-name entry, with
-/// `att_exported | att_imported` (the `ro` branch only adds ASS_FORCE and
-/// re-asserts att_readonly), and the rebuilds that follow
-/// (builtins/set.def set_shellopts, builtins/shopt.def set_bashopts) go
-/// through bind_variable, which keeps the attributes. The imported value
-/// is consumed by the option replay in initialize_fresh_shell_env_vars and
-/// then rebuilt in place, so the export mark survives and `set -o` /
-/// `shopt -s` changes reach child shells through it.
-pub(in crate::executor) fn is_bash_managed_shell_var(name: &str) -> bool {
-    matches!(
-        name,
-        "BASH"
-            | "BASH_ALIASES"
-            | "BASH_ARGC"
-            | "BASH_ARGV"
-            | "BASH_CMDS"
-            | "BASH_EXECUTION_STRING"
-            | "BASH_LINENO"
-            | "BASH_SOURCE"
-            | "BASH_VERSINFO"
-            | "BASH_VERSION"
-            | "DIRSTACK"
-            | "EUID"
-            | "FUNCNAME"
-            | "HOSTNAME"
-            | "HOSTTYPE"
-            | "LINENO"
-            | "MACHTYPE"
-            | "OLDPWD"
-            | "OPTARG"
-            | "OPTIND"
-            | "OSTYPE"
-            | "PIPESTATUS"
-            | "PPID"
-            | "RANDOM"
-            | "SECONDS"
-            | "SRANDOM"
-            | "UID"
-            | "_"
-    )
+    !name.starts_with("__RUBASH_")
 }
 
 pub(in crate::executor) fn unmark_env_name(
@@ -335,13 +298,16 @@ mod tests {
         table
     }
 
-    /// rubash#2723: GNU initialize_shell_variables imports the
-    /// environment's exported-ness as-is (variables.c:513-516) — on the
-    /// EMBEDDED path (process_startup=false) as much as on the
-    /// standalone one. Lowercase-first, underscore-first and
-    /// single-character names are export candidates exactly like
-    /// uppercase ones; only rubash-internal transport names and
-    /// bash-managed names stay unmarked.
+    /// rubash#2723 + rubash#3534: GNU initialize_shell_variables marks
+    /// EVERY valid imported name att_exported|att_imported
+    /// (variables.c:506-517) — on the EMBEDDED path
+    /// (process_startup=false) as much as on the standalone one.
+    /// Lowercase-first, underscore-first, single-character and
+    /// bash-managed names are export candidates exactly like uppercase
+    /// ones; only rubash-internal transport names stay unmarked. The
+    /// per-name initializers decide afterwards whether the mark
+    /// survives (set_ppid removes it; uidset and the dynamic
+    /// initializers keep it).
     #[test]
     fn initial_export_candidates_follow_gnu_import() {
         for process_startup in [false, true] {
@@ -357,18 +323,24 @@ mod tests {
                 "PWD",
             ]);
             mark_initial_exported_vars(&mut table, process_startup);
-            for expected in ["http_proxy", "my_var", "_myvar", "foo", "x", "PATH"] {
+            for expected in [
+                "http_proxy",
+                "my_var",
+                "_myvar",
+                "foo",
+                "x",
+                "PATH",
+                "SECONDS",
+            ] {
                 assert!(
                     table.is_marked(EXPORTED_VARS, expected),
                     "{expected} must be marked exported (process_startup={process_startup})"
                 );
             }
-            for excluded in ["__RUBASH_SESSION_SCOPE", "SECONDS"] {
-                assert!(
-                    !table.is_marked(EXPORTED_VARS, excluded),
-                    "{excluded} must stay unmarked (process_startup={process_startup})"
-                );
-            }
+            assert!(
+                !table.is_marked(EXPORTED_VARS, "__RUBASH_SESSION_SCOPE"),
+                "__RUBASH_SESSION_SCOPE must stay unmarked (process_startup={process_startup})"
+            );
         }
     }
 
