@@ -4709,8 +4709,14 @@ impl Executor {
         if is_closed_redirect_target(&target) {
             return ListBound::Closed;
         }
-        if is_null_device(&target) {
+        if is_null_device(&target)
+            || crate::special_paths::is_zero_device(&target)
+            || crate::special_paths::is_random_device(&target)
+        {
             return ListBound::Target(OutputTarget::Null);
+        }
+        if crate::special_paths::is_full_device(&target) {
+            return ListBound::Target(OutputTarget::FullDevice);
         }
         if crate::executor::execution_misc::dev_stdio_redirect_fd(&target).is_none()
             && !crate::special_paths::is_net_redirect_target(&target)
