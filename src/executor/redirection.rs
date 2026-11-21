@@ -685,6 +685,45 @@ impl Executor {
         in_pipeline_stage
     }
 
+    /// The one per-entry nounset query for redirect words (rubash#535):
+    /// the bare name of the first unbound parameter reference in this
+    /// entry's target, or None. The judgment runs on the raw target text
+    /// with the recorded process-substitution spans masked (rubash#1915:
+    /// a span is child text, subst.c:6362 process_substitute — the
+    /// command node's own span records are consumed by materialization
+    /// before redirects apply, but the target word's metadata keeps its
+    /// recordings) and the single-quoted spans masked (rubash#1930: a
+    /// `$name` inside single quotes is literal filename text in GNU,
+    /// `echo hi > '$NOPE'` creates the file; the recorded-span masking
+    /// runs first because a span's own text may carry quotes the quote
+    /// masker must not reinterpret). Here-document and here-string
+    /// targets are exempt — their bodies are judged by the heredoc
+    /// expansion gates. Every redirect-word nounset verdict goes through
+    /// this query — the reject walker's arm, the compound list scan
+    /// (rubash#3454), and the #2701 pre-scan's deferral check
+    /// (rubash#4001) — so the three can never disagree about whether an
+    /// entry carries the verdict.
+    pub(in crate::executor) fn redirect_word_nounset_hit(
+        &self,
+        redirect: &Redirect,
+    ) -> Option<String> {
+        if !crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset") {
+            return None;
+        }
+        if matches!(
+            redirect.kind,
+            crate::parser::RedirectKind::HereDoc | crate::parser::RedirectKind::HereString
+        ) {
+            return None;
+        }
+        let masked_target = Self::mask_recorded_process_substitutions(
+            &redirect.target_metadata.raw,
+            &redirect.target_metadata.process_substitutions,
+        );
+        let masked_target = mask_redirect_target_quoted_spans(&masked_target);
+        self.nounset_unbound_parameter(&masked_target)
+    }
+
     pub(in crate::executor) fn reject_invalid_redirects(
         &mut self,
         cmd: &CommandNode,
@@ -940,46 +979,19 @@ impl Executor {
             // targets, a forked child for external ones — so the walker
             // reports here and hands the fatal class back to the caller
             // (rubash#535).
-            if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset")
-                && !matches!(
-                    redirect.kind,
-                    crate::parser::RedirectKind::HereDoc | crate::parser::RedirectKind::HereString
-                )
-            {
-                // rubash#1915: the scan judges the raw target text, but
-                // a recorded process-substitution span inside it is
-                // child text (subst.c:6362 process_substitute) — mask
-                // the command's recorded spans before judging, exactly
-                // like the simple-command pre-scan does.
-                // The command node's own span records are consumed by
-                // materialization before redirects apply, but the
-                // target word's metadata keeps its recordings.
-                let masked_target = Self::mask_recorded_process_substitutions(
-                    &redirect.target_metadata.raw,
-                    &redirect.target_metadata.process_substitutions,
-                );
-                // rubash#1930: the raw target still spells its quotes,
-                // and the scanner has no quote state — a `$name` inside
-                // single quotes is literal filename text in GNU
-                // (`echo hi > '$NOPE'` creates the file), not an unbound
-                // reference. Mask the quoted spans (the recorded-span
-                // masking above runs first: a span's own text may carry
-                // quotes the quote masker must not reinterpret).
-                let masked_target = mask_redirect_target_quoted_spans(&masked_target);
-                if let Some(name) = self.nounset_unbound_parameter(&masked_target) {
-                    let mut stderr = Vec::new();
-                    // rubash#3406: a redirection_expand failure inside
-                    // the walk is the same do_redirections moment as
-                    // reject_redirect_at — same class prefix.
-                    writeln!(
-                        &mut stderr,
-                        "{}{name}: unbound variable",
-                        self.compound_redirect_error_prefix(cmd)
-                    )?;
-                    self.write_redirect_diagnostic_at(cmd, index, &stderr)?;
-                    self.exit_code = 1;
-                    return Ok(Some(RedirectRejection::FatalNounset));
-                }
+            if let Some(name) = self.redirect_word_nounset_hit(redirect) {
+                let mut stderr = Vec::new();
+                // rubash#3406: a redirection_expand failure inside
+                // the walk is the same do_redirections moment as
+                // reject_redirect_at — same class prefix.
+                writeln!(
+                    &mut stderr,
+                    "{}{name}: unbound variable",
+                    self.compound_redirect_error_prefix(cmd)
+                )?;
+                self.write_redirect_diagnostic_at(cmd, index, &stderr)?;
+                self.exit_code = 1;
+                return Ok(Some(RedirectRejection::FatalNounset));
             }
             let target = self.expand_redirect_target(redirect);
             // GNU subst.c:12663-12668: failglob inside redirection_expand
@@ -1815,15 +1827,11 @@ impl Executor {
             ) {
                 continue;
             }
-            // rubash#1915/#1930: judge the raw target with the
-            // recorded process-substitution spans and the single-quoted
-            // spans masked, exactly like the walker does.
-            let masked_target = Self::mask_recorded_process_substitutions(
-                &redirect.target_metadata.raw,
-                &redirect.target_metadata.process_substitutions,
-            );
-            let masked_target = mask_redirect_target_quoted_spans(&masked_target);
-            if let Some(name) = self.nounset_unbound_parameter(&masked_target) {
+            // rubash#1915/#1930: the shared per-entry query judges the
+            // raw target with the recorded process-substitution spans
+            // and the single-quoted spans masked, exactly like the
+            // walker's arm.
+            if let Some(name) = self.redirect_word_nounset_hit(redirect) {
                 let mut stderr = Vec::new();
                 writeln!(
                     &mut stderr,
