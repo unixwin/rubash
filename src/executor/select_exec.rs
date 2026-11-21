@@ -233,6 +233,13 @@ impl Executor {
         // prints, unless the body emptied REPLY.
         let mut show_menu = true;
         loop {
+            // rubash#2810: cooperative cancellation safe point — the
+            // query's read slices poll the token too (below); this is
+            // the per-question check that keeps an always-fed select
+            // loop bound.
+            if self.host_cancel_requested() {
+                return Err(ExecuteError::HostCancelled);
+            }
             // GNU execute_cmd.c:3566-3570: PS3 is re-read every iteration,
             // so a body assignment retargets the next prompt.
             let ps3 = self
@@ -495,15 +502,40 @@ impl Executor {
                 .filter(|_| !crate::fd::is_disk_file(stdin_handle))
                 .map(|s| std::time::Instant::now() + std::time::Duration::from_secs_f64(s));
             let mut line: Vec<u8> = Vec::new();
+            const SLICE: std::time::Duration = std::time::Duration::from_millis(50);
             let at_eof = loop {
-                if let Some(deadline) = deadline {
-                    let now = std::time::Instant::now();
-                    if now >= deadline
-                        || crate::fd::wait_readable(stdin_handle, deadline - now)
-                            == crate::fd::ReadWait::Timeout
+                // rubash#2810: the token poll inside the query's wait —
+                // the acquisition abandons as EOF (the loop-top check
+                // above then raises the dedicated unwind). The wait is
+                // sliced so an unbounded `read_some` cannot ride out a
+                // cancel; a ready fd falls through to the byte read
+                // exactly as before.
+                if self.host_cancel_requested() {
+                    break true;
+                }
+                let wait = deadline
+                    .and_then(|deadline| deadline.checked_duration_since(std::time::Instant::now()))
+                    .map_or(Some(SLICE), |remaining| {
+                        if remaining.is_zero() {
+                            None
+                        } else {
+                            Some(remaining.min(SLICE))
+                        }
+                    });
+                match wait {
+                    None => break true,
+                    Some(slice)
+                        if crate::fd::wait_readable(stdin_handle, slice)
+                            == crate::fd::ReadWait::Timeout =>
                     {
-                        break true;
+                        let expired =
+                            deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline);
+                        if expired {
+                            break true;
+                        }
+                        continue;
                     }
+                    _ => {}
                 }
                 match crate::fd::read_some(stdin_handle, 1) {
                     Ok(buf) if buf.is_empty() => break true,

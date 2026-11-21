@@ -4404,6 +4404,12 @@ impl Executor {
                 // exactly as a slow body error does. The 1024-iteration tick
                 // amortizes the mailbox poll to ~zero per iteration.
                 if iters & 1023 == 0 {
+                    // rubash#2810: the fast loop bypasses the statement
+                    // boundary poll — the same tick carries the token
+                    // check (one relaxed load per 1024 iterations).
+                    if executor.host_cancel_requested() {
+                        break Err(ExecuteError::HostCancelled);
+                    }
                     executor.run_pending_signal_traps()?;
                 }
                 // Wrapping increment mirrors bash_arith (`value as i64`).

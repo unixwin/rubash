@@ -522,6 +522,12 @@ pub enum GroupedRunStop {
     /// (evalstring.c:387-393, :618-619), which propagates even
     /// on a failed parse status.
     ErrexitBreak,
+    /// rubash#2810: the host's cooperative cancellation token
+    /// ended the run — a group unwound with
+    /// `ExecuteError::HostCancelled`. Not an exit-jump, not an
+    /// errexit verdict, and NOT a signal: the session records it
+    /// as the distinct cancelled flow.
+    Cancelled,
 }
 
 /// The grouped driver's run classification, as values: the
@@ -588,6 +594,13 @@ pub struct GroupedRunClassification {
     /// rest of the line without deciding the session — the
     /// errexit verdict on status 1 does.
     pub expansion_error_discard: bool,
+    /// rubash#2810: the terminal group ended in a cooperative
+    /// cancellation — the host's [`crate::api::CancelToken`]
+    /// tripped an engine safe point and unwound the unit with
+    /// `ExecuteError::HostCancelled` (recorded per unit like
+    /// `signal_discard`). A host classification, never a
+    /// script-visible signal outcome.
+    pub cancelled: bool,
 }
 
 /// Same grouped run as [`run_script_with_history_at_line_offset`], also
@@ -736,6 +749,10 @@ fn run_script_grouped_at_line_offset(
     // read's first group.
     executor.evalerror_failglob_pending.set(false);
     executor.evalerror_arith_pending.set(false);
+    // rubash#2810: the same per-unit freshness for the cancel
+    // record — a mark banked by a unit nobody ever classified
+    // must not stop this run's first group.
+    executor.clear_unit_cancelled();
     let raw_lines: Vec<&str> = contents.split_inclusive('\n').collect();
     let mut index = 0usize;
     // rubash#1186: the failglob DISCARD span, as the last line of the
@@ -874,6 +891,10 @@ fn run_script_grouped_at_line_offset(
         // expansion-error discard record the raise points noted.
         let expansion_discarded = executor.take_unit_expansion_error_discard();
         terminal_expansion_discard = expansion_discarded;
+        // rubash#2810: the same per-group take for the cooperative
+        // cancellation record — a group that unwound on the host's
+        // token stops the reader unconditionally, like a jump.
+        let cancelled = executor.take_unit_cancelled();
         // GNU execute_cmd.c:652-656: `! CMD` gains CMD_IGNORE_RETURN under
         // errexit — the inverted command's status is exempt.
         let last_inverted = executor.last_command_inverted();
@@ -887,7 +908,7 @@ fn run_script_grouped_at_line_offset(
         // record must not swallow a real unwind (`false || false`:
         // the last `false` raised, the verdict reads the first
         // `false`'s exemption).
-        if parse_error || exit_jump || errexit_unwind || errexit_stop {
+        if parse_error || exit_jump || errexit_unwind || errexit_stop || cancelled {
             // GAP-1 (unixwin/niubash#863): the run's classification is
             // adjudicated HERE, from these same verdicts — the
             // decomposition of the stop bool below, computed once.
@@ -901,7 +922,13 @@ fn run_script_grouped_at_line_offset(
                 exit_jump_raw,
                 errexit_stop,
                 last_inverted,
-                stop: if exit_jump && !parse_error {
+                // rubash#2810: the host's cancellation outranks every
+                // script-side unwind — a cancel that landed while an
+                // exit-jump was already in flight still reports
+                // Cancelled (the host asked for the run to end).
+                stop: if cancelled {
+                    Some(GroupedRunStop::Cancelled)
+                } else if exit_jump && !parse_error {
                     Some(GroupedRunStop::ExitJump)
                 } else if errexit_unwind || errexit_stop {
                     Some(GroupedRunStop::ErrexitBreak)
@@ -910,6 +937,7 @@ fn run_script_grouped_at_line_offset(
                 },
                 signal_discard: discarded,
                 expansion_error_discard: expansion_discarded,
+                cancelled,
             };
             // DE-06 (design 9.3; PLAN row 12): a parse error is
             // ending this run — a selected `parse-error` filter
@@ -958,12 +986,14 @@ fn run_script_grouped_at_line_offset(
                 // the exit's own status (execute_cmd.c:5537). The
                 // parse-abort arm keeps last_exit_code: its status is
                 // a reader-discard value, not a jump payload.
-                if exit_jump && !parse_error {
+                if exit_jump && !parse_error && !cancelled {
                     status
                 } else {
                     executor.last_exit_code()
                 },
-                (exit_jump && !parse_error) || errexit_stop,
+                // rubash#2810: a cancelled run never exits the shell —
+                // the host asked to stop THIS run, not the session.
+                ((exit_jump && !parse_error) || errexit_stop) && !cancelled,
                 classification,
             );
         }
@@ -5477,6 +5507,15 @@ fn run_source_impl_inner_body(
             // for the driver layer like the ExitCode arm does.
             executor.note_unit_signal_discard();
             130
+        }
+        // rubash#2810: the host's cooperative cancellation ended the
+        // unit — record it so the driver layer classifies the run as
+        // Cancelled. NO diagnostic and no status synthesis: the token
+        // is not a script-visible event, and $? keeps the last
+        // completed command's status.
+        Err(ExecuteError::HostCancelled) => {
+            executor.note_unit_cancelled();
+            executor.last_exit_code()
         }
         // A `return` that unwinds to this unit's top ends the unit with
         // its status as an ordinary value (builtins/evalfile.c

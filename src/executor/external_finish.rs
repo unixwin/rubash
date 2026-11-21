@@ -1598,6 +1598,11 @@ impl Executor {
             // child-process analogue of the reader discard (the parent's
             // list only ever sees the child's 130 status).
             ExecuteError::SigintUnwind => Ok(130),
+            // rubash#2810: a host cancellation is NOT a child status —
+            // propagate the unwind so the parent's run ends in the
+            // cancelled classification instead of a spoofed 130 or an
+            // ordinary exit code.
+            ExecuteError::HostCancelled => Err(ExecuteError::HostCancelled),
             // Loop control can never escape a child process.
             ExecuteError::Break(_) | ExecuteError::Continue(_) => Ok(1),
             ExecuteError::CommandNotFound(name) => {
