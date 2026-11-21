@@ -2237,10 +2237,21 @@ impl Executor {
         env_vars
             .entry("TERM".to_string())
             .or_insert_with(|| "dumb".to_string());
-        env_vars.insert(
-            SHELL_START_EPOCH.to_string(),
-            current_epoch_seconds().to_string(),
-        );
+        // GNU shell.c:470 sets `shell_start_time = shellstart.tv_sec` at
+        // startup; preserve any transported value on respawn (keep_shlvl).
+        env_vars
+            .entry(SHELL_START_EPOCH.to_string())
+            .or_insert_with(|| current_epoch_seconds().to_string());
+        // GNU variables.c:1349-1361 init_seconds_var: an inherited SECONDS
+        // seeds seconds_value_assigned (valid_number -> value, else 0) without
+        // shifting shell_start_time, so `printf '%(%s)T' -2` reports the true
+        // shell start time while `$SECONDS` starts from the imported offset.
+        if !keep_shlvl {
+            if let Some(imported_seconds) = env_vars.get("SECONDS") {
+                let offset = imported_seconds.trim().parse::<i64>().unwrap_or(0);
+                env_vars.insert(SECONDS_OFFSET.to_string(), offset.to_string());
+            }
+        }
         // GNU shell.c:1974-1986 (shell_initialize -> initialize_shell_options
         // set.def:607-630 via parse_shellopts set.def:600-604, and
         // initialize_bashopts shopt.def): a non-privileged shell applies the
