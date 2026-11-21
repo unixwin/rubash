@@ -1274,8 +1274,10 @@ impl Executor {
     }
 }
 
-/// GNU subst.c ${#name} length: MB_STRLEN over the value (subst.c:8308) with
-/// the locale byte walk of lib/sh/utf8.c:167-184 utf8_mbstrlen.
+/// GNU subst.c ${#name} length: MB_STRLEN over the value (subst.c:8308)
+/// -> MBSLEN (include/shmbutil.h:48-49) -> mbstrlen
+/// (lib/sh/shmbchar.c:56-79), which steps with the C library's
+/// `mbrlen`.
 ///
 /// In a multibyte locale this is one character per valid multibyte sequence,
 /// one per byte of an invalid sequence (MB_INVALIDCH -> clen = 1). In a
@@ -1307,23 +1309,9 @@ pub(in crate::executor) fn parameter_char_length(value: &str) -> usize {
         return bytes.len();
     }
 
-    let mut count = 0usize;
-    let mut rest: &[u8] = &bytes;
-    while !rest.is_empty() {
-        match std::str::from_utf8(rest) {
-            Ok(text) => {
-                count += text.chars().count();
-                break;
-            }
-            Err(error) => {
-                let valid = error.valid_up_to();
-                if let Ok(text) = std::str::from_utf8(&rest[..valid]) {
-                    count += text.chars().count();
-                }
-                count += 1; // utf8.c:177-178: an invalid byte counts as one
-                rest = &rest[valid + 1..];
-            }
-        }
-    }
-    count
+    // mbstrlen (lib/sh/shmbchar.c:56) counts one character per valid
+    // mbrlen sequence — including glibc's extended 5/6-byte UTF-8 forms
+    // — and one per byte of an invalid sequence (utf8_mblen,
+    // locale.rs).
+    crate::locale::multibyte_char_count(&bytes)
 }
