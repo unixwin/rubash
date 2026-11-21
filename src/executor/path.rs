@@ -3695,6 +3695,107 @@ fn external_argument_path(arg: &str, env_vars: &HashMap<String, String>) -> Stri
     }
 }
 
+/// Whether an external child at `program` receives Windows-native environment
+/// variable values (unixwin/niubash#1001). Mirrors the child-class split in
+/// `external_command_for_named_program`: shell-wrapped scripts, namespace
+/// bridges (`wsl`/`ssh`/etc.), and POSIX-aware WinuxCmd applets stay in the
+/// POSIX namespace, while native Windows executables receive converted paths.
+pub(in crate::executor) fn external_child_uses_native_env(
+    program: &Path,
+    env_vars: &HashMap<String, String>,
+) -> bool {
+    #[cfg(windows)]
+    {
+        let shell_wrapped = !is_windows_powershell_script(program)
+            && !is_windows_batch_file(program)
+            && should_run_with_shell(program);
+        if shell_wrapped {
+            return false;
+        }
+        if !argv_dialect_legacy(env_vars) && is_namespace_bridge_program(program) {
+            return false;
+        }
+        if !argv_dialect_legacy(env_vars) && posix_aware_child(program, env_vars) {
+            return false;
+        }
+        true
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (program, env_vars);
+        false
+    }
+}
+
+fn env_var_excluded_by_msys2_conv_excl(name: &str, env_vars: &HashMap<String, String>) -> bool {
+    let Some(excl) = env_vars
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("MSYS2_ENV_CONV_EXCL"))
+        .map(|(_, v)| v.as_str())
+    else {
+        return false;
+    };
+    for pattern in excl.split(';').filter(|p| !p.is_empty()) {
+        if pattern == "*" {
+            return true;
+        }
+        if let Some(exact) = pattern.strip_suffix('=') {
+            if name.eq_ignore_ascii_case(exact) {
+                return true;
+            }
+        } else if name.len() >= pattern.len() && name[..pattern.len()].eq_ignore_ascii_case(pattern)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Convert POSIX-style paths inside an environment variable value to Windows
+/// form for a native child process (unixwin/niubash#1001), honoring
+/// `MSYS2_ENV_CONV_EXCL` and keeping contract-verbatim variables (`PWD`,
+/// `OLDPWD`, `PATH`, `TMPDIR`, `__RUBASH_*`), URLs, and non-path values
+/// untouched.
+pub(in crate::executor) fn external_env_value(
+    name: &str,
+    value: &str,
+    env_vars: &HashMap<String, String>,
+) -> String {
+    #[cfg(windows)]
+    {
+        if value.is_empty()
+            || name.eq_ignore_ascii_case("PATH")
+            || name.eq_ignore_ascii_case("TMPDIR")
+            || name.eq_ignore_ascii_case("PWD")
+            || name.eq_ignore_ascii_case("OLDPWD")
+            || name.eq_ignore_ascii_case("MSYS2_ENV_CONV_EXCL")
+            || name.eq_ignore_ascii_case("MSYS2_ARG_CONV_EXCL")
+            || name.eq_ignore_ascii_case("MSYS_NO_PATHCONV")
+            || name == "_"
+            || name.starts_with("__RUBASH_")
+            || env_var_excluded_by_msys2_conv_excl(name, env_vars)
+        {
+            return value.to_string();
+        }
+        if value.starts_with('/') && value.contains(':') {
+            let segments: Vec<&str> = value.split(':').collect();
+            if segments.len() >= 2 && segments.iter().all(|seg| seg.starts_with('/')) {
+                return segments
+                    .into_iter()
+                    .map(|seg| external_argument_path(seg, env_vars))
+                    .collect::<Vec<_>>()
+                    .join(";");
+            }
+        }
+        external_argument_path(value, env_vars)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (name, env_vars);
+        value.to_string()
+    }
+}
+
 fn windows_external_absolute_argument_needs_translation(
     normalized: &str,
     env_vars: &HashMap<String, String>,

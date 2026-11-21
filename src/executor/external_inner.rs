@@ -970,7 +970,12 @@ impl Executor {
         // G-02: children are born in the session cwd; the `env -C`
         // override below replaces it for its own child.
         self.stamp_spawn_cwd(&mut process);
-        apply_env_command_environment(&mut process, &env_vars, !config.ignore_environment);
+        apply_env_command_environment(
+            &mut process,
+            &program,
+            &env_vars,
+            !config.ignore_environment,
+        );
         if let Some(chdir) = &config.chdir {
             let directory = shell_path_to_windows(chdir, &env_map);
             if !directory.is_dir() {
@@ -2231,6 +2236,18 @@ impl Executor {
             "_".to_string(),
             program.to_string_lossy().into_owned(),
         );
+        #[cfg(windows)]
+        {
+            let mut effective_env = self.shell_state.env_vars.clone();
+            for (k, v) in &pairs {
+                effective_env.insert(k.clone(), v.clone());
+            }
+            if crate::executor::path::external_child_uses_native_env(program, &effective_env) {
+                for (name, value) in &mut pairs {
+                    *value = crate::executor::path::external_env_value(name, value, &effective_env);
+                }
+            }
+        }
         pairs
     }
 
@@ -7074,11 +7091,16 @@ fn ordered_env_remove(entries: &mut Vec<(String, String)>, name: &str) {
 
 fn apply_env_command_environment(
     process: &mut Command,
+    program: &std::path::Path,
     env_vars: &[(String, String)],
     inherit_required_windows: bool,
 ) {
     process.env_clear();
     let env_map: HashMap<String, String> = env_vars.iter().cloned().collect();
+    #[cfg(windows)]
+    let convert_native = crate::executor::path::external_child_uses_native_env(program, &env_map);
+    #[cfg(not(windows))]
+    let _ = program;
     for (name, value) in env_vars {
         if is_valid_process_env(name, value) {
             let value = if cfg!(windows) && name.eq_ignore_ascii_case("PATH") {
@@ -7097,7 +7119,18 @@ fn apply_env_command_environment(
                 // chars at the child boundary (same rubash#141 contract as
                 // child_env_value / the argv boundary), never leak the
                 // U+E000 pair into the child's environment block.
-                crate::executor::substitution_metadata::decode_raw_byte_markers_to_byte_chars(value)
+                let decoded =
+                    crate::executor::substitution_metadata::decode_raw_byte_markers_to_byte_chars(
+                        value,
+                    );
+                #[cfg(windows)]
+                if convert_native {
+                    crate::executor::path::external_env_value(name, &decoded, &env_map)
+                } else {
+                    decoded
+                }
+                #[cfg(not(windows))]
+                decoded
             };
             process.env(name, value);
         }
