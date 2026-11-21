@@ -1024,8 +1024,10 @@ fn coproc_source_spec(
 enum CoprocRedirectOutcome {
     /// Spawn proceeds; carries the coproc pipe writer when an fd-1
     /// redirect displaced it from the child's stdout (rubash#1632:
-    /// GNU's redirect save slot in the forked child, held by the
-    /// caller until the coproc retires), plus the rubash#2200
+    /// GNU's redirect save slot in the forked child; the caller holds
+    /// it for the body's redirect scope — dropped at spawn for bodies
+    /// GNU applies non-undoably, dropped at the child's exit for
+    /// group/compound bodies, rubash#4008), plus the rubash#2200
     /// numbered-fd transport: the parent-side inheritable dups
     /// backing the child's fd>=3 bindings (the caller closes them
     /// once the spawn settles), the env pairs naming them for a
@@ -6186,42 +6188,62 @@ impl Executor {
             };
             // rubash#1632: a coproc-level `>file`/`>>file` (or `>&-`)
             // displaced the pipe writer from the child's stdout. GNU
-            // applies the redirect in the forked child, where the
-            // displaced end survives in a redirect save slot for the
-            // child's whole life — the parent's read end therefore sees
-            // no EOF while the coproc lives (a `read -t` times out
-            // instead of reporting EOF, and the file receives the data).
-            // On Unix the writer rides into the child at the first free
-            // fd in the save-slot range (dup2 clears CLOEXEC on the
-            // target, so it survives the exec); elsewhere the parent
-            // holds it in coproc_displaced_stdout_writers until the
-            // coproc retires.
+            // binds the trailing redirect list to the INNER command
+            // (parse.y:1130/1153 `COPROC shell_command redirection_list`
+            // appends it to $2->redirects), so the displaced end's
+            // lifetime is the inner command's own redirect scope: a
+            // `{ }` group or compound body applies it undoably
+            // (execute_cmd.c:854 do_redirections RX_ACTIVE|RX_UNDOABLE
+            // -> redir.c add_undo_redirect's fcntl F_DUPFD to a save
+            // slot >= SHELL_FD_BASE), so the write end lives until the
+            // body finishes — the parent's read end sees no EOF while
+            // the coproc lives (a `read -t` times out instead of
+            // reporting EOF, and the file receives the data). A `( )`
+            // subshell body or a simple command applies its redirects
+            // without the undo list (execute_cmd.c:1761/5522
+            // RX_ACTIVE), so the displaced end closes at apply time and
+            // the read end sees EOF immediately (rubash#4008). On Unix
+            // a live save rides into the child at the first free fd in
+            // the save-slot range (dup2 clears CLOEXEC on the target,
+            // so it survives the exec); elsewhere a detached waiter
+            // drops the parent-held writer when the child exits — the
+            // parent must never hold it past the coproc's death, or
+            // `cat <&${COPROC[0]}` hangs forever waiting on an EOF the
+            // retirement-deferred drop never delivered.
+            let hold_until_child_exit = matches!(
+                coproc_cmd.body_kind,
+                crate::parser::CoprocBodyKind::BraceGroup
+                    | crate::parser::CoprocBodyKind::CompoundCommand
+                    | crate::parser::CoprocBodyKind::CommandSequence
+            );
             #[cfg(unix)]
-            if let Some(writer) = &displaced_stdout_writer {
-                use std::os::unix::io::AsRawFd as _;
-                let writer_fd = writer.as_raw_fd();
-                unsafe {
-                    use std::os::unix::process::CommandExt as _;
-                    child.pre_exec(move || {
-                        let mut slot = -1;
-                        for candidate in 10..64 {
-                            if libc::fcntl(candidate, libc::F_GETFD) == -1 {
-                                slot = candidate;
-                                break;
+            if hold_until_child_exit {
+                if let Some(writer) = &displaced_stdout_writer {
+                    use std::os::unix::io::AsRawFd as _;
+                    let writer_fd = writer.as_raw_fd();
+                    unsafe {
+                        use std::os::unix::process::CommandExt as _;
+                        child.pre_exec(move || {
+                            let mut slot = -1;
+                            for candidate in 10..64 {
+                                if libc::fcntl(candidate, libc::F_GETFD) == -1 {
+                                    slot = candidate;
+                                    break;
+                                }
                             }
-                        }
-                        if slot == -1 {
-                            return Err(std::io::Error::from_raw_os_error(libc::EMFILE));
-                        }
-                        if slot == writer_fd {
-                            if libc::fcntl(writer_fd, libc::F_SETFD, 0) == -1 {
+                            if slot == -1 {
+                                return Err(std::io::Error::from_raw_os_error(libc::EMFILE));
+                            }
+                            if slot == writer_fd {
+                                if libc::fcntl(writer_fd, libc::F_SETFD, 0) == -1 {
+                                    return Err(std::io::Error::last_os_error());
+                                }
+                            } else if libc::dup2(writer_fd, slot) == -1 {
                                 return Err(std::io::Error::last_os_error());
                             }
-                        } else if libc::dup2(writer_fd, slot) == -1 {
-                            return Err(std::io::Error::last_os_error());
-                        }
-                        Ok(())
-                    });
+                            Ok(())
+                        });
+                    }
                 }
             }
 
@@ -6296,15 +6318,24 @@ impl Executor {
                     // the correct pipe direction on all hosts.
                     let pid = child_proc.id();
                     adopt_orphan_console(pid);
-                    // rubash#1632: settle the displaced stdout writer —
-                    // on Unix the child holds its own copy (pre_exec) and
-                    // the parent's copy closes here; elsewhere the parent
-                    // holds it until the coproc retires.
+                    // rubash#1632/#4008: settle the displaced stdout
+                    // writer — on Unix the child holds its own copy
+                    // (pre_exec) and the parent's copy closes here;
+                    // elsewhere a detached waiter drops it when the
+                    // child exits (GNU's save slot is a child fd, so it
+                    // dies with the coproc — the old retirement-lifetime
+                    // parent hold left ${COPROC[0]} readers blocked past
+                    // the coproc's death forever). When GNU closes the
+                    // displaced end at apply time (simple/`( )` bodies),
+                    // the writer drops right here — immediate EOF.
                     #[cfg(unix)]
                     drop(displaced_stdout_writer);
                     #[cfg(not(unix))]
-                    if let Some(writer) = displaced_stdout_writer {
-                        self.coproc_displaced_stdout_writers.insert(pid, writer);
+                    match (hold_until_child_exit, displaced_stdout_writer) {
+                        (true, Some(writer)) => {
+                            Self::hold_coproc_writer_until_child_exit(&child_proc, writer);
+                        }
+                        (_, writer) => drop(writer),
                     }
                     if let Some(target) = coproc_stderr_target {
                         if let Some(stderr) = child_proc.stderr.take() {
@@ -6656,6 +6687,42 @@ impl Executor {
     /// to continue to spawn, or Declined when a redirect was
     /// refused after printing its diagnostic (no coproc is created;
     /// the caller fails the command with status 1).
+    /// rubash#4008: on hosts without child-fd injection, GNU's
+    /// redirect save slot (redir.c add_undo_redirect — a CHILD fd
+    /// holding the displaced coproc pipe writer for the body's
+    /// redirect scope) is emulated by a detached thread that waits on
+    /// a duplicate of the child process handle and drops the writer
+    /// at the child's exit. The parent's `${COPROC[0]}` read end
+    /// therefore sees EOF exactly when the coproc dies, matching
+    /// GNU's child-lifetime hold instead of holding the writer to
+    /// coproc retirement — a `cat <&${COPROC[0]}` / `read -u` issued
+    /// before the next disposal point used to block forever on an EOF
+    /// the retired-later drop never delivered.
+    #[cfg(not(unix))]
+    fn hold_coproc_writer_until_child_exit(
+        child: &std::process::Child,
+        writer: std::io::PipeWriter,
+    ) {
+        use std::os::windows::io::AsRawHandle as _;
+        fn wait_process_exit(h: crate::fd::HANDLE) {
+            extern "system" {
+                fn WaitForSingleObject(h: crate::fd::HANDLE, ms: u32) -> u32;
+            }
+            unsafe { WaitForSingleObject(h, u32::MAX) };
+        }
+        let raw = child.as_raw_handle() as crate::fd::HANDLE;
+        let Ok(watch) = crate::fd::duplicate_handle(raw) else {
+            // No watch possible — drop now; an early EOF beats the
+            // retirement-lifetime hold this replaced.
+            return;
+        };
+        std::thread::spawn(move || {
+            wait_process_exit(watch);
+            crate::fd::close_handle(watch);
+            drop(writer);
+        });
+    }
+
     fn apply_coproc_redirects(
         &mut self,
         cmd: &CommandNode,
@@ -6743,12 +6810,13 @@ impl Executor {
         // loop. The fd-1/2 spec paths are tracked alongside so a
         // dup FROM a spec can label its binding.
         //
-        // rubash#1632 interplay: the fd-1 spec starts as the coproc
-        // pipe writer; whenever a redirect replaces it,
+        // rubash#1632/#4008 interplay: the fd-1 spec starts as the
+        // coproc pipe writer; whenever a redirect replaces it,
         // replace_coproc_out_spec hands the writer back as the
-        // displaced writer (kept alive by the caller for the
-        // coproc's lifetime, GNU's redirect save slot) instead of
-        // dropping it here.
+        // displaced writer (held by the caller for the body's
+        // redirect scope — GNU's save slot dies with the child, so
+        // the caller drops it at apply-equivalent time or at the
+        // child's exit) instead of dropping it here.
         let mut out_spec = CoprocFdSpec::Pipe(stdout_writer);
         let mut displaced_writer: Option<std::io::PipeWriter> = None;
         // The child's stderr target, for dup resolution only: the
