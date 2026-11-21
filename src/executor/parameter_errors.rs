@@ -1321,18 +1321,50 @@ impl Executor {
         // empty — otherwise a `:?` earlier in the list would see a
         // later fragment's bind.
         crate::executor::expand_braced_indices::scan_sim_clear();
+        let mut seen_comsub = false;
         for word in &cmd.words {
             let masked =
                 Self::mask_recorded_process_substitutions(word, &cmd.process_substitutions);
-            if let Some(error) = self.parameter_expansion_error_in_word(&masked) {
+            let has_comsub = masked.contains("$(")
+                || masked.contains('`')
+                || word_contains_current_shell_command_substitution(&masked);
+            let has_braces = self.is_brace_expand_enabled()
+                && masked.contains('{')
+                && crate::expand::braces::expand_braces(&masked).len() > 1;
+            let (error, deferred) = self.parameter_expansion_error_in_word_with_defer(
+                &masked,
+                true,
+                seen_comsub || has_comsub || has_braces,
+            );
+            if deferred {
+                return None;
+            }
+            if let Some(error) = error {
                 return Some(error);
+            }
+            if has_comsub {
+                seen_comsub = true;
             }
         }
         for value in cmd.assignment_values() {
             let masked =
                 Self::mask_recorded_process_substitutions(value, &cmd.process_substitutions);
-            if let Some(error) = self.parameter_expansion_error_in_word(&masked) {
+            let has_comsub = masked.contains("$(")
+                || masked.contains('`')
+                || word_contains_current_shell_command_substitution(&masked);
+            let (error, deferred) = self.parameter_expansion_error_in_word_with_defer(
+                &masked,
+                true,
+                seen_comsub || has_comsub,
+            );
+            if deferred {
+                return None;
+            }
+            if let Some(error) = error {
                 return Some(error);
+            }
+            if has_comsub {
+                seen_comsub = true;
             }
         }
 
@@ -2490,13 +2522,23 @@ impl Executor {
         word: &str,
         quote_aware: bool,
     ) -> Option<(String, String, i32)> {
+        self.parameter_expansion_error_in_word_with_defer(word, quote_aware, false)
+            .0
+    }
+
+    fn parameter_expansion_error_in_word_with_defer(
+        &self,
+        word: &str,
+        quote_aware: bool,
+        defer_bad_subst: bool,
+    ) -> (Option<(String, String, i32)>, bool) {
         // perf6 admission: same necessary condition as
         // parameter_assignment_error_in_word — every arm (nounset `$ref`,
         // `${` spans, `${|`) needs an ASCII `$`; a `$`-free word cannot
         // produce a diagnostic. Heredoc bodies route here too (quotes are
         // literal data there, but the `$` requirement is unchanged).
         if !word.as_bytes().contains(&b'$') {
-            return None;
+            return (None, false);
         }
         let word = word
             .strip_prefix(crate::executor::markers::QUOTED_WORD_PREFIX)
@@ -2505,7 +2547,7 @@ impl Executor {
         // Preserve Rubash's nested current-shell extension; its `${| ... }`
         // marker disambiguates the legacy enclosing form from this Bash error.
         if word.contains("${|") {
-            return None;
+            return (None, false);
         }
         // rubash#1597: a triggered `=`/`:=` on the all-elements
         // spelling errors in EVERY word position GNU expands (for-list
@@ -2513,7 +2555,7 @@ impl Executor {
         // the simple-command pre-scan). EX_BADUSAGE, like the readonly
         // assignment class.
         if let Some(name) = self.bad_array_subscript_assignment_in_word(word) {
-            return Some((name, "bad array subscript".to_string(), 2));
+            return (Some((name, "bad array subscript".to_string(), 2)), false);
         }
         if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset") {
             // niubash#993 §1: the nounset walk records each `:=`/`=`
@@ -2529,7 +2571,10 @@ impl Executor {
                 // expr.c expr_streval raises FORCE_EOF for unbound vars
                 // under set -u — fatal like `${x?}` (see command_execute).
                 let (name, message) = self.nounset_unbound_diagnostic(name);
-                return Some((name, message, Self::FATAL_PARAMETER_EXPANSION_STATUS));
+                return (
+                    Some((name, message, Self::FATAL_PARAMETER_EXPANSION_STATUS)),
+                    false,
+                );
             }
         }
         let mut rest = word;
@@ -2625,11 +2670,14 @@ impl Executor {
                 }
             }
             let Some(end) = matching_parameter_brace(after_start) else {
-                return Some((
-                    "${".to_string() + after_start + "}",
-                    "unexpected EOF while looking for matching `}'".to_string(),
-                    2,
-                ));
+                return (
+                    Some((
+                        "${".to_string() + after_start + "}",
+                        "unexpected EOF while looking for matching `}'".to_string(),
+                        2,
+                    )),
+                    false,
+                );
             };
             let inner = &after_start[..end];
             // GNU subst.c:10053 parameter_brace_expand -> valid_brace_expansion_word
@@ -2647,22 +2695,34 @@ impl Executor {
             // dispatch, and it covers the indirect/length prefixes (`${!x[]}`,
             // `${#x[]}`) whose reference obeys the same rule.
             if Self::malformed_braced_reference(inner) {
-                return Some((
-                    crate::executor::expand_word::bad_substitution_display(word, !quote_aware),
-                    "bad substitution".to_string(),
-                    1,
-                ));
+                if defer_bad_subst {
+                    return (None, true);
+                }
+                return (
+                    Some((
+                        crate::executor::expand_word::bad_substitution_display(word, !quote_aware),
+                        "bad substitution".to_string(),
+                        1,
+                    )),
+                    false,
+                );
             }
             // GNU rejects a parameter expansion nested inside another
             // parameter expansion inside an array subscript. Reject it
             // before the mutable whole-word expander can recurse indefinitely;
             // a single nested subscript such as `${A[${i}]}` remains valid.
             if inner.contains("[${${") {
-                return Some((
-                    crate::executor::expand_word::bad_substitution_display(word, !quote_aware),
-                    "bad substitution".to_string(),
-                    1,
-                ));
+                if defer_bad_subst {
+                    return (None, true);
+                }
+                return (
+                    Some((
+                        crate::executor::expand_word::bad_substitution_display(word, !quote_aware),
+                        "bad substitution".to_string(),
+                        1,
+                    )),
+                    false,
+                );
             }
             // GNU subst.c:10053 valid_brace_expansion_word: after ${, the
             // parameter name must be a valid name/special-var/subscripted
@@ -2670,11 +2730,17 @@ impl Executor {
             // token, which is not a valid operator tail — bad substitution
             // (new-exp.tests `${c//${$(($#-1))}/x/}`).
             if inner.starts_with("$(") || inner.contains("${$(") {
-                return Some((
-                    crate::executor::expand_word::bad_substitution_display(word, !quote_aware),
-                    "bad substitution".to_string(),
-                    1,
-                ));
+                if defer_bad_subst {
+                    return (None, true);
+                }
+                return (
+                    Some((
+                        crate::executor::expand_word::bad_substitution_display(word, !quote_aware),
+                        "bad substitution".to_string(),
+                        1,
+                    )),
+                    false,
+                );
             }
             // rubash#2596: the subscript is expanded while the
             // parameter is fetched, before any operator, transform,
@@ -2683,7 +2749,7 @@ impl Executor {
             // subst.c:11063) — a nested error inside it pre-empts
             // every arm below.
             if let Some(nested) = self.nested_subscript_word_error(inner, quote_aware) {
-                return Some(nested);
+                return (Some(nested), false);
             }
             // GNU subst.c:8944-8951 parameter_brace_transform +
             // valid_parameter_transform (subst.c:8898): a `@xform` suffix on
@@ -2713,11 +2779,20 @@ impl Executor {
                         ScanValue::Undecidable => self.parameter_error_value(base).is_some(),
                     };
                 if is_set {
-                    return Some((
-                        crate::executor::expand_word::bad_substitution_display(word, !quote_aware),
-                        "bad substitution".to_string(),
-                        Self::FATAL_PARAMETER_EXPANSION_STATUS,
-                    ));
+                    if defer_bad_subst {
+                        return (None, true);
+                    }
+                    return (
+                        Some((
+                            crate::executor::expand_word::bad_substitution_display(
+                                word,
+                                !quote_aware,
+                            ),
+                            "bad substitution".to_string(),
+                            Self::FATAL_PARAMETER_EXPANSION_STATUS,
+                        )),
+                        false,
+                    );
                 }
             }
             // `${#X}` is the length form. X must be a valid parameter name
@@ -2726,11 +2801,20 @@ impl Executor {
             // substitution in GNU Bash.
             if let Some(length_name) = inner.strip_prefix('#') {
                 if !Self::is_valid_length_parameter_name(length_name) {
-                    return Some((
-                        crate::executor::expand_word::bad_substitution_display(word, !quote_aware),
-                        "bad substitution".to_string(),
-                        1,
-                    ));
+                    if defer_bad_subst {
+                        return (None, true);
+                    }
+                    return (
+                        Some((
+                            crate::executor::expand_word::bad_substitution_display(
+                                word,
+                                !quote_aware,
+                            ),
+                            "bad substitution".to_string(),
+                            1,
+                        )),
+                        false,
+                    );
                 }
             }
             // Indirect expansions accept a simple parameter reference, an
@@ -2739,11 +2823,20 @@ impl Executor {
             // is a bad substitution in GNU.
             if let Some(indirect) = self.indirect_parameter_body(inner) {
                 if !Self::is_valid_indirect_expression(indirect) {
-                    return Some((
-                        crate::executor::expand_word::bad_substitution_display(word, !quote_aware),
-                        "bad substitution".to_string(),
-                        1,
-                    ));
+                    if defer_bad_subst {
+                        return (None, true);
+                    }
+                    return (
+                        Some((
+                            crate::executor::expand_word::bad_substitution_display(
+                                word,
+                                !quote_aware,
+                            ),
+                            "bad substitution".to_string(),
+                            1,
+                        )),
+                        false,
+                    );
                 }
                 // Value-dependent GNU diagnostics for the plain indirect
                 // form ${!name} (subst.c parameter_brace_expand_indir): an
@@ -2784,11 +2877,14 @@ impl Executor {
                     };
                     match self.shell_state.env_vars.get(indirect) {
                         None if !source_found => {
-                            return Some((
-                                indirect.to_string(),
-                                "invalid indirect expansion".to_string(),
-                                1,
-                            ));
+                            return (
+                                Some((
+                                    indirect.to_string(),
+                                    "invalid indirect expansion".to_string(),
+                                    1,
+                                )),
+                                false,
+                            );
                         }
                         None => {
                             // Declared-unset entry: the expansion is empty,
@@ -2802,7 +2898,10 @@ impl Executor {
                             // the marker-joined storage and leaked it).
                             if let Some(t) = self.indirect_source_scalar_value(indirect) {
                                 if !Self::is_valid_indirect_target(&t) {
-                                    return Some((t, "invalid variable name".to_string(), 1));
+                                    return (
+                                        Some((t, "invalid variable name".to_string(), 1)),
+                                        false,
+                                    );
                                 }
                             }
                         }
@@ -2823,7 +2922,7 @@ impl Executor {
                     // variable name` (rubash#3784).
                     if let Some(t) = self.parameter_error_value(indirect) {
                         if !Self::is_valid_indirect_target(&t) {
-                            return Some((t, "invalid variable name".to_string(), 1));
+                            return (Some((t, "invalid variable name".to_string(), 1)), false);
                         }
                     }
                 }
@@ -2869,11 +2968,14 @@ impl Executor {
                         && self.shell_state.variables.get(head).is_none()
                         && !self.pipestatus_cell_exists(head)
                     {
-                        return Some((
-                            head.to_string(),
-                            "invalid indirect expansion".to_string(),
-                            1,
-                        ));
+                        return (
+                            Some((
+                                head.to_string(),
+                                "invalid indirect expansion".to_string(),
+                                1,
+                            )),
+                            false,
+                        );
                     }
                     // GNU subst.c:7924-7934 parameter_brace_expand_indir:
                     // for `${!name[sub]}` an unresolvable BASE variable is
@@ -2921,11 +3023,14 @@ impl Executor {
                                 _ => false,
                             };
                             if !base_exists && !pure_keys_form {
-                                return Some((
-                                    format!("{}{}", head, &tail[..close]),
-                                    "invalid indirect expansion".to_string(),
-                                    1,
-                                ));
+                                return (
+                                    Some((
+                                        format!("{}{}", head, &tail[..close]),
+                                        "invalid indirect expansion".to_string(),
+                                        1,
+                                    )),
+                                    false,
+                                );
                             }
                             // The PLAIN subscripted form (the group closes
                             // the body) validates t too — here t is the
@@ -2942,11 +3047,14 @@ impl Executor {
                                         self.array_element_parameter_value(&reference)
                                     {
                                         if !Self::is_valid_indirect_target(&element) {
-                                            return Some((
-                                                element,
-                                                "invalid variable name".to_string(),
-                                                1,
-                                            ));
+                                            return (
+                                                Some((
+                                                    element,
+                                                    "invalid variable name".to_string(),
+                                                    1,
+                                                )),
+                                                false,
+                                            );
                                         }
                                     }
                                 }
@@ -2991,7 +3099,7 @@ impl Executor {
                         };
                         if let Some(t) = t {
                             if !Self::is_valid_indirect_target(&t) {
-                                return Some((t, "invalid variable name".to_string(), 1));
+                                return (Some((t, "invalid variable name".to_string(), 1)), false);
                             }
                         }
                     }
@@ -3013,7 +3121,7 @@ impl Executor {
                         self.shell_state.positional_window().join(" ")
                     };
                     if !t.is_empty() && !Self::is_valid_indirect_target(&t) {
-                        return Some((t, "invalid variable name".to_string(), 1));
+                        return (Some((t, "invalid variable name".to_string(), 1)), false);
                     }
                 }
                 // Same adjudication for a special source WITH an operator
@@ -3029,7 +3137,7 @@ impl Executor {
                 {
                     if let Some(t) = self.parameter_error_value(&head.to_string()) {
                         if !t.is_empty() && !Self::is_valid_indirect_target(&t) {
-                            return Some((t, "invalid variable name".to_string(), 1));
+                            return (Some((t, "invalid variable name".to_string(), 1)), false);
                         }
                     }
                 }
@@ -3066,7 +3174,10 @@ impl Executor {
                                 self.array_element_parameter_value(&indirect[..open + close])
                             {
                                 if !Self::is_valid_indirect_target(&t) {
-                                    return Some((t, "invalid variable name".to_string(), 1));
+                                    return (
+                                        Some((t, "invalid variable name".to_string(), 1)),
+                                        false,
+                                    );
                                 }
                             }
                         } else {
@@ -3122,7 +3233,10 @@ impl Executor {
                                 };
                                 if let Some(t) = t {
                                     if !Self::is_valid_indirect_target(&t) {
-                                        return Some((t, "invalid variable name".to_string(), 1));
+                                        return (
+                                            Some((t, "invalid variable name".to_string(), 1)),
+                                            false,
+                                        );
                                     }
                                 }
                             }
@@ -3136,11 +3250,17 @@ impl Executor {
             if inner.chars().next().is_some_and(char::is_whitespace)
                 && !word_contains_current_shell_command_substitution(word)
             {
-                return Some((
-                    crate::executor::expand_word::bad_substitution_display(word, !quote_aware),
-                    "bad substitution".to_string(),
-                    1,
-                ));
+                if defer_bad_subst {
+                    return (None, true);
+                }
+                return (
+                    Some((
+                        crate::executor::expand_word::bad_substitution_display(word, !quote_aware),
+                        "bad substitution".to_string(),
+                        1,
+                    )),
+                    false,
+                );
             }
             // GNU subst.c:10053 parameter_brace_expand ->
             // valid_brace_expansion_word (subst.c:7583): the extracted
@@ -3164,11 +3284,17 @@ impl Executor {
             if !self.scan_bad_substitution_defers_to_expansion(word, inner)
                 && crate::executor::expand_word::braced_name_is_bad_substitution(inner)
             {
-                return Some((
-                    crate::executor::expand_word::bad_substitution_display(word, !quote_aware),
-                    "bad substitution".to_string(),
-                    1,
-                ));
+                if defer_bad_subst {
+                    return (None, true);
+                }
+                return (
+                    Some((
+                        crate::executor::expand_word::bad_substitution_display(word, !quote_aware),
+                        "bad substitution".to_string(),
+                        1,
+                    )),
+                    false,
+                );
             }
             if let Some((name, message, require_non_empty)) =
                 parse_parameter_error_operator(inner, self.posix_mode_enabled())
@@ -3189,11 +3315,14 @@ impl Executor {
                         } else {
                             "parameter not set".to_string()
                         };
-                        return Some((
-                            parameter_error_display_name(name, quote_aware),
-                            message,
-                            Self::FATAL_PARAMETER_EXPANSION_STATUS,
-                        ));
+                        return (
+                            Some((
+                                parameter_error_display_name(name, quote_aware),
+                                message,
+                                Self::FATAL_PARAMETER_EXPANSION_STATUS,
+                            )),
+                            false,
+                        );
                     }
                     QuestionOutcome::Error => {
                         // GNU subst.c:8216-8230 parameter_brace_expand_error
@@ -3206,7 +3335,7 @@ impl Executor {
                             if let Some(nested) =
                                 self.parameter_expansion_error_in_word_context(message, quote_aware)
                             {
-                                return Some(nested);
+                                return (Some(nested), false);
                             }
                         }
                         let message = if message.is_empty() {
@@ -3234,11 +3363,14 @@ impl Executor {
                         // expand_wdesc_fatal (FORCE_EOF): `${x?}`/`${x:?}` abort
                         // the whole noninteractive script; subshell, pipeline,
                         // and command-substitution boundaries contain it.
-                        return Some((
-                            parameter_error_display_name(name, quote_aware),
-                            message,
-                            Self::FATAL_PARAMETER_EXPANSION_STATUS,
-                        ));
+                        return (
+                            Some((
+                                parameter_error_display_name(name, quote_aware),
+                                message,
+                                Self::FATAL_PARAMETER_EXPANSION_STATUS,
+                            )),
+                            false,
+                        );
                     }
                 }
             }
@@ -3250,7 +3382,7 @@ impl Executor {
             // `${a:-${b:?inner}}` with a unset reports `b: inner` and
             // aborts; it never yields the message text as a value).
             if let Some(nested) = self.nested_operator_word_error(inner, quote_aware) {
-                return Some(nested);
+                return (Some(nested), false);
             }
             // rubash#3225: the scan parse must not probe through the
             // reporting element fetch (parse_parameter_substring's NULL
@@ -3325,7 +3457,10 @@ impl Executor {
                         let display = Self::parameter_substring_raw_length_text(inner)
                             .map(str::to_string)
                             .unwrap_or_else(|| length.to_string());
-                        return Some((display, "substring expression < 0".to_string(), 1));
+                        return (
+                            Some((display, "substring expression < 0".to_string(), 1)),
+                            false,
+                        );
                     }
                 }
             }
@@ -3337,7 +3472,7 @@ impl Executor {
             self.scan_record_assignment(inner);
             rest = &after_start[end + 1..];
         }
-        None
+        (None, false)
     }
 
     /// Byte length of the balanced `open`/`close` group whose opener sits at

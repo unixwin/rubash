@@ -1143,7 +1143,7 @@ impl Executor {
                                 );
                             }
                             self.shell_state.parameter_bad_substitution.set(true);
-                            continue;
+                            break;
                         }
                         if let Some((error_name, message, require_non_empty)) =
                             crate::executor::parameter_ops::parse_parameter_error_operator(
@@ -1194,7 +1194,7 @@ impl Executor {
                                     );
                                 }
                                 self.shell_state.parameter_bad_substitution.set(true);
-                                continue;
+                                break;
                             }
                         }
                     }
@@ -1239,7 +1239,7 @@ impl Executor {
                             );
                         }
                         self.shell_state.parameter_bad_substitution.set(true);
-                        continue;
+                        break;
                     }
                     // A bad-substitution diagnostic inside this fragment must
                     // name the whole enclosing word (GNU subst.c:10278),
@@ -1259,6 +1259,9 @@ impl Executor {
                             )
                         },
                     );
+                    if self.shell_state.parameter_bad_substitution.get() {
+                        break;
+                    }
                     if preserve_quotes {
                         push_preserved_expansion_output(&mut output, &value, in_double);
                     } else {
