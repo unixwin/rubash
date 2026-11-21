@@ -523,6 +523,26 @@ impl Executor {
         ))
     }
 
+    /// Embedded-parameter walk for a word the lexer marked fully
+    /// double-quoted (STORAGE_WORD_PREFIX, lexer/word.rs): quote removal
+    /// stripped every `"` delimiter, so the walker's own in_double tracker
+    /// never engages even though every character sits inside the
+    /// double-quoted region. GNU expand_word_internal tracks
+    /// per-character quote flags instead (subst.c:11639-11673 CTLESC /
+    /// Q_DOUBLE_QUOTES), so re-enter the walk inside a synthetic
+    /// `"..."` span: fragments then dispatch with in_double set — the
+    /// same quoted bit the mutable walker passes as
+    /// SubstitutionQuoteContext::DoubleQuoted (embedded_mutations.rs
+    /// fragment_context), which routes the `${var op word}` RHS through
+    /// the double-quoted expansion (subst.c:7982-7993
+    /// parameter_brace_expand_rhs). Without it `"a b${W:-'}'}"` lost the
+    /// quotes in the default word and produced `a b}` where GNU produces
+    //  `a b'}'` (rubash#4004).
+    fn expand_embedded_parameters_fully_quoted(&self, word: &str) -> String {
+        let quoted = format!("\"{word}\"");
+        self.expand_embedded_parameters(&quoted)
+    }
+
     pub(in crate::executor) fn expand_quoted_parameter_word(&self, word: &str) -> String {
         // TODO(subst.c/parse.y): Quoted parameter expansion should carry
         // CTLESC/CTLQUOTEMARK state from the parser. This preserves the
@@ -532,10 +552,10 @@ impl Executor {
             .strip_prefix("${")
             .and_then(|word| word.strip_suffix('}'))
         else {
-            return self.expand_embedded_parameters(word);
+            return self.expand_embedded_parameters_fully_quoted(word);
         };
         if !braced_parameter_spans_whole_word(word) {
-            return self.expand_embedded_parameters(word);
+            return self.expand_embedded_parameters_fully_quoted(word);
         }
 
         // GNU subst.c:9777-9917 `parameter_brace_expand` dispatches on
