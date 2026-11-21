@@ -1595,6 +1595,7 @@ impl Executor {
                 conditional_nounset_error: Cell::new(false),
                 arithmetic_last_error_category: Cell::new(None),
                 parameter_bad_substitution: Cell::new(false),
+                bad_substitution_discard_only: Cell::new(false),
                 bad_substitution_reported: Cell::new(false),
                 redirect_failglob_error: Cell::new(false),
                 redirect_failglob_seen: Cell::new(false),

@@ -927,6 +927,50 @@ impl Executor {
         !self.shell_state.bad_substitution_reported.replace(true)
     }
 
+    /// rubash#3969: report and latch one brace product's expansion-layer
+    /// failure — GNU subst.c:11568-11593 (expand_word_internal's `` ` ``
+    /// case, SX_REQMATCH string_extract). brace_expand_word_list hands
+    /// each product to expansion as a fresh word, so a sequence element
+    /// that is a raw backquote glued to further text (`` `x ``, `` `1 ``,
+    /// `` `$x `` — `{a..A}x`, `{a..A}{1..2}`, `{a..A}$x`) reads as an
+    /// unclosed command substitution and fails the WHOLE word list:
+    /// expand_word_error -> exp_jump_to_top_level(DISCARD)
+    /// (subst.c:13093-13110). `tail` is the product's raw text from the
+    /// backquote to the end of the word (string+t_index), matching
+    /// report_error's `bad substitution: no closing "`" in %s`. The
+    /// command-list consumers of parameter_bad_substitution own the
+    /// abort; the diagnostic print joins the report-once budget like
+    /// every `bad substitution` site. The verdict latches with the
+    /// discard-only class marker (`bad_substitution_discard_only`):
+    /// GNU's `` ` `` case returns &expand_wdesc_error, never the fatal
+    /// sentinel, so no consumer may promote this class to FORCE_EOF
+    /// under posixly_correct.
+    pub(in crate::executor) fn report_brace_product_backquote_failure(&self, tail: &str) {
+        if self.bad_substitution_report_first() {
+            let line = self
+                .shell_state
+                .env_vars
+                .get("__RUBASH_CURRENT_LINE")
+                .and_then(|line| line.parse::<usize>().ok())
+                .unwrap_or(1);
+            self.write_diagnostic_fd2(
+                format!(
+                    "{}bad substitution: no closing \"`\" in {}\n",
+                    self.error_prefix_at_line(line),
+                    tail
+                )
+                .as_bytes(),
+            );
+        }
+        // First verdict wins (GNU abandons the word list at its first
+        // expansion failure): only a latch this report actually raises
+        // takes the discard-only class — a verdict already latched by
+        // the `${...}` class keeps that class.
+        if !self.shell_state.parameter_bad_substitution.replace(true) {
+            self.shell_state.bad_substitution_discard_only.set(true);
+        }
+    }
+
     pub(crate) fn expand_word(&self, word: &str) -> String {
         let _xpass = crate::executor::expand_braced_indices::SubXpassFrame::new();
         let _wctx = crate::executor::expand_braced_indices::WordCtxGuard::new_if_absent();

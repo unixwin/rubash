@@ -97,6 +97,22 @@ impl Executor {
                             self.raise_evalerror_abort();
                             self.abandon_on_arithmetic_expansion_error()?;
                         }
+                        // rubash#3969: a brace product's unclosed
+                        // backquote latched the bad-substitution verdict
+                        // mid-list — the same expand_word_error DISCARD
+                        // class as the arithmetic arm above (subst.c:11587
+                        // -> subst.c:13093-13110): no iteration runs, the
+                        // for fails with status 1, the rest of its source
+                        // line is discarded. Consume it here so the latch
+                        // cannot poison the next command's expansion.
+                        if self.shell_state.parameter_bad_substitution.replace(false) {
+                            self.shell_state.bad_substitution_reported.set(false);
+                            self.shell_state.bad_substitution_discard_only.set(false);
+                            self.raise_evalerror_abort();
+                            self.command_expansion_failed.set(true);
+                            self.exit_code = 1;
+                            return Err(ExecuteError::ExpansionFailure(1));
+                        }
                         values.extend(expanded);
                     }
                     Err(pattern) => {

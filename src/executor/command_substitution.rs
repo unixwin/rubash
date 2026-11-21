@@ -803,6 +803,7 @@ impl Executor {
         // start_job (jobs.c:3837) refuses fg/bg inside it.
         self.shell_state.in_command_substitution.set(true);
         self.shell_state.parameter_bad_substitution.set(false);
+        self.shell_state.bad_substitution_discard_only.set(false);
         // rubash#3499: the print budget clears with the verdict — the
         // body is fresh parser input whose own diagnostic deserves its
         // own report, and the interior snapshot below restores the
@@ -2167,6 +2168,7 @@ impl Executor {
         shell_state.arithmetic_nounset_error.set(false);
         shell_state.arithmetic_last_error_category.set(None);
         shell_state.parameter_bad_substitution.set(false);
+        shell_state.bad_substitution_discard_only.set(false);
         // rubash#3499: the forked child starts with a clean print
         // budget as well as a clean verdict.
         shell_state.bad_substitution_reported.set(false);

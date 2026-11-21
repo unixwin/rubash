@@ -6083,6 +6083,22 @@ impl Executor {
                 }
             } else {
                 values.extend(self.expand_shellexp_word_values_result(&word)?);
+                // rubash#3969: a brace product's unclosed backquote is the
+                // same expand_word_error that abandons
+                // gen_wordlist_matches' expansion in GNU — the diagnostic
+                // already printed and the rest of the command list is
+                // DISCARDed (`compgen -W "{a..A}x"; echo after` never
+                // runs `echo`), not a truncated success. Consume the
+                // latch and arm the reader-level abort so it cannot leak
+                // into the next command.
+                if self.shell_state.parameter_bad_substitution.replace(false) {
+                    self.shell_state.bad_substitution_reported.set(false);
+                    self.shell_state.bad_substitution_discard_only.set(false);
+                    self.raise_evalerror_abort();
+                    self.command_expansion_failed.set(true);
+                    self.exit_code = 1;
+                    return Ok(Vec::new());
+                }
             }
         }
         Ok(values)

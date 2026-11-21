@@ -199,6 +199,10 @@ impl Executor {
         // Snapshot the expansion-verdict latches; a false→true transition
         // inside the walk is the walk's own failure verdict.
         let bad_sub_before = self.shell_state.parameter_bad_substitution.replace(false);
+        let bad_sub_discard_before = self
+            .shell_state
+            .bad_substitution_discard_only
+            .replace(false);
         // rubash#3499: the print budget rides with the verdict — the walk
         // is a read-side render, so a diagnostic it prints must not spend
         // the enclosing command's one report, and a report the enclosing
@@ -248,6 +252,9 @@ impl Executor {
         self.shell_state
             .bad_substitution_reported
             .set(bad_sub_reported_before);
+        self.shell_state
+            .bad_substitution_discard_only
+            .set(bad_sub_discard_before);
         EXPAND_DEPTH.with(|d| d.set(depth));
         if failed {
             return word.to_string();
