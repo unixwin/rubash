@@ -20,11 +20,10 @@
 //! the band boundaries U+1FFFFF / U+200000 / U+3FFFFFF / U+4000000 and
 //! the mid-word/adjacent-escape compositions.
 //!
-//! Known residual (length face, not this issue): `${#v}` counts the
-//! extended forms as their invalid-UTF-8 byte count (Rust's UTF-8
-//! decoder rejects > U+10FFFF where glibc mbrtowc accepts one char),
-//! so it reports 4/5/6 where GNU reports 1 — the same divergence the
-//! `printf -v`/`echo -e` producers already had before this fix.
+//! Length face (fixed by rubash#4035): `${#v}` counts the extended
+//! forms as ONE character — glibc's `mbrlen` accepts the pre-2003
+//! 4/5/6-byte range where Rust's UTF-8 decoder rejects it — see
+//! `utf8_mblen`/`multibyte_char_count` in src/locale.rs.
 
 use std::process::Command;
 
