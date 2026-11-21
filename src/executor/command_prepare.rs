@@ -4859,15 +4859,18 @@ impl Executor {
         // `f <&"${X[0]}"` with an anchored empty expansion reported the
         // apply-layer fallback (`&<0x1d>: Invalid argument`) instead of the
         // gate's `"${X[0]}": Bad file descriptor` (issue #518). Placement
-        // mirrors execute_materialized_command: before the tempenv applies,
-        // because redirect words expand against the caller's bindings.
+        // mirrors execute_materialized_command (rubash#4036): the gate's
+        // diagnostics belong AFTER the xtrace head line
+        // (execute_cmd.c:4648-4649 xtrace_print_word_list precedes every
+        // do_redirections call), while its redirect-word expansion must
+        // still see the pre-tempenv bindings (redir.c:298
+        // redirection_expand, variables.c:1978) — secured by expanding
+        // every gate candidate into redirect_target_memo before
+        // apply_temporary_assignments binds, so the gate's own
+        // expand_redirect_target calls hit the memo.
         let settle_superseded_net_outputs =
             self.superseded_net_output_settlement_applies(&materialized_cmd, false);
-        let redirect_rejection =
-            match self.reject_invalid_redirects(&materialized_cmd, settle_superseded_net_outputs) {
-                Ok(rejection) => rejection,
-                Err(error) => return Some(Err(error)),
-            };
+        self.preexpand_redirect_targets(&materialized_cmd);
         let assignment_raws = (materialized_cmd.assignment_raws.len()
             == materialized_cmd.assignments.len())
         .then(|| materialized_cmd.assignment_raws.as_slice());
@@ -4876,36 +4879,6 @@ impl Executor {
             assignment_raws,
             &materialized_cmd.words,
         );
-        if let Some(rejection) = redirect_rejection {
-            // Only the FatalNounset class routes through the expansion-error
-            // classifier (rubash#535): an unbound variable in a function
-            // call's redirect word is a fatal expansion error, and the
-            // classifier's Err (interactive DISCARD or main-shell FORCE_EOF)
-            // must reach the driver, not be dropped. Other rejections (bad
-            // dup fd, ambiguous redirect) keep the plain skip path —
-            // running the classifier for them would kill the script where
-            // GNU continues (issue518 dup_empty_quoted_word regression).
-            let heredoc_result = if rejection == super::redirection::RedirectRejection::FatalNounset
-            {
-                Some(self.finish_heredoc_expansion_error(
-                    &materialized_cmd,
-                    Self::FATAL_PARAMETER_EXPANSION_STATUS,
-                ))
-            } else {
-                None
-            };
-            self.restore_temporary_assignments(temporary_assignments);
-            if let Some(Err(error)) = heredoc_result {
-                let _ = self.finish_process_substitutions(process_substitution_files);
-                let _ = self
-                    .finish_assignment_output_process_substitutions_for_command(&materialized_cmd);
-                return Some(Err(error));
-            }
-            let finish_result = self.finish_process_substitutions(process_substitution_files);
-            let assignment_finish_result =
-                self.finish_assignment_output_process_substitutions_for_command(&materialized_cmd);
-            return Some(finish_result.and(assignment_finish_result));
-        }
         // POSIX-mode notes item 36 (GNU 5.3 cell matrix): a failed readonly
         // tempenv assignment before a FUNCTION skips the function and
         // abandons the rest of the command list with status 1 (subshell
