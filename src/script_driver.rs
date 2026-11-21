@@ -1285,7 +1285,7 @@ pub(crate) fn read_next_source_group(
     let mut pending_heredocs: Vec<(String, bool)> = Vec::new();
     let mut paren_depth: i64 = 0;
     let mut saw_heredoc = false;
-    let mut heredoc_arith_depth: i64 = 0;
+    let mut heredoc_scan_state = HeredocScanState::default();
     let mut group: Vec<(String, bool)> = Vec::new();
     let start_line = *index + 1;
     let posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
@@ -1408,7 +1408,7 @@ pub(crate) fn read_next_source_group(
             }
             Front::None => {
                 let declared =
-                    stdin_heredoc_line_declarations(&expanded_line, &mut heredoc_arith_depth);
+                    stdin_heredoc_line_declarations(&expanded_line, &mut heredoc_scan_state);
                 saw_heredoc = saw_heredoc
                     || (!declared.is_empty()
                         && (expanded_line.contains("$(")
@@ -3021,8 +3021,20 @@ pub fn line_paren_delta(line: &str) -> i64 {
 /// push_string + here_document_to_fd). Lines consumed as body text are
 /// never scanned for `<<` operators.
 pub fn stdin_heredoc_declarations(text: &str) -> Vec<(String, bool)> {
+    let mut state = HeredocScanState::default();
+    stdin_heredoc_declarations_with_state(text, &mut state)
+}
+
+/// stdin_heredoc_declarations with the caller's scan state: the
+/// line-at-a-time drivers (interactive reader, stdin script reader) pass a
+/// state that lives as long as their pending group, so a quote or
+/// substitution opened on one line still suppresses `<<` on the
+/// continuation lines (rubash#3962).
+fn stdin_heredoc_declarations_with_state(
+    text: &str,
+    state: &mut HeredocScanState,
+) -> Vec<(String, bool)> {
     let mut pending: Vec<(String, bool)> = Vec::new();
-    let mut arith_depth = 0i64;
     for line in text.split('\n') {
         if let Some((delimiter, strip_tabs)) = pending.first().cloned() {
             let candidate = if strip_tabs {
@@ -3035,7 +3047,7 @@ pub fn stdin_heredoc_declarations(text: &str) -> Vec<(String, bool)> {
             }
             continue;
         }
-        pending.extend(scan_heredoc_operators_with_state(line, &mut arith_depth));
+        pending.extend(scan_heredoc_operators_with_state(line, state));
     }
     pending
 }
@@ -3043,9 +3055,9 @@ pub fn stdin_heredoc_declarations(text: &str) -> Vec<(String, bool)> {
 /// rubash#351 oracle: the first line of `input` whose heredoc delimiter word
 /// leaves a quote open, with that quote character and the 1-based line.
 pub fn heredoc_delimiter_unclosed_quote(input: &str) -> Option<(char, usize)> {
-    let mut arith_depth = 0i64;
+    let mut state = HeredocScanState::default();
     for (line_index, line) in input.split('\n').enumerate() {
-        let (_, unclosed) = scan_heredoc_operators_full(line, &mut arith_depth);
+        let (_, unclosed) = scan_heredoc_operators_full(line, &mut state);
         if let Some(quote) = unclosed {
             return Some((quote, line_index + 1));
         }
@@ -3053,11 +3065,60 @@ pub fn heredoc_delimiter_unclosed_quote(input: &str) -> Option<(char, usize)> {
     None
 }
 
+/// Cross-line lexical context for the heredoc-declaration scan. GNU
+/// read_token lexes `<<` at token level only — the `case '<'` arm
+/// (parse.y:3692-3701) returning LESS_LESS / LESS_LESS_MINUS /
+/// LESS_LESS_LESS, each later registered by push_heredoc (parse.y:3106).
+/// Inside a word, quote or substitution body — the state read_token_word
+/// (parse.y:5305) carries across a physical line — `<<` is literal text
+/// and declares nothing. The scan previously carried only the `((`/`$((`
+/// arithmetic depth, so a `<<` on a line that began inside an open
+/// `"`/`'`/`$(`/`` ` ``/`${` span declared a phantom heredoc whose body
+/// never arrived, gluing the rest of the file into one incomplete group
+/// (rubash#3962).
+#[derive(Clone, Debug, Default)]
+pub struct HeredocScanState {
+    /// Open contexts at the current scan point, innermost last. Empty is
+    /// token-level state, where `<<` is a redirection operator.
+    contexts: Vec<HeredocScanContext>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HeredocScanContext {
+    /// `'…` or `$'…` body. `ansi` marks the ANSI-C form, whose `\` escapes
+    /// the next char (parse.y:3992 LEX_PASSNEXT under P_ALLOWESC), so
+    /// `\'` does not close.
+    SingleQuote { ansi: bool },
+    /// `"…` or `$"…` body: `\` escapes the next char (the CBSDQUOTE table
+    /// behind parse.y:5384-5387) and `$(` / `${` / `` ` `` open live
+    /// nested contexts (read_token_word's dstack recursion through
+    /// parse_matched_pair, parse.y:3877).
+    DoubleQuote,
+    /// `` ` `` … `` ` `` body: collected verbatim for the inner reparse —
+    /// a `<<` inside belongs to that reparse, never to this reader.
+    Backquote,
+    /// `$(`, `<(`, `>(` or bare `(` … `)`: operator-live — a `<<` inside
+    /// is a real redirection whose body gathers from this same input
+    /// stream (parse.y:3120 gather_here_documents).
+    Live,
+    /// `${` … `}` body: expansion word text — `<<` inside is data
+    /// (parse.y:3877 parse_matched_pair); nested `$(`/`${`/quotes/`` ` ``
+    /// still nest.
+    Brace,
+    /// `((` / `$((` … `))` body at the carried paren depth: `<<` inside
+    /// is the shift operator (parse.y:3727-3728 parse_dparen).
+    Arith(i64),
+}
+
 /// One physical line of the driver's heredoc-declaration scan, carrying the
-/// open arithmetic-command paren depth across lines so a multi-line `((`
-/// never leaks its shift operators as heredoc declarations.
-pub fn stdin_heredoc_line_declarations(line: &str, arith_depth: &mut i64) -> Vec<(String, bool)> {
-    scan_heredoc_operators_with_state(line, arith_depth)
+/// lexical contexts a multi-line `((`/quote/substitution leaves open so a
+/// continuation line is judged by its real context, not as token-level
+/// text.
+pub fn stdin_heredoc_line_declarations(
+    line: &str,
+    state: &mut HeredocScanState,
+) -> Vec<(String, bool)> {
+    scan_heredoc_operators_with_state(line, state)
 }
 
 /// `<<`/`<<-` operator declarations on one physical line. GNU parse.y
@@ -3081,12 +3142,15 @@ pub fn stdin_heredoc_line_declarations(line: &str, arith_depth: &mut i64) -> Vec
 /// and a mis-parse of the merged text (rubash#244/#245: ble.sh -n died at
 /// line 28355 after 117 s; GNU parses instantly, rc=0).
 fn scan_heredoc_operators(line: &str) -> Vec<(String, bool)> {
-    let mut arith_depth = 0i64;
-    scan_heredoc_operators_with_state(line, &mut arith_depth)
+    let mut state = HeredocScanState::default();
+    scan_heredoc_operators_with_state(line, &mut state)
 }
 
-fn scan_heredoc_operators_with_state(line: &str, arith_depth: &mut i64) -> Vec<(String, bool)> {
-    scan_heredoc_operators_full(line, arith_depth).0
+fn scan_heredoc_operators_with_state(
+    line: &str,
+    state: &mut HeredocScanState,
+) -> Vec<(String, bool)> {
+    scan_heredoc_operators_full(line, state).0
 }
 
 /// scan_heredoc_operators_with_state plus the unterminated-quote signal of
@@ -3094,22 +3158,46 @@ fn scan_heredoc_operators_with_state(line: &str, arith_depth: &mut i64) -> Vec<(
 /// reads the here-document delimiter as an ordinary WORD, so a quote that
 /// never closes keeps the read open to EOF — no heredoc is declared and the
 /// parser dies with `unexpected EOF while looking for matching `q''.
+/// Whether the quote char at `pos` is `$'`-prefixed (ANSI-C quoting): a
+/// `$` immediately before it that is not itself escaped — an odd `\` run
+/// before the `$` escapes it instead (parse.y:5366-5398 backslash arm).
+fn dollar_quote_prefix(chars: &[char], pos: usize) -> bool {
+    if pos == 0 || chars[pos - 1] != '$' {
+        return false;
+    }
+    let mut backslashes = 0usize;
+    let mut j = pos - 1;
+    while j > 0 && chars[j - 1] == '\\' {
+        backslashes += 1;
+        j -= 1;
+    }
+    backslashes % 2 == 0
+}
+
+fn quote_context(chars: &[char], pos: usize) -> HeredocScanContext {
+    if chars[pos] == '"' {
+        HeredocScanContext::DoubleQuote
+    } else {
+        HeredocScanContext::SingleQuote {
+            ansi: dollar_quote_prefix(chars, pos),
+        }
+    }
+}
+
 fn scan_heredoc_operators_full(
     line: &str,
-    arith_depth: &mut i64,
+    state: &mut HeredocScanState,
 ) -> (Vec<(String, bool)>, Option<char>) {
-    // perf21 byte admission: every declaration arm needs a `<` byte, and the
-    // only cross-line state (`arith_depth`) can be opened solely by a `(`
-    // byte (`((` command position or `$((` word expansion — both arms below
-    // read a `(` from the text). With neither byte present and depth already
-    // 0, the walk below cannot declare anything and cannot move the state,
-    // so skip the char materialization entirely (GNU read_token streams the
-    // input once; this walk is the gather's per-line substitute).
-    if *arith_depth == 0 {
-        let bytes = line.as_bytes();
-        if !bytes.contains(&b'<') && !bytes.contains(&b'(') {
-            return (Vec::new(), None);
-        }
+    // perf21 byte admission: an empty context stack plus a line with no
+    // byte that can declare `<<` or open a context cannot move the state,
+    // so skip the char materialization entirely (GNU read_token streams
+    // the input once; this walk is the gather's per-line substitute).
+    if state.contexts.is_empty()
+        && !line
+            .bytes()
+            .any(|b| matches!(b, b'<' | b'(' | b'\'' | b'"' | b'`' | b'$'))
+    {
+        return (Vec::new(), None);
     }
     // GNU read_token_word (parse.y:5419-5437) reads the heredoc delimiter
     // as an ordinary WORD: a quote that never closes keeps reading lines
@@ -3129,54 +3217,224 @@ fn scan_heredoc_operators_full(
     // operator boundary, or a command keyword puts a following `((` in
     // command position.
     let mut at_command = true;
-    while i < chars.len() {
-        if *arith_depth > 0 {
-            // Arithmetic body: parens nest the span; quoted spans are
-            // opaque; `<<` is the shift operator, never a heredoc.
-            match chars[i] {
-                '\\' => i += 2,
-                '\'' | '"' => {
-                    let q = chars[i];
+    'line: while i < chars.len() {
+        // Resume inside whatever an earlier line (or span of this line)
+        // left open: `<<` is an operator only at token level
+        // (parse.y:3692-3701); every other context consumes its span
+        // without declarations (rubash#3962).
+        match state.contexts.last().copied() {
+            Some(HeredocScanContext::SingleQuote { ansi }) => {
+                while i < chars.len() {
+                    let ch = chars[i];
                     i += 1;
-                    while i < chars.len() && chars[i] != q {
-                        if q == '"' && chars[i] == '\\' && i + 1 < chars.len() {
-                            i += 1;
-                        }
+                    if ch == '\'' {
+                        state.contexts.pop();
+                        break;
+                    }
+                    if ansi && ch == '\\' {
                         i += 1;
                     }
-                    i += 1;
                 }
-                '(' => {
-                    *arith_depth += 1;
-                    i += 1;
-                }
-                ')' => {
-                    *arith_depth -= 1;
-                    i += 1;
-                    if *arith_depth == 0 {
-                        at_command = true;
+                continue 'line;
+            }
+            Some(HeredocScanContext::DoubleQuote) => {
+                while i < chars.len() {
+                    match chars[i] {
+                        '"' => {
+                            state.contexts.pop();
+                            i += 1;
+                            break;
+                        }
+                        '\\' => i += 2,
+                        '$' if chars.get(i + 1) == Some(&'(') && chars.get(i + 2) == Some(&'(') => {
+                            state.contexts.push(HeredocScanContext::Arith(2));
+                            i += 3;
+                            break;
+                        }
+                        '$' if chars.get(i + 1) == Some(&'(') => {
+                            state.contexts.push(HeredocScanContext::Live);
+                            i += 2;
+                            break;
+                        }
+                        '$' if chars.get(i + 1) == Some(&'{') => {
+                            state.contexts.push(HeredocScanContext::Brace);
+                            i += 2;
+                            break;
+                        }
+                        '`' => {
+                            state.contexts.push(HeredocScanContext::Backquote);
+                            i += 1;
+                            break;
+                        }
+                        _ => i += 1,
                     }
                 }
-                _ => i += 1,
+                continue 'line;
             }
-            continue;
+            Some(HeredocScanContext::Backquote) => {
+                while i < chars.len() {
+                    let ch = chars[i];
+                    i += 1;
+                    if ch == '`' {
+                        state.contexts.pop();
+                        break;
+                    }
+                    if ch == '\\' {
+                        i += 1;
+                    }
+                }
+                continue 'line;
+            }
+            Some(HeredocScanContext::Brace) => {
+                while i < chars.len() {
+                    match chars[i] {
+                        '}' => {
+                            state.contexts.pop();
+                            i += 1;
+                            break;
+                        }
+                        '\\' => i += 2,
+                        '$' if chars.get(i + 1) == Some(&'(') && chars.get(i + 2) == Some(&'(') => {
+                            state.contexts.push(HeredocScanContext::Arith(2));
+                            i += 3;
+                            break;
+                        }
+                        '$' if chars.get(i + 1) == Some(&'(') => {
+                            state.contexts.push(HeredocScanContext::Live);
+                            i += 2;
+                            break;
+                        }
+                        '$' if chars.get(i + 1) == Some(&'{') => {
+                            state.contexts.push(HeredocScanContext::Brace);
+                            i += 2;
+                            break;
+                        }
+                        '`' => {
+                            state.contexts.push(HeredocScanContext::Backquote);
+                            i += 1;
+                            break;
+                        }
+                        '\'' | '"' => {
+                            state.contexts.push(quote_context(&chars, i));
+                            i += 1;
+                            break;
+                        }
+                        _ => i += 1,
+                    }
+                }
+                continue 'line;
+            }
+            Some(HeredocScanContext::Arith(_)) => {
+                // Arithmetic body: parens nest the span; `<<` is the
+                // shift operator, never a heredoc. Quotes, `` ` ``,
+                // `$(`/`${`/`$((` open real nested contexts (a `<<`
+                // inside `$(` is live — its body gathers from this
+                // stream).
+                while i < chars.len() {
+                    match chars[i] {
+                        '\\' => i += 2,
+                        '(' => {
+                            if let Some(HeredocScanContext::Arith(d)) = state.contexts.last_mut() {
+                                *d += 1;
+                            }
+                            i += 1;
+                        }
+                        ')' => {
+                            let depth = match state.contexts.last_mut() {
+                                Some(HeredocScanContext::Arith(d)) => {
+                                    *d -= 1;
+                                    *d
+                                }
+                                _ => 0,
+                            };
+                            i += 1;
+                            if depth == 0 {
+                                state.contexts.pop();
+                                at_command = true;
+                                break;
+                            }
+                        }
+                        '$' if chars.get(i + 1) == Some(&'(') && chars.get(i + 2) == Some(&'(') => {
+                            // Nested `$((` is still shift-suppressed
+                            // arithmetic: fold it into this depth.
+                            if let Some(HeredocScanContext::Arith(d)) = state.contexts.last_mut() {
+                                *d += 2;
+                            }
+                            i += 3;
+                        }
+                        '$' if chars.get(i + 1) == Some(&'(') => {
+                            state.contexts.push(HeredocScanContext::Live);
+                            i += 2;
+                            break;
+                        }
+                        '$' if chars.get(i + 1) == Some(&'{') => {
+                            state.contexts.push(HeredocScanContext::Brace);
+                            i += 2;
+                            break;
+                        }
+                        '`' => {
+                            state.contexts.push(HeredocScanContext::Backquote);
+                            i += 1;
+                            break;
+                        }
+                        '\'' | '"' => {
+                            state.contexts.push(quote_context(&chars, i));
+                            i += 1;
+                            break;
+                        }
+                        _ => i += 1,
+                    }
+                }
+                continue 'line;
+            }
+            Some(HeredocScanContext::Live) | None => {}
         }
+        // Token level — also inside a Live context, where `<<` is a real
+        // heredoc operator whose body this reader gathers.
         match chars[i] {
             ' ' | '\t' => i += 1,
             '#' => break,
             '$' if chars.get(i + 1) == Some(&'(') && chars.get(i + 2) == Some(&'(') => {
-                // `$((` arithmetic expansion inside a word: the body is
-                // arithmetic text (parse.y read_token_word ->
+                // `$((` arithmetic expansion at token boundary: the body
+                // is arithmetic text (parse.y read_token_word ->
                 // parse_matched_pair), so `<<` there never declares.
-                *arith_depth = 2;
+                state.contexts.push(HeredocScanContext::Arith(2));
                 i += 3;
+            }
+            '$' if chars.get(i + 1) == Some(&'(') => {
+                // `$(` command substitution: operator-live — a `<<`
+                // inside declares a heredoc gathered from this input
+                // (parse.y:3120 gather_here_documents).
+                state.contexts.push(HeredocScanContext::Live);
+                i += 2;
+                at_command = true;
+            }
+            '$' if chars.get(i + 1) == Some(&'{') => {
+                state.contexts.push(HeredocScanContext::Brace);
+                i += 2;
             }
             '(' if chars.get(i + 1) == Some(&'(') && at_command => {
                 // Command-position `((` arithmetic command: parse_dparen
                 // consumes the whole body before read_token's redirection
                 // branch ever runs (parse.y:3727-3728).
-                *arith_depth = 2;
+                state.contexts.push(HeredocScanContext::Arith(2));
                 i += 2;
+            }
+            '(' => {
+                // Subshell `(`, procsub `<(`/`>(` (the `<`/`>` already
+                // scanned) or function-header parens: the `)` closer
+                // tracks the context so text after it scans token-level
+                // again.
+                state.contexts.push(HeredocScanContext::Live);
+                i += 1;
+                at_command = true;
+            }
+            ')' => {
+                if matches!(state.contexts.last(), Some(HeredocScanContext::Live)) {
+                    state.contexts.pop();
+                }
+                i += 1;
+                at_command = true;
             }
             '<' => {
                 if chars.get(i + 1) == Some(&'<') {
@@ -3196,14 +3454,14 @@ fn scan_heredoc_operators_full(
                 }
                 at_command = false;
             }
-            '>' | '|' | '&' | ';' | '(' | ')' => {
+            '>' | '|' | '&' | ';' => {
                 i += 1;
                 at_command = true;
             }
             _ => {
                 // One word, honoring quoting; comparison text is dequoted.
                 let mut word = String::new();
-                while i < chars.len() {
+                'word: while i < chars.len() {
                     match chars[i] {
                         ' ' | '\t' | '<' | '>' | '|' | '&' | ';' | '(' | ')' => break,
                         '$' if chars.get(i + 1) == Some(&'(') && chars.get(i + 2) == Some(&'(') => {
@@ -3215,11 +3473,12 @@ fn scan_heredoc_operators_full(
                             // read_token's redirection branch). A span still
                             // open at end of line propagates its depth into
                             // the carried state so continuation lines keep
-                            // the suppression.
-                            *arith_depth = 2;
+                            // the suppression; a nested `$(`/`${`/quote
+                            // left open propagates as its own context.
+                            let mut depth = 2i64;
                             word.push('$');
                             i += 1;
-                            while i < chars.len() && *arith_depth > 0 {
+                            while i < chars.len() && depth > 0 {
                                 match chars[i] {
                                     '\\' => {
                                         word.push(chars[i]);
@@ -3229,30 +3488,59 @@ fn scan_heredoc_operators_full(
                                             i += 1;
                                         }
                                     }
-                                    '\'' | '"' => {
+                                    '\'' | '"' | '`' => {
                                         let q = chars[i];
-                                        word.push(chars[i]);
+                                        let q_pos = i;
+                                        word.push(q);
                                         i += 1;
-                                        while i < chars.len() && chars[i] != q {
-                                            if q == '"' && chars[i] == '\\' && i + 1 < chars.len() {
+                                        let mut closed = false;
+                                        while i < chars.len() {
+                                            let ch = chars[i];
+                                            word.push(ch);
+                                            i += 1;
+                                            if ch == q {
+                                                closed = true;
+                                                break;
+                                            }
+                                            if q != '\'' && ch == '\\' && i < chars.len() {
                                                 word.push(chars[i]);
                                                 i += 1;
                                             }
-                                            word.push(chars[i]);
-                                            i += 1;
                                         }
-                                        if i < chars.len() {
-                                            word.push(chars[i]);
-                                            i += 1;
+                                        if !closed {
+                                            state.contexts.push(HeredocScanContext::Arith(depth));
+                                            state.contexts.push(if q == '`' {
+                                                HeredocScanContext::Backquote
+                                            } else {
+                                                quote_context(&chars, q_pos)
+                                            });
+                                            break 'word;
                                         }
                                     }
+                                    '$' if chars.get(i + 1) == Some(&'(')
+                                        && chars.get(i + 2) != Some(&'(') =>
+                                    {
+                                        // `$(` inside arith nests a live
+                                        // command substitution — stack it
+                                        // so its `<<` still declares.
+                                        state.contexts.push(HeredocScanContext::Arith(depth));
+                                        state.contexts.push(HeredocScanContext::Live);
+                                        i += 2;
+                                        break 'word;
+                                    }
+                                    '$' if chars.get(i + 1) == Some(&'{') => {
+                                        state.contexts.push(HeredocScanContext::Arith(depth));
+                                        state.contexts.push(HeredocScanContext::Brace);
+                                        i += 2;
+                                        break 'word;
+                                    }
                                     '(' => {
-                                        *arith_depth += 1;
+                                        depth += 1;
                                         word.push(chars[i]);
                                         i += 1;
                                     }
                                     ')' => {
-                                        *arith_depth -= 1;
+                                        depth -= 1;
                                         word.push(chars[i]);
                                         i += 1;
                                     }
@@ -3261,6 +3549,117 @@ fn scan_heredoc_operators_full(
                                         i += 1;
                                     }
                                 }
+                            }
+                            if depth > 0 {
+                                state.contexts.push(HeredocScanContext::Arith(depth));
+                                break 'word;
+                            }
+                        }
+                        '$' if chars.get(i + 1) == Some(&'{') => {
+                            // `${` inside a word — one atomic word piece;
+                            // a `<<` inside is expansion text
+                            // (parse.y:3877 parse_matched_pair). Nested
+                            // `${` and quoted/`` ` `` spans consume into
+                            // the word; a nested `$(` is operator-live so
+                            // it stacks under the brace context, and a
+                            // span still open at end of line carries as
+                            // a context.
+                            word.push('$');
+                            word.push('{');
+                            i += 2;
+                            let mut depth = 1i64;
+                            while i < chars.len() && depth > 0 {
+                                match chars[i] {
+                                    '\\' => {
+                                        word.push(chars[i]);
+                                        i += 1;
+                                        if i < chars.len() {
+                                            word.push(chars[i]);
+                                            i += 1;
+                                        }
+                                    }
+                                    '$' if chars.get(i + 1) == Some(&'{') => {
+                                        word.push('$');
+                                        word.push('{');
+                                        depth += 1;
+                                        i += 2;
+                                    }
+                                    '$' if chars.get(i + 1) == Some(&'(')
+                                        && chars.get(i + 2) != Some(&'(') =>
+                                    {
+                                        state.contexts.push(HeredocScanContext::Brace);
+                                        state.contexts.push(HeredocScanContext::Live);
+                                        i += 2;
+                                        break 'word;
+                                    }
+                                    '}' => {
+                                        depth -= 1;
+                                        word.push(chars[i]);
+                                        i += 1;
+                                    }
+                                    '\'' | '"' | '`' => {
+                                        let q = chars[i];
+                                        let q_pos = i;
+                                        word.push(q);
+                                        i += 1;
+                                        let mut closed = false;
+                                        while i < chars.len() {
+                                            let ch = chars[i];
+                                            word.push(ch);
+                                            i += 1;
+                                            if ch == q {
+                                                closed = true;
+                                                break;
+                                            }
+                                            if q != '\'' && ch == '\\' && i < chars.len() {
+                                                word.push(chars[i]);
+                                                i += 1;
+                                            }
+                                        }
+                                        if !closed {
+                                            state.contexts.push(HeredocScanContext::Brace);
+                                            state.contexts.push(if q == '`' {
+                                                HeredocScanContext::Backquote
+                                            } else {
+                                                quote_context(&chars, q_pos)
+                                            });
+                                            break 'word;
+                                        }
+                                    }
+                                    _ => {
+                                        word.push(chars[i]);
+                                        i += 1;
+                                    }
+                                }
+                            }
+                            if depth > 0 {
+                                state.contexts.push(HeredocScanContext::Brace);
+                                break 'word;
+                            }
+                        }
+                        '`' => {
+                            // Backquote body: verbatim text for the inner
+                            // reparse — a `<<` inside is that reparse's
+                            // operator, never an outer declaration.
+                            word.push('`');
+                            i += 1;
+                            let mut closed = false;
+                            while i < chars.len() {
+                                let ch = chars[i];
+                                word.push(ch);
+                                i += 1;
+                                if ch == '`' {
+                                    closed = true;
+                                    break;
+                                }
+                                if ch == '\\' && i < chars.len() {
+                                    word.push(chars[i]);
+                                    i += 1;
+                                }
+                            }
+                            if !closed {
+                                state.contexts.push(HeredocScanContext::Backquote);
+                                break 'word;
                             }
                         }
                         '\\' => {
@@ -3272,6 +3671,7 @@ fn scan_heredoc_operators_full(
                         }
                         '\'' | '"' => {
                             let q = chars[i];
+                            let q_pos = i;
                             i += 1;
                             while i < chars.len() && chars[i] != q {
                                 if q == '"' && chars[i] == '\\' && i + 1 < chars.len() {
@@ -3287,6 +3687,13 @@ fn scan_heredoc_operators_full(
                             // bodies are literal data).
                             if i >= chars.len() && expect_delim.is_some() {
                                 unclosed_delimiter_quote = Some(q);
+                            }
+                            if i >= chars.len() {
+                                // The quote keeps the WORD open across
+                                // the line — carry its context so the
+                                // continuation is not judged at token
+                                // level (rubash#3962).
+                                state.contexts.push(quote_context(&chars, q_pos));
                             }
                             i += 1;
                         }
@@ -6309,6 +6716,10 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
     }
     let mut pending = String::new();
     let mut pending_heredocs: Vec<(String, bool)> = Vec::new();
+    // Scan state for `pending`: a quote/substitution left open by an
+    // accepted line keeps suppressing `<<` on the continuation lines, so
+    // it lives as long as the pending group (rubash#3962).
+    let mut heredoc_state = HeredocScanState::default();
     let mut group: Vec<(String, bool)> = Vec::new();
     let mut next_line = 1usize;
     let mut pending_start_line = 1usize;
@@ -6355,7 +6766,8 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                         is_body = true;
                     }
                 } else {
-                    pending_heredocs.extend(stdin_heredoc_declarations(phys_line));
+                    pending_heredocs
+                        .extend(stdin_heredoc_declarations_with_state(phys_line, &mut heredoc_state));
                 }
                 group.push((phys_line.to_string(), is_body));
             }
@@ -6444,6 +6856,7 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                 let parse_error = executor.take_parse_error();
                 pending.clear();
                 group.clear();
+                heredoc_state = HeredocScanState::default();
                 // GNU eval.c:202-205 (reader_loop): a failing read_command
                 // sets EOF_Reached only `if (interactive == 0)'. An
                 // interactive shell reports the syntax error, discards the
@@ -6693,6 +7106,7 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                     let _ = executor.take_signal_discard_pending();
                     pending.clear();
                     group.clear();
+                    heredoc_state = HeredocScanState::default();
                     st = EditState::default();
                     continue;
                 }
@@ -6771,6 +7185,7 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                     let _ = executor.take_signal_discard_pending();
                     pending.clear();
                     group.clear();
+                    heredoc_state = HeredocScanState::default();
                     st = EditState::default();
                 } else if eof_now {
                     // Whether this EOF is a terminal hangup (pty master
@@ -6849,6 +7264,7 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                 let _ = executor.take_signal_discard_pending();
                 pending.clear();
                 group.clear();
+                heredoc_state = HeredocScanState::default();
                 st = EditState::default();
                 continue;
             }
@@ -8373,6 +8789,10 @@ pub fn run_stdin_script(executor: &mut Executor) -> i32 {
     let mut input = String::new();
     let mut pending = String::new();
     let mut pending_heredocs: Vec<(String, bool)> = Vec::new();
+    // Scan state for `pending`: a quote/substitution left open by one
+    // stdin line keeps suppressing `<<` on the continuation lines, so it
+    // lives as long as the pending group (rubash#3962).
+    let mut heredoc_state = HeredocScanState::default();
     let mut next_line = 1usize;
     let mut pending_start_line = 1usize;
 
@@ -8445,7 +8865,10 @@ pub fn run_stdin_script(executor: &mut Executor) -> i32 {
                 pending_heredocs.remove(0);
             }
         } else {
-            pending_heredocs.extend(stdin_heredoc_declarations(&input));
+            pending_heredocs.extend(stdin_heredoc_declarations_with_state(
+                &input,
+                &mut heredoc_state,
+            ));
         }
 
         let stdin_posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
@@ -8502,6 +8925,7 @@ pub fn run_stdin_script(executor: &mut Executor) -> i32 {
             }
         }
         pending.clear();
+        heredoc_state = HeredocScanState::default();
         if parse_error
             || executor.take_exit_jump_pending()
             // rubash#2960: GNU eval.c:206-207 — this stdin reader is
