@@ -18,6 +18,7 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use super::bind::{BindKindView, BindView};
+use super::cancel::CancelToken;
 #[cfg(windows)]
 use super::capabilities::ElevationHandler;
 use super::capabilities::{
@@ -64,6 +65,15 @@ pub enum Flow {
     /// break; the status is the same value
     /// [`RunOutcome::status`] carries.
     ErrexitBreak(i32),
+    /// rubash#2810: the run ended on the host's cooperative
+    /// cancellation token — an engine safe point observed
+    /// [`crate::api::CancelToken::cancel`]. Deliberately NOT a
+    /// signal outcome: no 128+N status is synthesized for it
+    /// (the status is the last completed command's, whatever
+    /// the run had reached), no `trap` fires for it, and the
+    /// session stays alive for the next run after the host
+    /// calls [`crate::api::CancelToken::reset`].
+    Cancelled,
 }
 
 /// The options a single run carries (§5.2). Construct through
@@ -278,6 +288,13 @@ pub struct RunClassification {
     /// reader-batch host rule is: end the session iff
     /// `unwind.is_some()`, with [`RunOutcome::status`].
     pub unwind: Option<RunUnwind>,
+    /// rubash#2810: the run's terminal unit ended in a
+    /// cooperative cancellation — the host's
+    /// [`crate::api::CancelToken`] tripped an engine safe
+    /// point. A host classification beside (never inside) the
+    /// signal/errexit/jump facts: it does not read as an
+    /// `unwind`, produces no 128+N status, and fired no trap.
+    pub cancelled: bool,
 }
 
 /// What a run produced (§5.2).
@@ -535,6 +552,11 @@ impl Session {
             let flow = match facts.stop {
                 Some(script_driver::GroupedRunStop::ExitJump) => Flow::ExitRequested(status),
                 Some(script_driver::GroupedRunStop::ErrexitBreak) => Flow::ErrexitBreak(status),
+                // rubash#2810: cooperative cancellation reports its
+                // own flow — not folded into Completed, and not an
+                // unwind class (the token is not a script-visible
+                // event, so `unwind` stays None for it).
+                Some(script_driver::GroupedRunStop::Cancelled) => Flow::Cancelled,
                 None => Flow::Completed,
             };
             let classification = RunClassification {
@@ -550,8 +572,9 @@ impl Session {
                     Some(script_driver::GroupedRunStop::ErrexitBreak) => {
                         Some(RunUnwind::ErrexitBreak)
                     }
-                    None => None,
+                    Some(script_driver::GroupedRunStop::Cancelled) | None => None,
                 },
+                cancelled: facts.cancelled,
             };
             let diagnostics = self.drain_run_diagnostics(source_name.as_deref());
             (status, flow, classification, diagnostics)
@@ -822,6 +845,7 @@ impl Session {
             errexit_break: false,
             last_inverted: self.executor.last_command_inverted(),
             unwind: None,
+            cancelled: self.executor.take_unit_cancelled(),
         }
     }
 
@@ -1211,6 +1235,29 @@ impl Session {
     /// while no run is in progress is consumed by the
     /// idle-input DISCARD discipline and does not carry into
     /// the next run.
+    /// Cooperative cancellation without signals (rubash#2810):
+    /// the session's cancellation token, cloned for the host's
+    /// write end. The token is the session's own (installed at
+    /// build, or supplied through
+    /// [`SessionBuilder::cancel_token`]); clones it returns are
+    /// the same token, freely `Send`able — the engine polls it at
+    /// execution safe points while a run executes on this
+    /// session's thread.
+    ///
+    /// [`CancelToken::cancel`] ends the CURRENT run at the next
+    /// safe point with [`Flow::Cancelled`] /
+    /// [`RunClassification::cancelled`]; it is not a signal — no
+    /// `trap` fires, no 128+N status is synthesized — and it is
+    /// not [`Session::interrupt`], which queues a real SIGINT
+    /// through the delivery machinery. The session keeps its
+    /// state (variables, functions, cwd); after the run returns,
+    /// call [`CancelToken::reset`] before the next run.
+    pub fn cancellation_token(&self) -> CancelToken {
+        self.executor
+            .cancel_token()
+            .expect("session executors always carry a cancellation token")
+    }
+
     pub fn interrupt(&mut self) {
         self.executor.interrupt();
     }
@@ -1599,6 +1646,21 @@ impl Session {
             // next file's accounting.
             let exit_jump_raw = self.executor.take_exit_jump_pending();
             let errexit_unwind = self.executor.take_errexit_unwind_armed();
+            // rubash#2810: a file cancelled by the host ends the
+            // chain in the cancelled flow, ahead of every script-side
+            // unwind below (the host asked for the run to stop).
+            if self.executor.take_unit_cancelled() {
+                return Ok(RunOutcome {
+                    status,
+                    flow: Flow::Cancelled,
+                    diagnostics,
+                    classification: RunClassification {
+                        last_inverted: self.executor.last_command_inverted(),
+                        cancelled: true,
+                        ..RunClassification::default()
+                    },
+                });
+            }
             if exit_jump_raw && errexit_unwind {
                 return Ok(RunOutcome {
                     status,
@@ -1613,6 +1675,7 @@ impl Session {
                         errexit_break: true,
                         last_inverted: self.executor.last_command_inverted(),
                         unwind: Some(RunUnwind::ErrexitBreak),
+                        cancelled: false,
                     },
                 });
             }
@@ -1636,6 +1699,7 @@ impl Session {
                         errexit_break: false,
                         last_inverted: self.executor.last_command_inverted(),
                         unwind: Some(RunUnwind::ExitJump),
+                        cancelled: false,
                     },
                 });
             }
@@ -1775,6 +1839,10 @@ impl Session {
         let exit_jump = exit_jump_raw && !errexit_unwind;
         let discarded = self.executor.take_unit_signal_discard();
         let expansion_discarded = self.executor.take_unit_expansion_error_discard();
+        // rubash#2810: the same per-unit take as the grouped route —
+        // a cancelled unit reports its own flow beside the script
+        // unwind classes.
+        let cancelled = self.executor.take_unit_cancelled();
         let errexit_break = script_driver::errexit_break_verdict(&self.executor, status);
         let unwind = if exit_jump && !parse_error {
             Some(RunUnwind::ExitJump)
@@ -1783,10 +1851,14 @@ impl Session {
         } else {
             None
         };
-        let flow = match unwind {
-            Some(RunUnwind::ExitJump) => Flow::ExitRequested(status),
-            Some(RunUnwind::ErrexitBreak) => Flow::ErrexitBreak(status),
-            None => Flow::Completed,
+        let flow = if cancelled {
+            Flow::Cancelled
+        } else {
+            match unwind {
+                Some(RunUnwind::ExitJump) => Flow::ExitRequested(status),
+                Some(RunUnwind::ErrexitBreak) => Flow::ErrexitBreak(status),
+                None => Flow::Completed,
+            }
         };
         RunOutcome {
             status,
@@ -1801,6 +1873,7 @@ impl Session {
                 errexit_break,
                 last_inverted: self.executor.last_command_inverted(),
                 unwind,
+                cancelled,
             },
         }
     }
@@ -2019,6 +2092,10 @@ pub struct SessionBuilder {
     winuxcmd_path: Option<PathBuf>,
     compatible_shell_path: Option<PathBuf>,
     disabled_builtins: Vec<String>,
+    /// rubash#2810: a host-supplied cooperative cancellation
+    /// token. `None` builds a fresh token the host can take from
+    /// [`Session::cancellation_token`] after `build()`.
+    cancel_token: Option<CancelToken>,
 }
 
 impl SessionBuilder {
@@ -2196,6 +2273,17 @@ impl SessionBuilder {
         self
     }
 
+    /// rubash#2810: install the host's cooperative cancellation
+    /// token on the session at build time — the form for hosts
+    /// that create the token before (or independently of) the
+    /// session. Without it the session builds a fresh token,
+    /// reachable through [`Session::cancellation_token`]; either
+    /// way [`CancelToken`] documents the poll contract.
+    pub fn cancel_token(mut self, token: CancelToken) -> SessionBuilder {
+        self.cancel_token = Some(token);
+        self
+    }
+
     /// Build the session. Fails when a builder input is one
     /// the engine refuses (today: a working directory the
     /// `cd` machinery cannot enter).
@@ -2231,6 +2319,10 @@ impl SessionBuilder {
         for name in &self.disabled_builtins {
             executor.set_builtin_disabled(name, true);
         }
+        // rubash#2810: the session always carries a cancellation
+        // token — the host's when one was supplied, a fresh one
+        // otherwise (reachable via Session::cancellation_token).
+        executor.set_cancel_token(Some(self.cancel_token.unwrap_or_default()));
         if self.login_shell {
             executor.mark_login_shell();
         }
