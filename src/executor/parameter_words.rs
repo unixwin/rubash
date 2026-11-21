@@ -1090,9 +1090,16 @@ impl Executor {
         // The bad-substitution diagnostic names the ENCLOSING word GNU was
         // expanding (subst.c:10278), recorded by the mutable walker; consume
         // the one-shot record so a nested fragment keeps its own word
-        // (rubash#758).
-        let diagnostic_word = crate::executor::expand_word::take_pending_diagnostic_word()
-            .unwrap_or_else(|| word.to_string());
+        // (rubash#758). A word with no record is this `${...}` fragment
+        // itself; a here-document body is runtime text GNU never ran
+        // parse_comsub on, so its `$(` spans cite raw (rubash#3543).
+        let (diagnostic_word, diagnostic_runtime) =
+            crate::executor::expand_word::take_pending_diagnostic_word().unwrap_or_else(|| {
+                (
+                    word.to_string(),
+                    matches!(context, SubstitutionQuoteContext::HereDocument),
+                )
+            });
         // GNU subst.c:10272-10288 (parameter_brace_expand): a quote
         // terminating the parameter name matches no operator arm and lands
         // on the `bad substitution` default. Mirror of the same check in
@@ -1105,7 +1112,10 @@ impl Executor {
                     format!(
                         "{}{}: bad substitution\n",
                         self.diagnostic_prefix(),
-                        crate::executor::expand_word::bad_substitution_display(&diagnostic_word)
+                        crate::executor::expand_word::bad_substitution_display(
+                            &diagnostic_word,
+                            diagnostic_runtime
+                        )
                     )
                     .as_bytes(),
                 );
@@ -1126,7 +1136,10 @@ impl Executor {
                     format!(
                         "{}{}: bad substitution\n",
                         self.diagnostic_prefix(),
-                        crate::executor::expand_word::bad_substitution_display(&diagnostic_word)
+                        crate::executor::expand_word::bad_substitution_display(
+                            &diagnostic_word,
+                            diagnostic_runtime
+                        )
                     )
                     .as_bytes(),
                 );

@@ -1097,8 +1097,12 @@ impl Executor {
         // The bad-substitution diagnostic reports the word GNU was expanding
         // (subst.c:10278), which for a walked fragment is the ENCLOSING word
         // the walker recorded. Consume the one-shot record here so a nested
-        // fragment cannot inherit it (rubash#758).
-        let diagnostic_word = take_pending_diagnostic_word().unwrap_or_else(|| word.to_string());
+        // fragment cannot inherit it (rubash#758). A word with no record —
+        // a `${...}` fragment handed to expand_word directly — is parser
+        // text by construction (runtime strings always arrive through a
+        // walker that records), so it cites canonical comsub spans.
+        let (diagnostic_word, diagnostic_runtime) =
+            take_pending_diagnostic_word().unwrap_or_else(|| (word.to_string(), false));
 
         // GNU subst.c:10272-10288 (parameter_brace_expand): the parameter
         // name is terminated by the first character that cannot be part of
@@ -1118,7 +1122,7 @@ impl Executor {
                     format!(
                         "{}{}: bad substitution\n",
                         self.diagnostic_prefix(),
-                        bad_substitution_display(&diagnostic_word)
+                        bad_substitution_display(&diagnostic_word, diagnostic_runtime)
                     )
                     .as_bytes(),
                 );
@@ -1141,7 +1145,7 @@ impl Executor {
                     format!(
                         "{}{}: bad substitution\n",
                         self.diagnostic_prefix(),
-                        bad_substitution_display(&diagnostic_word)
+                        bad_substitution_display(&diagnostic_word, diagnostic_runtime)
                     )
                     .as_bytes(),
                 );
@@ -1307,7 +1311,11 @@ impl Executor {
         {
             return Some(self.expand_plain_assignment_word(name, value));
         }
-        let _diag_word = PendingDiagnosticWordGuard::new(word);
+        // `expand_word` only ever sees parser-read text (here-document
+        // bodies and prompt strings expand through the embedded walkers,
+        // never this entry), so the record is never runtime text
+        // (rubash#3543).
+        let _diag_word = PendingDiagnosticWordGuard::new(word, false);
         Some(self.expand_plain_assignment_word(name, value))
     }
 
@@ -1636,22 +1644,29 @@ thread_local! {
     /// (rubash#758). Consumed by the first gate evaluation so a NESTED
     /// fragment (`${x-${y[0]z}}`) keeps its own word.
     ///
-    /// Stored as a raw `(ptr, len)` borrow rather than a `String`: the guard
-    /// is created once per walked `${}` fragment and the value is read only
-    /// on the bad-substitution path, so the historical `word.to_string()`
-    /// paid one allocation per fragment to describe an error that almost
-    /// never fires. The referent is the walker's `word: &str`, which the
-    /// guard's scope cannot outlive (the slot is restored on drop and the
-    /// one-shot `take` only runs inside that scope), so the pointer is valid
-    /// for every read — see the safety note on `take_pending_diagnostic_word`.
-    static PENDING_DIAGNOSTIC_WORD: std::cell::Cell<Option<(*const u8, usize)>> =
+    /// Stored as a raw `(ptr, len, runtime_text)` borrow rather than a
+    /// `String`: the guard is created once per walked `${}` fragment and
+    /// the value is read only on the bad-substitution path, so the
+    /// historical `word.to_string()` paid one allocation per fragment to
+    /// describe an error that almost never fires. The referent is the
+    /// walker's `word: &str`, which the guard's scope cannot outlive (the
+    /// slot is restored on drop and the one-shot `take` only runs inside
+    /// that scope), so the pointer is valid for every read — see the
+    /// safety note on `take_pending_diagnostic_word`. `runtime_text` marks
+    /// words GNU never ran parse_comsub on (here-document bodies,
+    /// prompt strings — redir.c:348 heredoc_expand /
+    /// parse.y:6689 expand_prompt_string expand runtime text), whose
+    /// `$(` spans GNU cites raw (rubash#3543).
+    static PENDING_DIAGNOSTIC_WORD: std::cell::Cell<Option<(*const u8, usize, bool)>> =
         const { std::cell::Cell::new(None) };
 }
 
 /// Run `f` with `word` recorded as the enclosing word for a walked `${}`
-/// fragment's bad-substitution diagnostic. The record is one-shot (see
-/// [`take_pending_diagnostic_word`]); on return the previous record (if
-/// any) is restored, so the frame's record can never leak past the
+/// fragment's bad-substitution diagnostic. `runtime_text` marks words GNU
+/// expands without parse_comsub (here-document bodies, prompt strings) —
+/// their `$(` spans are cited raw (rubash#3543). The record is one-shot
+/// (see [`take_pending_diagnostic_word`]); on return the previous record
+/// (if any) is restored, so the frame's record can never leak past the
 /// fragment.
 ///
 /// The record is install-if-absent, like [`PendingDiagnosticWordGuard`]:
@@ -1663,8 +1678,12 @@ thread_local! {
 /// its own word: the outer fragment's gate evaluation consumes the record
 /// (take) before any nested operator word expands, so the slot is empty
 /// again by then.
-pub(in crate::executor) fn with_pending_diagnostic_word<T>(word: &str, f: impl FnOnce() -> T) -> T {
-    let _guard = PendingDiagnosticWordGuard::new(word);
+pub(in crate::executor) fn with_pending_diagnostic_word<T>(
+    word: &str,
+    runtime_text: bool,
+    f: impl FnOnce() -> T,
+) -> T {
+    let _guard = PendingDiagnosticWordGuard::new(word, runtime_text);
     f()
 }
 
@@ -1722,13 +1741,13 @@ pub(in crate::executor) fn declare_assoc_hint_contains(name: &str) -> bool {
 /// only reachable while the frame is live. The referent therefore outlives
 /// the read and cannot have been moved (it is borrowed immutably for the
 /// whole frame).
-pub(in crate::executor) fn take_pending_diagnostic_word() -> Option<String> {
+pub(in crate::executor) fn take_pending_diagnostic_word() -> Option<(String, bool)> {
     PENDING_DIAGNOSTIC_WORD.with(|slot| {
-        slot.take().map(|(ptr, len)| {
+        slot.take().map(|(ptr, len, runtime_text)| {
             // SAFETY: see the function-level safety note.
             let word =
                 unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len)) };
-            word.to_string()
+            (word.to_string(), runtime_text)
         })
     })
 }
@@ -1744,15 +1763,19 @@ pub(in crate::executor) fn take_pending_diagnostic_word() -> Option<String> {
 /// fragment's gate evaluation consumes the record (take) before any nested
 /// operator word expands, so the slot is empty again by then.
 pub(in crate::executor) struct PendingDiagnosticWordGuard {
-    previous: Option<(*const u8, usize)>,
+    previous: Option<(*const u8, usize, bool)>,
 }
 
 impl PendingDiagnosticWordGuard {
-    pub(in crate::executor) fn new(word: &str) -> Self {
+    /// `runtime_text` marks a word GNU expands without parse_comsub —
+    /// a here-document body (redir.c:348 heredoc_expand -> expand_string)
+    /// or a prompt string (parse.y:6689 expand_prompt_string) — whose
+    /// `$(` spans the diagnostic cites raw (rubash#3543).
+    pub(in crate::executor) fn new(word: &str, runtime_text: bool) -> Self {
         let previous = PENDING_DIAGNOSTIC_WORD.with(|slot| {
             let previous = slot.get();
             if previous.is_none() {
-                slot.set(Some((word.as_ptr(), word.len())));
+                slot.set(Some((word.as_ptr(), word.len(), runtime_text)));
             }
             previous
         });
@@ -1769,7 +1792,16 @@ impl Drop for PendingDiagnosticWordGuard {
 /// Renders a `${...}` word for the bad-substitution diagnostic: operator
 /// words quote-decoded before re-expansion carry data sentinels that
 /// must read back as the source characters like GNU's diagnostic.
-pub(in crate::executor) fn bad_substitution_display(word: &str) -> String {
+///
+/// `runtime_text` marks words GNU expands without parse_comsub —
+/// here-document bodies and prompt strings (redir.c:348 heredoc_expand,
+/// parse.y:6689 expand_prompt_string). For every other (parser-read)
+/// word, each `$(` span was replaced at read time by its print_comsub
+/// serialization (parse.y:4451 parse_comsub -> parse.y:4632), so the
+/// citation goes through `canonicalize_comsub_spans` first —
+/// `${-x$(echo hi >&2)}` is reported as `${-x$(echo hi 1>&2)}`
+/// (rubash#3543, residual of rubash#3404).
+pub(in crate::executor) fn bad_substitution_display(word: &str, runtime_text: bool) -> String {
     // GNU cites the word as the lexer stored it (subst.c:10278): the
     // `$` of a `$'...'` / `$"..."` parameter-name sigil is consumed by
     // the lexer, so a fragment cited at its `${` start keeps the quote
@@ -1777,7 +1809,12 @@ pub(in crate::executor) fn bad_substitution_display(word: &str) -> String {
     // (rubash#1483). A `$'` that is literal data elsewhere in the word
     // (e.g. inside double quotes) keeps its dollar, so the replacement
     // is anchored at the fragment start.
-    crate::locale::decode_to_visible_text(word)
+    let display = if runtime_text {
+        word.to_string()
+    } else {
+        super::print_comsub::canonicalize_comsub_spans(word)
+    };
+    crate::locale::decode_to_visible_text(&display)
         .replace("${$'", "${'")
         .replace("${$\"", "${\"")
 }

@@ -1042,9 +1042,14 @@ impl Executor {
                             // This arm only fires for a fragment in a
                             // quoted region (see the condition above):
                             // record that context for the fragment's
-                            // pattern sub-words (rubash#2650).
+                            // pattern sub-words (rubash#2650). The prompt
+                            // pass (`double_quoted`) and here-document
+                            // bodies are runtime text GNU never ran
+                            // parse_comsub on — their bad-substitution
+                            // citations keep `$(` spans raw (rubash#3543).
                             let value = crate::executor::expand_word::with_pending_diagnostic_word(
                                 word,
+                                double_quoted || heredoc,
                                 || {
                                     crate::executor::expand_word::with_extquote_name_quoted_context(
                                         true,
@@ -1122,13 +1127,16 @@ impl Executor {
                         if !terminated {
                             // rubash#3499: one diagnostic per latch
                             // lifetime (see bad_substitution_report_first).
+                            // This arm only runs under the prompt pass
+                            // (`double_quoted`): runtime text, cited raw
+                            // (rubash#3543).
                             if self.bad_substitution_report_first() {
                                 self.write_diagnostic_fd2(
                                     format!(
                                         "{}{}: bad substitution\n",
                                         self.diagnostic_prefix(),
                                         crate::executor::expand_word::bad_substitution_display(
-                                            word
+                                            word, true
                                         )
                                     )
                                     .as_bytes(),
@@ -1213,13 +1221,19 @@ impl Executor {
                             .is_some()
                     {
                         // rubash#3499: one diagnostic per latch lifetime
-                        // (see bad_substitution_report_first).
+                        // (see bad_substitution_report_first). The arm's
+                        // guards already exclude the runtime-text
+                        // contexts (prompt pass, here-document, quoted
+                        // segments), so the word is parser text and its
+                        // `$(` spans cite canonical (rubash#3543).
                         if self.bad_substitution_report_first() {
                             self.write_diagnostic_fd2(
                                 format!(
                                     "{}{}: bad substitution\n",
                                     self.diagnostic_prefix(),
-                                    crate::executor::expand_word::bad_substitution_display(word)
+                                    crate::executor::expand_word::bad_substitution_display(
+                                        word, false
+                                    )
                                 )
                                 .as_bytes(),
                             );
@@ -1232,14 +1246,19 @@ impl Executor {
                     // not just the `${...}` span (rubash#758).
                     // The fragment's pattern sub-words inherit this
                     // walker's quote context for the extquote-name gate
-                    // (rubash#2650): record it for the dispatch.
-                    let value =
-                        crate::executor::expand_word::with_pending_diagnostic_word(word, || {
+                    // (rubash#2650): record it for the dispatch. Prompt
+                    // strings and here-document bodies are runtime text —
+                    // GNU cites their `$(` spans raw (rubash#3543).
+                    let value = crate::executor::expand_word::with_pending_diagnostic_word(
+                        word,
+                        double_quoted || heredoc,
+                        || {
                             crate::executor::expand_word::with_extquote_name_quoted_context(
                                 in_double || double_quoted || heredoc || fragment_site_quoted,
                                 || self.expand_word(&format!("${{{name}}}")),
                             )
-                        });
+                        },
+                    );
                     if preserve_quotes {
                         push_preserved_expansion_output(&mut output, &value, in_double);
                     } else {
