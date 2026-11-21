@@ -457,12 +457,17 @@ impl Executor {
         // marked form rides the memo (below) as the gate's verdict, and
         // a trusted single field IS the filename (below).
         //
-        // The verdict is trusted under either of two conditions. (a) The
-        // marked expansion carries protection (a bare IFS_GLUE / the
-        // ANSI-C guard): protection demonstrably flowed into the
-        // expansion, so the splitter saw quoted whitespace as data. (b)
-        // The raw word carries nothing whose protection depends on
-        // mark_quoted_ifs_from_raw's simulation
+        // The verdict is trusted under either of two conditions. (a)
+        // mark_quoted_ifs_from_raw_checked reports that its raw-to-cooked
+        // simulation succeeded (`quoted_simulation_ok`): every quoted IFS
+        // character and quoted expansion site in the word received its
+        // protection marker, so the splitter saw quoted whitespace as data
+        // (rubash#3263: checking for `IFS_GLUE` / `ANSI_C_IFS_GUARD` in
+        // `marked_expanded` is not sound because `mark_literal_ifs_chars`
+        // places `IFS_GLUE` on literal non-whitespace IFS chars even when
+        // the quoted-IFS simulation bails out, leaving quoted IFS
+        // whitespace unprotected). (b) The raw word carries nothing whose
+        // protection depends on mark_quoted_ifs_from_raw's simulation
         // (raw_word_has_simulation_dependent_ifs): that pass protects
         // exactly the quoted IFS characters and the quoted expansion
         // sites it records, and only when its simulation reproduces the
@@ -470,13 +475,9 @@ impl Executor {
         // simulation bail cannot leave an IFS character unprotected
         // (literal non-whitespace IFS characters are glued by
         // mark_literal_ifs_chars either way, and decoded/escaped blanks
-        // ride their guard pairs), so the count is sound even when no
-        // carrier survives. The shape that needs condition (b) is a
-        // quoted character that is not an IFS character at all
-        // (IFS=`:`, a quoted space): it needs no carrier, so under
-        // condition (a) alone the count stayed unread and the textual
-        // gate misreported the target ambiguous. Every other shape
-        // keeps the textual gate's behavior.
+        // ride their guard pairs), so the count is sound even when the
+        // simulation bails. Every other shape keeps the textual gate's
+        // behavior.
         let raw = redirect.target_metadata.raw.as_str();
         let needs_ifs_marking = !redirect.target.starts_with(STORAGE_WORD_PREFIX)
             && !redirect
@@ -492,27 +493,21 @@ impl Executor {
                 .get("IFS")
                 .map(String::as_str)
                 .unwrap_or("");
-            let mut marked = super::command_prepare::mark_literal_ifs_chars(&redirect.target, ifs);
-            marked = super::command_prepare::mark_quoted_ifs_from_raw(
-                raw,
-                &marked,
-                ifs,
-                self.posix_mode_enabled(),
-            );
+            let marked = super::command_prepare::mark_literal_ifs_chars(&redirect.target, ifs);
+            let (marked, quoted_simulation_ok) =
+                super::command_prepare::mark_quoted_ifs_from_raw_checked(
+                    raw,
+                    &marked,
+                    ifs,
+                    self.posix_mode_enabled(),
+                );
             let marked_expanded = self.expand_word(&marked);
             let fields = crate::executor::arrays::field_split_values_with_ifs(
                 &crate::executor::markers::ansi_c_ifs_guard_to_ifs_glue(&marked_expanded),
                 self.shell_state.env_vars.get("IFS").map(String::as_str),
             );
             let mut single_field: Option<String> = None;
-            if crate::executor::markers::contains_bare_sentinel(
-                &marked_expanded,
-                crate::executor::markers::IFS_GLUE,
-            ) || crate::executor::markers::contains_bare_sentinel(
-                &marked_expanded,
-                crate::executor::markers::ANSI_C_IFS_GUARD,
-            ) || !raw_word_has_simulation_dependent_ifs(raw, ifs)
-            {
+            if quoted_simulation_ok || !raw_word_has_simulation_dependent_ifs(raw, ifs) {
                 field_count = Some(fields.len());
                 if fields.len() == 1 {
                     single_field = fields.into_iter().next();

@@ -6869,6 +6869,22 @@ pub(in crate::executor) fn mark_quoted_ifs_from_raw(
     ifs: &str,
     posix: bool,
 ) -> String {
+    mark_quoted_ifs_from_raw_checked(raw, cooked_with_marks, ifs, posix).0
+}
+
+/// Same as [`mark_quoted_ifs_from_raw`], returning `(marked, simulation_ok)`
+/// where `simulation_ok` is `true` iff the raw-to-cooked quote-removal
+/// simulation matched `cooked` and quoted IFS/expansion-site marks were
+/// applied (rubash#3263: callers must not infer simulation success from the
+/// mere presence of `IFS_GLUE`, because `mark_literal_ifs_chars` places
+/// `IFS_GLUE` on literal non-whitespace IFS chars even when the quoted-IFS
+/// simulation bails out).
+pub(in crate::executor) fn mark_quoted_ifs_from_raw_checked(
+    raw: &str,
+    cooked_with_marks: &str,
+    ifs: &str,
+    posix: bool,
+) -> (String, bool) {
     use crate::executor::markers::{
         ANSI_C_IFS_GUARD, CTLESC, DATA_BACKSLASH, DATA_BACKTICK, DATA_DOLLAR, DATA_DQUOTE,
         DATA_SQUOTE, IFS_GLUE, PARAM_NAME_END_MARKER, QUOTED_EXPANSION_SITE,
@@ -7344,7 +7360,7 @@ pub(in crate::executor) fn mark_quoted_ifs_from_raw(
     }
     // Only apply if our simulation matches the actual cooked word.
     if simulated != cooked {
-        return cooked_with_marks.to_string();
+        return (cooked_with_marks.to_string(), false);
     }
     // Apply \x1c marks at the recorded positions. The cooked_with_marks may
     // already have marks from mark_literal_ifs_chars; we need to account for
@@ -7382,7 +7398,7 @@ pub(in crate::executor) fn mark_quoted_ifs_from_raw(
         prev_glued = false;
         cooked_pos += ch.len_utf8();
     }
-    result
+    (result, true)
 }
 
 /// Strip \x1c IFS-protection markers from a string. Used for non-field-split
@@ -8524,5 +8540,29 @@ mod command_word_materialization_tests {
             mark_quoted_ifs_from_raw("BK_V$i=x", "BK_V$i=x", " \t\n", false),
             "BK_V$i=x"
         );
+    }
+
+    #[test]
+    fn mark_quoted_ifs_from_raw_checked_reports_simulation_bail() {
+        // rubash#3263: when mark_literal_ifs_chars places IFS_GLUE on `,` in
+        // the same word, a simulation bail in mark_quoted_ifs_from_raw_checked
+        // must still report `false` so callers do not falsely trust
+        // unprotected quoted IFS whitespace.
+        let ifs = " ,";
+        let raw = r#"" a $[1+2]",$v"#;
+        let cooked = " a $[1+2],$v";
+        let lit_marked = mark_literal_ifs_chars(cooked, ifs);
+        assert!(lit_marked.contains(crate::executor::markers::IFS_GLUE));
+        let (out, ok) = super::mark_quoted_ifs_from_raw_checked(raw, &lit_marked, ifs, false);
+        assert!(!ok, "divergent simulation must report false");
+        assert_eq!(out, lit_marked);
+
+        // Matching simulation reports `true` and marks the quoted space too.
+        let raw_ok = r#"" a b",$v"#;
+        let cooked_ok = " a b,$v";
+        let lit_ok = mark_literal_ifs_chars(cooked_ok, ifs);
+        let (out_ok, ok2) = super::mark_quoted_ifs_from_raw_checked(raw_ok, &lit_ok, ifs, false);
+        assert!(ok2, "matching simulation must report true");
+        assert_ne!(out_ok, lit_ok);
     }
 }
