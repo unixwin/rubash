@@ -1430,6 +1430,70 @@ pub fn inherited_fd_path(fd: u32) -> std::path::PathBuf {
     std::path::PathBuf::from(format!("/dev/fd/{fd}"))
 }
 
+/// rubash#3094 / rubash#3432: the (device, inode, mtime seconds, mtime
+/// nanoseconds) of the open file description behind `h`, mirroring
+/// `fd/unix.rs:fd_stat_parts` (GNU `lib/sh/eaccess.c:80 sh_stat` ->
+/// `fstat(fd, finfo)`). Files use `GetFileInformationByHandle`; pipes
+/// and other kernel objects without file metadata fall back to
+/// `NtQueryInformationFile(FileInternalInformation)` so dup'd pipe fds
+/// (`exec 3< <(cmd); exec 4<&3`) share an identity.
+pub fn fd_stat_parts(h: HANDLE) -> Option<(u64, u64, i64, i64)> {
+    if h == INVALID_HANDLE_VALUE || h == 0 {
+        return None;
+    }
+    let mut info = BY_HANDLE_FILE_INFORMATION {
+        dwFileAttributes: 0,
+        ftCreationTime: [0; 2],
+        ftLastAccessTime: [0; 2],
+        ftLastWriteTime: [0; 2],
+        dwVolumeSerialNumber: 0,
+        nFileSizeHigh: 0,
+        nFileSizeLow: 0,
+        nNumberOfLinks: 0,
+        nFileIndexHigh: 0,
+        nFileIndexLow: 0,
+    };
+    if unsafe { GetFileInformationByHandle(h, &mut info) } != 0 {
+        let dev = u64::from(info.dwVolumeSerialNumber);
+        let ino = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
+        let ticks = (u64::from(info.ftLastWriteTime[1]) << 32) | u64::from(info.ftLastWriteTime[0]);
+        // Windows FILETIME epoch is 1601-01-01; Unix epoch is 1970-01-01
+        // (11_644_473_600 seconds = 116_444_736_000_000_000 * 100ns).
+        const WINDOWS_TO_UNIX_EPOCH_100NS: i64 = 116_444_736_000_000_000;
+        let unix_100ns = (ticks as i64).saturating_sub(WINDOWS_TO_UNIX_EPOCH_100NS);
+        let sec = unix_100ns.div_euclid(10_000_000);
+        let nsec = unix_100ns.rem_euclid(10_000_000) * 100;
+        return Some((dev, ino, sec, nsec));
+    }
+
+    #[link(name = "ntdll")]
+    extern "system" {
+        fn NtQueryInformationFile(
+            file_handle: HANDLE,
+            io_status_block: *mut [usize; 2],
+            file_information: *mut i64,
+            length: u32,
+            file_information_class: u32,
+        ) -> i32;
+    }
+    const FILE_INTERNAL_INFORMATION: u32 = 6;
+    let mut iosb = [0usize; 2];
+    let mut index_number: i64 = 0;
+    let status = unsafe {
+        NtQueryInformationFile(
+            h,
+            &mut iosb,
+            &mut index_number,
+            std::mem::size_of::<i64>() as u32,
+            FILE_INTERNAL_INFORMATION,
+        )
+    };
+    if status == 0 && index_number != 0 {
+        return Some((0, index_number as u64, 0, 0));
+    }
+    None
+}
+
 /// `NUL` device handle (child stdio for a null-redirected fd).
 pub fn open_null_device() -> std::io::Result<HANDLE> {
     let h = unsafe {
