@@ -2224,9 +2224,11 @@ impl FdTable {
     /// position (no capture or pipeline stream holds it — the
     /// same question write_fd_endpoint answers, shell_options.rs);
     /// only then does a dup of the process descriptor carry the
-    /// arm's object. When the marker names a capture, or the
-    /// duplicate fails, the symbolic clone is kept — the
-    /// pre-#4024 form for that arm.
+    /// arm's object. When the marker names a capture, the symbolic
+    /// clone is kept — the pre-#4024 form for that arm. A duplicate
+    /// that is attempted and fails propagates as an error instead:
+    /// GNU's save is the same fcntl, and its failure fails the
+    /// redirection rather than parking a dead alias.
     pub(crate) fn exec_walk_saved_entry(
         &self,
         fd: u32,
@@ -2242,22 +2244,10 @@ impl FdTable {
         // walk-local currency the walk disposes (its FileFd drop is
         // the descriptor's whole lifecycle), never a startup
         // adoption parked for relocation or close-identity probes.
-        let stdio_dup = |std_fd: u32| -> Option<Rc<FileFd>> {
+        let stdio_dup = |std_fd: u32| -> std::io::Result<Rc<FileFd>> {
             #[cfg(unix)]
             {
-                crate::fd::dup_adopted_fd(std_fd).map(|handle| {
-                    Rc::new(FileFd {
-                        handle,
-                        closed: std::cell::Cell::new(false),
-                        adopted: false,
-                        path: crate::fd::inherited_fd_path(std_fd),
-                    })
-                })
-            }
-            #[cfg(not(unix))]
-            {
-                crate::fd::duplicate_handle(crate::fd::process_std_handle(std_fd))
-                    .ok()
+                crate::fd::dup_adopted_fd(std_fd)
                     .map(|handle| {
                         Rc::new(FileFd {
                             handle,
@@ -2266,23 +2256,35 @@ impl FdTable {
                             path: crate::fd::inherited_fd_path(std_fd),
                         })
                     })
+                    .ok_or_else(std::io::Error::last_os_error)
+            }
+            #[cfg(not(unix))]
+            {
+                crate::fd::duplicate_handle(crate::fd::process_std_handle(std_fd)).map(|handle| {
+                    Rc::new(FileFd {
+                        handle,
+                        closed: std::cell::Cell::new(false),
+                        adopted: false,
+                        path: crate::fd::inherited_fd_path(std_fd),
+                    })
+                })
             }
         };
         let read = match &entry.read {
             // `InheritedProcessStdin` is the process descriptor 0 by
             // definition — it always names a kernel descriptor.
-            Some(FdReadEndpoint::InheritedProcessStdin) => stdio_dup(0)
-                .map(FdReadEndpoint::File)
-                .or_else(|| entry.read.clone()),
+            Some(FdReadEndpoint::InheritedProcessStdin) => {
+                Some(stdio_dup(0).map(FdReadEndpoint::File)?)
+            }
             _ => entry.read.clone(),
         };
         let write = match &entry.write {
-            Some(FdWriteEndpoint::Stdout) if stdout_is_process => stdio_dup(1)
-                .map(FdWriteEndpoint::File)
-                .or_else(|| entry.write.clone()),
-            Some(FdWriteEndpoint::Stderr) if stderr_is_process => stdio_dup(2)
-                .map(FdWriteEndpoint::File)
-                .or_else(|| entry.write.clone()),
+            Some(FdWriteEndpoint::Stdout) if stdout_is_process => {
+                Some(stdio_dup(1).map(FdWriteEndpoint::File)?)
+            }
+            Some(FdWriteEndpoint::Stderr) if stderr_is_process => {
+                Some(stdio_dup(2).map(FdWriteEndpoint::File)?)
+            }
             _ => entry.write.clone(),
         };
         Ok(Some(FdEntry {
