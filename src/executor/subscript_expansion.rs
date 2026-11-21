@@ -1230,6 +1230,33 @@ impl Executor {
         };
         let tokens: Vec<String> =
             crate::executor::assignment_helpers::split_storage_words(&body).collect();
+        // GNU arrayfunc.c:557-610 expand_compound_array_assignment ->
+        // expand_words_no_vars -> subst.c:13250 brace_expand_word_list:
+        // indexed compound-declare elements undergo brace expansion before
+        // parameter/command/pathname expansion (assoc returns early at
+        // arrayfunc.c:594-599 without expand_words_no_vars, rubash#3970).
+        let tokens: Vec<String> = if !assoc
+            && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "braceexpand")
+        {
+            tokens
+                .into_iter()
+                .flat_map(|token| {
+                    if token.starts_with(ARRAY_FIELD_SPLIT_MARKER)
+                        || token.starts_with(STORAGE_WORD_PREFIX)
+                    {
+                        vec![token]
+                    } else {
+                        crate::expand::braces::expand_braces_tagged(&token)
+                            .into_iter()
+                            .filter(|product| !product.text.is_empty() || product.sequence_null)
+                            .map(|product| product.text)
+                            .collect()
+                    }
+                })
+                .collect()
+        } else {
+            tokens
+        };
         let mut elements: Vec<String> = Vec::new();
 
         if assoc {
