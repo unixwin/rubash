@@ -1044,7 +1044,7 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
                                 report_open: !funsub,
                                 funsub,
                                 command: false,
-                                term_ready: false,
+                                term_ready: funsub, // rubash#3972: a funsub body starts as a complete (empty) command list; the first word char clears this via the funsub tracker
                                 case_depth_at_push: 0,
                                 array_list: false,
                                 pattern_paren: false,
@@ -5910,7 +5910,7 @@ pub(crate) fn close_char_residuals_advance(
                                 report_open: !funsub,
                                 funsub,
                                 command: false,
-                                term_ready: false,
+                                term_ready: funsub, // rubash#3972: a funsub body starts as a complete (empty) command list; the first word char clears this via the funsub tracker
                                 case_depth_at_push: 0,
                                 array_list: false,
                                 pattern_paren: false,
