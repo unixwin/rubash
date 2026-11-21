@@ -1,3 +1,5 @@
+#[path = "compile_cache.rs"]
+pub(super) mod compile_cache;
 #[path = "cursor.rs"]
 mod cursor;
 #[path = "expression.rs"]
