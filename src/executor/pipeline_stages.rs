@@ -1852,13 +1852,19 @@ impl Executor {
                 let window = format!("{}{}", self.tempenv_scalar_view(base_name), expanded_value);
                 self.stage_composition_bind(&mut composition_undo, base_name, &window);
                 if is_valid_process_env(base_name, &window) {
-                    process.env(base_name, window);
+                    process.env(
+                        base_name,
+                        crate::executor::substitution_metadata::env_value_to_os_string(&window),
+                    );
                 }
                 continue;
             }
             self.stage_composition_bind(&mut composition_undo, base_name, expanded_value);
             if is_valid_process_env(base_name, expanded_value) {
-                process.env(base_name, expanded_value);
+                process.env(
+                    base_name,
+                    crate::executor::substitution_metadata::env_value_to_os_string(expanded_value),
+                );
             }
         }
         self.restore_composition_binds(composition_undo);

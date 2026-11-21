@@ -1990,7 +1990,10 @@ impl Executor {
     ) {
         process.env_clear();
         for (name, value) in self.compose_external_environment(cmd, program) {
-            process.env(name, value);
+            process.env(
+                name,
+                crate::executor::substitution_metadata::env_value_to_os_string(&value),
+            );
         }
     }
 
@@ -5097,12 +5100,17 @@ impl Executor {
         argv_p.push(std::ptr::null());
         let mut env_c: Vec<CString> = Vec::with_capacity(env_pairs.len());
         for (name, value) in env_pairs {
-            env_c.push(CString::new(format!("{name}={value}")).map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "environment contains an interior NUL",
-                )
-            })?);
+            env_c.push(
+                CString::new(crate::executor::substitution_metadata::env_entry_c_bytes(
+                    name, value,
+                ))
+                .map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "environment contains an interior NUL",
+                    )
+                })?,
+            );
         }
         let mut env_p: Vec<*const libc::c_char> =
             env_c.iter().map(|entry| entry.as_ptr()).collect();
@@ -6876,8 +6884,8 @@ fn apply_env_command_environment(
     let env_map: HashMap<String, String> = env_vars.iter().cloned().collect();
     for (name, value) in env_vars {
         if is_valid_process_env(name, value) {
-            let value = if cfg!(windows) && name.eq_ignore_ascii_case("PATH") {
-                shell_path_to_process(value, &env_map)
+            let value: std::ffi::OsString = if cfg!(windows) && name.eq_ignore_ascii_case("PATH") {
+                shell_path_to_process(value, &env_map).into()
             } else if cfg!(windows) && name == "TMPDIR" {
                 // Same child-boundary contract as child_env_value
                 // (unixwin/niubash#162): exported TMPDIR crosses in
@@ -6887,12 +6895,12 @@ fn apply_env_command_environment(
                 shell_path_to_windows(value, &env_map)
                     .to_string_lossy()
                     .replace('\\', "/")
+                    .into()
             } else {
-                // Raw-byte marker pairs in a stored value must map to byte
-                // chars at the child boundary (same rubash#141 contract as
-                // child_env_value / the argv boundary), never leak the
-                // U+E000 pair into the child's environment block.
-                crate::executor::substitution_metadata::decode_raw_byte_markers_to_byte_chars(value)
+                // Decode raw-byte marker pairs directly to OS bytes on Unix
+                // (`OsString::from_vec`) instead of widening `0xFF` to
+                // `U+00FF` (`0xC3 0xBF`, rubash#3965).
+                crate::executor::substitution_metadata::env_value_to_os_string(value)
             };
             process.env(name, value);
         }

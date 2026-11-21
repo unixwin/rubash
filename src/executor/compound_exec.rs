@@ -6241,7 +6241,10 @@ impl Executor {
                     self.spill_respawn_env_entries(env_entries, respawn_argv_bytes);
                 state_temp = temp;
                 for (key, value) in entries {
-                    child.env(key, value);
+                    child.env(
+                        key,
+                        crate::executor::substitution_metadata::env_value_to_os_string(&value),
+                    );
                 }
             }
             // rubash#3219: a coproc child born inside an in-process
