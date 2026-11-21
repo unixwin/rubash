@@ -429,22 +429,20 @@ fn push_ansi_c_codepoint(output: &mut String, value: u32) {
     if value >= 0x8000_0000 {
         return;
     }
-    // Values above the Unicode maximum (U+10FFFF) are not codepoints at
-    // all (rubash#1606, residual of #1465): there is no scalar for rubash's
-    // text layer to carry, and the raw-byte marker path below would emit
-    // the historic 4/5/6-byte form (e.g. F4 90 80 80 for U+110000) that no
-    // UTF-8 decoder accepts. GNU reaches this band only through glibc
-    // wctomb inside u32cconv (lib/sh/unicode.c:239); in the C locale —
-    // GNU's default when no locale is selected, the environment the
-    // regression pins run in — wctomb fails and the u32tocesc fallback
-    // (unicode.c:141, uppercase hex) keeps the escape literal. Keep it
-    // literal in every locale mode: the band has no valid representation
-    // to convert to. (Surrogates below the band keep the existing
-    // raw-byte path, matching GNU in a UTF-8 locale.)
-    if value > 0x10_FFFF {
-        output.push_str(&format!("\\U{value:08X}"));
-        return;
-    }
+    // The band between the Unicode maximum and the sign bit
+    // (U+110000..=U+7FFFFFFF, rubash#3947) needs no special case: GNU
+    // strtrans.c:161-181 -> unicode.c:239 u32cconv -> unicode.c:154
+    // u32toutf8 encodes it as the historic 4/5/6-byte UTF-8 forms under
+    // a UTF-8 locale (U+110000 -> F4 90 80 80, U+200000 -> F8 88 80 80
+    // 80, U+7FFFFFFF -> FD BF BF BF BF BF — verified against WSL GNU
+    // Bash 5.3.x script-file probes), while the non-UTF-8 branch of the
+    // locale gate below re-emits the escape literally through the same
+    // u32tocesc fallback the rest of the band uses. u32cconv_utf8_text
+    // carries these values as raw-byte marker pairs — the same
+    // transport the surrogate CESU-8 encodings already use — so they
+    // decode back to the exact GNU bytes at the output boundary.
+    // (The earlier #1606 hold kept this band literal in every locale;
+    // that predated the UTF-8-locale probes and contradicted GNU there.)
     // GNU strtrans.c:161-181 decodes $'\uNNNN'/'\UNNNNNNNN' through the same
     // u32cconv as printf (lib/sh/unicode.c:239): wctomb on a 4-byte-wchar_t
     // UTF-8 platform encodes every value <= 0x7fffffff, including surrogates
