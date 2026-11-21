@@ -6528,7 +6528,16 @@ impl Executor {
                         !current.closed && (current.read.is_some() || current.write.is_some())
                     });
                     if !occupied_now {
-                        if let Some(entry) = self.fd_table.saved_entry(source)? {
+                        // rubash#4024: the save is a REAL descriptor
+                        // (FdTable::exec_walk_saved_entry) — a stdio
+                        // marker cloned as the symbolic alias would die
+                        // with the redirector's own close, and the
+                        // dup-back would bind a dead endpoint.
+                        if let Some(entry) = self.fd_table.exec_walk_saved_entry(
+                            source,
+                            self.stdout_marker_names_process(source),
+                            self.stderr_capture.is_none(),
+                        )? {
                             if !entry.closed && (entry.read.is_some() || entry.write.is_some()) {
                                 self.fd_table.entries.insert(slot, entry.clone());
                                 inserted_saves.push((slot, entry));
@@ -7661,6 +7670,28 @@ impl Executor {
                 self.shell_state
                     .env_vars
                     .remove(&fd_output_process_substitution_key(target_fd));
+            }
+        }
+    }
+
+    /// rubash#4024: whether an `FdWriteEndpoint::Stdout` marker bound
+    /// at `source` resolves to the process stdout descriptor — the
+    /// same answer write_fd_endpoint gives (shell_options.rs): a
+    /// dup2-snapshot record of `None` froze the fd to the real stdout
+    /// (rubash#368); an absent record is the live alias, which names
+    /// the kernel descriptor only while no capture or pipeline stream
+    /// holds it. When false the marker names a capture no descriptor
+    /// dup can carry, and the exec walk's undo save keeps its
+    /// symbolic form.
+    fn stdout_marker_names_process(&self, source: u32) -> bool {
+        if source == 1 && crate::executor::shell_options::active_capture_stream().is_some() {
+            return false;
+        }
+        match self.fd_table.stdout_alias_generation.get(&source) {
+            Some(record) => record.is_none(),
+            None => {
+                !crate::executor::shell_options::stdout_capture_active()
+                    && self.stdout_capture.is_none()
             }
         }
     }

@@ -2204,6 +2204,95 @@ impl FdTable {
         }
     }
 
+    /// rubash#4024: the undo save an exec walk materializes — like
+    /// `saved_entry`, but the symbolic stdio arms are upgraded to
+    /// private descriptor duplicates, the `add_undo_redirect`
+    /// `fcntl (fd, F_DUPFD, SHELL_FD_BASE)` port (redir.c:1303).
+    /// GNU's save is a REAL descriptor, so the same list's `>&-` /
+    /// `<&-` retires only the redirector's number
+    /// (close_orphaned_process_fd, rubash#3930) while the save
+    /// stays live for a later `N>&<slot>` dup — `exec >&- 1>&10`
+    /// must still print. `saved_entry` duplicates only
+    /// kernel-backed arms; cloning the `Stdout` / `Stderr` /
+    /// `InheritedProcessStdin` markers yields an ALIAS of process
+    /// descriptor 1/2/0 — dead the moment the close retires the
+    /// real descriptor, so the dup-back bound a dead endpoint and
+    /// every later write vanished silently.
+    ///
+    /// `stdout_is_process` / `stderr_is_process` say whether the
+    /// marker resolves to the kernel descriptor at this walk
+    /// position (no capture or pipeline stream holds it — the
+    /// same question write_fd_endpoint answers, shell_options.rs);
+    /// only then does a dup of the process descriptor carry the
+    /// arm's object. When the marker names a capture, or the
+    /// duplicate fails, the symbolic clone is kept — the
+    /// pre-#4024 form for that arm.
+    pub(crate) fn exec_walk_saved_entry(
+        &self,
+        fd: u32,
+        stdout_is_process: bool,
+        stderr_is_process: bool,
+    ) -> std::io::Result<Option<FdEntry>> {
+        let Some(entry) = self.saved_entry(fd)? else {
+            return Ok(None);
+        };
+        // A private duplicate of the process's own standard
+        // descriptor: same open file description, exactly what
+        // F_DUPFD yields for GNU's save. Not `adopted` — the save is
+        // walk-local currency the walk disposes (its FileFd drop is
+        // the descriptor's whole lifecycle), never a startup
+        // adoption parked for relocation or close-identity probes.
+        let stdio_dup = |std_fd: u32| -> Option<Rc<FileFd>> {
+            #[cfg(unix)]
+            {
+                crate::fd::dup_adopted_fd(std_fd).map(|handle| {
+                    Rc::new(FileFd {
+                        handle,
+                        closed: std::cell::Cell::new(false),
+                        adopted: false,
+                        path: crate::fd::inherited_fd_path(std_fd),
+                    })
+                })
+            }
+            #[cfg(not(unix))]
+            {
+                crate::fd::duplicate_handle(crate::fd::process_std_handle(std_fd))
+                    .ok()
+                    .map(|handle| {
+                        Rc::new(FileFd {
+                            handle,
+                            closed: std::cell::Cell::new(false),
+                            adopted: false,
+                            path: crate::fd::inherited_fd_path(std_fd),
+                        })
+                    })
+            }
+        };
+        let read = match &entry.read {
+            // `InheritedProcessStdin` is the process descriptor 0 by
+            // definition — it always names a kernel descriptor.
+            Some(FdReadEndpoint::InheritedProcessStdin) => stdio_dup(0)
+                .map(FdReadEndpoint::File)
+                .or_else(|| entry.read.clone()),
+            _ => entry.read.clone(),
+        };
+        let write = match &entry.write {
+            Some(FdWriteEndpoint::Stdout) if stdout_is_process => stdio_dup(1)
+                .map(FdWriteEndpoint::File)
+                .or_else(|| entry.write.clone()),
+            Some(FdWriteEndpoint::Stderr) if stderr_is_process => stdio_dup(2)
+                .map(FdWriteEndpoint::File)
+                .or_else(|| entry.write.clone()),
+            _ => entry.write.clone(),
+        };
+        Ok(Some(FdEntry {
+            read,
+            write,
+            closed: entry.closed,
+            dynamic: entry.dynamic,
+        }))
+    }
+
     /// rubash#3814: whole-table fork-boundary snapshot — the
     /// save/restore half of GNU's forked-child descriptor copies
     /// (execute_cmd.c:1576 execute_in_subshell; subst.c:7143
