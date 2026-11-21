@@ -3285,7 +3285,21 @@ impl Executor {
                         // for the target; any other model leaves
                         // the fd to the output graph.
                         let source_is_read_description = source_target == OutputTarget::Closed;
-                        state.fds.insert(fd, source_target);
+                        // rubash#4000: on a persist_move_closes walk a
+                        // later move's source close retires the fd
+                        // table's FileFd — the dup must bind an
+                        // independent duplicate, not an Rc alias of
+                        // it (dup_walk_bound_target). Other walks keep
+                        // the shared clone: no in-walk close can
+                        // retire the source there, and SharedFile
+                        // Rc::ptr_eq identity feeds the pipeline
+                        // stage merge (pipeline_stages.rs).
+                        let bound = if state.persist_move_closes {
+                            dup_walk_bound_target(source_target)
+                        } else {
+                            source_target
+                        };
+                        state.fds.insert(fd, bound);
                         if source_is_read_description {
                             state.list_binds.insert(fd, ListBound::ReadOnly);
                         } else {
@@ -3415,7 +3429,16 @@ impl Executor {
                         // a closed descriptor. Any other model means
                         // the output graph owns the fd outright.
                         let source_is_read_description = source_target == OutputTarget::Closed;
-                        state.fds.insert(target_fd, source_target);
+                        // rubash#4000: same independent-endpoint rule
+                        // as the file arm above — a later move's
+                        // persist close of the source must not retire
+                        // this dup's handle.
+                        let bound = if state.persist_move_closes {
+                            dup_walk_bound_target(source_target)
+                        } else {
+                            source_target
+                        };
+                        state.fds.insert(target_fd, bound);
                         if source_is_read_description {
                             state.list_binds.insert(target_fd, ListBound::ReadOnly);
                         } else {
@@ -3803,9 +3826,16 @@ impl Executor {
                     );
                 }
                 Some(FdWriteEndpoint::File(file_fd)) => {
-                    state
-                        .fds
-                        .insert(fd, OutputTarget::SharedFile(file_fd.clone()));
+                    // rubash#4000: the spelling open's shared serve
+                    // gets the same independent-endpoint rule as the
+                    // dup arms on persist_move_closes walks — a later
+                    // move's source close must not retire it.
+                    let endpoint = if state.persist_move_closes {
+                        dup_walk_file_endpoint(&file_fd)
+                    } else {
+                        file_fd.clone()
+                    };
+                    state.fds.insert(fd, OutputTarget::SharedFile(endpoint));
                 }
                 // rubash#2691: the source descriptor HAS a write
                 // endpoint, just not one the arms above re-open — a
@@ -4737,6 +4767,35 @@ fn redirect_fd_or_default(redirect: &Redirect, default_fd: u32) -> u32 {
             .parse()
             .unwrap_or(default_fd)
     })
+}
+
+/// rubash#4000: the walk-level form of `FdEntry::dup_file_endpoints`
+/// (rubash#2613/#3706). A `>&N`/`<&N` dup binds the target an
+/// INDEPENDENT kernel duplicate of the source's open file
+/// description — GNU's dup2 gives the redirector its own descriptor
+/// on the same description (redir.c:1193 do_redirection_internal),
+/// so the move arm's `close (redir_fd)` (redir.c:1231, r_move_*)
+/// retires only the source's descriptor and an earlier `1>&9` in the
+/// same list keeps writing. An Rc-cloned SharedFile instead aliases
+/// the FileFd the move's persist close retires
+/// (close_persistent_output_fd, rubash#1235), and the flush writes a
+/// closed descriptor (`echo: write error: Bad file descriptor`).
+/// FileFd::duplicate is the same F_DUPFD_CLOEXEC / DuplicateHandle
+/// save dup: same open file description, shared offset, independent
+/// handle. A dup failure (descriptor exhaustion) falls back to the
+/// shared clone — the walk must not fail a redirect GNU's
+/// descriptor-table dup2 performs without allocating a fresh number.
+fn dup_walk_file_endpoint(file: &Rc<FileFd>) -> Rc<FileFd> {
+    file.duplicate().unwrap_or_else(|_| Rc::clone(file))
+}
+
+/// rubash#4000: apply dup_walk_file_endpoint to a resolved dup
+/// target — only SharedFile carries a retirable kernel handle.
+fn dup_walk_bound_target(target: OutputTarget) -> OutputTarget {
+    match target {
+        OutputTarget::SharedFile(file) => OutputTarget::SharedFile(dup_walk_file_endpoint(&file)),
+        other => other,
+    }
 }
 
 impl OutputFdState {
