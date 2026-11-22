@@ -1236,6 +1236,14 @@ impl Executor {
         &mut self.shell_state
     }
 
+    pub fn platform(&self) -> crate::platform::Platform {
+        self.shell_state.platform
+    }
+
+    pub fn set_platform(&mut self, platform: crate::platform::Platform) {
+        self.shell_state.platform = platform;
+    }
+
     pub(crate) fn set_exit_code(&mut self, exit_code: i32) {
         self.exit_code = exit_code;
     }

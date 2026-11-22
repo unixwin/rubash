@@ -1606,6 +1606,7 @@ impl Executor {
                 procsub_adhoc_carriers: std::cell::RefCell::new(Vec::new()),
                 fork_saved_process_umask: None,
                 fork_saved_process_rlimits: None,
+                platform: crate::platform::Platform::host(),
             },
             fd_table: FdTable::new(),
             // variables.c:440: a refused function import leaves

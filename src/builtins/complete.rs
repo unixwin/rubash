@@ -2522,13 +2522,14 @@ fn disabled_builtin_completion_candidates(env_vars: &HashMap<String, String>) ->
 /// unnamed numbers, so map them through the SIGJUNK form instead of
 /// emitting blank candidates.
 fn signal_completion_candidates() -> Vec<String> {
-    let mut candidates = Vec::with_capacity(crate::builtins::trap::SIGNALS.len() + 4);
+    let table = crate::platform::Platform::host().signal_table();
+    let mut candidates = Vec::with_capacity(table.len() + 4);
     candidates.push("EXIT".to_string());
-    for (index, name) in crate::builtins::trap::SIGNALS.iter().enumerate() {
-        if name.is_empty() {
-            candidates.push(format!("SIGJUNK({})", index + 1));
+    for entry in table {
+        if entry.sig_name.is_empty() {
+            candidates.push(format!("SIGJUNK({})", entry.number));
         } else {
-            candidates.push((*name).to_string());
+            candidates.push(entry.sig_name.to_string());
         }
     }
     candidates.push("DEBUG".to_string());

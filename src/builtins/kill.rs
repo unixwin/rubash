@@ -3,304 +3,8 @@
 //! GNU Bash source ownership:
 // - builtins/kill.def
 
+use crate::platform::Platform;
 use std::io::{self, Write};
-
-/// Signal table: `(signal number, number as string, name without `SIG`)`.
-///
-/// GNU bash builds this table per-target at configure time: Makefile.in
-/// compiles support/mksignames.c against the TARGET machine's `<signal.h>`
-/// (Makefile.in:599-617 CREATED_SUPPORT/signames.h, rules at :775-804) and
-/// support/signames.c:69 `initialize_signames()` fills `signal_names[]`
-/// indexed by signal number, guarded per signal — SIGPWR at signames.c:278,
-/// SIGSTKFLT at :292, SIGEMT at :353, SIGINFO at :442 — with the
-/// SIGRTMIN..SIGRTMAX arithmetic names generated at :92-139
-/// (`signal_names[rtmin+i] = "SIGRTMIN+%d"`). This is the Rust compile-time
-/// equivalent of that generator: numbers come from the libc crate, which
-/// resolves them per target.
-///
-/// * `cfg(not(unix))`: the literal Linux x86 table is the wire format of
-///   the Windows file-mailbox protocol (other rubash processes write these
-///   numbers into `%LOCALAPPDATA%\rubash-signals`) and of the suspend/resume state
-///   backend — Linux numbering is the design contract. DO NOT renumber.
-/// * `cfg(unix)`: numbers follow the target platform via libc (Darwin:
-///   7=EMT, 10=BUS, 12=SYS, 17=STOP, 18=TSTP, 19=CONT, 20=CHLD, 29=INFO,
-///   30=USR1, 31=USR2; no STKFLT/PWR/RT signals). Where Linux and the BSD
-///   family disagree, both alternatives occupy the same numeric slot
-///   (Linux BUS=7 / Darwin EMT=7, Linux USR1=10 / Darwin BUS=10, ...), so
-///   the interleaved table stays in numeric order on every platform —
-///   `kill -l` walks it in order and GNU's `signal_names[]` is indexed by
-///   signal number, so ordering is part of the GNU-compatible surface.
-///   The Linux legs cover android too: bionic resolves the Linux kernel
-///   numbering (libc's android module pins SIGBUS=7, SIGUSR1=10,
-///   SIGSTKFLT=16, SIGPWR=30, SIGSYS=31, ...), so the 1..31 slots compile
-///   in there unchanged.
-/// * The Linux RT block pins the glibc contract 34..64 as literals:
-///   `libc::SIGRTMIN` is a FUNCTION on glibc (linux_like libc, forwarding
-///   to `__libc_current_sigrtmin()`), not a const, so it cannot populate a
-///   const table. Android carries its own literal block for bionic's RT
-///   base: `__libc_current_sigrtmin()` is 41 and `__libc_current_sigrtmax()`
-///   is 64 on the Termux oracle (GNU bash 5.3.20 aarch64-linux-android
-///   maps `kill -l 41` to RTMIN), so 41..64 carry the signames.c:92-139
-///   arithmetic names and 32..40 stay holes.
-///   `signal_table_tests::linux_realtime_block_matches_libc` and its
-///   android sibling guard the equality at runtime on every CI run.
-#[cfg(not(unix))]
-const SIGNALS: &[(i32, &str, &str)] = &[
-    (1, "1", "HUP"),
-    (2, "2", "INT"),
-    (3, "3", "QUIT"),
-    (4, "4", "ILL"),
-    (5, "5", "TRAP"),
-    (6, "6", "ABRT"),
-    (7, "7", "BUS"),
-    (8, "8", "FPE"),
-    (9, "9", "KILL"),
-    (10, "10", "USR1"),
-    (11, "11", "SEGV"),
-    (12, "12", "USR2"),
-    (13, "13", "PIPE"),
-    (14, "14", "ALRM"),
-    (15, "15", "TERM"),
-    (16, "16", "STKFLT"),
-    (17, "17", "CHLD"),
-    (18, "18", "CONT"),
-    (19, "19", "STOP"),
-    (20, "20", "TSTP"),
-    (21, "21", "TTIN"),
-    (22, "22", "TTOU"),
-    (23, "23", "URG"),
-    (24, "24", "XCPU"),
-    (25, "25", "XFSZ"),
-    (26, "26", "VTALRM"),
-    (27, "27", "PROF"),
-    (28, "28", "WINCH"),
-    (29, "29", "IO"),
-    (30, "30", "PWR"),
-    (31, "31", "SYS"),
-    (34, "34", "RTMIN"),
-    (35, "35", "RTMIN+1"),
-    (36, "36", "RTMIN+2"),
-    (37, "37", "RTMIN+3"),
-    (38, "38", "RTMIN+4"),
-    (39, "39", "RTMIN+5"),
-    (40, "40", "RTMIN+6"),
-    (41, "41", "RTMIN+7"),
-    (42, "42", "RTMIN+8"),
-    (43, "43", "RTMIN+9"),
-    (44, "44", "RTMIN+10"),
-    (45, "45", "RTMIN+11"),
-    (46, "46", "RTMIN+12"),
-    (47, "47", "RTMIN+13"),
-    (48, "48", "RTMIN+14"),
-    (49, "49", "RTMIN+15"),
-    (50, "50", "RTMAX-14"),
-    (51, "51", "RTMAX-13"),
-    (52, "52", "RTMAX-12"),
-    (53, "53", "RTMAX-11"),
-    (54, "54", "RTMAX-10"),
-    (55, "55", "RTMAX-9"),
-    (56, "56", "RTMAX-8"),
-    (57, "57", "RTMAX-7"),
-    (58, "58", "RTMAX-6"),
-    (59, "59", "RTMAX-5"),
-    (60, "60", "RTMAX-4"),
-    (61, "61", "RTMAX-3"),
-    (62, "62", "RTMAX-2"),
-    (63, "63", "RTMAX-1"),
-    (64, "64", "RTMAX"),
-];
-
-/// Unix half of the signal seam: same triple format and per-platform numeric
-/// order as the mailbox table above, but every number is resolved from libc
-/// for the compilation target (the mksignames.c contract — see the table
-/// doc above for the GNU anchors).
-#[cfg(unix)]
-const SIGNALS: &[(i32, &str, &str)] = &[
-    (libc::SIGHUP as i32, "1", "HUP"),
-    (libc::SIGINT as i32, "2", "INT"),
-    (libc::SIGQUIT as i32, "3", "QUIT"),
-    (libc::SIGILL as i32, "4", "ILL"),
-    (libc::SIGTRAP as i32, "5", "TRAP"),
-    (libc::SIGABRT as i32, "6", "ABRT"),
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    (libc::SIGBUS as i32, "7", "BUS"),
-    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
-    (libc::SIGEMT as i32, "7", "EMT"),
-    (libc::SIGFPE as i32, "8", "FPE"),
-    (libc::SIGKILL as i32, "9", "KILL"),
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    (libc::SIGUSR1 as i32, "10", "USR1"),
-    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
-    (libc::SIGBUS as i32, "10", "BUS"),
-    (libc::SIGSEGV as i32, "11", "SEGV"),
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    (libc::SIGUSR2 as i32, "12", "USR2"),
-    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
-    (libc::SIGSYS as i32, "12", "SYS"),
-    (libc::SIGPIPE as i32, "13", "PIPE"),
-    (libc::SIGALRM as i32, "14", "ALRM"),
-    (libc::SIGTERM as i32, "15", "TERM"),
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    (libc::SIGSTKFLT as i32, "16", "STKFLT"),
-    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
-    (libc::SIGURG as i32, "16", "URG"),
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    (libc::SIGCHLD as i32, "17", "CHLD"),
-    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
-    (libc::SIGSTOP as i32, "17", "STOP"),
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    (libc::SIGCONT as i32, "18", "CONT"),
-    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
-    (libc::SIGTSTP as i32, "18", "TSTP"),
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    (libc::SIGSTOP as i32, "19", "STOP"),
-    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
-    (libc::SIGCONT as i32, "19", "CONT"),
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    (libc::SIGTSTP as i32, "20", "TSTP"),
-    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
-    (libc::SIGCHLD as i32, "20", "CHLD"),
-    (libc::SIGTTIN as i32, "21", "TTIN"),
-    (libc::SIGTTOU as i32, "22", "TTOU"),
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    (libc::SIGURG as i32, "23", "URG"),
-    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
-    (libc::SIGIO as i32, "23", "IO"),
-    (libc::SIGXCPU as i32, "24", "XCPU"),
-    (libc::SIGXFSZ as i32, "25", "XFSZ"),
-    (libc::SIGVTALRM as i32, "26", "VTALRM"),
-    (libc::SIGPROF as i32, "27", "PROF"),
-    (libc::SIGWINCH as i32, "28", "WINCH"),
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    (libc::SIGIO as i32, "29", "IO"),
-    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
-    (libc::SIGINFO as i32, "29", "INFO"),
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    (libc::SIGPWR as i32, "30", "PWR"),
-    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
-    (libc::SIGUSR1 as i32, "30", "USR1"),
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    (libc::SIGSYS as i32, "31", "SYS"),
-    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
-    (libc::SIGUSR2 as i32, "31", "USR2"),
-    // Linux-only POSIX realtime block, numbered 34..64 per the glibc
-    // contract (see the table doc above). Darwin/BSD targets have no RT
-    // signals and compile the whole block out, exactly like GNU's
-    // `#if defined (SIGRTMIN)` at signames.c:97-139.
-    #[cfg(target_os = "linux")]
-    (34, "34", "RTMIN"),
-    #[cfg(target_os = "linux")]
-    (35, "35", "RTMIN+1"),
-    #[cfg(target_os = "linux")]
-    (36, "36", "RTMIN+2"),
-    #[cfg(target_os = "linux")]
-    (37, "37", "RTMIN+3"),
-    #[cfg(target_os = "linux")]
-    (38, "38", "RTMIN+4"),
-    #[cfg(target_os = "linux")]
-    (39, "39", "RTMIN+5"),
-    #[cfg(target_os = "linux")]
-    (40, "40", "RTMIN+6"),
-    #[cfg(target_os = "linux")]
-    (41, "41", "RTMIN+7"),
-    #[cfg(target_os = "linux")]
-    (42, "42", "RTMIN+8"),
-    #[cfg(target_os = "linux")]
-    (43, "43", "RTMIN+9"),
-    #[cfg(target_os = "linux")]
-    (44, "44", "RTMIN+10"),
-    #[cfg(target_os = "linux")]
-    (45, "45", "RTMIN+11"),
-    #[cfg(target_os = "linux")]
-    (46, "46", "RTMIN+12"),
-    #[cfg(target_os = "linux")]
-    (47, "47", "RTMIN+13"),
-    #[cfg(target_os = "linux")]
-    (48, "48", "RTMIN+14"),
-    #[cfg(target_os = "linux")]
-    (49, "49", "RTMIN+15"),
-    #[cfg(target_os = "linux")]
-    (50, "50", "RTMAX-14"),
-    #[cfg(target_os = "linux")]
-    (51, "51", "RTMAX-13"),
-    #[cfg(target_os = "linux")]
-    (52, "52", "RTMAX-12"),
-    #[cfg(target_os = "linux")]
-    (53, "53", "RTMAX-11"),
-    #[cfg(target_os = "linux")]
-    (54, "54", "RTMAX-10"),
-    #[cfg(target_os = "linux")]
-    (55, "55", "RTMAX-9"),
-    #[cfg(target_os = "linux")]
-    (56, "56", "RTMAX-8"),
-    #[cfg(target_os = "linux")]
-    (57, "57", "RTMAX-7"),
-    #[cfg(target_os = "linux")]
-    (58, "58", "RTMAX-6"),
-    #[cfg(target_os = "linux")]
-    (59, "59", "RTMAX-5"),
-    #[cfg(target_os = "linux")]
-    (60, "60", "RTMAX-4"),
-    #[cfg(target_os = "linux")]
-    (61, "61", "RTMAX-3"),
-    #[cfg(target_os = "linux")]
-    (62, "62", "RTMAX-2"),
-    #[cfg(target_os = "linux")]
-    (63, "63", "RTMAX-1"),
-    #[cfg(target_os = "linux")]
-    (64, "64", "RTMAX"),
-    // Android-only POSIX realtime block, numbered 41..64 per the bionic
-    // contract (see the table doc above; 32..40 are holes, exactly like
-    // GNU's `#if defined (SIGRTMIN)` at signames.c:97-139 generates).
-    #[cfg(target_os = "android")]
-    (41, "41", "RTMIN"),
-    #[cfg(target_os = "android")]
-    (42, "42", "RTMIN+1"),
-    #[cfg(target_os = "android")]
-    (43, "43", "RTMIN+2"),
-    #[cfg(target_os = "android")]
-    (44, "44", "RTMIN+3"),
-    #[cfg(target_os = "android")]
-    (45, "45", "RTMIN+4"),
-    #[cfg(target_os = "android")]
-    (46, "46", "RTMIN+5"),
-    #[cfg(target_os = "android")]
-    (47, "47", "RTMIN+6"),
-    #[cfg(target_os = "android")]
-    (48, "48", "RTMIN+7"),
-    #[cfg(target_os = "android")]
-    (49, "49", "RTMIN+8"),
-    #[cfg(target_os = "android")]
-    (50, "50", "RTMIN+9"),
-    #[cfg(target_os = "android")]
-    (51, "51", "RTMIN+10"),
-    #[cfg(target_os = "android")]
-    (52, "52", "RTMIN+11"),
-    #[cfg(target_os = "android")]
-    (53, "53", "RTMAX-11"),
-    #[cfg(target_os = "android")]
-    (54, "54", "RTMAX-10"),
-    #[cfg(target_os = "android")]
-    (55, "55", "RTMAX-9"),
-    #[cfg(target_os = "android")]
-    (56, "56", "RTMAX-8"),
-    #[cfg(target_os = "android")]
-    (57, "57", "RTMAX-7"),
-    #[cfg(target_os = "android")]
-    (58, "58", "RTMAX-6"),
-    #[cfg(target_os = "android")]
-    (59, "59", "RTMAX-5"),
-    #[cfg(target_os = "android")]
-    (60, "60", "RTMAX-4"),
-    #[cfg(target_os = "android")]
-    (61, "61", "RTMAX-3"),
-    #[cfg(target_os = "android")]
-    (62, "62", "RTMAX-2"),
-    #[cfg(target_os = "android")]
-    (63, "63", "RTMAX-1"),
-    #[cfg(target_os = "android")]
-    (64, "64", "RTMAX"),
-];
 
 /// The platform's SIGCHLD number for dispatch paths that special-case child
 /// notifications (GNU keys them on SIGCHLD via the target's signal.h —
@@ -385,6 +89,21 @@ where
     W: Write,
     E: Write,
 {
+    execute_with_io_posix_for_platform(args, stdout, stderr, posix, Platform::host())
+}
+
+/// [`execute_with_io_posix`] parameterized by runtime [`Platform`].
+pub fn execute_with_io_posix_for_platform<W, E>(
+    args: &[String],
+    stdout: &mut W,
+    stderr: &mut E,
+    posix: bool,
+    platform: Platform,
+) -> io::Result<i32>
+where
+    W: Write,
+    E: Write,
+{
     if args.is_empty() {
         write_kill_usage(stderr)?;
         return Ok(2);
@@ -450,7 +169,7 @@ where
         };
         if let Some((spec, advance)) = spec_form {
             sigspec = spec;
-            signal = decode_signal_spec(spec, posix);
+            signal = decode_signal_spec_for_platform(spec, posix, platform);
             saw_signal = true;
             index += advance;
             continue;
@@ -470,7 +189,7 @@ where
             // diagnostic (rubash#1259) and a bare `-` decodes the empty
             // spec (invalid, per the GNU oracle).
             sigspec = value.strip_prefix('-').unwrap_or(value);
-            signal = decode_signal_spec(sigspec, posix);
+            signal = decode_signal_spec_for_platform(sigspec, posix, platform);
             saw_signal = true;
             index += 1;
             continue;
@@ -480,7 +199,7 @@ where
     let operands_start = index;
 
     if listing {
-        return display_kill_list(&args[operands_start..], posix, stdout, stderr);
+        return display_kill_list(&args[operands_start..], posix, platform, stdout, stderr);
     }
 
     let Some(signal) = signal else {
@@ -697,6 +416,10 @@ pub fn signal_number_for_spec(value: &str) -> Option<i32> {
     signal_number_from_spec(value)
 }
 
+pub fn signal_number_for_spec_on_platform(platform: Platform, value: &str) -> Option<i32> {
+    decode_signal_spec_for_platform(value, false, platform)
+}
+
 /// strsignal(3) text for a signal-death notice (rubash#229). GNU jobs.c
 /// printable_job_status renders a dead pipeline with j_strsignal, which
 /// resolves to strsignal(3) ("Terminated", "Killed", "User defined signal
@@ -761,6 +484,10 @@ pub fn signal_death_description(signal: i32) -> String {
 }
 
 pub fn translate_signal(value: &str) -> Option<&'static str> {
+    translate_signal_for_platform(Platform::host(), value)
+}
+
+pub fn translate_signal_for_platform(platform: Platform, value: &str) -> Option<&'static str> {
     if value == "0" {
         return Some("EXIT");
     }
@@ -769,10 +496,10 @@ pub fn translate_signal(value: &str) -> Option<&'static str> {
         if number > 128 {
             number -= 128;
         }
-        return signal_name(number);
+        return signal_name_for_platform(platform, number);
     }
 
-    decode_signal_name(value, true)
+    decode_signal_name_for_platform(value, true, platform)
 }
 
 /// GNU general.c valid_number: leading whitespace is skipped, an
@@ -808,6 +535,14 @@ fn strip_sig_prefix(value: &str) -> Option<&str> {
 /// mixed/lowercase prefixed spellings (`SigTerm`, `sigterm`, `sighup`)
 /// were rejected by `kill -l` (rubash#1386) and the `-s` validator.
 fn decode_signal_name(value: &str, allow_sig_prefix: bool) -> Option<&'static str> {
+    decode_signal_name_for_platform(value, allow_sig_prefix, Platform::host())
+}
+
+fn decode_signal_name_for_platform(
+    value: &str,
+    allow_sig_prefix: bool,
+    platform: Platform,
+) -> Option<&'static str> {
     if value.eq_ignore_ascii_case("EXIT") {
         return Some("0");
     }
@@ -838,7 +573,7 @@ fn decode_signal_name(value: &str, allow_sig_prefix: bool) -> Option<&'static st
     if bare.eq_ignore_ascii_case("EXIT") {
         return None;
     }
-    signal_number(bare)
+    signal_number_for_platform(platform, bare)
 }
 
 /// True for the trap pseudo-signals (65/66/67): they decode to real
@@ -857,14 +592,22 @@ fn is_trap_pseudo_signal(signal: i32) -> bool {
 /// rest of the kill machinery (mailbox wire numbers, `kill -l` holes)
 /// is built on.
 fn decode_signal_spec(value: &str, posix: bool) -> Option<i32> {
+    decode_signal_spec_for_platform(value, posix, Platform::host())
+}
+
+fn decode_signal_spec_for_platform(value: &str, posix: bool, platform: Platform) -> Option<i32> {
     if let Some(number) = valid_number(value) {
         if number == 0 {
             return Some(0);
         }
-        return (number >= 1 && number <= 64 && signal_name(number as i32).is_some())
-            .then_some(number as i32);
+        return (number >= 1
+            && number <= 64
+            && signal_name_for_platform(platform, number as i32).is_some())
+        .then_some(number as i32);
     }
-    decode_signal_name(value, !posix)?.parse::<i32>().ok()
+    decode_signal_name_for_platform(value, !posix, platform)?
+        .parse::<i32>()
+        .ok()
 }
 
 fn signal_number_from_spec(value: &str) -> Option<i32> {
@@ -892,6 +635,7 @@ fn sigspec_accepted(value: &str, posix: bool) -> bool {
 fn display_kill_list<W, E>(
     list: &[String],
     posix: bool,
+    platform: Platform,
     stdout: &mut W,
     stderr: &mut E,
 ) -> io::Result<i32>
@@ -901,9 +645,9 @@ where
 {
     if list.is_empty() {
         if posix {
-            write_signal_list_posix(stdout)?;
+            write_signal_list_posix(platform, stdout)?;
         } else {
-            write_signal_list(stdout)?;
+            write_signal_list(platform, stdout)?;
         }
         return Ok(0);
     }
@@ -923,12 +667,12 @@ where
                     diagnostic_prefix()
                 )?;
                 status = 1;
-            } else if let Some(translation) = signal_name(number as i32) {
+            } else if let Some(translation) = signal_name_for_platform(platform, number as i32) {
                 writeln!(stdout, "{translation}")?;
             }
             continue;
         }
-        if let Some(translation) = decode_signal_name(value, !posix) {
+        if let Some(translation) = decode_signal_name_for_platform(value, !posix, platform) {
             writeln!(stdout, "{translation}")?;
         } else {
             writeln!(
@@ -1898,35 +1642,44 @@ fn utf16_until_nul(chars: &[u16]) -> String {
 }
 
 fn signal_name(number: i32) -> Option<&'static str> {
-    SIGNALS
-        .iter()
-        .find_map(|(signal_number, _, name)| (*signal_number == number).then_some(*name))
+    signal_name_for_platform(Platform::host(), number)
+}
+
+fn signal_name_for_platform(platform: Platform, number: i32) -> Option<&'static str> {
+    platform.signal_name_for_number(number)
 }
 
 fn signal_number(name: &str) -> Option<&'static str> {
-    // GNU trap.c decode_signal with DSIG_NOCASE (kill.def:103 sets it
-    // unconditionally): signal names fold case (rubash#1367 #1385 #1386).
-    SIGNALS.iter().find_map(|(_, number, signal_name)| {
-        signal_name.eq_ignore_ascii_case(name).then_some(*number)
-    })
+    signal_number_for_platform(Platform::host(), name)
 }
 
-fn write_signal_list<W>(stdout: &mut W) -> io::Result<()>
+fn signal_number_for_platform(platform: Platform, name: &str) -> Option<&'static str> {
+    // GNU trap.c decode_signal with DSIG_NOCASE (kill.def:103 sets it
+    // unconditionally): signal names fold case (rubash#1367 #1385 #1386).
+    platform.signal_number_str_for_bare_name(name)
+}
+
+fn write_signal_list<W>(platform: Platform, stdout: &mut W) -> io::Result<()>
 where
     W: Write,
 {
     // GNU kill.def list_signals: 5 entries per line, tab-separated; the
     // final partial line still carries the tab separator before the closing
     // newline (captured from GNU 5.3.0 `kill -l` on the WSL baseline).
-    let total = SIGNALS.len();
-    for (position, (number, _, name)) in SIGNALS.iter().enumerate() {
+    let entries: Vec<_> = platform
+        .signal_table()
+        .iter()
+        .filter(|entry| !entry.bare_name.is_empty())
+        .collect();
+    let total = entries.len();
+    for (position, entry) in entries.iter().enumerate() {
         let position = position + 1;
         if position > 1 && (position - 1) % 5 == 0 {
             writeln!(stdout)?;
         } else if position > 1 {
             write!(stdout, "\t")?;
         }
-        write!(stdout, "{number:>2}) SIG{name}")?;
+        write!(stdout, "{:>2}) {}", entry.number, entry.sig_name)?;
         if position == total && position % 5 != 0 {
             write!(stdout, "\t")?;
         }
@@ -1937,11 +1690,16 @@ where
 
 /// POSIX-mode `kill -l` with no operand (rubash#1054): one line, bare
 /// names in signal-number order, single-space separated.
-fn write_signal_list_posix<W>(stdout: &mut W) -> io::Result<()>
+fn write_signal_list_posix<W>(platform: Platform, stdout: &mut W) -> io::Result<()>
 where
     W: Write,
 {
-    let names: Vec<&str> = SIGNALS.iter().map(|(_, _, name)| *name).collect();
+    let names: Vec<&str> = platform
+        .signal_table()
+        .iter()
+        .filter(|entry| !entry.bare_name.is_empty())
+        .map(|entry| entry.bare_name)
+        .collect();
     writeln!(stdout, "{}", names.join(" "))?;
     Ok(())
 }
@@ -5109,11 +4867,13 @@ mod signal_table_tests {
     /// second field feeds `kill -l USR1`-style name→number output.
     #[test]
     fn digit_field_matches_signal_number() {
-        for (number, digits, _) in super::SIGNALS {
+        for entry in crate::platform::Platform::host().signal_table() {
             assert_eq!(
-                digits.parse::<i32>().unwrap(),
-                *number,
-                "digit field {digits:?} does not match number {number}"
+                entry.number_str.parse::<i32>().unwrap(),
+                entry.number,
+                "digit field {:?} does not match number {}",
+                entry.number_str,
+                entry.number
             );
         }
     }
@@ -5122,12 +4882,12 @@ mod signal_table_tests {
     /// stay in strictly ascending signal-number order on every platform.
     #[test]
     fn table_is_in_ascending_signal_number_order() {
-        for pair in super::SIGNALS.windows(2) {
+        for pair in crate::platform::Platform::host().signal_table().windows(2) {
             assert!(
-                pair[0].0 < pair[1].0,
+                pair[0].number < pair[1].number,
                 "signal table out of numeric order at {} then {}",
-                pair[0].0,
-                pair[1].0
+                pair[0].number,
+                pair[1].number
             );
         }
     }
