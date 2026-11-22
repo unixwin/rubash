@@ -69,20 +69,18 @@ pub(super) fn parse_conditional_command(
         close_delimiter: tokens[end].value.clone(),
         close_delimiter_metadata: token_metadata(&tokens[end]),
         expression,
+        // rubash#3428 / rubash#4092: GNU's cond path stamps Cond->line on
+        // the `]]` token in the READER's numbering — a backslash-newline
+        // continuation inside `[[ ... ]]` does not advance it (unlike the
+        // arith `(( ))` family, whose #3406 completion line counts the
+        // continuation's physical line). Store it on `ConditionalCommand::line`
+        // (mirrors GNU `Cond->line` in execute_cmd.c:419-420) rather than
+        // overwriting `command.end_line`, so `command.end_line` keeps the
+        // parse-end ambient line after any trailing redirections.
+        line: tokens.get(end).map(|token| token.logical_line),
     }));
 
-    let (mut command, next) = finish_compound_command(command, tokens, end + 1);
-    // rubash#3428: GNU's cond path stamps the node's completion line on
-    // the `]]` token in the READER's numbering — a backslash-newline
-    // continuation inside `[[ ... ]]` does not advance it (unlike the
-    // arith `(( ))` family, whose #3406 completion line counts the
-    // continuation's physical line). `[[ x == 1 \`<newline>` ]] < BAD`
-    // therefore reports line 1 while the same command across a real
-    // newline still reports line 2; `Token::logical_line` carries
-    // exactly that continuation-merged numbering.
-    if let Some(close_line) = tokens.get(end).map(|token| token.logical_line) {
-        command.end_line = Some(close_line);
-    }
+    let (command, next) = finish_compound_command(command, tokens, end + 1);
     Some((command, next))
 }
 
