@@ -2533,6 +2533,12 @@ impl Executor {
                 "BASH_SOURCE",
                 "DIRSTACK",
                 "FUNCNAME",
+                // GROUPS has no stored seed below (its dynamic face is
+                // the live group set), but an imported GROUPS cell is
+                // the same GNU shape: init_dynamic_array_var returns
+                // it unchanged, so the sever mark alone stands the
+                // dynamic face down for it (rubash#4060).
+                "GROUPS",
             ] {
                 if env_vars.contains_key(name) {
                     mark_env_name(env_vars, UNSET_DYNAMIC_VARS, name);

@@ -1429,7 +1429,7 @@ impl Executor {
             .nameref_target_name(base)
             .unwrap_or_else(|| base.to_string());
         let resolved_base = resolved.split('[').next().unwrap_or(resolved.as_str());
-        is_noassign_bash_array(resolved_base)
+        is_live_noassign_bash_array(&self.shell_state.env_vars, resolved_base)
     }
 
     pub(in crate::executor) fn apply_shell_assignment(
@@ -2026,7 +2026,7 @@ impl Executor {
         if matches!(base_name, "BASH_ALIASES" | "BASH_CMDS") && !dynamic_unbound && !dynamic_plain {
             return self.apply_dynamic_assoc_assignment(base_name, &value, append);
         }
-        if is_noassign_bash_array(base_name) && !append {
+        if is_live_noassign_bash_array(&self.shell_state.env_vars, base_name) && !append {
             return true;
         }
         let compound_assignment = value.starts_with(COMPOUND_ASSIGNMENT_MARKER);

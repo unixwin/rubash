@@ -868,7 +868,7 @@ impl Executor {
         let array_name = array_name.as_str();
         if !is_shell_name(array_name)
             || is_marked_var(&self.shell_state.env_vars, READONLY_VARS, array_name)
-            || is_noassign_bash_array(array_name)
+            || is_live_noassign_bash_array(&self.shell_state.env_vars, array_name)
         {
             return false;
         }

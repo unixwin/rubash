@@ -107,7 +107,10 @@ pub(super) fn is_noassign_bash_array(name: &str) -> bool {
     let name = name.split_once('[').map(|(name, _)| name).unwrap_or(name);
     // GNU att_noassign carriers (variables.c:1839/1886/1889-1893):
     // FUNCNAME, GROUPS, BASH_ARGC, BASH_ARGV, BASH_SOURCE, BASH_LINENO
-    // (rubash#2369).
+    // (rubash#2369). Twin of executor::arrays::is_noassign_bash_array —
+    // same six carriers; keep the name sets in sync. The sever-aware
+    // live verdict is single-pointed in
+    // executor::is_live_noassign_bash_array (rubash#4060).
     matches!(
         name,
         "BASH_ARGC" | "BASH_ARGV" | "BASH_LINENO" | "BASH_SOURCE" | "FUNCNAME" | "GROUPS"
