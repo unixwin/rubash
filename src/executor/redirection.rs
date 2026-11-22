@@ -1148,7 +1148,58 @@ impl Executor {
                     self.apply_parameter_assignment_expansions_in_word(target_word);
                 }
             }
-            let target = self.expand_redirect_target(redirect);
+            let was_evalerror_pending = self.evalerror_pending.get();
+            let (target, captured_subscript_diags) =
+                crate::executor::arithmetic::with_operand_subscript_diag_capture(|| {
+                    self.expand_redirect_target(redirect)
+                });
+            if !captured_subscript_diags.is_empty() {
+                let mut stderr = Vec::new();
+                for line in &captured_subscript_diags {
+                    let _ = writeln!(&mut stderr, "{line}");
+                }
+                self.write_redirect_diagnostic_at(cmd, index, &stderr)?;
+            }
+            if self.shell_state.arithmetic_expansion_error.get()
+                || self.shell_state.arithmetic_fatal_error.get()
+            {
+                let nounset = self.shell_state.arithmetic_nounset_error.replace(false);
+                self.shell_state.arithmetic_expansion_error.set(false);
+                self.shell_state.arithmetic_fatal_error.set(false);
+                if nounset {
+                    if self.expansion_error_is_interactive_discard() {
+                        self.note_unit_expansion_error_discard();
+                        self.exit_code = 1;
+                        self.command_expansion_failed.set(true);
+                        return Err(ExecuteError::ExpansionFailure(1));
+                    }
+                    self.exit_code = 1;
+                    return Ok(Some(RedirectRejection::FatalNounset));
+                }
+                self.exit_code = 1;
+                if self.heredoc_error_command_runs_in_main_shell(cmd) {
+                    // GNU execute_cmd.c:5606 / 4268 -> redir.c:237
+                    // do_redirections -> arrayfunc.c:1388
+                    // array_expand_index -> jump_to_top_level (DISCARD):
+                    // in-process builtin/function/non-forking-null
+                    // redirections run in the main shell, so the
+                    // arithmetic evalerror discards the rest of the
+                    // current command list (eval.c:111-131) and the
+                    // reader continues at the next line.
+                    self.persist_discard_output_redirect_prefix(cmd, index)?;
+                    self.command_expansion_failed.set(true);
+                    self.evalerror_arith_pending.set(true);
+                    return Err(ExecuteError::ExpansionFailure(1));
+                }
+                // GNU execute_cmd.c:5884 (execute_disk_command) / 4244
+                // (forked execute_null_command): do_redirections runs in
+                // the forked child, where jump_to_top_level (DISCARD)
+                // exits only the child with EXECUTION_FAILURE (1)
+                // (eval.c:117-122). The parent shell continues the
+                // current command list with $?=1.
+                self.evalerror_pending.set(was_evalerror_pending);
+                return Ok(Some(RedirectRejection::Command));
+            }
             // GNU subst.c:12663-12668: failglob inside redirection_expand
             // prints `no match: WORD' (done, at the expansion) and DISCARDs
             // the command list with status 1 — the command never runs and
@@ -2139,6 +2190,30 @@ impl Executor {
         )?;
         self.write_redirect_diagnostic_at(cmd, index, &stderr)?;
         self.exit_code = 1;
+        Ok(())
+    }
+
+    /// Keep the output half of the redirect prefix that GNU has already
+    /// applied when array_expand_index longjmps out of do_redirections
+    /// (arrayfunc.c:1381-1388). The failing simple command's undo records
+    /// have not yet been put under an unwind protect, so the DISCARD path
+    /// leaves those descriptor bindings installed. Dropping the saved scope
+    /// here is intentional: this is the one path that must not undo them.
+    fn persist_discard_output_redirect_prefix(
+        &mut self,
+        cmd: &CommandNode,
+        index: usize,
+    ) -> Result<(), ExecuteError> {
+        if index == 0 {
+            return Ok(());
+        }
+        let mut prefix_cmd = cmd.clone();
+        prefix_cmd.redirects.truncate(index);
+        if prefix_cmd.redirects.is_empty() {
+            return Ok(());
+        }
+        let _leaked_redirect_state = self.open_compound_output_redirects(&prefix_cmd)?;
+        self.compound_binder_saves = None;
         Ok(())
     }
 

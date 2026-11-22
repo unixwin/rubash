@@ -147,6 +147,21 @@ pub(in crate::executor) fn take_operand_subscript_diag_capture() -> Vec<String> 
     OPERAND_SUBSCRIPT_DIAG_CAPTURE.with(|slot| slot.borrow_mut().take().unwrap_or_default())
 }
 
+/// Run `f` with the operand-subscript diagnostic capture armed, restoring any
+/// outer capture on exit, and return `(result, captured_lines)`.
+pub(in crate::executor) fn with_operand_subscript_diag_capture<T>(
+    f: impl FnOnce() -> T,
+) -> (T, Vec<String>) {
+    let saved = OPERAND_SUBSCRIPT_DIAG_CAPTURE.with(|slot| slot.borrow_mut().replace(Vec::new()));
+    let result = f();
+    let captured = OPERAND_SUBSCRIPT_DIAG_CAPTURE.with(|slot| {
+        let taken = slot.borrow_mut().take().unwrap_or_default();
+        *slot.borrow_mut() = saved;
+        taken
+    });
+    (result, captured)
+}
+
 /// Take (and clear) the evalerror record of the last evaluation.
 pub(in crate::executor) fn take_arith_eval_error() -> Option<ArithEvalError> {
     ARITH_EVAL_ERROR.with(|slot| slot.borrow_mut().take())
@@ -1762,7 +1777,11 @@ impl Executor {
         };
         // rubash#1202: an armed capture (test -v's subscript rewrite)
         // collects the line for the builtin's buffered, redirectable
-        // stderr; otherwise it goes to the raw process stderr as before.
+        // stderr. Uncaptured expansion-time diagnostics still write to fd 2
+        // as currently bound: GNU evalerror reports through internal_error
+        // (expr.c:1524-1535), whose stderr FILE writes to descriptor 2 after
+        // do_redirections/exec/group redirections have rebound it. A raw
+        // process-stderr write bypassed those bindings (rubash#4114).
         let captured = OPERAND_SUBSCRIPT_DIAG_CAPTURE.with(|slot| {
             if let Some(lines) = slot.borrow_mut().as_mut() {
                 lines.push(line.clone());
@@ -1772,9 +1791,7 @@ impl Executor {
             }
         });
         if !captured {
-            eprintln!("{line}");
-            use std::io::Write;
-            let _ = std::io::stderr().flush();
+            self.write_diagnostic_fd2(format!("{line}\n").as_bytes());
         }
     }
 

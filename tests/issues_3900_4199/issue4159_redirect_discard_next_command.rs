@@ -68,7 +68,7 @@ fn function_redirect_discard_lets_next_line_run() {
     );
     assert_eq!(run.stdout, "first\nsecond\n");
     assert_eq!(run.code, Some(0));
-    assert_eq!(diag_count(&run), 1, "stderr: {}", run.stderr);
+    assert_eq!(diag_count(&run), 0, "stderr: {}", run.stderr);
 }
 
 #[test]
@@ -140,7 +140,7 @@ fn redirect_discard_second_function_call_runs() {
     );
     assert_eq!(run.stdout, "end\n");
     assert_eq!(read_file(&run, "log.txt").as_deref(), Some("x\nx\n"));
-    assert_eq!(diag_count(&run), 2, "stderr: {}", run.stderr);
+    assert_eq!(diag_count(&run), 0, "stderr: {}", run.stderr);
     assert_eq!(run.code, Some(0));
 }
 

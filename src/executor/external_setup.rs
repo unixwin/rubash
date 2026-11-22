@@ -1714,43 +1714,46 @@ impl Executor {
                 }
             }
             if redirect.fd.unwrap_or(0) == 0 {
-                let target = self.expand_redirect_target(redirect);
-                if let Some(fd) = redirect_target_fd(&target) {
-                    // rubash#2502: an alias-SPELLING target (`< /dev/fd/N`)
-                    // whose descriptor re-opens fresh must stay a
-                    // spelling: the snapshot below materializes the
-                    // endpoint's remaining bytes and consumes them —
-                    // the dup model — but GNU's spelling is an open
-                    // (redir.c:725), and a stage-0 materialized copy
-                    // that remembers its origin file
-                    // (FdReadEndpoint::bytes_with_origin) re-opens that
-                    // file in the spawn layer's own alias dispatch
-                    // instead. `&N` dup spellings keep the snapshot:
-                    // they DO share the endpoint's stream.
-                    let spelling_reopens_fresh = !target.starts_with('&')
-                        && matches!(
-                            self.fd_table.read_endpoint(fd),
-                            Some(FdReadEndpoint::Text(_))
-                        )
-                        && self.fd_alias_reopen_path(fd).is_some();
-                    if self.fd_table.is_open_for_read(fd) && !spelling_reopens_fresh {
-                        if let Some(input) = self.virtual_fd_stdin_remaining_bytes(fd) {
-                            let path = self.write_process_substitution_temp_bytes(&input)?;
-                            let input_len = self.virtual_fd_stdin_len(fd);
-                            self.fd_table.consume_all_text(fd);
-                            self.shell_state
-                                .env_vars
-                                .insert(fd_stdin_offset_key(fd), input_len);
+                let (target, deferred_subscript_error) =
+                    self.expand_redirect_target_deferring_subscript_error(redirect);
+                if !deferred_subscript_error {
+                    if let Some(fd) = redirect_target_fd(&target) {
+                        // rubash#2502: an alias-SPELLING target (`< /dev/fd/N`)
+                        // whose descriptor re-opens fresh must stay a
+                        // spelling: the snapshot below materializes the
+                        // endpoint's remaining bytes and consumes them —
+                        // the dup model — but GNU's spelling is an open
+                        // (redir.c:725), and a stage-0 materialized copy
+                        // that remembers its origin file
+                        // (FdReadEndpoint::bytes_with_origin) re-opens that
+                        // file in the spawn layer's own alias dispatch
+                        // instead. `&N` dup spellings keep the snapshot:
+                        // they DO share the endpoint's stream.
+                        let spelling_reopens_fresh = !target.starts_with('&')
+                            && matches!(
+                                self.fd_table.read_endpoint(fd),
+                                Some(FdReadEndpoint::Text(_))
+                            )
+                            && self.fd_alias_reopen_path(fd).is_some();
+                        if self.fd_table.is_open_for_read(fd) && !spelling_reopens_fresh {
+                            if let Some(input) = self.virtual_fd_stdin_remaining_bytes(fd) {
+                                let path = self.write_process_substitution_temp_bytes(&input)?;
+                                let input_len = self.virtual_fd_stdin_len(fd);
+                                self.fd_table.consume_all_text(fd);
+                                self.shell_state
+                                    .env_vars
+                                    .insert(fd_stdin_offset_key(fd), input_len);
+                                redirect.target = shell_display_path(&path.to_string_lossy());
+                                files.inputs.push(path);
+                            }
+                            // File-backed fds keep `&N`: the spawn layer dups
+                            // the real handle (shared offset) — a path rewrite
+                            // would reopen the file at offset 0.
+                        } else if let Some(input) = self.external_fd_heredoc_input(cmd, fd) {
+                            let path = self.write_process_substitution_temp(&input)?;
                             redirect.target = shell_display_path(&path.to_string_lossy());
                             files.inputs.push(path);
                         }
-                        // File-backed fds keep `&N`: the spawn layer dups
-                        // the real handle (shared offset) — a path rewrite
-                        // would reopen the file at offset 0.
-                    } else if let Some(input) = self.external_fd_heredoc_input(cmd, fd) {
-                        let path = self.write_process_substitution_temp(&input)?;
-                        redirect.target = shell_display_path(&path.to_string_lossy());
-                        files.inputs.push(path);
                     }
                 }
             }
