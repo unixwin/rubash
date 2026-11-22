@@ -1905,7 +1905,6 @@ impl Executor {
             // bind, and symbolic write endpoints (FullDevice,
             // ProcContentWrite, PipeChannel) carry no kernel handle of
             // the referent — those keep the literal-stat fallback.
-            #[cfg(unix)]
             let stat_handle: Option<crate::fd::HANDLE> = match &entry.read {
                 Some(FdReadEndpoint::File(file)) => Some(file.handle),
                 Some(FdReadEndpoint::CoprocStdout { fd, .. }) => Some(fd.handle),
@@ -1920,7 +1919,6 @@ impl Executor {
                     _ => None,
                 },
             };
-            #[cfg(unix)]
             if let Some(handle) = stat_handle {
                 if let Some((dev, ino, sec, nsec)) = crate::fd::fd_stat_parts(handle) {
                     self.shell_state.env_vars.insert(
@@ -1928,6 +1926,13 @@ impl Executor {
                         format!("{dev} {ino} {sec} {nsec}"),
                     );
                 }
+            } else if let Some(FdReadEndpoint::ProcessSubstitution(rc) | FdReadEndpoint::Text(rc)) =
+                &entry.read
+            {
+                let ptr = std::rc::Rc::as_ptr(rc) as usize as u64;
+                self.shell_state
+                    .env_vars
+                    .insert(format!("{FD_STAT_PREFIX}{fd}"), format!("0 {ptr} 0 0"));
             }
             if let Some(target) = target {
                 self.shell_state
