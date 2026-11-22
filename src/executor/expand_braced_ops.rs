@@ -154,7 +154,7 @@ impl Executor {
             return Some(String::new());
         }
         if let Some((array_name, index)) = parse_array_integer_subscript(name) {
-            if array_name == "GROUPS" {
+            if array_name == "GROUPS" && !self.groups_shadowed() {
                 let Ok(index) = usize::try_from(index) else {
                     return Some(String::new());
                 };
@@ -273,7 +273,7 @@ impl Executor {
             .strip_suffix("[@]")
             .or_else(|| name.strip_suffix("[*]"))
         {
-            if array_name == "GROUPS" {
+            if array_name == "GROUPS" && !self.groups_shadowed() {
                 return Some(self.groups_words().join(" "));
             }
             // rubash#375: dynamic stack arrays join from the live view.
@@ -297,7 +297,7 @@ impl Executor {
             );
         }
         if let Some((array_name, index)) = parse_array_numeric_subscript(name) {
-            if array_name == "GROUPS" {
+            if array_name == "GROUPS" && !self.groups_shadowed() {
                 return Some(self.group_value_at(index).unwrap_or_default());
             }
             // rubash#375: dynamic stack arrays read the element straight

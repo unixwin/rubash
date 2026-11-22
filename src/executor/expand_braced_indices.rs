@@ -757,7 +757,7 @@ impl Executor {
             name.strip_suffix("[@]")
                 .or_else(|| name.strip_suffix("[*]"))
         }) {
-            if array_name == "GROUPS" {
+            if array_name == "GROUPS" && !self.groups_shadowed() {
                 return Some(self.groups_words().len().to_string());
             }
             let storage = self.parameter_array_storage(array_name);

@@ -62,10 +62,40 @@ impl Executor {
                 }
                 return stack;
             }
-            "BASH_ARGC" => return self.bash_argc_view(),
-            "BASH_ARGV" => return self.bash_argv_view(),
-            "BASH_LINENO" => return self.bash_lineno_view(),
-            "BASH_SOURCE" => {
+            "BASH_ARGC"
+                if !is_marked_var(
+                    &self.shell_state.env_vars,
+                    crate::executor::UNSET_DYNAMIC_VARS,
+                    "BASH_ARGC",
+                ) =>
+            {
+                return self.bash_argc_view()
+            }
+            "BASH_ARGV"
+                if !is_marked_var(
+                    &self.shell_state.env_vars,
+                    crate::executor::UNSET_DYNAMIC_VARS,
+                    "BASH_ARGV",
+                ) =>
+            {
+                return self.bash_argv_view()
+            }
+            "BASH_LINENO"
+                if !is_marked_var(
+                    &self.shell_state.env_vars,
+                    crate::executor::UNSET_DYNAMIC_VARS,
+                    "BASH_LINENO",
+                ) =>
+            {
+                return self.bash_lineno_view()
+            }
+            "BASH_SOURCE"
+                if !is_marked_var(
+                    &self.shell_state.env_vars,
+                    crate::executor::UNSET_DYNAMIC_VARS,
+                    "BASH_SOURCE",
+                ) =>
+            {
                 // Same gating as the dynamic_stack_array_values view:
                 // without a script main frame (`bash -c`, stdin
                 // scripts) the script-name bottom entry installed
@@ -965,7 +995,7 @@ impl Executor {
     }
 
     pub(in crate::executor) fn array_length(&self, name: &str) -> usize {
-        if name == "GROUPS" {
+        if name == "GROUPS" && !self.groups_shadowed() {
             return self.groups_words().len();
         }
         // rubash#375: `${#BASH_LINENO[@]}` and friends count the live view
@@ -1069,7 +1099,14 @@ impl Executor {
         // local/tempenv shadow of DIRSTACK has already given its
         // verdict through the marks and the typed cell above (a scalar
         // shadow is not an array, whatever the name's dynamic face is).
-        if resolved == "DIRSTACK" && self.dirstack_shadowed() {
+        if (resolved == "DIRSTACK" && self.dirstack_shadowed())
+            || (resolved == "GROUPS" && self.groups_shadowed())
+            || is_marked_var(
+                &self.shell_state.env_vars,
+                crate::executor::UNSET_DYNAMIC_VARS,
+                &resolved,
+            )
+        {
             return false;
         }
         crate::executor::dynamic_arrays::is_dynamic_array_name(&resolved)
@@ -1242,7 +1279,7 @@ impl Executor {
                         }
                     }
                     if let Some(array_name) = name.strip_suffix("[@]") {
-                        if array_name == "GROUPS" {
+                        if array_name == "GROUPS" && !self.groups_shadowed() {
                             // rubash#3649: this parse's result is the
                             // expansion, so commit its offset/length writes.
                             self.queue_pending_subscript_writes(writes);
@@ -1347,7 +1384,7 @@ impl Executor {
         if let Some(values) = self.indirect_array_reference_word_values(word, quoted_array_word) {
             return Some(values);
         }
-        if quoted_array_word && word == "${GROUPS[*]}" {
+        if quoted_array_word && word == "${GROUPS[*]}" && !self.groups_shadowed() {
             return Some(vec![self
                 .groups_words()
                 .join(&self.ifs_first_char_separator())]);
@@ -1414,7 +1451,7 @@ impl Executor {
                     .or_else(|| word.strip_suffix("[*]}"))
             }
         })?;
-        if name == "GROUPS" {
+        if name == "GROUPS" && !self.groups_shadowed() {
             return Some(self.groups_words());
         }
         let storage = self.parameter_array_storage(name)?;

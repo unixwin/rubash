@@ -2102,7 +2102,7 @@ impl Executor {
             }
             _ => {}
         }
-        if name == "GROUPS" {
+        if name == "GROUPS" && !self.groups_shadowed() {
             return Some(format_indexed_array_storage(
                 self.groups_words().into_iter().enumerate().collect(),
             ));
@@ -2581,6 +2581,14 @@ impl Executor {
                 .iter()
                 .any(|scope| scope.contains_key("DIRSTACK"))
             || is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, "DIRSTACK")
+    }
+
+    /// Whether `GROUPS` is currently severed (imported as a scalar or
+    /// lifetime-unset via `UNSET_DYNAMIC_VARS`, GNU `variables.c:1255` /
+    /// `3839`) or shadowed by a local/tempenv binding.
+    pub(in crate::executor) fn groups_shadowed(&self) -> bool {
+        self.dynamic_name_shadowed("GROUPS")
+            || is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, "GROUPS")
     }
 
     /// Materializes the DIRSTACK array cell from the live directory stack.
