@@ -1326,6 +1326,21 @@ fn copy_dollar_paren_body_raw_cursor<'a>(out: &mut String, rest: &'a str) -> &'a
             prev_sig = Some(ch);
         }
         match ch {
+            '$' if rest.as_bytes().get(idx) == Some(&b'{')
+                && rest
+                    .as_bytes()
+                    .get(idx + 1)
+                    .is_some_and(|b| matches!(b, b' ' | b'\t' | b'\n' | b'|')) =>
+            {
+                if let Some(len) = super::alias_stream::skip_funsub_body_byte_len(&rest[idx..]) {
+                    out.push_str(&rest[idx..idx + len]);
+                    idx += len;
+                    word.push('\u{1}');
+                    word_boundary = false;
+                    token_boundary = false;
+                    continue;
+                }
+            }
             '$' if rest.as_bytes().get(idx) == Some(&b'\'') => {
                 idx += 1;
                 out.push('\'');
@@ -3042,6 +3057,29 @@ fn copy_dollar_paren_body_raw(
             prev_sig = Some(ch);
         }
         match ch {
+            '$' if chars.peek() == Some(&'{') => {
+                // rubash#4031 graft: bounded lookahead for the FUNSUB_CHAR
+                // predicate (see embedded_parameters.rs) — no full collect
+                // of the remaining input for ordinary `${...}`.
+                let mut lookahead = chars.clone();
+                let funsub_open = lookahead.next() == Some('{')
+                    && lookahead
+                        .next()
+                        .is_some_and(|c| matches!(c, ' ' | '\t' | '\n' | '|'));
+                if funsub_open {
+                    let remaining: String = chars.clone().collect();
+                    if let Some(len) = super::alias_stream::skip_funsub_body_byte_len(&remaining) {
+                        out.push_str(&remaining[..len]);
+                        for _ in remaining[..len].chars() {
+                            chars.next();
+                        }
+                        word.push('\u{1}');
+                        word_boundary = false;
+                        token_boundary = false;
+                        continue;
+                    }
+                }
+            }
             '$' if chars.peek() == Some(&'\'') => {
                 chars.next();
                 out.push('\'');

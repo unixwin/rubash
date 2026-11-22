@@ -149,6 +149,7 @@ src/executor/embedded_parameters.rs | L3 | replace:PROTECTED_BACKSLASH | owner r
 src/executor/embedded_parameters.rs | L3 | replace:PROTECTED_BACKSLASH_STR | carrier-to-carrier re-encoding inside the owning walker; bare-carrier invariant as the restore chains
 src/executor/embedded_parameters.rs | L3 | replace:PROTECTED_LITERAL_BACKSLASH | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
 src/executor/embedded_parameters.rs | L3 | replace:PROTECTED_LITERAL_DOLLAR | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/embedded_parameters.rs | L2 | \\u\{0*1\} | inert placeholder byte in the reserved-word shadow copy (domain-local 0x01; not the readline PROMPT_IGNORE_START protocol)
 src/executor/env_helpers.rs | L1 | \\u\{0*E000\} | test data: expected values / probe inputs spelled with marker literals in test code
 src/executor/env_helpers.rs | L1 | \\u\{0*E01C\} | test data: expected values / probe inputs spelled with marker literals in test code
 src/executor/env_helpers.rs | L1 | \\u\{0*E314\} | test data: expected values / probe inputs spelled with marker literals in test code
