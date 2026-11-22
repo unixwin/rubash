@@ -696,7 +696,14 @@ impl Executor {
             .into_iter()
             .flatten(),
         ) {
-            if redirect.kind == crate::parser::RedirectKind::HereDoc {
+            if matches!(
+                redirect.kind,
+                crate::parser::RedirectKind::HereDoc | crate::parser::RedirectKind::HereString
+            ) {
+                // GNU redir.c:348 heredoc_expand handles both HereDoc and
+                // HereString inside preexpand_command_stdin (with the fork
+                // boundary for external commands at execute_cmd.c:5522);
+                // redir.c:298 redirection_expand covers filename redirects only.
                 continue;
             }
             let target = redirect.target.as_str();
