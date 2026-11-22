@@ -3046,7 +3046,13 @@ fn append_literal_glob_text(output: &mut String, text: &str) {
         // escape skips, lib/glob/sm_loop.c:676 PATSCAN) treat `\(`,
         // `\)`, `\|` as the literal characters, in both the extglob and
         // the plain pattern matcher.
-        if matches!(ch, '*' | '?' | '[' | '\\' | '(' | ')' | '|') {
+        // rubash#4126: `]` and `-` belong to the same set (glob_char_p
+        // covers both): a quoted `]` left bare closed a bracket
+        // expression before its real members were read, and a quoted
+        // `-` between two members became a range. The shared bracket
+        // parser's escape arm reads `\]` / `\-` as literal members,
+        // so escaping them here is the same spelling as the rest.
+        if matches!(ch, '*' | '?' | '[' | '\\' | '(' | ')' | '|' | ']' | '-') {
             output.push('\\');
         }
         output.push(ch);

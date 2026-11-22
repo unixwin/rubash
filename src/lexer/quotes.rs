@@ -2263,7 +2263,7 @@ fn copy_braced_parameter_with_ansi_c_cursor<'a>(out: &mut String, rest: &'a str)
 /// Cursor form of `remove_double_quoted_into` (rest just inside the opening
 /// `"`; returns the remainder just past the closing `"` or, if unterminated,
 /// an empty slice). Trigger bytes inside double quotes: `"`, `$`, `\`, `'`,
-/// the glob set `* ? [ @ + !`, and `` ` `` when backtick bodies must be
+/// the glob set `* ? [ ] - @ + !`, and `` ` `` when backtick bodies must be
 /// preserved.
 pub(crate) fn remove_double_quoted_into_cursor<'a>(
     out: &mut String,
@@ -2365,7 +2365,12 @@ pub(crate) fn remove_double_quoted_into_cursor<'a>(
                 out.push(crate::executor::markers::DATA_SQUOTE);
                 rest = &rest[1..];
             }
-            b @ (b'*' | b'?' | b'[' | b'@' | b'+' | b'!') => {
+            // rubash#4126: `]` and `-` are glob-significant inside a
+            // bracket expression (closer / range operator), so a quoted
+            // one must carry the same CTLESC literal mark as the rest of
+            // the set — left bare, `[a"]"b]` closed at the quoted `]`
+            // and `[a"-"z]` read the quoted `-` as a range.
+            b @ (b'*' | b'?' | b'[' | b']' | b'-' | b'@' | b'+' | b'!') => {
                 pending_name = false;
                 out.push(crate::executor::markers::CTLESC);
                 out.push(char::from(b));
@@ -2381,7 +2386,17 @@ pub(crate) fn remove_double_quoted_into_cursor<'a>(
                     let b = bytes[idx];
                     if matches!(
                         b,
-                        b'"' | b'$' | b'\\' | b'\'' | b'*' | b'?' | b'[' | b'@' | b'+' | b'!'
+                        b'"' | b'$'
+                            | b'\\'
+                            | b'\''
+                            | b'*'
+                            | b'?'
+                            | b'['
+                            | b']'
+                            | b'-'
+                            | b'@'
+                            | b'+'
+                            | b'!'
                     ) || (preserve_backticks && b == b'`')
                     {
                         break;
@@ -2639,7 +2654,7 @@ fn remove_double_quoted_into(
                 pending_name = false;
                 out.push(crate::executor::markers::DATA_SQUOTE);
             }
-            _ if matches!(quoted, '*' | '?' | '[' | '@' | '+' | '!') => {
+            _ if matches!(quoted, '*' | '?' | '[' | ']' | '-' | '@' | '+' | '!') => {
                 pending_name = false;
                 out.push(crate::executor::markers::CTLESC);
                 out.push(quoted);
