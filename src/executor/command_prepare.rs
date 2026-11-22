@@ -2993,7 +2993,14 @@ impl Executor {
         // Vec+String allocation off words that can never brace-expand.
         let raw_has_braces = raw
             .is_some_and(|r| r.contains('{') && crate::expand::braces::expand_braces(r).len() > 1);
-        if (!quoted_whole_word || raw_has_braces) && raw.is_some() && self.is_brace_expand_enabled()
+        // GNU subst.c:12727-12732 brace_expand_word_list: a W_COMPASSIGN|W_ASSIGNARG
+        // word (`declare e=({1..3})`) must NOT undergo outer brace expansion at
+        // command-word time; its element list is brace-expanded inside
+        // expand_compound_array_assignment -> expand_words_no_vars (rubash#3970).
+        if !compound_assignment_operand_word(cmd, index, word)
+            && (!quoted_whole_word || raw_has_braces)
+            && raw.is_some()
+            && self.is_brace_expand_enabled()
         // GNU runs brace expansion before parameter expansion, so a
         // dollar-brace in the word does not suppress it: the dollar-brace
         // body is skipped by the brace scanner (foo{bar,${var.} splits).

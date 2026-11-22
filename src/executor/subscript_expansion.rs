@@ -1230,6 +1230,53 @@ impl Executor {
         };
         let tokens: Vec<String> =
             crate::executor::assignment_helpers::split_storage_words(&body).collect();
+        // GNU arrayfunc.c:557-610 expand_compound_array_assignment ->
+        // expand_words_no_vars -> subst.c:13250 brace_expand_word_list:
+        // indexed compound-declare elements undergo brace expansion before
+        // parameter/command/pathname expansion (assoc returns early at
+        // arrayfunc.c:594-599 without expand_words_no_vars, rubash#3970).
+        let tokens: Vec<String> = if !assoc
+            && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "braceexpand")
+        {
+            let mut expanded_tokens: Vec<String> = Vec::new();
+            for token in tokens {
+                if token.starts_with(ARRAY_FIELD_SPLIT_MARKER)
+                    || token.starts_with(STORAGE_WORD_PREFIX)
+                {
+                    expanded_tokens.push(token);
+                    continue;
+                }
+                for product in crate::expand::braces::expand_braces_tagged(&token) {
+                    // rubash#3969, declare face: GNU's storage-side rescan
+                    // (expand_words_no_vars -> expand_word_internal's `` ` ``
+                    // case, subst.c:11568-11593) reaches the same verdict the
+                    // command-word layer reports for plain compounds — a
+                    // brace product carrying an unclosed backquote is an
+                    // expand_word_error abandoning the whole assignment.
+                    // The generic latch consumers for this command already
+                    // ran (the verdict is raised inside the builtin), so
+                    // consume the latch on the spot and arm the reader-level
+                    // DISCARD, mirroring command_execute.rs's redirect
+                    // pre-pass.
+                    if let Some(index) =
+                        crate::expand::braces::unclosed_backquote_index(&product.text)
+                    {
+                        self.report_brace_product_backquote_failure(&product.text[index..]);
+                        self.shell_state.parameter_bad_substitution.set(false);
+                        self.shell_state.bad_substitution_discard_only.set(false);
+                        self.shell_state.bad_substitution_reported.set(false);
+                        self.raise_evalerror_abort();
+                        return Err("()".to_string());
+                    }
+                    if !product.text.is_empty() || product.sequence_null {
+                        expanded_tokens.push(product.text);
+                    }
+                }
+            }
+            expanded_tokens
+        } else {
+            tokens
+        };
         let mut elements: Vec<String> = Vec::new();
 
         if assoc {
