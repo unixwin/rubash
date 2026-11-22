@@ -4549,6 +4549,167 @@ pub fn unclosed_comsub_eof_shape(
     ))
 }
 
+/// Locate the innermost unclosed `${<funsub_char>...` body in `input`
+/// (GNU `parse_comsub`, `parse.y:4472-4490`: `FUNSUB_CHAR` is blank,
+/// newline, or `|`). Returns `(body_start_byte, body_start_line)`
+/// where `body_start_byte` is right after `${<char>` (or right at `\n`
+/// for `${\n...` so line numbers match `parse.y:4482-4483`).
+pub fn unclosed_funsub_body_start(input: &str) -> Option<(usize, usize)> {
+    let chars: Vec<char> = input.chars().collect();
+    let mut i = 0usize;
+    let mut line = 1usize;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    let mut token_boundary = true;
+    let mut last_unclosed: Option<(usize, usize)> = None;
+
+    while i < chars.len() {
+        let ch = chars[i];
+        if escaped {
+            escaped = false;
+            token_boundary = false;
+            if ch == '\n' {
+                line += 1;
+            }
+            i += 1;
+            continue;
+        }
+        if single {
+            if ch == '\'' {
+                single = false;
+            } else if ch == '\n' {
+                line += 1;
+            }
+            i += 1;
+            continue;
+        }
+        if double {
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                double = false;
+            } else if ch == '\n' {
+                line += 1;
+            } else if ch == '`' {
+                i += 1;
+                while i < chars.len() {
+                    match chars[i] {
+                        '\\' => {
+                            i += 1;
+                            if chars.get(i) == Some(&'\n') {
+                                line += 1;
+                            }
+                        }
+                        '`' => break,
+                        '\n' => line += 1,
+                        _ => {}
+                    }
+                    i += 1;
+                }
+            } else if ch == '$'
+                && chars.get(i + 1) == Some(&'{')
+                && matches!(chars.get(i + 2), Some(' ' | '\t' | '\n' | '|'))
+            {
+                if let Some(end) = super::alias_stream::skip_funsub_body(&chars, i + 1) {
+                    line += chars[i..end].iter().filter(|&&c| c == '\n').count();
+                    i = end;
+                    continue;
+                }
+                let body_char_idx = if chars.get(i + 2) == Some(&'\n') {
+                    i + 2
+                } else {
+                    i + 3
+                };
+                last_unclosed = Some((body_char_idx, line));
+                double = false;
+                token_boundary = true;
+                i = body_char_idx;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+
+        match ch {
+            '\\' => {
+                escaped = true;
+                token_boundary = false;
+            }
+            '\'' => {
+                single = true;
+                token_boundary = false;
+            }
+            '"' => {
+                double = true;
+                token_boundary = false;
+            }
+            '\n' => {
+                line += 1;
+                token_boundary = true;
+            }
+            '#' if token_boundary => {
+                while i + 1 < chars.len() && chars[i + 1] != '\n' {
+                    i += 1;
+                }
+            }
+            '`' => {
+                i += 1;
+                while i < chars.len() {
+                    match chars[i] {
+                        '\\' => {
+                            i += 1;
+                            if chars.get(i) == Some(&'\n') {
+                                line += 1;
+                            }
+                        }
+                        '`' => break,
+                        '\n' => line += 1,
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                token_boundary = false;
+            }
+            '$' if chars.get(i + 1) == Some(&'{')
+                && matches!(chars.get(i + 2), Some(' ' | '\t' | '\n' | '|')) =>
+            {
+                if let Some(end) = super::alias_stream::skip_funsub_body(&chars, i + 1) {
+                    line += chars[i..end].iter().filter(|&&c| c == '\n').count();
+                    i = end;
+                    token_boundary = false;
+                    continue;
+                }
+                let body_char_idx = if chars.get(i + 2) == Some(&'\n') {
+                    i + 2
+                } else {
+                    i + 3
+                };
+                last_unclosed = Some((body_char_idx, line));
+                token_boundary = true;
+                i = body_char_idx;
+                continue;
+            }
+            ' ' | '\t' | ';' | '&' | '|' | '(' | ')' | '<' | '>' => {
+                token_boundary = true;
+            }
+            _ => {
+                token_boundary = false;
+            }
+        }
+        i += 1;
+    }
+
+    last_unclosed.map(|(body_char_idx, body_line)| {
+        let byte = input
+            .char_indices()
+            .nth(body_char_idx)
+            .map(|(b, _)| b)
+            .unwrap_or(input.len());
+        (byte, body_line)
+    })
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum OpenerKind {
     /// `$(`

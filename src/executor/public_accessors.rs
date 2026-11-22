@@ -623,7 +623,7 @@ impl Executor {
     /// the error's line, read from the reader unit text the driver
     /// parks on the shell state (see [`Self::comsub_body_echo_source`]);
     /// routes with no parked unit text keep the stored body fragment.
-    pub(in crate::executor) fn report_comsub_body_parse_error(
+    pub(crate) fn report_comsub_body_parse_error(
         &self,
         cmd: &crate::parser::CommandNode,
         body_text: Option<&str>,
