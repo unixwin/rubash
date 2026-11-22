@@ -1644,6 +1644,11 @@ impl Executor {
         if spans.is_empty() {
             return None;
         }
+        // GNU subst.c:10278: a bad substitution in any fragment of the
+        // assignment RHS names the whole RHS word, not the post-comsub
+        // suffix slice.
+        let _diag_word =
+            crate::executor::expand_word::PendingDiagnosticWordGuard::new(&value, false);
         let mut word = ExpandedWord::default();
         let mut cursor = 0usize;
         for span in spans {
@@ -1692,6 +1697,11 @@ impl Executor {
                 ),
             )
             .replace(crate::executor::markers::IFS_GLUE, "");
+            if self.shell_state.parameter_bad_substitution.get()
+                || self.no_closing_brace_failure.get()
+            {
+                return Some(String::new());
+            }
             // Walker output is storage-domain text, not source text: its
             // raw-byte marker pairs are transport for payload bytes. GNU's
             // quoted-context splice re-escapes expansion output uniformly

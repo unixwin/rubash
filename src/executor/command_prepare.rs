@@ -3046,6 +3046,11 @@ impl Executor {
                     } else {
                         values.extend(self.expand_command_word(cmd, index, &product.text, None));
                     }
+                    if self.shell_state.parameter_bad_substitution.get()
+                        || self.no_closing_brace_failure.get()
+                    {
+                        break;
+                    }
                 }
                 return values;
             }
