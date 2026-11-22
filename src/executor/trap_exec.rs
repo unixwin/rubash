@@ -1628,30 +1628,59 @@ impl Executor {
         // parse mode is the live one — the plain tokenize() default
         // (posix off) would freeze parse-time verdicts (e.g. the `time`
         // dash-word rule, parse.y:3286) under the wrong mode.
-        let mut tokens =
-            crate::lexer::tokenize_with_initial_posix(source, self.posix_mode_enabled());
-        // GNU eval reports errors with the caller line numbering:
-        // the string lines continue the script line counter
-        // (posix2.tests: "eval: line 199: syntax error ...").
-        if caller_line > 1 {
-            for token in tokens.iter_mut() {
-                token.position += caller_line - 1;
-                // rubash#3605: end_position shares position's line space.
-                token.end_position += caller_line - 1;
-                // rubash#3605: the gather end line shifts in lockstep
-                // (see script_driver.rs).
-                token.heredoc_end_line = token.heredoc_end_line.map(|line| line + caller_line - 1);
-            }
-        }
-        let mut ast = crate::parser::parse_with_options(
-            &tokens,
-            crate::parser::ParseLoopOptions {
-                stray_close_is_error: true,
-                diagnostic_text: None,
-                source_text: Some(source.into()),
-                source_line_offset: caller_line.saturating_sub(1),
-            },
+        // rubash#2828: bounded content-keyed parse cache. The key carries
+        // the exact (already alias-spliced) bytes the tokenize sees plus
+        // every parser-affecting input — caller line offset, posix mode,
+        // the ambient extglob gate, expand_aliases, and the alias-table
+        // generation — so a repeated `eval "$x"` re-executes the AST
+        // instead of re-tokenizing and re-parsing, while an alias
+        // mutation between two identical strings can never serve a stale
+        // expansion.
+        let (posix_mode, extglob_gate, aliases_enabled, alias_generation) =
+            self.runtime_parse_state();
+        let cache_key = RuntimeParseCacheKey::eval(
+            source,
+            caller_line.saturating_sub(1),
+            posix_mode,
+            extglob_gate,
+            aliases_enabled,
+            alias_generation,
         );
+        let mut ast = match self.runtime_parse_lookup(&cache_key) {
+            Some(ast) => ast,
+            None => {
+                let mut tokens = crate::lexer::tokenize_with_initial_posix(source, posix_mode);
+                // GNU eval reports errors with the caller line numbering:
+                // the string lines continue the script line counter
+                // (posix2.tests: "eval: line 199: syntax error ...").
+                if caller_line > 1 {
+                    for token in tokens.iter_mut() {
+                        token.position += caller_line - 1;
+                        // rubash#3605: end_position shares position's line space.
+                        token.end_position += caller_line - 1;
+                        // rubash#3605: the gather end line shifts in lockstep
+                        // (see script_driver.rs).
+                        token.heredoc_end_line =
+                            token.heredoc_end_line.map(|line| line + caller_line - 1);
+                    }
+                }
+                let ast = crate::parser::parse_with_options(
+                    &tokens,
+                    crate::parser::ParseLoopOptions {
+                        stray_close_is_error: true,
+                        diagnostic_text: None,
+                        source_text: Some(source.into()),
+                        source_line_offset: caller_line.saturating_sub(1),
+                    },
+                );
+                self.runtime_parse_store(cache_key, &ast);
+                ast
+            }
+        };
+        // Graft resolution (#4078 x #4071): the PR's cache block above,
+        // the redirect application in #4071's conditional form — the
+        // function now returns (Result, bool, bool), so the PR's bare
+        // `?` would not compile here.
         if wrap_redirects {
             if let Err(err) = self.apply_command_output_redirects(cmd, &mut ast) {
                 return (Err(err), false, false);
@@ -2007,20 +2036,41 @@ impl Executor {
             .shell_state
             .env_vars
             .insert("__RUBASH_TRAP_CONTEXT".to_string(), "exit trap".to_string());
-        let tokens = crate::lexer::tokenize(&action);
-        // rubash#3328: GNU trap.c:1071 parse_and_execute reads the
-        // action string as parser input, so parser_error echoes the
-        // action's own line verbatim (error.c:300-316) — thread the
-        // string as the diagnostic source instead of the bare parse(),
-        // whose token-join fallback re-serializes it (`echo inaction
-        // ; echo (` for `echo inaction; echo (`).
-        let mut ast = crate::parser::parse_with_options(
-            &tokens,
-            crate::parser::ParseLoopOptions {
-                source_text: Some(action.as_str().into()),
-                ..Default::default()
-            },
+        // rubash#2828: bounded content-keyed parse cache (see the eval
+        // site above). An EXIT action fires once per shell exit but can
+        // be re-set and re-fired by nested runners — identical text +
+        // state reuses the AST.
+        let (posix_mode, extglob_gate, aliases_enabled, alias_generation) =
+            self.runtime_parse_state();
+        let cache_key = RuntimeParseCacheKey::trap(
+            &action,
+            0,
+            posix_mode,
+            extglob_gate,
+            aliases_enabled,
+            alias_generation,
         );
+        let mut ast = match self.runtime_parse_lookup(&cache_key) {
+            Some(ast) => ast,
+            None => {
+                let tokens = crate::lexer::tokenize(&action);
+                // rubash#3328: GNU trap.c:1071 parse_and_execute reads the
+                // action string as parser input, so parser_error echoes the
+                // action's own line verbatim (error.c:300-316) — thread the
+                // string as the diagnostic source instead of the bare parse(),
+                // whose token-join fallback re-serializes it (`echo inaction
+                // ; echo (` for `echo inaction; echo (`).
+                let ast = crate::parser::parse_with_options(
+                    &tokens,
+                    crate::parser::ParseLoopOptions {
+                        source_text: Some(action.as_str().into()),
+                        ..Default::default()
+                    },
+                );
+                self.runtime_parse_store(cache_key, &ast);
+                ast
+            }
+        };
         // rubash#3641: an unclosed matched pair the lexer folded into
         // word text leaves this re-parse marker-free — run only the
         // complete prefix GNU's parse_and_execute loop would have
@@ -2274,15 +2324,33 @@ impl Executor {
             "__RUBASH_TRAP_CONTEXT".to_string(),
             "debug trap".to_string(),
         );
-        let (mut ast, mut ast_base) = {
+        // rubash#2828: the single-slot cache key now carries the ambient
+        // extglob gate and the alias-table state alongside the spliced
+        // text — a `shopt`/`alias` change between two firings of the same
+        // action text must re-parse rather than serve the stale AST. The
+        // cell also records the gate the miss path's tokenize left
+        // behind, replayed on a hit (the lexer's line-loop flips the
+        // global for a top-level `shopt -s extglob` in the action).
+        let entry_extglob_gate = crate::lexer::parse_extended_glob();
+        let entry_alias_enabled = self.alias_expansion_enabled();
+        let entry_alias_generation = self.shell_state.alias_generation;
+        let (mut ast, mut ast_base, cache_key, post_parse_gate) = {
             let taken = self.debug_trap_action_cache.borrow_mut().take();
             match taken {
-                Some((key, cached_ast, base)) if key == action => (cached_ast, base),
+                Some((key, cached_ast, base, stored_gate))
+                    if key.action == action
+                        && key.extglob == entry_extglob_gate
+                        && key.alias_expansion_enabled == entry_alias_enabled
+                        && key.alias_generation == entry_alias_generation =>
+                {
+                    crate::lexer::set_parse_extended_glob(stored_gate);
+                    (cached_ast, base, key, stored_gate)
+                }
                 _ => {
                     let tokens = crate::lexer::tokenize(&action);
                     // rubash#3328: thread the spliced action as the
                     // diagnostic source (same shape as the EXIT-trap
-                    // site): the bare parse() re-serialized the echo line.
+                    // site): the bare parse() re-serializes the echo line.
                     let ast = crate::parser::parse_with_options(
                         &tokens,
                         crate::parser::ParseLoopOptions {
@@ -2290,7 +2358,13 @@ impl Executor {
                             ..Default::default()
                         },
                     );
-                    (ast, 1)
+                    let key = DebugTrapCacheKey {
+                        action: action.clone(),
+                        extglob: entry_extglob_gate,
+                        alias_expansion_enabled: entry_alias_enabled,
+                        alias_generation: entry_alias_generation,
+                    };
+                    (ast, 1, key, crate::lexer::parse_extended_glob())
                 }
             }
         };
@@ -2345,7 +2419,8 @@ impl Executor {
         // verdict-fired action caches nothing: its stored AST is the
         // complete prefix, not the action's own parse (rubash#3641).
         if trap_eof_diag.is_none() {
-            *self.debug_trap_action_cache.borrow_mut() = Some((action, ast, ast_base));
+            *self.debug_trap_action_cache.borrow_mut() =
+                Some((cache_key, ast, ast_base, post_parse_gate));
         }
         self.resume_alias_streamed(saved_alias_streamed);
         // rubash#546 (cell 2): when the firing happened inside a trap
@@ -2440,29 +2515,51 @@ impl Executor {
             "__RUBASH_TRAP_CONTEXT".to_string(),
             "return trap".to_string(),
         );
-        let tokens = crate::lexer::tokenize_with_initial_posix_and_line(
+        // rubash#2828: bounded content-keyed parse cache. The caller
+        // line anchors the parse (source_line_offset), so it is part of
+        // the key — a RETURN action firing from different call lines
+        // parses per anchor but a stable (action, line, state) triple
+        // reuses the AST.
+        let (posix_mode, extglob_gate, aliases_enabled, alias_generation) =
+            self.runtime_parse_state();
+        let cache_key = RuntimeParseCacheKey::trap(
             &action,
-            false,
-            call_line.unwrap_or(1),
+            call_line.unwrap_or(1).saturating_sub(1),
+            posix_mode,
+            extglob_gate,
+            aliases_enabled,
+            alias_generation,
         );
-        // rubash#3328: thread the action as the diagnostic source
-        // (same shape as the EXIT-trap site): GNU _run_trap_internal
-        // parses the action string as fresh input, so the echo line
-        // is the action's own line verbatim, not a token-join rebuild.
-        let mut ast = crate::parser::parse_with_options(
-            &tokens,
-            crate::parser::ParseLoopOptions {
-                source_text: Some(action.as_str().into()),
-                // Token positions are absolute (start_line-anchored), so
-                // the parse must know the same shift to map them back
-                // onto action-text lines and to compute the physical EOF
-                // line — same contract as the eval runner above
-                // (trap.c:_run_trap_internal parses the action at the
-                // caller's line_number).
-                source_line_offset: call_line.unwrap_or(1).saturating_sub(1),
-                ..Default::default()
-            },
-        );
+        let mut ast = match self.runtime_parse_lookup(&cache_key) {
+            Some(ast) => ast,
+            None => {
+                let tokens = crate::lexer::tokenize_with_initial_posix_and_line(
+                    &action,
+                    false,
+                    call_line.unwrap_or(1),
+                );
+                // rubash#3328: thread the action as the diagnostic source
+                // (same shape as the EXIT-trap site): GNU _run_trap_internal
+                // parses the action string as fresh input, so the echo line
+                // is the action's own line verbatim, not a token-join rebuild.
+                let ast = crate::parser::parse_with_options(
+                    &tokens,
+                    crate::parser::ParseLoopOptions {
+                        source_text: Some(action.as_str().into()),
+                        // Token positions are absolute (start_line-anchored), so
+                        // the parse must know the same shift to map them back
+                        // onto action-text lines and to compute the physical EOF
+                        // line — same contract as the eval runner above
+                        // (trap.c:_run_trap_internal parses the action at the
+                        // caller's line_number).
+                        source_line_offset: call_line.unwrap_or(1).saturating_sub(1),
+                        ..Default::default()
+                    },
+                );
+                self.runtime_parse_store(cache_key, &ast);
+                ast
+            }
+        };
         // rubash#3641: an unclosed matched pair the lexer folded into
         // word text leaves this re-parse marker-free — run only the
         // complete prefix GNU's parse_and_execute loop would have
@@ -3158,18 +3255,39 @@ impl Executor {
                     "trap".to_string()
                 },
             );
-            let tokens = crate::lexer::tokenize(&action);
-            // rubash#3328: thread the action as the diagnostic source
-            // (same shape as the EXIT-trap site): GNU trap.c:496 runs
-            // the action through parse_and_execute, so the echo line
-            // is the action's own line verbatim.
-            let mut ast = crate::parser::parse_with_options(
-                &tokens,
-                crate::parser::ParseLoopOptions {
-                    source_text: Some(action.as_str().into()),
-                    ..Default::default()
-                },
+            // rubash#2828: bounded content-keyed parse cache — a signal
+            // trap fires the same action text on every delivery, so the
+            // AST is reused until the text or a parser-affecting input
+            // (alias table, expand_aliases, posix, extglob gate) changes.
+            let (posix_mode, extglob_gate, aliases_enabled, alias_generation) =
+                self.runtime_parse_state();
+            let cache_key = RuntimeParseCacheKey::trap(
+                &action,
+                0,
+                posix_mode,
+                extglob_gate,
+                aliases_enabled,
+                alias_generation,
             );
+            let mut ast = match self.runtime_parse_lookup(&cache_key) {
+                Some(ast) => ast,
+                None => {
+                    let tokens = crate::lexer::tokenize(&action);
+                    // rubash#3328: thread the action as the diagnostic source
+                    // (same shape as the EXIT-trap site): GNU trap.c:496 runs
+                    // the action through parse_and_execute, so the echo line
+                    // is the action's own line verbatim.
+                    let ast = crate::parser::parse_with_options(
+                        &tokens,
+                        crate::parser::ParseLoopOptions {
+                            source_text: Some(action.as_str().into()),
+                            ..Default::default()
+                        },
+                    );
+                    self.runtime_parse_store(cache_key, &ast);
+                    ast
+                }
+            };
             // rubash#3641: an unclosed matched pair the lexer folded into
             // word text leaves this re-parse marker-free — run only the
             // complete prefix GNU's parse_and_execute loop would have
@@ -4020,26 +4138,46 @@ impl Executor {
             "__RUBASH_TRAP_CONTEXT".to_string(),
             "error trap".to_string(),
         );
-        let tokens = crate::lexer::tokenize_with_initial_posix_and_line(
+        // rubash#2828: bounded content-keyed parse cache — the failed
+        // command's line anchors the parse (source_line_offset), so it
+        // is part of the key like the RETURN runner's call line.
+        let (posix_mode, extglob_gate, aliases_enabled, alias_generation) =
+            self.runtime_parse_state();
+        let cache_key = RuntimeParseCacheKey::trap(
             &action,
-            false,
-            failed_line.unwrap_or(1),
+            failed_line.unwrap_or(1).saturating_sub(1),
+            posix_mode,
+            extglob_gate,
+            aliases_enabled,
+            alias_generation,
         );
-        // rubash#3328: thread the spliced action as the diagnostic
-        // source (same shape as the EXIT-trap site): the bare parse()
-        // re-serialized the echo line.
-        let mut ast = crate::parser::parse_with_options(
-            &tokens,
-            crate::parser::ParseLoopOptions {
-                source_text: Some(action.as_str().into()),
-                // Same start_line-anchored contract as the RETURN runner:
-                // the physical EOF line is source_line_offset + the
-                // action's newline count + 1, so the offset must be
-                // failed_line - 1 for GNU's `line N+1` EOF diagnostic.
-                source_line_offset: failed_line.unwrap_or(1).saturating_sub(1),
-                ..Default::default()
-            },
-        );
+        let mut ast = match self.runtime_parse_lookup(&cache_key) {
+            Some(ast) => ast,
+            None => {
+                let tokens = crate::lexer::tokenize_with_initial_posix_and_line(
+                    &action,
+                    false,
+                    failed_line.unwrap_or(1),
+                );
+                // rubash#3328: thread the spliced action as the diagnostic
+                // source (same shape as the EXIT-trap site): the bare parse()
+                // re-serialized the echo line.
+                let ast = crate::parser::parse_with_options(
+                    &tokens,
+                    crate::parser::ParseLoopOptions {
+                        source_text: Some(action.as_str().into()),
+                        // Same start_line-anchored contract as the RETURN runner:
+                        // the physical EOF line is source_line_offset + the
+                        // action's newline count + 1, so the offset must be
+                        // failed_line - 1 for GNU's `line N+1` EOF diagnostic.
+                        source_line_offset: failed_line.unwrap_or(1).saturating_sub(1),
+                        ..Default::default()
+                    },
+                );
+                self.runtime_parse_store(cache_key, &ast);
+                ast
+            }
+        };
         // rubash#3641: an unclosed matched pair the lexer folded into
         // word text leaves this re-parse marker-free — run only the
         // complete prefix GNU's parse_and_execute loop would have
@@ -4178,15 +4316,35 @@ impl Executor {
         // EXIT-trap site): the bare parse() re-serialized the echo line.
         let action_source: std::rc::Rc<str> = action.as_str().into();
         let mut result: Result<(), ExecuteError> = Ok(());
+        // rubash#2828: bounded content-keyed parse cache — pending CHLD
+        // notifications re-fire the same action text; the first firing
+        // parses, the rest reuse.
+        let (posix_mode, extglob_gate, aliases_enabled, alias_generation) =
+            self.runtime_parse_state();
+        let cache_key = RuntimeParseCacheKey::trap(
+            &action,
+            0,
+            posix_mode,
+            extglob_gate,
+            aliases_enabled,
+            alias_generation,
+        );
         loop {
-            let tokens = crate::lexer::tokenize(&action);
-            let mut ast = crate::parser::parse_with_options(
-                &tokens,
-                crate::parser::ParseLoopOptions {
-                    source_text: Some(action_source.clone()),
-                    ..Default::default()
-                },
-            );
+            let mut ast = match self.runtime_parse_lookup(&cache_key) {
+                Some(ast) => ast,
+                None => {
+                    let tokens = crate::lexer::tokenize(&action);
+                    let ast = crate::parser::parse_with_options(
+                        &tokens,
+                        crate::parser::ParseLoopOptions {
+                            source_text: Some(action_source.clone()),
+                            ..Default::default()
+                        },
+                    );
+                    self.runtime_parse_store(cache_key.clone(), &ast);
+                    ast
+                }
+            };
             // rubash#3641: an unclosed matched pair the lexer folded into
             // word text leaves this re-parse marker-free — run only the
             // complete prefix GNU's parse_and_execute loop would have

@@ -322,22 +322,41 @@ fn run_main() -> i32 {
     // driver_error_name.
     let startup_error_name = invocation_name.unwrap_or_else(|| "bash".to_string());
 
-    if args.len() > 1 {
-        return run_args(
+    // rubash#2828 graft: both exits funnel through one code value so the
+    // env-gated cache report below runs for every invocation form (-c,
+    // script file, stdin, interactive).
+    let code = if args.len() > 1 {
+        run_args(
             &mut executor,
             &args[1..],
             args.first().map(String::as_str),
             &startup_error_name,
-        );
-    }
+        )
+    } else {
+        // GNU shell.c:541-547: with no operands (and no -c string), tty stdin +
+        // tty stderr make the shell interactive — init_interactive — and POSIX
+        // says "the -s option shall be assumed", so commands come from stdin
+        // either way (shell.c:787-790 read_from_stdin). The stdin-script vs
+        // interactive-reader split inside run_no_script_with_init mirrors the
+        // same C: a non-tty stdin stays the script driver (shell.c:780-786).
+        run_no_script_with_init(&mut executor, None, None)
+    };
+    report_runtime_parse_cache_stats(&executor);
+    code
+}
 
-    // GNU shell.c:541-547: with no operands (and no -c string), tty stdin +
-    // tty stderr make the shell interactive — init_interactive — and POSIX
-    // says "the -s option shall be assumed", so commands come from stdin
-    // either way (shell.c:787-790 read_from_stdin). The stdin-script vs
-    // interactive-reader split inside run_no_script_with_init mirrors the
-    // same C: a non-tty stdin stays the script driver (shell.c:780-786).
-    run_no_script_with_init(&mut executor, None, None)
+/// rubash#2828 graft: env-gated observability for the runtime parse cache.
+/// `RUBASH_PARSE_CACHE_STATS=1` prints the cache counters to stderr at
+/// exit so tests can assert the cache actually fires; unset means zero
+/// output and zero behavior change.
+fn report_runtime_parse_cache_stats(executor: &Executor) {
+    if std::env::var_os("RUBASH_PARSE_CACHE_STATS").is_none() {
+        return;
+    }
+    let (entries, cap, hits, misses) = executor.runtime_parse_cache_stats();
+    eprintln!(
+        "rubash: runtime-parse-cache entries={entries} cap={cap} hits={hits} misses={misses}"
+    );
 }
 
 fn print_usage() {
