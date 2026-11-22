@@ -4702,8 +4702,10 @@ impl Executor {
     /// list, so NO state payload — function spans, positional
     /// windows, attribute lists, exported values — rides a single
     /// argv/env string past the OS per-string cap, and the aggregate
-    /// stays inside a conservative share of ARG_MAX. Two spill rules,
-    /// both by size class, never by key:
+    /// stays inside a conservative share of ARG_MAX. Two spill rules
+    /// by size class, plus — on Windows only — a third rule by
+    /// case-collision class (rubash#4127, see the body); never a rule
+    /// by key identity:
     ///
     /// * an entry whose `key=value` rendering exceeds
     ///   [`RESPAWN_ENV_ENTRY_LIMIT`] bytes spills (MAX_ARG_STRLEN is
@@ -4729,7 +4731,12 @@ impl Executor {
     /// order. Duplicate-key adjudication therefore still resolves to
     /// the last writer for every pattern the builders produce: a
     /// key's instances are either all inline (stamps and overrides
-    /// are small) or the oversized tail instance rides the file.
+    /// are small) or the oversized tail instance rides the file. The
+    /// Windows case-collision rule splits a fold group instead (first
+    /// spelling inline, later variants in the file); because the
+    /// variants keep their relative order in the splice and each
+    /// spelling's own last instance still lands after its earlier
+    /// ones, last-writer-per-spelling is preserved there too.
     pub(in crate::executor) fn spill_respawn_env_entries(
         &self,
         entries: Vec<(String, String)>,
@@ -4753,6 +4760,38 @@ impl Executor {
             .filter(|(_, entry)| entry_size(entry) > RESPAWN_ENV_ENTRY_LIMIT)
             .map(|(index, _)| index)
             .collect();
+        // rubash#4127 (Windows only): a third spill rule, by key class
+        // rather than size. The std Command environment block is keyed
+        // case-insensitively, so two entries whose keys differ only by
+        // case (`V` / `v`) collapse into one block entry — the first
+        // spelling survives carrying the LAST value, and both
+        // variables are silently corrupted in the child. Shell
+        // variable names are case-sensitive, so such pairs are
+        // legitimate. Route every entry whose key case-folds to an
+        // earlier entry's key — without being that key — through the
+        // state file: the import splice restores it verbatim after
+        // the inline entries, in original relative order, so each
+        // spelling reaches the child with its own last value. The
+        // first occurrence of each fold group stays inline (alone in
+        // the block it carries exactly its own entry until a later
+        // exact duplicate overrides it, as today), and exact
+        // duplicates never spill under this rule: the block's
+        // last-writer collapse and the import's agree on those. With
+        // no collision nothing spills and the common path is unchanged.
+        #[cfg(windows)]
+        {
+            let mut seen: Vec<(&str, String)> = Vec::new();
+            for (index, entry) in entries.iter().enumerate() {
+                let folded = entry.0.to_uppercase();
+                let collides = seen
+                    .iter()
+                    .any(|(raw, seen_folded)| *seen_folded == folded && *raw != entry.0);
+                if collides && !spilled_indexes.contains(&index) {
+                    spilled_indexes.push(index);
+                }
+                seen.push((entry.0.as_str(), folded));
+            }
+        }
         let spilled_bytes: usize = spilled_indexes
             .iter()
             .map(|&index| entry_size(&entries[index]))
@@ -5197,6 +5236,49 @@ mod respawn_state_spill_tests {
         let decoded =
             crate::invocation::decode_respawn_state_entries(&bytes).expect("state file decodes");
         assert_eq!(kept.len() - 1 + decoded.len(), 300, "no entry is lost");
+    }
+
+    // rubash#4127: on Windows the std Command environment block keys
+    // entries case-insensitively, so a later case-variant of an
+    // earlier key must ride the state file instead of collapsing
+    // into the earlier spelling's block entry.
+    #[cfg(windows)]
+    #[test]
+    fn case_colliding_entries_ride_the_state_file_on_windows() {
+        let executor = Executor::new();
+        let entries = vec![
+            ("V".to_string(), "upper".to_string()),
+            ("v".to_string(), "lower".to_string()),
+            ("FOO".to_string(), "1".to_string()),
+        ];
+        let (kept, file) = executor.spill_respawn_env_entries(entries, 0);
+        let path = file.expect("a state file must be written");
+        assert_eq!(kept.len(), 3, "first spelling + FOO + pointer: {kept:?}");
+        assert_eq!(kept[0], ("V".to_string(), "upper".to_string()));
+        assert_eq!(kept[1].0, "FOO");
+        assert_eq!(
+            kept[2].0,
+            crate::invocation::RESPAWN_STATE_FILE_ENV_KEY,
+            "the pointer is appended last"
+        );
+        let bytes = std::fs::read(&path).expect("state file readable");
+        let _ = std::fs::remove_file(&path);
+        let decoded =
+            crate::invocation::decode_respawn_state_entries(&bytes).expect("state file decodes");
+        assert_eq!(decoded, vec![("v".to_string(), "lower".to_string())]);
+    }
+
+    // rubash#4127: exact duplicates are NOT collisions — the block's
+    // last-writer collapse already matches shell semantics for them,
+    // so they stay inline and no state file is minted.
+    #[cfg(windows)]
+    #[test]
+    fn exact_duplicates_stay_inline_on_windows() {
+        let executor = Executor::new();
+        let entries = vec![entry("A", 10), entry("A", 20)];
+        let (kept, file) = executor.spill_respawn_env_entries(entries.clone(), 0);
+        assert_eq!(kept, entries);
+        assert!(file.is_none());
     }
 
     #[test]
