@@ -5157,53 +5157,90 @@ impl Executor {
         Some(result.and(finish_result).and(assignment_finish_result))
     }
 
+    pub(in crate::executor) fn command_is_assignment_only_statement(
+        &self,
+        cmd: &CommandNode,
+    ) -> bool {
+        mixed_arm_admission(cmd)
+            || (!cmd.words.is_empty()
+                && (0..cmd.words.len())
+                    .all(|index| command_word_is_array_element_assignment(cmd, index)))
+    }
+
     pub(in crate::executor) fn execute_assignment_or_comment_command(
         &mut self,
         cmd: &CommandNode,
-    ) -> bool {
-        if self.execute_integer_assignment_suffix(cmd) || self.execute_assignment_words(cmd) {
-            // GNU execute_cmd.c:4625-4640 execute_simple_command: assignment
-            // words are peeled by separate_out_assignments, leaving WORDS==0,
-            // and the null command path binds `$_` to the NULL string
-            // (4638 bind_lastarg((char *)NULL)) — `v=5; echo $_` prints an
-            // empty `$_`. Comments never execute (reader-level skip), so the
-            // comment arm below keeps the previous value.
-            self.bind_underscore("");
-            // rubash#1523: the word-form standalone assignment owns
-            // its RHS output process substitutions — finish them
-            // at this command (see execute_empty_words_command).
-            let _ = self.finish_assignment_output_process_substitutions_for_command(cmd);
-            // GNU execute_cmd.c execute_simple_command: a failed standalone
-            // assignment jumps to top level (DISCARD) — the rest of the
-            // command list is discarded (`a[]=v; echo after` prints nothing).
-            if self.exit_code != 0 {
-                self.raise_evalerror_abort();
-            }
-            return true;
-        }
-        if self.execute_mixed_assignment_statement(cmd) {
-            self.bind_underscore("");
-            // rubash#1523: same finish as the assignment-words arm.
-            let _ = self.finish_assignment_output_process_substitutions_for_command(cmd);
-            if self.exit_code != 0 {
-                self.raise_evalerror_abort();
-            }
-            return true;
-        }
-        if self.execute_array_element_assignment(cmd) {
+        original_words_had_command_substitution: bool,
+    ) -> Result<bool, ExecuteError> {
+        let handled = if self.execute_integer_assignment_suffix(cmd)
+            || self.execute_assignment_words(cmd)
+            || self.execute_mixed_assignment_statement(cmd)
+        {
+            true
+        } else if self.execute_array_element_assignment(cmd) {
             // GNU variables.c:5820/6257-6266 sv_strict_posix: an
             // element bind of POSIXLY_CORRECT re-derives the mode
             // (rubash#3661).
             self.sync_posix_mode_if_assignment_operands(&cmd.words);
-            self.bind_underscore("");
-            // rubash#1523: same finish as the assignment-words arm.
-            let _ = self.finish_assignment_output_process_substitutions_for_command(cmd);
-            if self.exit_code != 0 {
-                self.raise_evalerror_abort();
-            }
-            return true;
+            true
+        } else {
+            false
+        };
+        if !handled {
+            return Ok(false);
         }
-        false
+        // GNU execute_cmd.c:4625-4640 execute_simple_command: assignment
+        // words are peeled by separate_out_assignments, leaving WORDS==0,
+        // and the null command path binds `$_` to the NULL string
+        // (4638 bind_lastarg((char *)NULL)) — `v=5; echo $_` prints an
+        // empty `$_`.
+        self.bind_underscore("");
+        // rubash#1523: the word-form standalone assignment owns
+        // its RHS output process substitutions — finish them
+        // at this command (see execute_empty_words_command).
+        let _ = self.finish_assignment_output_process_substitutions_for_command(cmd);
+        // GNU execute_cmd.c execute_simple_command: a failed standalone
+        // assignment jumps to top level (DISCARD) — the rest of the
+        // command list is discarded (`a[]=v; echo after` prints nothing),
+        // before execute_null_command is ever reached.
+        if self.exit_code != 0 {
+            self.raise_evalerror_abort();
+            return Ok(true);
+        }
+        // GNU execute_cmd.c:4628-4641 execute_simple_command: once all
+        // assignment words are bound and WORDS==0, execute_null_command
+        // runs any redirections on the command (and preserves any
+        // command-substitution status when the redirects do not force a
+        // fork).
+        if command_has_redirect(cmd)
+            || cmd.heredoc.is_some()
+            || !cmd.heredoc_redirects.is_empty()
+            || cmd.here_string.is_some()
+        {
+            let command_had_substitution = original_words_had_command_substitution
+                || cmd
+                    .assignment_raws
+                    .iter()
+                    .any(|raw| raw.contains("$(") || raw.contains('`'))
+                || cmd
+                    .assignments
+                    .iter()
+                    .any(|(_, value)| value.contains("$(") || value.contains('`'));
+            let vanished_status = if command_had_substitution {
+                self.last_command_substitution_status.take()
+            } else {
+                None
+            };
+            let mut null_cmd = cmd.clone();
+            null_cmd.words.clear();
+            null_cmd.word_metadata.clear();
+            null_cmd.assignments.clear();
+            null_cmd.assignment_raws.clear();
+            null_cmd.array_element_assignments.clear();
+            null_cmd.compound_assignments.clear();
+            self.execute_empty_words_command(&null_cmd, vanished_status)?;
+        }
+        Ok(true)
     }
 
     /// rubash#1568: execute a mixed assignment STATEMENT — a command
