@@ -4698,10 +4698,15 @@ fn eval_mutable_arith_result(
     if *DEBUG_ARITH.get_or_init(|| std::env::var("RUBASH_DEBUG_ARITH").is_ok()) {
         eprintln!("ARITH-INPUT: {normalized:?}");
     }
-    let value = parser.parse_comma();
-    parser.skip_ws();
-    let trailing = parser.pos != parser.input.len();
-    let value = value.filter(|_| !trailing);
+    let (value, trailing) = if let Some(compiled) = parser::compiled::lookup_or_compile(&normalized)
+    {
+        (parser.eval_compiled(&compiled), false)
+    } else {
+        let value = parser.parse_comma();
+        parser.skip_ws();
+        let trailing = parser.pos != parser.input.len();
+        (value.filter(|_| !trailing), trailing)
+    };
     if parser.error.is_none() {
         if trailing {
             // GNU expr.c:484-485: `curtok != 0` after EXP_LOWEST — the

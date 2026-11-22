@@ -1,3 +1,5 @@
+#[path = "compiled.rs"]
+pub(super) mod compiled;
 #[path = "cursor.rs"]
 mod cursor;
 #[path = "expression.rs"]
@@ -312,6 +314,330 @@ impl ConditionalArithParser<'_> {
             "arithmetic syntax error in expression"
         };
         self.fail(msg, self.pos);
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) enum ArithUnaryOp {
+    Plus,
+    Neg,
+    LogicalNot,
+    BitNot,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) enum ArithBinOp {
+    Add,
+    Sub,
+    Mul,
+    BitOr,
+    BitXor,
+    BitAnd,
+    Shl,
+    Shr,
+    Eq,
+    Ne,
+    Ge,
+    Le,
+    Gt,
+    Lt,
+}
+
+pub(super) trait ArithBackend {
+    type Val: Copy;
+
+    fn input(&self) -> &[u8];
+    fn pos(&self) -> usize;
+    fn set_pos(&mut self, pos: usize);
+    fn last_tok_start(&self) -> usize;
+    fn last_tok_operand(&self) -> bool;
+    fn note_op(&mut self, start: usize);
+    fn note_operand(&mut self, start: usize);
+
+    fn skip_ws(&mut self) {
+        while self.peek().is_some_and(|ch| ch.is_ascii_whitespace()) {
+            self.set_pos(self.pos() + 1);
+        }
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.input().get(self.pos()).copied()
+    }
+
+    fn starts_with(&self, value: &str) -> bool {
+        self.input()[self.pos()..].starts_with(value.as_bytes())
+    }
+
+    fn fail(&mut self, msg: &str, tok_start: usize) -> Option<Self::Val>;
+    fn fail_display(
+        &mut self,
+        msg: &str,
+        tok_start: usize,
+        display_end: usize,
+    ) -> Option<Self::Val>;
+    fn fail_operand_expected(&mut self) -> Option<Self::Val>;
+    fn fail_invalid_operator(&mut self) -> Option<Self::Val>;
+
+    fn enter_depth(&mut self) -> bool {
+        true
+    }
+    fn leave_depth(&mut self) {}
+
+    fn lit(&mut self, value: i128) -> Option<Self::Val>;
+    fn unary(&mut self, op: ArithUnaryOp, operand: Self::Val) -> Option<Self::Val>;
+    fn binary(&mut self, op: ArithBinOp, lhs: Self::Val, rhs: Self::Val) -> Option<Self::Val>;
+    fn div(&mut self, lhs: Self::Val, rhs: Self::Val, rhs_start: usize) -> Option<Self::Val>;
+    fn rem(&mut self, lhs: Self::Val, rhs: Self::Val, rhs_start: usize) -> Option<Self::Val>;
+    fn pow(&mut self, lhs: Self::Val, rhs: Self::Val, exp_tok: usize) -> Option<Self::Val>;
+    fn comma(&mut self, lhs: Self::Val, rhs: Self::Val) -> Option<Self::Val>;
+
+    fn eval_logical_or(&mut self, lhs: Self::Val) -> Option<Self::Val>;
+    fn eval_logical_and(&mut self, lhs: Self::Val) -> Option<Self::Val>;
+    fn eval_conditional(&mut self, cond: Self::Val) -> Option<Self::Val>;
+
+    fn try_parse_assignment(&mut self) -> Option<Option<Self::Val>>;
+    fn try_parse_pre_incdec(&mut self, delta: i128) -> Option<Option<Self::Val>>;
+    fn parse_variable_factor(&mut self) -> Option<Self::Val>;
+}
+
+impl ArithBackend for ConditionalArithParser<'_> {
+    type Val = i128;
+
+    fn input(&self) -> &[u8] {
+        self.input
+    }
+
+    fn pos(&self) -> usize {
+        self.pos
+    }
+
+    fn set_pos(&mut self, pos: usize) {
+        self.pos = pos;
+    }
+
+    fn last_tok_start(&self) -> usize {
+        self.last_tok_start
+    }
+
+    fn last_tok_operand(&self) -> bool {
+        self.last_tok_operand
+    }
+
+    fn note_op(&mut self, start: usize) {
+        self.note_op(start);
+    }
+
+    fn note_operand(&mut self, start: usize) {
+        self.note_operand(start);
+    }
+
+    fn fail(&mut self, msg: &str, tok_start: usize) -> Option<i128> {
+        self.fail(msg, tok_start)
+    }
+
+    fn fail_display(&mut self, msg: &str, tok_start: usize, display_end: usize) -> Option<i128> {
+        self.fail_display(msg, tok_start, display_end)
+    }
+
+    fn fail_operand_expected(&mut self) -> Option<i128> {
+        self.fail_operand_expected()
+    }
+
+    fn fail_invalid_operator(&mut self) -> Option<i128> {
+        self.fail_invalid_operator()
+    }
+
+    fn lit(&mut self, value: i128) -> Option<i128> {
+        Some(value)
+    }
+
+    fn unary(&mut self, op: ArithUnaryOp, operand: i128) -> Option<i128> {
+        Some(match op {
+            ArithUnaryOp::Plus => operand,
+            ArithUnaryOp::Neg => super::bash_arith(-operand),
+            ArithUnaryOp::LogicalNot => i128::from(operand == 0),
+            ArithUnaryOp::BitNot => super::bash_arith(!operand),
+        })
+    }
+
+    fn binary(&mut self, op: ArithBinOp, lhs: i128, rhs: i128) -> Option<i128> {
+        Some(match op {
+            ArithBinOp::Add => super::bash_arith(lhs + rhs),
+            ArithBinOp::Sub => super::bash_arith(lhs - rhs),
+            ArithBinOp::Mul => super::bash_arith(lhs * rhs),
+            ArithBinOp::BitOr => super::bash_arith(lhs | rhs),
+            ArithBinOp::BitXor => super::bash_arith(lhs ^ rhs),
+            ArithBinOp::BitAnd => super::bash_arith(lhs & rhs),
+            ArithBinOp::Shl => super::bash_arith((lhs as i64).wrapping_shl(rhs as u32) as i128),
+            ArithBinOp::Shr => super::bash_arith((lhs as i64).wrapping_shr(rhs as u32) as i128),
+            ArithBinOp::Eq => i128::from(lhs == rhs),
+            ArithBinOp::Ne => i128::from(lhs != rhs),
+            ArithBinOp::Ge => i128::from(lhs >= rhs),
+            ArithBinOp::Le => i128::from(lhs <= rhs),
+            ArithBinOp::Gt => i128::from(lhs > rhs),
+            ArithBinOp::Lt => i128::from(lhs < rhs),
+        })
+    }
+
+    fn div(&mut self, lhs: i128, mut rhs: i128, rhs_start: usize) -> Option<i128> {
+        if rhs == 0 {
+            if self.noeval == 0 {
+                return self.fail("division by 0", rhs_start);
+            }
+            rhs = 1;
+        }
+        Some(super::bash_arith(
+            (lhs as i64).wrapping_div(rhs as i64) as i128
+        ))
+    }
+
+    fn rem(&mut self, lhs: i128, mut rhs: i128, rhs_start: usize) -> Option<i128> {
+        if rhs == 0 {
+            if self.noeval == 0 {
+                return self.fail("division by 0", rhs_start);
+            }
+            rhs = 1;
+        }
+        if lhs == i128::from(i64::MIN) && rhs == -1 {
+            Some(0)
+        } else {
+            Some(lhs % rhs)
+        }
+    }
+
+    fn pow(&mut self, lhs: i128, rhs: i128, exp_tok: usize) -> Option<i128> {
+        if rhs < 0 {
+            if self.noeval == 0 {
+                return self.fail("exponent less than 0", exp_tok);
+            }
+            return Some(1);
+        }
+        super::checked_arithmetic_pow(lhs, rhs)
+    }
+
+    fn comma(&mut self, _lhs: i128, rhs: i128) -> Option<i128> {
+        Some(rhs)
+    }
+
+    fn eval_logical_or(&mut self, lhs: i128) -> Option<i128> {
+        if lhs != 0 {
+            self.noeval += 1;
+            let right = expression::parse_logical_and_with(self);
+            self.noeval -= 1;
+            right?;
+            Some(1)
+        } else {
+            let right = expression::parse_logical_and_with(self)?;
+            Some(i128::from(lhs != 0 || right != 0))
+        }
+    }
+
+    fn eval_logical_and(&mut self, lhs: i128) -> Option<i128> {
+        if lhs == 0 {
+            self.noeval += 1;
+            let right = expression::parse_conditional_tail_with(self);
+            self.noeval -= 1;
+            right?;
+            Some(0)
+        } else {
+            let right = expression::parse_conditional_tail_with(self)?;
+            Some(i128::from(lhs != 0 && right != 0))
+        }
+    }
+
+    fn eval_conditional(&mut self, condition: i128) -> Option<i128> {
+        if condition == 0 {
+            self.noeval += 1;
+            let branch = expression::parse_comma_with(self);
+            self.noeval -= 1;
+            branch?;
+            self.skip_ws();
+            if self.peek() != Some(b':') {
+                let tok = if self.pos < self.input.len() {
+                    self.pos
+                } else {
+                    self.last_tok_start
+                };
+                return self.fail("`:' expected for conditional expression", tok);
+            }
+            self.note_op(self.pos);
+            self.pos += 1;
+            self.skip_ws();
+            if self.pos >= self.input.len() {
+                return self.fail("expression expected", self.last_tok_start);
+            }
+            return expression::parse_conditional_with(self);
+        }
+
+        let true_value = expression::parse_comma_with(self)?;
+        self.skip_ws();
+        if self.peek() != Some(b':') {
+            let tok = if self.pos < self.input.len() {
+                self.pos
+            } else {
+                self.last_tok_start
+            };
+            return self.fail("`:' expected for conditional expression", tok);
+        }
+        self.note_op(self.pos);
+        self.pos += 1;
+        self.skip_ws();
+        if self.pos >= self.input.len() {
+            return self.fail("expression expected", self.last_tok_start);
+        }
+        if let Some(op_pos) = expression::assignment_op_start_in(self.input, self.pos) {
+            self.skip_arithmetic_conditional_branch(&[",", ")", ":"]);
+            return self.fail("attempted assignment to non-variable", op_pos);
+        }
+        self.noeval += 1;
+        let branch = expression::parse_conditional_with(self);
+        self.noeval -= 1;
+        branch?;
+        Some(true_value)
+    }
+
+    fn try_parse_assignment(&mut self) -> Option<Option<i128>> {
+        if !self.assignment_lvalue_is_next() {
+            return Some(None);
+        }
+        let lvalue = self.parse_lvalue_for_assignment()?;
+        self.skip_ws();
+        let op_start = self.pos;
+        let Some(op) = self.consume_assignment_operator() else {
+            return Some(None);
+        };
+        self.note_op(op_start);
+        self.skip_ws();
+        let precaptured = if op != "=" {
+            Some(self.lvalue_value(&lvalue)?)
+        } else {
+            None
+        };
+        let rhs_start = self.pos;
+        let rhs = expression::parse_assignment_with(self)?;
+        if matches!(op, "/=" | "%=") && rhs == 0 && self.noeval == 0 {
+            self.fail("division by 0", rhs_start);
+            return None;
+        }
+        self.assign_lvalue_precaptured(&lvalue, op, rhs, precaptured)
+            .map(Some)
+    }
+
+    fn try_parse_pre_incdec(&mut self, delta: i128) -> Option<Option<i128>> {
+        let op_start = self.pos;
+        self.pos += 2;
+        if let Some(lvalue) = self.parse_lvalue() {
+            self.note_op(op_start);
+            let result = self.update_lvalue(&lvalue, delta, true)?;
+            factor::post_incdec_after_preincdec_with(self);
+            return Some(Some(result));
+        }
+        self.pos = op_start;
+        Some(None)
+    }
+
+    fn parse_variable_factor(&mut self) -> Option<i128> {
+        self.parse_variable()
     }
 }
 
