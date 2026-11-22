@@ -936,6 +936,15 @@ pub struct Executor {
     /// disposal_wait_count as of the previous refresh_background_jobs
     /// call; a disposal point has occurred when it moved.
     disposal_prev_mark: Cell<u64>,
+    /// Coproc pids whose stdout pipe reached EOF during a blocking
+    /// `read` in the current command list. At the next fresh-read line
+    /// boundary (`parse.y:2533` `notify_and_cleanup` ->
+    /// `cleanup_dead_jobs` -> `coproc_reap`), only those drained coprocs
+    /// may retire: a line read that stopped at its delimiter can leave
+    /// more producer bytes in the pipe, so it is only a reap-publication
+    /// window, not evidence that disposal is safe (rubash#2053,
+    /// rubash#3633 / rubash#4088).
+    pipe_read_drained_coprocs: Vec<u32>,
     coproc_stderr_forwarders: HashMap<u32, std::thread::JoinHandle<Result<(), std::io::Error>>>,
     /// Assignment-RHS output process substitutions awaiting their
     /// finish, in materialization order (GNU forks left-to-right

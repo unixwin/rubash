@@ -137,7 +137,10 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
             // and the fds bind as COPROC). A builtin-name allowlist
             // here stole the first word of the simple command as a
             // name (rubash#1153).
-            if !lookahead.value.starts_with('-') && !is_keyword(tokens, i, "!") && next_is_compound
+            if !lookahead.value.starts_with('-')
+                && !is_keyword(tokens, i, "!")
+                && next_is_compound
+                && any_process_substitution_word_target(tokens, i).is_none()
             {
                 name = Some((lookahead.value.clone(), lookahead.raw.clone()));
                 i += 1; // consume the name
@@ -397,7 +400,8 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
                 | TokenKind::RedirectErrAppend
                 | TokenKind::HereDoc
                 | TokenKind::HereString
-        ) {
+        ) && any_process_substitution_word_target(tokens, i).is_none()
+        {
             let before = i;
             collect_trailing_redirections(tokens, &mut i, &mut command);
             if i == before {

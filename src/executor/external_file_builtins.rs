@@ -149,56 +149,69 @@ impl Executor {
             self.record_emulated_command_resolution(name, emulated);
             return Ok(true);
         }
-        let handled = match cmd.words[0].as_str() {
-            "/bin/pwd" | "/usr/bin/pwd" => {
-                // Issue #2093 (GNU findcmd.c:383-385): a slash-bearing word
-                // is execve'd verbatim — when the shell path layer
-                // translates this spelling to an existing, executable
-                // literal file, that FILE answers (physical-pwd default,
-                // --help/--version) and the builtin redirect stands down;
-                // with no literal file the redirect stays (the Windows
-                // no-/bin default, docs/builtins.md §4.3). Declining routes
-                // to the real exec path, whose own literal probe resolves
-                // the same file.
-                if crate::executor::path::literal_executable_file(name, &self.shell_state.env_vars)
-                {
-                    return Ok(false);
+        // On Unix, SIGPIPE is SIG_DFL process-wide (rubash#1333); an
+        // in-process emulated external stands in for a forked child, so
+        // block SIGPIPE across its execution to turn pipe-write death
+        // into EPIPE -> exit_code 141 instead of killing the enclosing
+        // shell/coproc group (rubash#3475 / rubash#4088).
+        let handled = {
+            #[cfg(unix)]
+            let _sigpipe_guard = crate::builtins::kill::sigpipe_block_guard();
+            match cmd.words[0].as_str() {
+                "/bin/pwd" | "/usr/bin/pwd" => {
+                    // Issue #2093 (GNU findcmd.c:383-385): a slash-bearing word
+                    // is execve'd verbatim — when the shell path layer
+                    // translates this spelling to an existing, executable
+                    // literal file, that FILE answers (physical-pwd default,
+                    // --help/--version) and the builtin redirect stands down;
+                    // with no literal file the redirect stays (the Windows
+                    // no-/bin default, docs/builtins.md §4.3). Declining routes
+                    // to the real exec path, whose own literal probe resolves
+                    // the same file.
+                    if crate::executor::path::literal_executable_file(
+                        name,
+                        &self.shell_state.env_vars,
+                    ) {
+                        return Ok(false);
+                    }
+                    let mut pwd_cmd = cmd.clone();
+                    pwd_cmd.words[0] = "pwd".to_string();
+                    self.exit_code = self.execute_pwd(&pwd_cmd)?;
+                    Ok(true)
                 }
-                let mut pwd_cmd = cmd.clone();
-                pwd_cmd.words[0] = "pwd".to_string();
-                self.exit_code = self.execute_pwd(&pwd_cmd)?;
-                Ok(true)
-            }
-            "/bin/printf" | "/usr/bin/printf" => {
-                // Issue #2093: same literal-file gate as the pwd arm above.
-                if crate::executor::path::literal_executable_file(name, &self.shell_state.env_vars)
-                {
-                    return Ok(false);
+                "/bin/printf" | "/usr/bin/printf" => {
+                    // Issue #2093: same literal-file gate as the pwd arm above.
+                    if crate::executor::path::literal_executable_file(
+                        name,
+                        &self.shell_state.env_vars,
+                    ) {
+                        return Ok(false);
+                    }
+                    let mut printf_cmd = cmd.clone();
+                    printf_cmd.words[0] = "printf".to_string();
+                    self.exit_code = self.execute_printf(&printf_cmd)?;
+                    Ok(true)
                 }
-                let mut printf_cmd = cmd.clone();
-                printf_cmd.words[0] = "printf".to_string();
-                self.exit_code = self.execute_printf(&printf_cmd)?;
-                Ok(true)
+                "mkdir" => self.external_mkdir(cmd),
+                "touch" => self.external_touch(cmd),
+                "chmod" => self.external_chmod(cmd),
+                "cp" => self.external_cp(cmd),
+                "rm" => self.external_rm(cmd),
+                "rmdir" => self.external_rmdir(cmd),
+                "cat" | "/bin/cat" | "/usr/bin/cat" => self.external_cat(cmd),
+                "sed" => self.external_sed(cmd),
+                "mkfifo" => self.external_mkfifo(cmd),
+                "tty" | "/bin/tty" | "/usr/bin/tty" => self.external_tty(cmd),
+                // #800A: the tput arm is Windows-only (unix keeps the real
+                // ncurses binary, which reads the authoritative system terminfo).
+                // It ADMITS only (TERM, invocation) pairs verified byte-for-byte
+                // against the GNU oracle and falls through to the real PATH
+                // binary for everything else, so non-admitted behavior is
+                // unchanged (src/executor/tput_emulation.rs header).
+                #[cfg(windows)]
+                "tput" | "/bin/tput" | "/usr/bin/tput" => self.external_tput(cmd),
+                _ => Ok(false),
             }
-            "mkdir" => self.external_mkdir(cmd),
-            "touch" => self.external_touch(cmd),
-            "chmod" => self.external_chmod(cmd),
-            "cp" => self.external_cp(cmd),
-            "rm" => self.external_rm(cmd),
-            "rmdir" => self.external_rmdir(cmd),
-            "cat" | "/bin/cat" | "/usr/bin/cat" => self.external_cat(cmd),
-            "sed" => self.external_sed(cmd),
-            "mkfifo" => self.external_mkfifo(cmd),
-            "tty" | "/bin/tty" | "/usr/bin/tty" => self.external_tty(cmd),
-            // #800A: the tput arm is Windows-only (unix keeps the real
-            // ncurses binary, which reads the authoritative system terminfo).
-            // It ADMITS only (TERM, invocation) pairs verified byte-for-byte
-            // against the GNU oracle and falls through to the real PATH
-            // binary for everything else, so non-admitted behavior is
-            // unchanged (src/executor/tput_emulation.rs header).
-            #[cfg(windows)]
-            "tput" | "/bin/tput" | "/usr/bin/tput" => self.external_tput(cmd),
-            _ => Ok(false),
         };
         // GNU: every arm above stands in for a forked disk child
         // (execute_cmd.c:5522 execute_disk_command), so an output write
@@ -212,6 +225,10 @@ impl Executor {
         // EPIPE-class error into the child's verdict: status 141, no
         // diagnostic, the list continues (rubash#3475 platform debt).
         let handled = match handled {
+            Err(ExecuteError::BrokenPipe) => {
+                self.exit_code = 141;
+                true
+            }
             Err(ExecuteError::IoError(error))
                 if super::shell_options::is_broken_pipe_error(&error) =>
             {

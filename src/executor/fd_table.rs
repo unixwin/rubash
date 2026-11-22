@@ -563,6 +563,12 @@ pub(crate) struct FdTable {
     /// treating it as plain EOF made `read x < dir` silent
     /// (rubash#1495). Cleared at the top of every record read.
     pub(crate) read_error: Option<String>,
+    /// One-shot evidence that the coproc stdout pipe behind the current
+    /// record read reached EOF (an empty read after the writer closed),
+    /// keyed by the coproc pid in the endpoint. This is deliberately not
+    /// read_eof_no_delimiter: a line that ends at its delimiter proves
+    /// nothing about unread bytes still buffered behind it (rubash#2053).
+    pub(crate) read_coproc_pipe_eof: Option<u32>,
     /// rubash#3944: the live `read`'s `-d` option word first raw byte
     /// (read.def:385), mirrored from the executor beside
     /// `read_delim_word_byte` when the read acquisition begins. The
@@ -888,6 +894,7 @@ impl FdTable {
             read_timed_out: false,
             read_eof_no_delimiter: false,
             read_error: None,
+            read_coproc_pipe_eof: None,
             read_delim_word_byte: None,
             stdout_alias_generation: std::collections::HashMap::new(),
             kernel_place_persistent: false,
@@ -2797,6 +2804,10 @@ impl FdTable {
             self.read_error = Some("Is a directory".to_string());
             return None;
         }
+        let coproc_pid = match &endpoint {
+            FdReadEndpoint::CoprocStdout { pid, .. } => Some(*pid),
+            _ => None,
+        };
         let file = match &endpoint {
             FdReadEndpoint::File(file) | FdReadEndpoint::CoprocStdout { fd: file, .. } => {
                 Some(file.clone())
@@ -2804,7 +2815,15 @@ impl FdTable {
             _ => None,
         };
         if let Some(file) = file {
-            return self.read_file_bytes(file, delimiter, char_limit, exact, escape_aware, raw);
+            return self.read_file_bytes(
+                file,
+                delimiter,
+                char_limit,
+                exact,
+                escape_aware,
+                raw,
+                coproc_pid,
+            );
         }
         let input = match endpoint {
             FdReadEndpoint::Text(input) | FdReadEndpoint::ProcessSubstitution(input) => input,
@@ -2974,6 +2993,7 @@ impl FdTable {
         exact: bool,
         escape_aware: bool,
         raw: bool,
+        coproc_pid: Option<u32>,
     ) -> Option<Vec<u8>> {
         if char_limit == Some(0) {
             return Some(Vec::new());
@@ -3002,6 +3022,7 @@ impl FdTable {
         let mut consumed = false;
         let mut delimiter_found = false;
         let mut limit_reached = false;
+        let mut source_eof = false;
         // The shared FdRecordScan replay of the GNU read loop (unit
         // consumption, first-byte delimiter compare, post-escape
         // budget), as in read_bytes.
@@ -3021,7 +3042,10 @@ impl FdTable {
                 }
             }
             let byte = match crate::fd::read_some(file.handle, 1) {
-                Ok(buf) if buf.is_empty() => break, // EOF
+                Ok(buf) if buf.is_empty() => {
+                    source_eof = true;
+                    break;
+                }
                 Ok(buf) => buf[0],
                 Err(error) => {
                     // A hard read failure (EISDIR on a directory
@@ -3052,6 +3076,11 @@ impl FdTable {
                     delimiter_found = true;
                     break;
                 }
+            }
+        }
+        if source_eof {
+            if let Some(pid) = coproc_pid {
+                self.read_coproc_pipe_eof = Some(pid);
             }
         }
         // EOF with zero bytes read must surface as None — `read` at EOF
