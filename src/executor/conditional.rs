@@ -1239,12 +1239,13 @@ impl Executor {
         // expanded text); decode both transport spellings on the subject
         // side too, symmetric with the pattern decode inside
         // compile_conditional_regex (rubash#3545).
+        let left_bytes = regex_subject_bytes(left);
         let left = decode_regex_operand(left);
         let right = restore_numeric_decimal_regex_escapes(right);
         let Ok(regex) = self.compile_conditional_regex(&right) else {
             return false;
         };
-        let Some(captures) = regex.captures(&left) else {
+        let Some(captures) = regex.captures(&left, &left_bytes) else {
             self.clear_bash_rematch();
             return false;
         };
@@ -1367,6 +1368,7 @@ impl Executor {
         let left_exp = self.expand_conditional_word(left);
         let right_exp = self.expand_conditional_word(right);
         let right_f = restore_numeric_decimal_regex_escapes(&right_exp);
+        let left_bytes = regex_subject_bytes(&left_exp);
         let left = decode_regex_operand(&left_exp);
         let right = right_f;
         // GNU xtrace prints arg2 as cond_expand_word returned it —
@@ -1376,7 +1378,7 @@ impl Executor {
             self.report_invalid_regex(&right);
             return 2;
         };
-        let Some(captures) = regex.captures(&left) else {
+        let Some(captures) = regex.captures(&left, &left_bytes) else {
             self.clear_bash_rematch();
             return 1;
         };
@@ -1406,7 +1408,9 @@ impl Executor {
         if self.regex_operands_nounset_fatal(left, right) {
             return 1;
         }
-        let left = decode_regex_operand(&self.expand_conditional_word(left));
+        let left_exp = self.expand_conditional_word(left);
+        let left_bytes = regex_subject_bytes(&left_exp);
+        let left = decode_regex_operand(&left_exp);
         let right = self.quote_aware_regex_rhs(right, metadata);
         let right = restore_numeric_decimal_regex_escapes(&right);
         self.xtrace_conditional_term("=~", &left, Some(&right));
@@ -1414,7 +1418,7 @@ impl Executor {
             self.report_invalid_regex(&right);
             return 2;
         };
-        let Some(captures) = regex.captures(&left) else {
+        let Some(captures) = regex.captures(&left, &left_bytes) else {
             self.clear_bash_rematch();
             return 1;
         };
@@ -1496,7 +1500,17 @@ impl Executor {
         // decoded to a raw byte never matches a pair-encoded subject —
         // decode_regex_operand covers both spellings, symmetric with
         // the subject decode at the three match entry points.
-        let pattern = decode_regex_operand(pattern);
+        // rubash#4133: in byte mode, pairs carrying a byte >= 0x80 are
+        // rendered to `\xHH` escapes BEFORE the fold — after the fold
+        // they are byte-chars, indistinguishable from genuine chars,
+        // and expand_non_ascii_to_byte_escapes would UTF-8-encode them
+        // into two-byte sequences glibc never compiles (it reads the
+        // single raw byte).
+        let pattern = if byte_mode {
+            decode_regex_operand(&render_regex_pattern_raw_byte_escapes(pattern))
+        } else {
+            decode_regex_operand(pattern)
+        };
         // In a UTF-8 locale the bracket classes expand to Unicode
         // tables (glibc regcomp resolves them through wctype); in byte
         // mode they pass through to the regex crate's ASCII classes,
@@ -1565,9 +1579,14 @@ impl Executor {
     /// translation (which doubles bare backslashes inside brackets,
     /// so a `\` + non-ASCII pair can only be an outside-bracket
     /// escape here) and after the quantifier rewrite (which copies
-    /// bracket spans verbatim). Raw-byte marker pairs (U+E000…)
-    /// expand the same way; pattern and subject stay in the same
-    /// marker encoding, so their consistency is preserved.
+    /// bracket spans verbatim). Every non-ASCII char reaching this
+    /// function is a genuine char (or a sub-0x80 carrier folded to
+    /// its ASCII/control char): raw-byte marker pairs carrying a
+    /// byte >= 0x80 were already rendered to single-byte escapes by
+    /// render_regex_pattern_raw_byte_escapes (rubash#4133) —
+    /// expanding those as UTF-8 was the old both-sides-wrong
+    /// spelling, consistent only because the subject was re-encoded
+    /// the same way.
     fn expand_non_ascii_to_byte_escapes(pattern: &str) -> String {
         let chars: Vec<char> = pattern.chars().collect();
         let mut out = String::with_capacity(pattern.len());
@@ -2293,7 +2312,7 @@ enum CompiledConditionalRegex {
 }
 
 impl CompiledConditionalRegex {
-    fn captures(&self, left: &str) -> Option<Vec<Option<String>>> {
+    fn captures(&self, left: &str, left_bytes: &[u8]) -> Option<Vec<Option<String>>> {
         match self {
             CompiledConditionalRegex::Text(regex) => regex.captures(left).map(|captures| {
                 captures
@@ -2308,7 +2327,16 @@ impl CompiledConditionalRegex {
                     .collect()
             }),
             CompiledConditionalRegex::Bytes(regex) => {
-                regex.captures(left.as_bytes()).map(|captures| {
+                // rubash#4133: match on the subject's raw bytes, not on
+                // `left.as_bytes()` — `left` is the byte-char spelling
+                // (decode_regex_operand folds each raw-byte marker pair
+                // to the char U+0000..=U+00FF), whose UTF-8 encoding
+                // re-encodes every byte >= 0x80 as two bytes. GNU's
+                // regexec sees the expanded subject as raw bytes
+                // (execute_cmd.c:4096 sh_regmatch), so the caller
+                // computes the byte spelling while the pairs are still
+                // present (regex_subject_bytes).
+                regex.captures(left_bytes).map(|captures| {
                     captures
                         .iter()
                         .map(|capture| {
@@ -2360,6 +2388,74 @@ fn decode_regex_operand(value: &str) -> String {
     } else {
         decoded
     }
+}
+
+/// The subject's raw-byte spelling for byte-mode matching (rubash#4133):
+/// the same payload decode `decode_regex_operand` performs, then the
+/// pair-preserving byte rendering of transport_name_spelling_bytes —
+/// a raw-byte marker pair emits its single byte, an escaped literal
+/// char emits its own UTF-8, and every other char emits its UTF-8, so a
+/// genuine `é` keeps its two bytes beside a raw 0x9C's one (the
+/// rubash#3218 provenance the byte-char fold cannot represent).
+fn regex_subject_bytes(value: &str) -> Vec<u8> {
+    let decoded = crate::executor::execution_misc::decode_command_substitution_payload(value);
+    crate::executor::substitution_metadata::transport_name_spelling_bytes(&decoded)
+}
+
+/// Byte-mode pattern companion to [`regex_subject_bytes`] (rubash#4133):
+/// render each raw-byte marker pair carrying a byte >= 0x80 as that
+/// byte's `\xHH` escape text, before `decode_regex_operand` folds the
+/// pairs to byte-chars. A folded byte-char is indistinguishable from a
+/// genuine char of the same code point, and
+/// `expand_non_ascii_to_byte_escapes` UTF-8-encodes both — correct for
+/// a genuine char (glibc reads its UTF-8 bytes), wrong for a carried
+/// raw byte (glibc reads the single byte). Pairs below 0x80 pass
+/// through untouched: their fold is the plain ASCII/control char,
+/// already the byte itself. Every other spelling (including the
+/// literal-char escape and an escaped literal U+E000) passes through
+/// untouched, mirroring transport_name_spelling_bytes' pair walk.
+fn render_regex_pattern_raw_byte_escapes(value: &str) -> String {
+    use crate::executor::markers::{
+        LITERAL_CHAR_ESCAPE, RAW_BYTE_MARKER_ESCAPE, RAW_BYTE_MARKER_FIRST, RAW_BYTE_MARKER_LAST,
+    };
+    if !crate::executor::markers::contains_decodable_transport(value) {
+        return value.to_string();
+    }
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == LITERAL_CHAR_ESCAPE {
+            out.push(ch);
+            if let Some(next) = chars.next() {
+                out.push(next);
+            }
+            continue;
+        }
+        if ch as u32 != RAW_BYTE_MARKER_ESCAPE {
+            out.push(ch);
+            continue;
+        }
+        match chars.peek().copied() {
+            Some(next) if next as u32 == RAW_BYTE_MARKER_ESCAPE => {
+                chars.next();
+                out.push(ch);
+                out.push(next);
+            }
+            Some(next)
+                if (RAW_BYTE_MARKER_FIRST..=RAW_BYTE_MARKER_LAST).contains(&(next as u32)) =>
+            {
+                let byte = (next as u32 - RAW_BYTE_MARKER_FIRST) as u8;
+                if byte >= 0x80 {
+                    chars.next();
+                    out.push_str(&format!("\\x{byte:02X}"));
+                } else {
+                    out.push(ch);
+                }
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 /// POSIX ERE has no `(?...)` construct: glibc regcomp rejects every
@@ -3252,7 +3348,8 @@ mod conditional_regex_cache_tests {
             let compiled = executor
                 .compile_conditional_regex(&pat)
                 .expect("valid pattern should compile");
-            assert!(compiled.captures(&format!("item_{i}_42")).is_some());
+            let subject = format!("item_{i}_42");
+            assert!(compiled.captures(&subject, subject.as_bytes()).is_some());
         }
         // Also flood invalid patterns to verify failure entries obey the cap.
         for i in 0..50 {
@@ -3295,8 +3392,8 @@ mod conditional_regex_cache_tests {
             .flatten()
             .expect("hit cs bytes");
 
-        assert!(hit_cs_text.captures("ABC").is_none());
-        assert!(hit_ci_text.captures("ABC").is_some());
+        assert!(hit_cs_text.captures("ABC", b"ABC").is_none());
+        assert!(hit_ci_text.captures("ABC", b"ABC").is_some());
         assert!(matches!(*hit_cs_bytes, CompiledConditionalRegex::Bytes(_)));
         assert!(matches!(*hit_cs_text, CompiledConditionalRegex::Text(_)));
     }
