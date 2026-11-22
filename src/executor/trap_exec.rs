@@ -9238,21 +9238,8 @@ impl Executor {
         if crate::executor::support_names::is_injected_group_redirect(redirect) {
             return Ok(false);
         }
-        if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset")
-            && !matches!(
-                redirect.kind,
-                RedirectKind::HereDoc | RedirectKind::HereString
-            )
-        {
-            let masked_target = Self::mask_recorded_process_substitutions(
-                &redirect.target_metadata.raw,
-                &redirect.target_metadata.process_substitutions,
-            );
-            let masked_target =
-                super::redirection::mask_redirect_target_quoted_spans(&masked_target);
-            if self.nounset_unbound_parameter(&masked_target).is_some() {
-                return Ok(true);
-            }
+        if self.redirect_word_nounset_hit(redirect).is_some() {
+            return Ok(true);
         }
         if matches!(
             redirect.kind,
@@ -9260,6 +9247,21 @@ impl Executor {
         ) {
             let gate_fd = redirect.fd.unwrap_or(0);
             return Ok(self.redirect_fd_over_limit(gate_fd));
+        }
+        {
+            let target_word = redirect.target.as_str();
+            if !((target_word.starts_with(">(") || target_word.starts_with("<("))
+                && target_word.ends_with(')'))
+            {
+                let raw_target = (!redirect.target_metadata.raw.is_empty())
+                    .then_some(redirect.target_metadata.raw.as_str());
+                if self
+                    .parameter_expansion_error_in_redirect_word_with_raw(target_word, raw_target)
+                    .is_some()
+                {
+                    return Ok(true);
+                }
+            }
         }
         if matches!(
             redirect.kind,

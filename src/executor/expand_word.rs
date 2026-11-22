@@ -501,7 +501,11 @@ impl Executor {
                     ifs,
                     self.posix_mode_enabled(),
                 );
-            let marked_expanded = self.expand_word(&marked);
+            let marked_expanded = if !raw.is_empty() {
+                with_pending_diagnostic_raw(raw, false, || self.expand_word(&marked))
+            } else {
+                self.expand_word(&marked)
+            };
             let fields = crate::executor::arrays::field_split_values_with_ifs(
                 &crate::executor::markers::ansi_c_ifs_guard_to_ifs_glue(&marked_expanded),
                 self.shell_state.env_vars.get("IFS").map(String::as_str),

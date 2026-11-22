@@ -1436,6 +1436,7 @@ impl Executor {
                     true,
                     raw_ctx,
                     seen_comsub || has_comsub || has_braces,
+                    true,
                 );
             if deferred {
                 return None;
@@ -1477,6 +1478,7 @@ impl Executor {
                     true,
                     raw_ctx,
                     seen_comsub || has_comsub,
+                    true,
                 );
             if deferred {
                 return None;
@@ -1686,6 +1688,7 @@ impl Executor {
             true,
             raw_ctx,
             defer_bad_subst,
+            true,
         )
     }
 
@@ -1713,6 +1716,34 @@ impl Executor {
         crate::executor::expand_braced_indices::scan_ctx_begin();
         let mark = Self::scan_pending_writes_mark();
         let verdict = self.parameter_expansion_error_in_word_with_raw(word, raw);
+        if verdict.is_none() {
+            Self::scan_pending_writes_rollback(mark);
+        }
+        verdict
+    }
+
+    /// Redirect-word companion to `parameter_expansion_error_in_word_isolated_with_raw`:
+    /// `reject_invalid_redirects` already ran the masked `nounset` check
+    /// (with recorded process-substitution and single-quoted spans masked),
+    /// so skip the unmasked `nounset` arm here while keeping `:?`, bad
+    /// substitution, and bad array subscript checks.
+    pub(in crate::executor) fn parameter_expansion_error_in_redirect_word_with_raw(
+        &self,
+        word: &str,
+        raw: Option<&str>,
+    ) -> Option<(String, String, i32)> {
+        crate::executor::expand_braced_indices::scan_ctx_begin();
+        let mark = Self::scan_pending_writes_mark();
+        let raw_ctx = raw.map(|raw_text| ScanRawContext {
+            display_raw: raw_text,
+            scan_raw: raw_text,
+            outer_double_quoted: false,
+        });
+        let verdict = self
+            .parameter_expansion_error_in_word_context_with_raw_and_defer(
+                word, true, raw_ctx, false, false,
+            )
+            .0;
         if verdict.is_none() {
             Self::scan_pending_writes_rollback(mark);
         }
@@ -2745,6 +2776,7 @@ impl Executor {
             quote_aware,
             raw_ctx,
             false,
+            true,
         )
         .0
     }
@@ -2756,12 +2788,20 @@ impl Executor {
     /// expansion produces the diagnostic itself — after executing the
     /// comsubs that precede the bad fragment. Every other verdict
     /// class keeps the scan's immediate return.
+    ///
+    /// Graft synthesis (rubash#4001 onto #4068): `check_nounset` is
+    /// the redirect-word gate — `reject_invalid_redirects` already
+    /// ran the masked `nounset` check, so the redirect-word entry
+    /// passes `false` and the unmasked nounset arm below is skipped
+    /// while `:?`, bad substitution, and bad array subscript verdicts
+    /// keep the scan's immediate return.
     fn parameter_expansion_error_in_word_context_with_raw_and_defer(
         &self,
         word: &str,
         quote_aware: bool,
         raw_ctx: Option<ScanRawContext<'_>>,
         defer_bad_subst: bool,
+        check_nounset: bool,
     ) -> (Option<(String, String, i32)>, bool) {
         // perf6 admission: same necessary condition as
         // parameter_assignment_error_in_word — every arm (nounset `$ref`,
@@ -2788,7 +2828,9 @@ impl Executor {
         if let Some(name) = self.bad_array_subscript_assignment_in_word(word) {
             return (Some((name, "bad array subscript".to_string(), 2)), false);
         }
-        if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset") {
+        if check_nounset
+            && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset")
+        {
             // niubash#993 §1: the nounset walk records each `:=`/`=`
             // bind it passes so a later `$name`/`${name}` fragment
             // adjudicates the evolved state. Its records are private
