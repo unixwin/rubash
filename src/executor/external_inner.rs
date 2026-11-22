@@ -2394,23 +2394,35 @@ impl Executor {
                 // then kill_shell re-raises so the shell dies BY
                 // SIGINT. A child that exited normally or by another
                 // signal (child_caught_sigint == 1) discards the
-                // delivery — the script continues with the child's
-                // own status.
-                if sigint_received
-                    && crate::executor::wait_status::exit_status_signal(&status)
-                        == Some(libc::SIGINT)
-                {
+                // delivery only while SIGINT is untrapped — the
+                // script continues with the child's own status. When
+                // SIGINT is trapped, the delivery is instead re-queued
+                // so the trap runs at the boundary (the else-if branch
+                // below; jobs.c:4384-4396, oracle-verified for both the
+                // survived-child and died-by-another-signal cases).
+                if sigint_received {
                     let trapped = crate::builtins::trap::get_trap_action(
                         &self.shell_state.env_vars,
                         "SIGINT",
                     );
-                    if trapped.is_some() {
+                    if crate::executor::wait_status::exit_status_signal(&status)
+                        == Some(libc::SIGINT)
+                    {
+                        if trapped.is_some() {
+                            crate::builtins::kill::requeue_pending_signals(vec![libc::SIGINT]);
+                        } else {
+                            self.termsig_death_trap_status = Some(self.exit_code);
+                            self.exit_code = 128 + libc::SIGINT;
+                            self.termsig_death_pending = Some(libc::SIGINT);
+                            return Err(ExecuteError::ExitCode(128 + libc::SIGINT));
+                        }
+                    } else if trapped.as_deref().is_some_and(|action| !action.is_empty()) {
+                        // jobs.c:4384-4396: non-interactive shell received SIGINT
+                        // while waiting for a foreground job that caught/ignored it
+                        // (child_caught_sigint != 0) and SIGINT is trapped — run
+                        // the trap handler at the boundary without treating the job
+                        // as interrupted.
                         crate::builtins::kill::requeue_pending_signals(vec![libc::SIGINT]);
-                    } else {
-                        self.termsig_death_trap_status = Some(self.exit_code);
-                        self.exit_code = 128 + libc::SIGINT;
-                        self.termsig_death_pending = Some(libc::SIGINT);
-                        return Err(ExecuteError::ExitCode(128 + libc::SIGINT));
                     }
                 }
                 status
