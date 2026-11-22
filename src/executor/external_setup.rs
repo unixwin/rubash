@@ -4396,6 +4396,12 @@ impl Executor {
         let mut process = std::process::Command::new(&exe);
         process
             .args(&spawn_args)
+            // rubash#3965 (captain graft of #4010): respawn state channel —
+            // the same contract as the coproc site in compound_exec.rs:
+            // stored spellings ride verbatim and the validated-respawn
+            // import restores them; raw bytes here would be dropped
+            // wholesale by the child's process_env_pairs import
+            // (rubash#2064), losing the variable.
             .envs(env_entries)
             // rubash#2195: fds 1-2 follow the spawn plan (the
             // prefix state at the substitution's own redirect);

@@ -564,9 +564,17 @@ impl Executor {
                 mirror_env_remove(&key);
             }
         }
-        let mut env_vars = crate::shell::var_table::VarTable::from_values(
-            crate::executor::env_helpers::entry_encode_imported_env(raw_env),
-        );
+        // rubash#3965 (captain graft of #4010): a validated respawn's
+        // environ is the parent's minted state transport, its user
+        // values already in stored spelling — import those verbatim
+        // (entry_encode_imported_env_respawn) so raw-byte marker pairs
+        // survive the fork this respawn emulates. Every other birth
+        // keeps the rubash#2884 entry-encoding of foreign environ data.
+        let mut env_vars = crate::shell::var_table::VarTable::from_values(if internal_respawn {
+            crate::executor::env_helpers::entry_encode_imported_env_respawn(raw_env)
+        } else {
+            crate::executor::env_helpers::entry_encode_imported_env(raw_env)
+        });
         // rubash#2356: out-of-band respawn state transport — the
         // spawn side moved every oversized environment entry into a
         // temp file and left only its path under

@@ -505,7 +505,10 @@ impl Executor {
     pub(in crate::executor) fn apply_child_environment(&self, process: &mut Command) {
         process.env_clear();
         for (name, value) in self.compose_child_environment() {
-            process.env(name, value);
+            process.env(
+                name,
+                crate::executor::substitution_metadata::env_value_to_os_string(&value),
+            );
         }
     }
 
@@ -532,16 +535,11 @@ impl Executor {
                 .to_string_lossy()
                 .replace('\\', "/");
         }
-        // GNU export puts the variable's raw bytes in the child's
-        // environment (variables.c:4850 make_env_array_from_var_list:
-        // line 4891 `value = value_cell (var)` then mk_env_string —
-        // the value cell bytes are copied verbatim, no re-encoding). A
-        // stored value carrying a raw-byte marker pair
-        // must not leak the pair itself into the child's env block — the
-        // child-argv boundary already maps each pair to its byte char
-        // (rubash#141, path.rs decode_raw_byte_markers_to_byte_chars);
-        // apply the same contract here so `x=$(printf '\377'); export x;
-        // env` prints the byte, not U+E000 U+E100.
-        crate::executor::substitution_metadata::decode_raw_byte_markers_to_byte_chars(value)
+        // GNU variables.c:4850 make_env_array_from_var_list copies raw cell
+        // bytes verbatim. Keep raw-byte marker pairs intact here so the
+        // `OsString` / `CString` child boundary (`env_value_to_os_string` /
+        // `env_entry_c_bytes`) decodes them directly to raw bytes without
+        // widening `0xFF` to `U+00FF` (`0xC3 0xBF`, rubash#3965).
+        value.to_string()
     }
 }

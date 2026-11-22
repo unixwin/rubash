@@ -6302,6 +6302,15 @@ impl Executor {
                     self.spill_respawn_env_entries(env_entries, respawn_argv_bytes);
                 state_temp = temp;
                 for (key, value) in entries {
+                    // rubash#3965 (captain graft of #4010): this arm is the
+                    // respawn STATE channel, not a foreign-child boundary —
+                    // the entries are the parent's stored spellings and a
+                    // validated respawn's import restores them verbatim
+                    // (init.rs). Decoding raw-byte marker pairs to raw
+                    // bytes here would hand the child a non-UTF-8 env
+                    // entry, which its process_env_pairs import drops
+                    // wholesale (rubash#2064): the variable would arrive
+                    // UNSET instead of carrying its byte.
                     child.env(key, value);
                 }
             }

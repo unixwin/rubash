@@ -80,6 +80,38 @@ pub(in crate::executor) fn entry_encode_imported_env(
         .collect()
 }
 
+/// rubash#3965 (captain graft of #4010): the validated-respawn variant of
+/// [`entry_encode_imported_env`]. A validated internal respawn's environ
+/// was minted by a rubash spawner out of its own variable table — the
+/// spawn sites compose it from the process env overlaid with the
+/// snapshot, so every user value already rides in STORED spelling
+/// (raw-byte marker pairs intact), exactly like the spill-file entries
+/// init.rs splices back verbatim below this same funnel (rubash#2356).
+/// Running the DATA entry-encoding over those values a second time
+/// escapes live marker pairs into literal text: the child would store
+/// U+E000/U+E100 characters where GNU's fork carries the raw byte.
+/// User values therefore pass verbatim here; the transport
+/// (`__RUBASH_*`) and function-source channels keep their ordinary
+/// treatment. Foreign births keep [`entry_encode_imported_env`] — the
+/// rubash#2884 protection for unencoded environ data is unchanged.
+pub(in crate::executor) fn entry_encode_imported_env_respawn(
+    values: HashMap<String, String>,
+) -> HashMap<String, String> {
+    values
+        .into_iter()
+        .map(|(name, value)| {
+            let value = if name.starts_with("__RUBASH_")
+                || super::function_env::imported_function_name(&name).is_some()
+            {
+                entry_encode_imported_env_value(&name, &value)
+            } else {
+                value
+            };
+            (name, value)
+        })
+        .collect()
+}
+
 /// Exact-case bare-name fallback into the process environment.
 ///
 /// GNU variables.c: the shell variable table is case-sensitive and the
@@ -375,5 +407,38 @@ mod tests {
             encoded["BASH_FUNC_f%%"],
             "() { echo '\u{E400}\u{E314}\u{1B}'; }"
         );
+    }
+
+    /// rubash#3965 (captain graft of #4010): the validated-respawn
+    /// variant must NOT re-encode user values — a live raw-byte marker
+    /// pair in stored spelling crosses verbatim (the plain funnel
+    /// escapes it into literal text; that is the foreign-birth
+    /// behavior) — while the transport and function-source channels
+    /// match the plain funnel exactly.
+    #[test]
+    fn entry_encode_imported_env_respawn_keeps_stored_spelling() {
+        let pair = "\u{E000}\u{E100}".to_string(); // stored spelling of byte 0xFF
+        let respawn = entry_encode_imported_env_respawn(HashMap::from([
+            ("X".to_string(), pair.clone()),
+            ("GUARD".to_string(), "\u{E314}".to_string()),
+            (
+                "__RUBASH_TRANSPORT".to_string(),
+                "\u{E314}\u{1B}".to_string(),
+            ),
+            (
+                "BASH_FUNC_f%%".to_string(),
+                "() { echo '\u{E314}\u{1B}'; }".to_string(),
+            ),
+        ]));
+        assert_eq!(respawn["X"], pair);
+        assert_eq!(respawn["GUARD"], "\u{E314}");
+        assert_eq!(respawn["__RUBASH_TRANSPORT"], "\u{E314}\u{1B}");
+        assert_eq!(
+            respawn["BASH_FUNC_f%%"],
+            "() { echo '\u{E400}\u{E314}\u{1B}'; }"
+        );
+        // The plain (foreign-birth) funnel escapes the same pair.
+        let foreign = entry_encode_imported_env(HashMap::from([("X".to_string(), pair)]));
+        assert_eq!(foreign["X"], "\u{E400}\u{E000}\u{E400}\u{E100}");
     }
 }
