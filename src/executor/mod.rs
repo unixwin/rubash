@@ -5,6 +5,7 @@
 pub(crate) mod arithmetic;
 pub(crate) mod glob;
 pub(crate) mod path;
+pub(crate) mod runtime_parse_cache;
 pub(crate) mod strmatch;
 pub(crate) mod types;
 pub(crate) mod wait_status;
@@ -14,6 +15,7 @@ use arithmetic::{
     eval_conditional_arith_value_categorized_with_writes_and_state,
     eval_conditional_arith_value_with_writes,
 };
+pub(crate) use runtime_parse_cache::{DebugTrapCacheKey, RuntimeParseCache, RuntimeParseCacheKey};
 pub(crate) use types::*;
 
 mod arrays;
@@ -1086,13 +1088,26 @@ pub struct Executor {
     /// runs the cached parse per firing; re-tokenizing + re-parsing the same
     /// action text on every firing (measured 12.5µs x 6002 firings in the
     /// bats_debug_trap lane) is dead work. Key = the alias-spliced action
-    /// text (the exact bytes tokenize sees), value = the parsed AST. During
-    /// a firing the AST is TAKEN out of the cell (the per-firing
+    /// text (the exact bytes tokenize sees) plus the ambient extglob gate
+    /// and the alias-table state the splice ran under, value = the parsed
+    /// AST. During a firing the AST is TAKEN out of the cell (the per-firing
     /// `command.line` stamp mutates it), executed, and put back — a stable
     /// action text pays zero clones and zero parses per firing. Any change
     /// to the spliced text (trap re-set, alias-table change feeding the
-    /// splice) misses and re-parses.
-    debug_trap_action_cache: std::cell::RefCell<Option<(String, crate::parser::Ast, i64)>>,
+    /// splice) misses and re-parses. The trailing bool is the extglob gate
+    /// the miss path's tokenize left behind, replayed on hits so a skipped
+    /// re-lex leaves the same ambient state.
+    debug_trap_action_cache:
+        std::cell::RefCell<Option<(DebugTrapCacheKey, crate::parser::Ast, i64, bool)>>,
+    /// rubash#2828: bounded content-keyed parse cache for runtime text
+    /// re-parsed by `eval`, non-DEBUG `trap` actions, and `source` (the
+    /// DEBUG action keeps the zero-clone single-slot above because it is
+    /// the per-command hot path). The key carries the exact bytes the
+    /// tokenize sees plus every parser-affecting input — line offset,
+    /// posix/extglob gates, `expand_aliases`, and the alias-table
+    /// generation — so an `alias`/`unalias`/BASH_ALIASES mutation between
+    /// two identical texts can never serve a stale AST.
+    runtime_parse_cache: std::cell::RefCell<RuntimeParseCache>,
     /// WP-3 (1.5.0 debugger design 4.4): the attached debug
     /// session's driver, consulted through the DEBUG-trap funnel
     /// (`run_debug_trap`). `None` on every executor but the

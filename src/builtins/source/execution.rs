@@ -256,75 +256,107 @@ fn run_source_groups(
         // separator); position/column/leading_ws/heredoc_end_line semantics
         // are identical because both streams are produced by the same
         // feeder code from the same pushes.
-        let mut tokens = match feeder_tokens {
-            Some(mut tokens) if gatherer_certified => {
-                if tokens
-                    .last()
-                    .is_some_and(|token| token.kind == crate::lexer::TokenKind::Semicolon)
-                {
-                    tokens.pop();
+        // rubash#2828: bounded content-keyed parse cache. Re-sourcing a
+        // file re-runs this loop over identical group texts; the key
+        // carries the exec_text bytes plus the line offset, posix mode,
+        // the group-ENTRY extglob gate (what the tokens below are lexed
+        // under — the ambient gate at this point is the group-END state
+        // the gather left behind and can coincide for groups whose entry
+        // gates differ), expand_aliases, and the alias-table generation,
+        // so a changed file or alias table can never serve a stale AST.
+        let (_posix_mode, _ambient_gate, aliases_enabled, alias_generation) =
+            executor.runtime_parse_state();
+        let cache_key = crate::executor::RuntimeParseCacheKey::source(
+            &exec_text,
+            if exec_text == pre_alias_text {
+                None
+            } else {
+                Some(pre_alias_text.as_str())
+            },
+            line_offset,
+            parse_posix,
+            gather_info.entry_extended_glob,
+            aliases_enabled,
+            alias_generation,
+        );
+        let mut ast = match executor.runtime_parse_lookup(&cache_key) {
+            Some(ast) => ast,
+            None => {
+                let mut tokens = match feeder_tokens {
+                    Some(mut tokens) if gatherer_certified => {
+                        if tokens
+                            .last()
+                            .is_some_and(|token| token.kind == crate::lexer::TokenKind::Semicolon)
+                        {
+                            tokens.pop();
+                        }
+                        tokens
+                    }
+                    _ => {
+                        // rubash#3205: the fresh re-lex starts from the
+                        // group-ENTRY gate (see
+                        // GroupGatherInfo::entry_extended_glob), not the
+                        // group-end global the gather left behind; restore
+                        // the caller's value afterwards.
+                        let saved_extended_glob = crate::lexer::parse_extended_glob();
+                        crate::lexer::set_parse_extended_glob(gather_info.entry_extended_glob);
+                        let tokens =
+                            crate::lexer::tokenize_with_initial_posix(&exec_text, parse_posix);
+                        crate::lexer::set_parse_extended_glob(saved_extended_glob);
+                        tokens
+                    }
+                };
+                if let Some(line) = crate::lexer::heredoc_overflow_line() {
+                    executor.mark_parse_error();
+                    eprintln!(
+                        "{}maximum here-document count exceeded",
+                        executor.parser_error_prefix_for_line(line)
+                    );
+                    executor.set_exit_code(2);
+                    return Ok(());
                 }
-                tokens
-            }
-            _ => {
-                // rubash#3205: the fresh re-lex starts from the
-                // group-ENTRY gate (see
-                // GroupGatherInfo::entry_extended_glob), not the
-                // group-end global the gather left behind; restore
-                // the caller's value afterwards.
-                let saved_extended_glob = crate::lexer::parse_extended_glob();
-                crate::lexer::set_parse_extended_glob(gather_info.entry_extended_glob);
-                let tokens = crate::lexer::tokenize_with_initial_posix(&exec_text, parse_posix);
-                crate::lexer::set_parse_extended_glob(saved_extended_glob);
-                tokens
+                if line_offset != 0 {
+                    for token in &mut tokens {
+                        token.position += line_offset;
+                        token.column += line_offset;
+                        // rubash#3605: end_position shifts with position (same line
+                        // space) — see script_driver.rs.
+                        token.end_position += line_offset;
+                        // rubash#1186: keep logical_line in the same (absolute)
+                        // line space as position; see script_driver.rs.
+                        token.logical_line += line_offset;
+                        // rubash#3605: heredoc_end_line shares that space — see
+                        // script_driver.rs.
+                        token.heredoc_end_line =
+                            token.heredoc_end_line.map(|line| line + line_offset);
+                    }
+                }
+                // GNU builtins/evalfile.c:296: a sourced file runs through
+                // parse_and_execute — the SAME parser as the top-level driver, not a
+                // lenient reparse. A stray `)` / `;;` at command position is a syntax
+                // error that aborts the remaining sourced text (rubash#203: `echo )`
+                // was silently accepted, the argument swallowed, rc=0, and the rest
+                // of the file still ran). parse.y yyerror reports `syntax error near
+                // unexpected token `)''; the group's pre-alias text is supplied so
+                // the diagnostic can echo the offending physical line
+                // (parse.y:6866 print_offending_line).
+                let ast = crate::parser::parse_with_options(
+                    &tokens,
+                    crate::parser::ParseLoopOptions {
+                        stray_close_is_error: true,
+                        source_text: Some(exec_text.as_str().into()),
+                        diagnostic_text: if exec_text == pre_alias_text {
+                            None
+                        } else {
+                            Some(pre_alias_text.as_str().into())
+                        },
+                        source_line_offset: line_offset,
+                    },
+                );
+                executor.runtime_parse_store(cache_key, &ast);
+                ast
             }
         };
-        if let Some(line) = crate::lexer::heredoc_overflow_line() {
-            executor.mark_parse_error();
-            eprintln!(
-                "{}maximum here-document count exceeded",
-                executor.parser_error_prefix_for_line(line)
-            );
-            executor.set_exit_code(2);
-            return Ok(());
-        }
-        if line_offset != 0 {
-            for token in &mut tokens {
-                token.position += line_offset;
-                token.column += line_offset;
-                // rubash#3605: end_position shifts with position (same line
-                // space) — see script_driver.rs.
-                token.end_position += line_offset;
-                // rubash#1186: keep logical_line in the same (absolute)
-                // line space as position; see script_driver.rs.
-                token.logical_line += line_offset;
-                // rubash#3605: heredoc_end_line shares that space — see
-                // script_driver.rs.
-                token.heredoc_end_line = token.heredoc_end_line.map(|line| line + line_offset);
-            }
-        }
-        // GNU builtins/evalfile.c:296: a sourced file runs through
-        // parse_and_execute — the SAME parser as the top-level driver, not a
-        // lenient reparse. A stray `)` / `;;` at command position is a syntax
-        // error that aborts the remaining sourced text (rubash#203: `echo )`
-        // was silently accepted, the argument swallowed, rc=0, and the rest
-        // of the file still ran). parse.y yyerror reports `syntax error near
-        // unexpected token `)''; the group's pre-alias text is supplied so
-        // the diagnostic can echo the offending physical line
-        // (parse.y:6866 print_offending_line).
-        let mut ast = crate::parser::parse_with_options(
-            &tokens,
-            crate::parser::ParseLoopOptions {
-                stray_close_is_error: true,
-                source_text: Some(exec_text.as_str().into()),
-                diagnostic_text: if exec_text == pre_alias_text {
-                    None
-                } else {
-                    Some(pre_alias_text.as_str().into())
-                },
-                source_line_offset: line_offset,
-            },
-        );
         if let Some(cmd) = redirect_cmd {
             executor.apply_inherited_command_output_redirects(cmd, &mut ast)?;
         }

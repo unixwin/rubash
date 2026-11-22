@@ -800,6 +800,7 @@ impl Executor {
             self.shell_state.function_definition_redirects = HashMap::new();
             self.shell_state.function_def_infos = imported_def_infos;
             self.shell_state.aliases = HashMap::new();
+            self.shell_state.bump_alias_generation();
             // Exec-model child (fresh process): empty job table — the
             // registry itself is emptied by the mem::take below; here only
             // the non-registry bookkeeping is reset.
@@ -1482,6 +1483,7 @@ impl Executor {
         self.shell_state.function_definition_redirects = saved_function_redirects;
         self.shell_state.function_def_infos = saved_function_def_infos;
         self.shell_state.aliases = saved_aliases;
+        self.shell_state.bump_alias_generation();
         self.tempenv_names = saved_tempenv_names;
         self.tempenv_marks = saved_tempenv_marks;
         self.tempenv_promoted_names = saved_tempenv_promoted;

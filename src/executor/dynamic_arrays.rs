@@ -2407,6 +2407,7 @@ impl Executor {
                     .aliases
                     .insert(key, crate::builtins::alias::Alias::new(&entry_value));
             }
+            self.shell_state.bump_alias_generation();
         } else {
             for (key, entry_value) in entries {
                 // assign_hashcmd (variables.c:1715): phash_insert with

@@ -2377,6 +2377,7 @@ impl Executor {
             debug_action_running: false,
             suppress_debug_trap_verbose: std::cell::Cell::new(false),
             debug_trap_action_cache: std::cell::RefCell::new(None),
+            runtime_parse_cache: std::cell::RefCell::new(RuntimeParseCache::new()),
             // WP-3: a command-substitution child never inherits the
             // debug session (DE-12: its frames are synthesized in a
             // later work package; stops stay on the owning executor).

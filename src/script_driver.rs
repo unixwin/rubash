@@ -10021,6 +10021,7 @@ mod perf10_token_reuse_tests {
         crate::lexer::set_parse_extended_glob(false);
         let mut executor = Executor::new();
         executor.shell_state.aliases.clear();
+        executor.shell_state.bump_alias_generation();
         let raw_lines: Vec<&str> = text.split_inclusive('\n').collect();
         let mut index = 0usize;
         let mut reused = 0usize;
@@ -10125,6 +10126,7 @@ mod perf10_token_reuse_tests {
         // the sourced status (0).
         let mut executor = Executor::new();
         executor.shell_state.aliases.clear();
+        executor.shell_state.bump_alias_generation();
         crate::builtins::source::execute_text(&mut executor, "X=1\n\r\nX=2\n")
             .expect("source of a three-group text with a blank CRLF line");
         assert_eq!(
@@ -10160,6 +10162,7 @@ mod perf10_token_reuse_tests {
             .shell_state
             .aliases
             .insert("ec".to_string(), crate::builtins::alias::Alias::new("echo"));
+        executor.shell_state.bump_alias_generation();
         let raw_lines: Vec<&str> = text.split_inclusive('\n').collect();
         let mut index = 0usize;
         let mut reused = 0usize;
@@ -10237,6 +10240,7 @@ mod perf10_token_reuse_tests {
         crate::lexer::set_parse_extended_glob(false);
         let mut executor = Executor::new();
         executor.shell_state.aliases.clear();
+        executor.shell_state.bump_alias_generation();
         let text = "echo before-extglob\nshopt -s extglob\ncase x in ?(a)) echo pat ;; esac\n";
         let raw_lines: Vec<&str> = text.split_inclusive('\n').collect();
         let mut index = 0usize;

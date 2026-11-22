@@ -876,7 +876,9 @@ impl Executor {
         }
         if array_name == "BASH_ALIASES" {
             let key = subscript.trim_matches('\'').trim_matches('"');
-            self.shell_state.aliases.remove(key);
+            if self.shell_state.aliases.remove(key).is_some() {
+                self.shell_state.bump_alias_generation();
+            }
             self.sync_dynamic_assoc_vars();
             return Some(0);
         }
