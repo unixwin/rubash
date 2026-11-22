@@ -1096,7 +1096,6 @@ fn is_andor(s: &str) -> bool {
 /// for N=3). Only the fstat of the entry's handle names the same
 /// file, and only it answers for pipes, sockets, devices, and
 /// deleted files, which have no re-stat-able path.
-#[cfg(unix)]
 fn fd_alias_stat(
     operand: &str,
     env_vars: &crate::shell::var_table::VarTable,
@@ -1115,7 +1114,6 @@ fn fd_alias_stat(
 /// pair. The nanosecond part counts forward from the whole second
 /// even before the epoch, so a negative sec subtracts the whole
 /// seconds and adds the nanoseconds back.
-#[cfg(unix)]
 fn stat_mark_time(sec: i64, nsec: i64) -> std::time::SystemTime {
     let nsec = nsec.clamp(0, 999_999_999) as u32;
     if sec >= 0 {
@@ -1164,7 +1162,6 @@ fn operand_identity(
     operand: &str,
     env_vars: &crate::shell::var_table::VarTable,
 ) -> Option<(u64, u64)> {
-    #[cfg(unix)]
     if let Some((dev, ino, _)) = fd_alias_stat(operand, env_vars) {
         return Some((dev, ino));
     }
@@ -1182,7 +1179,6 @@ fn modified(
     // mark names the bound descriptor's mtime; the TARGET mark's
     // path is the Windows rung; the literal path is the pre-#3432
     // behaviour.
-    #[cfg(unix)]
     if let Some((_, _, mtime)) = fd_alias_stat(path, env_vars) {
         return Some(mtime);
     }
