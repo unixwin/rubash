@@ -4365,6 +4365,96 @@ pub(crate) fn command_tree_has_hard_parse_error(command: &CommandNode) -> bool {
     hard || command_tree_walk_nested(command, command_tree_has_hard_parse_error)
 }
 
+/// First node in `command`'s tree carrying a HARD parse failure, in
+/// the descent order of `command_tree_walk_nested` (the command itself
+/// first, then nested bodies). The marker predicate is the
+/// `command_tree_has_hard_parse_error` set except that a
+/// `__RUBASH_PARSE_ERROR_COND__` marker holding an end-of-input value
+/// (`eof...` / `eof`) is NOT hard: the body only reaches EOF, so the
+/// caller must fall through to the EOF diagnostic rather than report
+/// a token error (rubash#4080). Reuses the generic walker instead of
+/// a second hand enumeration of the command variants — the walker's
+/// field order (including `coproc` bodies, which the hand enumeration
+/// missed) is the canonical one. The hit is recorded through a `Cell`
+/// because the walker's predicate is `Fn` (shared): the walker's
+/// `nested` helper and its direct predicate calls share one borrow,
+/// so a capturing `FnMut` closure cannot be passed (E0499 on the
+/// first two graft heads).
+fn find_first_hard_parse_error_node(command: &CommandNode) -> Option<&CommandNode> {
+    if is_hard_token_error_node(command) {
+        return Some(command);
+    }
+    let found: std::cell::Cell<Option<&CommandNode>> = std::cell::Cell::new(None);
+    command_tree_walk_nested(command, |nested| {
+        if found.get().is_none() {
+            if let Some(hit) = find_first_hard_parse_error_node(nested) {
+                found.set(Some(hit));
+                return true;
+            }
+        }
+        false
+    });
+    found.get()
+}
+
+/// True when this node itself carries a hard token error (see
+/// `find_first_hard_parse_error_node`).
+fn is_hard_token_error_node(command: &CommandNode) -> bool {
+    let sep = crate::executor::markers::PARSE_ERROR_FIELD_SEP;
+    command.assignments.iter().any(|(name, value)| {
+        name == "__RUBASH_PARSE_ERROR_NEAR__"
+            || (name == "__RUBASH_PARSE_ERROR_COND__"
+                && !value.starts_with(&format!("eof{sep}"))
+                && value != "eof")
+            || name.starts_with("__RUBASH_COMPOUND_SYNTAX_ERROR")
+            || (name == "__RUBASH_PARSE_ERROR__" && value.starts_with("unexpected token"))
+    })
+}
+
+/// rubash#4080: When an unclosed `${<funsub_char>...` body was not
+/// closed by `}` in `reserved_word_acceptable` position (e.g.
+/// `echo ${ case x in }`, `echo ${ in }`), GNU's `parse_comsub`
+/// (`parse.y:4519, 4549`) still runs `yyparse()` on the body with
+/// `shell_eof_token = '}'`. Any token-level syntax error inside the
+/// body fails before EOF and reports `syntax error near unexpected
+/// token ... while looking for matching '}'` + offending line
+/// (`parse.y:6858-6865`), rather than `unexpected EOF`.
+fn funsub_body_token_error_reported(
+    executor: &Executor,
+    input: &str,
+    line_offset: usize,
+    parse_posix: bool,
+    suppress_unclosed_diagnostic: bool,
+) -> bool {
+    let Some((body_start_byte, body_open_line)) = crate::lexer::unclosed_funsub_body_start(input)
+    else {
+        return false;
+    };
+    let body = &input[body_start_byte..];
+    let body_start_line = body_open_line + line_offset;
+    let tokens =
+        crate::lexer::tokenize_comsub_body_marked(body, parse_posix, body_start_line, true, &[]);
+    let ast = crate::parser::parse_with_options(
+        &tokens,
+        crate::parser::ParseLoopOptions {
+            source_text: Some(body.into()),
+            source_line_offset: body_start_line - 1,
+            ..crate::parser::ParseLoopOptions::default()
+        },
+    );
+    let Some(err_node) = ast
+        .commands
+        .iter()
+        .find_map(find_first_hard_parse_error_node)
+    else {
+        return false;
+    };
+    if !suppress_unclosed_diagnostic {
+        executor.report_comsub_body_parse_error(err_node, Some(body), true);
+    }
+    true
+}
+
 /// True when this command (or any nested command) carries an
 /// end-of-input verdict — the `__RUBASH_PARSE_ERROR_EOF*` marker family
 /// or the plain `__RUBASH_PARSE_ERROR__` "unexpected end of file"
@@ -4460,8 +4550,24 @@ fn interactive_pending_is_hard_syntax_error(
 
 /// Drives `predicate` over every command nested inside `command`
 // (pipeline stages, and-or lists, compound bodies, clause bodies).
-fn command_tree_walk_nested(command: &CommandNode, predicate: fn(&CommandNode) -> bool) -> bool {
-    let mut nested = |body: &[CommandNode]| body.iter().any(predicate);
+// The predicate is a plain `Fn` rather than a `fn` pointer so a
+// caller can capture state — but only through shared borrows (see
+// `find_first_hard_parse_error_node`, which records its hit in a
+// `Cell`): the `nested` helper below and the direct predicate calls
+// share one borrow, so an `FnMut` closure cannot be passed (E0499
+// on the first two graft heads), and the predicate's argument
+// lifetime is bound to the command's own lifetime so a hit can be
+// stored into the caller's `Option<&CommandNode>` (an elided
+// `impl FnMut(&CommandNode)` would be higher-ranked; the `nested`
+// helper's parameter carries the same `'a`, otherwise its anonymous
+// lifetime cannot outlive it — E0521 on the second graft head).
+// Plain function items still coerce, so the existing
+// `command_tree_has_*` callers are untouched.
+fn command_tree_walk_nested<'a>(
+    command: &'a CommandNode,
+    predicate: impl Fn(&'a CommandNode) -> bool,
+) -> bool {
+    let nested = |body: &'a [CommandNode]| body.iter().any(&predicate);
     command
         .pipeline_command
         .as_ref()
@@ -5610,6 +5716,19 @@ fn run_source_impl_inner_body(
                     }
                     executor.set_last_exit_code(1);
                     return 1;
+                } else if close == '}'
+                    && !report_open
+                    && funsub_body_token_error_reported(
+                        executor,
+                        input,
+                        line_offset,
+                        parse_posix,
+                        suppress_unclosed_diagnostic,
+                    )
+                {
+                    executor.errexit_live_at_diagnostic();
+                    executor.set_last_exit_code(2);
+                    return 2;
                 } else {
                     let reported = if report_open { global_open } else { global_eof };
                     unclosed_report!(
