@@ -674,6 +674,39 @@ pub(crate) fn decode_raw_byte_markers(bytes: &[u8]) -> Vec<u8> {
     output
 }
 
+/// Convert an internal shell env value (which may contain U+E000 raw-byte
+/// marker pairs and U+E400 literal-char escapes) into an `OsString` for
+/// `std::process::Command::env`.
+///
+/// On Unix (`#[cfg(unix)]`), `OsString::from_vec` preserves every decoded byte
+/// (`0x80..=0xFF`, e.g. `0xFF`) verbatim in `execve`'s `envp` without
+/// widening to UTF-8 `U+00FF` (`0xC3 0xBF`). On Windows (`#[cfg(not(unix))]`),
+/// `CreateProcessW` requires UTF-16 `OsString`, so raw bytes map to byte chars
+/// (`U+0080..=U+00FF`).
+pub(crate) fn env_value_to_os_string(value: &str) -> std::ffi::OsString {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        std::ffi::OsString::from_vec(decode_raw_byte_markers(value.as_bytes()))
+    }
+    #[cfg(not(unix))]
+    {
+        std::ffi::OsString::from(decode_raw_byte_markers_to_byte_chars(value))
+    }
+}
+
+/// Build the `NAME=VALUE` byte vector for a Unix `execve` `envp` entry,
+/// decoding raw-byte marker pairs into verbatim bytes (rubash#3965).
+#[cfg(unix)]
+pub(crate) fn env_entry_c_bytes(name: &str, value: &str) -> Vec<u8> {
+    let decoded = decode_raw_byte_markers(value.as_bytes());
+    let mut bytes = Vec::with_capacity(name.len() + 1 + decoded.len());
+    bytes.extend_from_slice(name.as_bytes());
+    bytes.push(b'=');
+    bytes.extend_from_slice(&decoded);
+    bytes
+}
+
 /// [`decode_raw_byte_markers`] with provenance for the one payload byte
 /// that stays ambiguous after a plain decode: 0x1C. In transport text a
 /// data 0x1C rides the raw-byte marker pair (bytes_to_shell_text tags

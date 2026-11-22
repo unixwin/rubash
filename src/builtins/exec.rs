@@ -1240,7 +1240,16 @@ fn apply_exported_environment(process: &mut Command, env_vars: &crate::shell::va
             continue;
         }
         if let Some(value) = env_vars.get(&name) {
-            process.env(&name, value);
+            // rubash#3965: the exec'd program is a foreign child, so this
+            // is an external boundary exactly like the spawn arms —
+            // stored raw-byte marker pairs decode here
+            // (env_value_to_os_string); passing the stored spelling
+            // through would leak U+E000/U+E100 into the child's
+            // environment block.
+            process.env(
+                &name,
+                crate::executor::substitution_metadata::env_value_to_os_string(value),
+            );
         }
     }
 }
