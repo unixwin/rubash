@@ -95,6 +95,12 @@ impl Executor {
         let fg_sigint_unwind = std::mem::take(&mut self.fg_sigint_unwind);
         let result = match result {
             Ok(()) if fg_sigint_unwind => Err(ExecuteError::SigintUnwind),
+            // rubash#2810: a cancel that landed during this unit's LAST
+            // command (or inside a blocking wait that abandoned early)
+            // left no boundary behind to trip — convert the still-set
+            // token here. A clone/child unit ending Ok swallows nothing:
+            // its parent's next boundary sees the same token.
+            Ok(()) if self.host_cancel_requested() => Err(ExecuteError::HostCancelled),
             other => other,
         };
         // rubash#423: GNU has no per-run cwd undo. `cd` runs chdir(2) in the
@@ -752,6 +758,36 @@ impl Executor {
                     self.exit_code = 130;
                 }
                 return Err(ExecuteError::SigintUnwind);
+            }
+            // rubash#2810: cooperative cancellation safe point — one
+            // relaxed load per statement boundary, covering every
+            // loop/eval/function body (they all funnel through this
+            // walker). No signal path: no trap fires, no status is
+            // synthesized. A flat `( )` region open in this frame is
+            // closed like the SIGINT arm — the region's saved parent
+            // state belongs to this frame, so the unwind restores it
+            // before propagating HostCancelled (no 130; the host's
+            // classification replaces any status synthesis).
+            if self.host_cancel_requested() {
+                if let Some(saved_state) = subshell_state.take() {
+                    while index + 1 < commands.len() && !commands[index + 1].subshell_end {
+                        index += 1;
+                    }
+                    if index + 1 < commands.len() {
+                        index += 1;
+                    }
+                    self.restore_flat_subshell(saved_state);
+                    if let Some(saved) = subshell_fd_table.take() {
+                        self.fd_table = saved;
+                    }
+                    if let Some(saved) = subshell_timed_stdin.take() {
+                        self.timed_stdin = saved;
+                    }
+                    if let Some(saved) = saved_fork_collapse.take() {
+                        self.subshell_fork_collapse.set(saved);
+                    }
+                }
+                return Err(ExecuteError::HostCancelled);
             }
             // rubash#2969: the same execute_cmd.c:635-636 gate for the
             // DEBUG-trap pending flags — a break/continue executed inside
