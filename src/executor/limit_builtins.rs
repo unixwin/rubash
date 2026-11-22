@@ -279,7 +279,7 @@ impl Executor {
                                         );
                                     }
                                     for member in &members {
-                                        self.note_kill_delivery(*member, request.signal);
+                                        self.note_kill_delivery(*member, request.signal, true);
                                     }
                                     any_succeeded = true;
                                 }
@@ -369,7 +369,7 @@ impl Executor {
                                 stderr.extend(signal_stderr);
                                 continue;
                             }
-                            self.note_kill_delivery(member, request.signal);
+                            self.note_kill_delivery(member, request.signal, false);
                         }
                         if operand_failed {
                             any_failed = true;
@@ -501,7 +501,7 @@ impl Executor {
                 // signal delivery).
                 continue;
             }
-            self.note_kill_delivery(pid, request.signal);
+            self.note_kill_delivery(pid, request.signal, false);
             continue;
         }
 
@@ -521,7 +521,7 @@ impl Executor {
     /// The job-table bookkeeping one successful signal delivery leaves
     /// behind, shared by the single-pid path and the jobspec pipeline
     /// walk (jobs.c:3988-4007) in `execute_tracked_background_kill`.
-    fn note_kill_delivery(&mut self, pid: u32, signal: i32) {
+    fn note_kill_delivery(&mut self, pid: u32, signal: i32, group_jobspec: bool) {
         // GNU: the shell learns that a background job stopped from
         // waitchld's WUNTRACED report, which only exists under job
         // control — a non-monitor shell never notices, so `jobs` keeps
@@ -539,14 +539,19 @@ impl Executor {
         // applying it synchronously inside the kill.
         if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "monitor") {
             if signal == 18 {
-                // GNU jobs.c:4013-4018 kill_pid: `kill -s CONT` on a
-                // job the table already records as stopped emulates
-                // `bg` — set_job_running publishes the Running
-                // transition at DELIVERY time (with J_NOTIFIED), not
-                // at the next notification point. Only the deferred
-                // path covers a CONT aimed at a job still running or
-                // one whose stop has not been recorded yet.
-                if self.shell_state.job_table.job_recorded_stopped(pid) {
+                // GNU jobs.c:4013-4018 kill_pid (`group` arm, jobspec
+                // with own pgrp): `kill -s CONT %job` on a job the
+                // table already records as stopped emulates `bg` —
+                // set_job_running publishes the Running transition at
+                // DELIVERY time (with J_NOTIFIED), not at the next
+                // notification point.
+                //
+                // By contrast, `kill -s CONT <pid>` (positive pid,
+                // `group == 0` at jobs.c:4026-4027) only calls
+                // kill(2) and does NOT touch the jobs table: the
+                // Running transition waits for waitchld at a later
+                // observation point (defer_state_mark, rubash#4097).
+                if group_jobspec && self.shell_state.job_table.job_recorded_stopped(pid) {
                     self.shell_state.job_table.mark_running(pid);
                 } else {
                     self.shell_state
