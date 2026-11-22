@@ -42,6 +42,9 @@ required-features = ["windows-shim"]
 # produce it; Windows packaging opts in with `--features windows-shim`.
 default = []
 windows-shim = []
+# Opt-in allocation counter for measurement-only builds (rubash#2812).
+# Default OFF so normal/timing builds compile zero counter checks.
+alloc-counter = []
 
 [dependencies]
 regex = "1"
