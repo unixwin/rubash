@@ -148,10 +148,7 @@ fn two_dash_groups() {
 /// sees EOF; the following command re-reads fresh.
 #[test]
 fn grouped_dash_twice_operands_then_second() {
-    assert_run(
-        "{ cat - -; } < f1; cat < f1",
-        "alpha\nbeta\nalpha\nbeta\n",
-    );
+    assert_run("{ cat - -; } < f1; cat < f1", "alpha\nbeta\nalpha\nbeta\n");
 }
 
 /// A later `cat -` with its OWN redirect was always fine and

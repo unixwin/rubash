@@ -773,10 +773,7 @@ mod tests {
             .filter(|row| !row.help_entry)
             .map(|row| row.name)
             .collect();
-        assert_eq!(
-            false_rows,
-            [":", "[", "echo", "false", "test", "true"]
-        );
+        assert_eq!(false_rows, [":", "[", "echo", "false", "test", "true"]);
         // Every Getopt row has the entry (ISHELP in option position).
         for row in BUILTIN_TABLE {
             if matches!(row.opt_spec, OptSpec::Getopt(_)) {

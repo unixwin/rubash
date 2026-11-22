@@ -94,8 +94,7 @@ fn move_first_line_present_when_redirector_open_on_undoable_walks() {
     assert_eq!(err, expected(1));
 
     let dir = test_dir("present_function");
-    let (out, err, _code) =
-        run_script(&dir, "f() { true; }\nf 8>/dev/null 8>&10-\necho rc=$?\n");
+    let (out, err, _code) = run_script(&dir, "f() { true; }\nf 8>/dev/null 8>&10-\necho rc=$?\n");
     assert_eq!(out, "rc=1\n");
     assert_eq!(err, expected(2));
 
@@ -139,10 +138,7 @@ fn bound_move_succeeds_silently() {
     // refutes that -- a plain command's move is temporary.
     let dir = test_dir("bound_move");
     std::fs::write(dir.join("in.txt"), "hello\n").expect("write in.txt");
-    let (out, err, code) = run_script(
-        &dir,
-        "exec 9<in.txt\ntrue 8>&9-\necho rc=$?\ncat <&8\n",
-    );
+    let (out, err, code) = run_script(&dir, "exec 9<in.txt\ntrue 8>&9-\necho rc=$?\ncat <&8\n");
     assert_eq!(out, "rc=0\n");
     assert_eq!(err, "probe.sh: line 4: 8: Bad file descriptor\n");
     assert_eq!(code, Some(1));
@@ -155,10 +151,7 @@ fn expanded_forms_keep_word_classification() {
     let dir = test_dir("word_form_dash");
     let (out, err, _code) = run_script(&dir, "x='10-'\ntrue 8>&$x\necho rc=$?\n");
     assert_eq!(out, "rc=1\n");
-    assert_eq!(
-        err,
-        "probe.sh: line 2: 10-: ambiguous redirect\n"
-    );
+    assert_eq!(err, "probe.sh: line 2: 10-: ambiguous redirect\n");
 
     // `8>&$x` with x='10': a plain dup of an unbound fd -- the
     // per-redirection line only, never the move first line. GNU

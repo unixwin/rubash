@@ -1481,9 +1481,7 @@ impl Executor {
     /// claimed by the closed-target arms.
     fn writeless_dup_source(&self, target: &str) -> Option<u32> {
         let source = redirect_target_fd(target)?;
-        if self.fd_table.is_closed(source)
-            || self.fd_table.output_endpoint(source).is_some()
-        {
+        if self.fd_table.is_closed(source) || self.fd_table.output_endpoint(source).is_some() {
             return None;
         }
         self.fd_table.entries.get(&source).map(|_| source)
