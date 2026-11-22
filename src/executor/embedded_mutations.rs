@@ -1573,6 +1573,11 @@ impl Executor {
                                         fragment_context,
                                     )
                                 });
+                            if self.shell_state.parameter_bad_substitution.get()
+                                || self.no_closing_brace_failure.get()
+                            {
+                                break;
+                            }
                             let value = protect_rhs_value(
                                 &value,
                                 protect_rhs_data || protect_expansion_results,
@@ -1614,6 +1619,11 @@ impl Executor {
                                         fragment_context,
                                     )
                                 });
+                            if self.shell_state.parameter_bad_substitution.get()
+                                || self.no_closing_brace_failure.get()
+                            {
+                                break;
+                            }
                             let value = protect_rhs_value(
                                 &value,
                                 protect_rhs_data || protect_expansion_results,
@@ -1679,6 +1689,11 @@ impl Executor {
                                     fragment_context,
                                 )
                             });
+                        if self.shell_state.parameter_bad_substitution.get()
+                            || self.no_closing_brace_failure.get()
+                        {
+                            break;
+                        }
                         let value = protect_rhs_value(
                             &value,
                             protect_rhs_data || protect_expansion_results,
