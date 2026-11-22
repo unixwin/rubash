@@ -334,7 +334,7 @@ impl Executor {
         let report_line = if super::command_text::compound_redirect_error_is_ambient(owner) {
             self.ambient_line.get().or(owner.end_line).or(owner.line)
         } else if super::command_text::redirect_error_uses_completion_line(owner) {
-            owner.end_line.or(owner.line)
+            super::command_text::redirect_error_completion_line(owner)
         } else {
             None
         };

@@ -292,6 +292,12 @@ pub struct ConditionalCommand {
     pub close_delimiter: String,
     pub close_delimiter_metadata: Box<WordMetadata>,
     pub expression: ConditionalExpression,
+    /// GNU `Cond->line` (execute_cmd.c:419-420 `executing_line_number`):
+    /// the `]]` token's `logical_line` in the reader's numbering, used by
+    /// redirect-open errors on `[[ ... ]]` without clobbering
+    /// `CommandNode::end_line` (the parse-end ambient line for trailing
+    /// process substitutions, rubash#4092).
+    pub line: Option<usize>,
 }
 
 /// Represents the parsed expression inside `[[ ... ]]`.

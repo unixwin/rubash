@@ -112,6 +112,9 @@ pub(crate) fn shift_trap_action_lines(commands: &mut [CommandNode], delta: i64) 
         if let Some(for_command) = &mut node.for_command {
             shift_trap_action_lines(&mut for_command.body, delta);
         }
+        if let Some(cond) = &mut node.conditional_command {
+            shift_slot(&mut cond.line, delta);
+        }
         if let Some(if_command) = &mut node.if_command {
             shift_trap_action_lines(&mut if_command.condition, delta);
             shift_trap_action_lines(&mut if_command.then_body, delta);

@@ -4073,7 +4073,7 @@ impl Executor {
             }
         }
         if super::command_text::redirect_error_uses_completion_line(cmd) {
-            if let Some(line) = cmd.end_line.or(cmd.line) {
+            if let Some(line) = super::command_text::redirect_error_completion_line(cmd) {
                 return self.error_prefix_at_line(line);
             }
         }

@@ -235,6 +235,17 @@ pub(in crate::executor) fn redirect_error_uses_completion_line(cmd: &CommandNode
     cmd.arithmetic_command.is_some() || cmd.conditional_command.is_some()
 }
 
+/// The completion line for `redirect_error_uses_completion_line` owners:
+/// `ConditionalCommand::line` (`Cond->line` at `]]`, execute_cmd.c:419-420)
+/// for `[[ ... ]]`, and `cmd.end_line` for `(( ... ))`, falling back to
+/// `cmd.end_line.or(cmd.line)`.
+pub(in crate::executor) fn redirect_error_completion_line(cmd: &CommandNode) -> Option<usize> {
+    if let Some(cond) = &cmd.conditional_command {
+        return cond.line.or(cmd.end_line).or(cmd.line);
+    }
+    cmd.end_line.or(cmd.line)
+}
+
 /// Whether a failure opening THIS command's own redirections reports
 /// at the ambient line instead of the command's own line. GNU
 /// execute_cmd.c:854 do_redirections runs before the dispatch switch
