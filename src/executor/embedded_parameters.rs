@@ -1337,9 +1337,51 @@ impl Executor {
                             double_quoted || heredoc,
                         ),
                     };
+                    // GNU subst.c:9777 parameter_brace_expand receives the
+                    // word's `quoted` flags: inside a double-quoted span
+                    // (or a here-document body, expanded under the same
+                    // rules) the `${var op word}` RHS is itself a
+                    // double-quoted string — subst.c:7982-7993
+                    // parameter_brace_expand_rhs runs
+                    // string_extract_double_quoted + expand_string_for_rhs
+                    // with the quoted flag — so the quotes in
+                    // `"${W:-'}'}"` stay literal data (rubash#4004). The
+                    // mutable walker carries that bit as
+                    // SubstitutionQuoteContext::DoubleQuoted
+                    // (embedded_mutations.rs fragment_context); this walk
+                    // routes the fragment through the quoted whole-word
+                    // expander, the &self port of the same context.
+                    let site_quoted = in_double || double_quoted || heredoc || fragment_site_quoted;
                     let value = crate::executor::expand_word::with_extquote_name_quoted_context(
-                        in_double || double_quoted || heredoc || fragment_site_quoted,
-                        || self.expand_word(&format!("${{{name}}}")),
+                        site_quoted,
+                        || {
+                            // Only a synthetic that IS one whole
+                            // `${...}` fragment takes the quoted
+                            // entry — expand_quoted_parameter_word
+                            // delegates non-spanning forms back to
+                            // the embedded walk, which would
+                            // re-dispatch the same fragment. A
+                            // word carrying an assignment fragment
+                            // is excluded: the rubash#1169
+                            // freeze/apply machinery keys on the
+                            // master's route, and a quoted-entry
+                            // render bypasses the frozen-fragment
+                            // consult, so an earlier fragment
+                            // would read the post-assignment value
+                            // (issue3045's case-subject freeze).
+                            if site_quoted
+                                && crate::executor::parameter_ops::braced_parameter_spans_whole_word(
+                                    synthetic.as_str(),
+                                )
+                                && !crate::executor::parameter_words::word_has_assignment_fragment(
+                                    word,
+                                )
+                            {
+                                self.expand_quoted_parameter_word(synthetic.as_str())
+                            } else {
+                                self.expand_word(synthetic.as_str())
+                            }
+                        },
                     );
                     if preserve_quotes {
                         push_preserved_expansion_output(&mut output, &value, in_double);

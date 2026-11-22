@@ -827,7 +827,17 @@ impl Executor {
         // guard byte reaches the ambiguity gate and the open() call
         // (rubash#379: `> $'out tab1.txt'` must write that literal name).
         // E400-aware: user U+E401 data (E400 E401) must survive (rubash#735).
-        let expanded = crate::executor::markers::strip_ansi_c_ifs_guard(&expanded);
+        // IFS_GLUE pairs ride the same boundary: protect_ifs_field_chars
+        // marks the IFS whitespace of a double-quoted `${var op word}`
+        // result (parameter_words.rs unescape_parameter_operator_result,
+        // subst.c:2673-2678) so word-list splitting keeps it glued, but a
+        // redirect operand that reaches this point is already a single
+        // field — the pair decodes to the literal character
+        // (`> "g${W:-h i}"` opens `gh i`, not a name carrying \x1c;
+        // rubash#4004).
+        let expanded = crate::executor::markers::strip_ansi_c_ifs_guard(
+            &crate::executor::command_substitution_values::decode_protected_ifs_chars(&expanded),
+        );
         if suppress_glob {
             // GNU subst.c:12683-12688 (expand_words_no_vars else-branch): a
             // word that does not glob is still DEQUOTED before it becomes
