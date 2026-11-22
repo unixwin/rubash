@@ -2916,6 +2916,27 @@ impl Executor {
             .set(self.preopened_generation.get().wrapping_add(1));
     }
 
+    /// rubash#4131: retire every pending preopened handle stamped with
+    /// `generation` or a later one. execute_command calls this at its
+    /// end-of-command boundary for the generation its own dispatch
+    /// opened: a handle this command's walks parked that no bind walk
+    /// adopted has no further consumer — GNU closes a command's
+    /// redirections when the command returns (execute_cmd.c:5606/5693
+    /// undo_partial_redirects around the dispatch) — and leaving it
+    /// parked keeps the target open into the NEXT command's execution,
+    /// so a following pipeline's children spawn while the shell still
+    /// holds the file write-open (the reject gate only retires it at
+    /// that next command's admission, which is already too late).
+    /// Handles stamped by earlier generations are not this command's
+    /// to retire: pipeline-stage transfers re-stamp their entries into
+    /// the stage subshell under its own older generation, and the
+    /// reject gate remains those entries' retirement path.
+    pub(in crate::executor) fn retire_preopened_from_generation(&self, generation: u64) {
+        self.pending_preopened_redirects
+            .borrow_mut()
+            .retain(|_, (_, _, parked_generation)| *parked_generation < generation);
+    }
+
     pub(in crate::executor) fn redirect_output_path_target(&self, target: &str) -> String {
         if self.posix_mode_enabled() {
             return target.to_string();

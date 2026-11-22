@@ -10,6 +10,11 @@ impl Executor {
         // retires the previous command's leftovers (see
         // Executor::preopened_generation).
         self.advance_preopened_generation();
+        // rubash#4131: this dispatch's generation, captured for the
+        // end-of-command retirement below (nested commands advance it
+        // further; their parked leftovers carry later stamps and are
+        // this command's to retire as well).
+        let command_generation = self.preopened_generation.get();
         // rubash#2652: a command dispatched outside suppression owns
         // the terminal status from here — clear any stale
         // suppressed-terminal record from an earlier command in the
@@ -49,6 +54,12 @@ impl Executor {
         }
         self.close_command_scoped_procsub_input_fds_from(procsub_fd_base);
         self.drain_deferred_varredir_closes(varredir_close_base);
+        // rubash#4131: retire this command's unadopted preopened
+        // redirect handles at the same boundary (see
+        // Executor::retire_preopened_from_generation) — an in-process
+        // builtin's parked handle otherwise stays open into the next
+        // command's execution.
+        self.retire_preopened_from_generation(command_generation);
         // rubash#3107: the dynamic associative variables' owner tables
         // (aliases, hashed_filenames) mutate without a mirror write, so
         // a materialized typed cell goes stale at this boundary;
