@@ -2435,6 +2435,16 @@ pub(crate) struct ComsubHeredocHeader {
 /// byte offset: an incomplete delimiter (one whose raw spelling ends with an
 /// unquoted backslash, completed by the next physical line) leaves the scan
 /// point at its `<<` so it is re-read after the join.
+///
+/// Quote state follows the matched-pair discipline of
+/// `complete_comsub_heredoc_header_close` (GNU parse.y:4172-4174: a `$(`
+/// dispatches to parse_comsub with ~P_DQUOTE, so the nested parse starts
+/// with the enclosing double-quote state cleared): a `$(` saves the
+/// current `double` flag on `quote_stack` and clears it, the matching
+/// `)` restores it (rubash#4128). Without the stack, a `'` inside
+/// `"$(...)"` could never open a single-quoted string and a `<<` inside
+/// either kind of quoted string inside the substitution was registered
+/// as a real heredoc header.
 pub(crate) fn scan_line_for_comsub_heredoc_headers(
     line: &str,
 ) -> (Vec<ComsubHeredocHeader>, usize) {
@@ -2444,6 +2454,7 @@ pub(crate) fn scan_line_for_comsub_heredoc_headers(
     let mut index = 0usize;
     let mut single = false;
     let mut double = false;
+    let mut quote_stack: Vec<bool> = Vec::new();
     // `index` always sits on a char boundary: ASCII tokens step one byte and
     // every other char steps by its UTF-8 length. Widening bytes with
     // `bytes[i] as char` let continuation bytes 0x85/0xa0 (inside e.g.
@@ -2479,7 +2490,32 @@ pub(crate) fn scan_line_for_comsub_heredoc_headers(
                     index += 1;
                 }
             }
+            '$' if !single
+                && bytes.get(index + 1) == Some(&b'(')
+                && bytes.get(index + 2) != Some(&b'(') =>
+            {
+                // Command substitution: the nested parse owns its quote
+                // state (see the function doc) — save the enclosing
+                // double-quote flag and start cleared.
+                quote_stack.push(double);
+                double = false;
+                index += 2;
+            }
+            '(' if !single && !double && !quote_stack.is_empty() => {
+                // A plain group inside the substitution pairs with its
+                // `)` the same way (the model in
+                // complete_comsub_heredoc_header_close pushes it too),
+                // so the `)` that closes the group is not mistaken for
+                // the substitution's own closer.
+                quote_stack.push(double);
+                index += 1;
+            }
+            ')' if !single && !double && !quote_stack.is_empty() => {
+                double = quote_stack.pop().unwrap_or(double);
+                index += 1;
+            }
             '<' if !single
+                && !double
                 && bytes.get(index + 1) == Some(&b'<')
                 && bytes.get(index + 2) != Some(&b'<') =>
             {
