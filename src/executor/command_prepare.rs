@@ -6903,6 +6903,22 @@ fn copy_comsub_body_verbatim_for_ifs_marking(
             prev_sig = Some(ch);
         }
         match ch {
+            '$' if next == Some('{')
+                && raw_chars
+                    .get(*index + 1)
+                    .is_some_and(|c| matches!(c, ' ' | '\t' | '\n' | '|')) =>
+            {
+                if let Some(end) = crate::lexer::skip_funsub_body(raw_chars, *index) {
+                    for &c in &raw_chars[*index..end] {
+                        simulated.push(c);
+                    }
+                    *index = end;
+                    word.push('\u{1}');
+                    word_boundary = false;
+                    token_boundary = false;
+                    continue;
+                }
+            }
             '$' if next == Some('\'') => {
                 simulated.push('\'');
                 *index += 1;

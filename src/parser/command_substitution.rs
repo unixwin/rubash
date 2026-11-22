@@ -493,6 +493,18 @@ fn dollar_command_substitution(
             ));
         }
         match ch {
+            '$' if chars.get(index + 1) == Some(&'{')
+                && chars
+                    .get(index + 2)
+                    .is_some_and(|c| matches!(c, ' ' | '\t' | '\n' | '|')) =>
+            {
+                if let Some(end) = crate::lexer::skip_funsub_body(chars, index + 1) {
+                    word.push('\u{1}');
+                    token_boundary = false;
+                    index = end;
+                    continue;
+                }
+            }
             '\'' if !double => single = !single,
             '"' if !single => double = !double,
             '(' if !single && !double && case_depth == 0 => depth += 1,

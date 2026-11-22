@@ -1221,7 +1221,15 @@ fn splice_substitution_body(
 /// reserved_word_acceptable): after `;', `&', `|', a newline, or a closed
 /// `{ }'/`( )' command construct, and with a word-breaking char (or end
 /// of input) following. Returns the index just past the closing `}`.
-pub(super) fn skip_funsub_body(chars: &[char], open: usize) -> Option<usize> {
+/// Byte length of a `${ command; }` funsub body starting at `{` (index 0 of
+/// `rest_from_open`), returning `None` if unclosed.
+pub(crate) fn skip_funsub_body_byte_len(rest_from_open: &str) -> Option<usize> {
+    let chars: Vec<char> = rest_from_open.chars().collect();
+    let end_char = skip_funsub_body(&chars, 0)?;
+    Some(chars[..end_char].iter().map(|c| c.len_utf8()).sum())
+}
+
+pub(crate) fn skip_funsub_body(chars: &[char], open: usize) -> Option<usize> {
     let mut depth = 1usize;
     let mut index = open + 1;
     let mut single = false;

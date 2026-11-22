@@ -3953,6 +3953,30 @@ pub(in crate::executor) fn collect_command_substitution_source_ex(
         // `${` opens parameter text: inside it `#` is a parameter operator
         // (e.g. `${#x}`), never a comment introducer.
         if source_ch == '$' && !single && chars.peek().copied() == Some('{') {
+            if !double {
+                // rubash#4031 graft: bounded lookahead for the FUNSUB_CHAR
+                // predicate (see embedded_parameters.rs) — no full collect
+                // of the remaining input for ordinary `${...}`.
+                let mut lookahead = chars.clone();
+                let funsub_open = lookahead.next() == Some('{')
+                    && lookahead
+                        .next()
+                        .is_some_and(|c| matches!(c, ' ' | '\t' | '\n' | '|'));
+                if funsub_open {
+                    let rest: String = chars.clone().collect();
+                    if let Some(len) = crate::lexer::skip_funsub_body_byte_len(&rest) {
+                        source.push(source_ch);
+                        source.push_str(&rest[..len]);
+                        for _ in rest[..len].chars() {
+                            chars.next();
+                        }
+                        word.push('\u{1}');
+                        word_boundary = false;
+                        token_boundary = false;
+                        continue;
+                    }
+                }
+            }
             source.push(source_ch);
             source.push(chars.next().expect("parameter brace"));
             parameter_depth += 1;
