@@ -2182,12 +2182,6 @@ impl Executor {
             // `$OLDPWD` would still expand to the rejected value.
             mirror_env_remove("OLDPWD");
         }
-        // The imported SECONDS base recorded by the fresh-shell arm
-        // below; folded into __RUBASH_SHELL_START_EPOCH at its insert
-        // site (see there). Zero when SECONDS was not imported and on
-        // the keep_shlvl path, whose offset rides the transported
-        // __RUBASH_SECONDS_OFFSET key instead.
-        let mut imported_seconds_offset: i64 = 0;
         // rubash#2058: see the keep_shlvl parameter.
         if !keep_shlvl {
             initialize_shell_level(env_vars);
@@ -2236,24 +2230,34 @@ impl Executor {
             // exception: the imported value is rebound into the cell
             // AND seeds the offset (seconds_value_assigned =
             // valid_number(value)), so $SECONDS starts counting from
-            // the imported base — keep the cell and record the offset.
-            // The offset is NOT stored under its own key here: a plain
-            // values entry is a visible variable (a named `declare -p`
-            // prints it, rc=0), while GNU has no such variable at all.
-            // It folds into __RUBASH_SHELL_START_EPOCH at the insert
-            // site below instead — every SECONDS reader computes
-            // now - epoch + offset, so epoch - offset with no key
-            // reproduces the imported base exactly, and the assignment
-            // arms (which read the same epoch when they install the
-            // offset key themselves) stay self-consistent. A raw
+            // the imported base — keep the cell and record the offset
+            // under its own key. The offset stays OUT of
+            // __RUBASH_SHELL_START_EPOCH: shell.c:470 sets
+            // shell_start_time at startup and printf %T -2 reads it
+            // directly (printf.def:626-627), so folding the offset
+            // into the epoch shifted %T -2 by -offset (rubash#4059).
+            // Every SECONDS reader computes now - epoch + offset, so
+            // the pair (true epoch, imported offset) reproduces the
+            // imported base exactly, and the assignment arms (which
+            // read the same epoch when they install the offset key
+            // themselves) stay self-consistent. A raw
             // __RUBASH_SECONDS_OFFSET riding a fresh shell's birth
-            // environment alongside SECONDS is superseded the same
-            // way; continuity across the respawn boundary rides the
-            // keep_shlvl transport, which skips this whole block.
+            // environment without SECONDS is foreign state, not an
+            // import, and is dropped; continuity across the respawn
+            // boundary rides the keep_shlvl transport, which skips
+            // this whole block.
             if let Some(imported) = env_vars.get("SECONDS").cloned() {
-                imported_seconds_offset = imported.parse::<i64>().unwrap_or(0);
+                let offset = imported.trim().parse::<i64>().unwrap_or(0);
+                env_vars.insert(SECONDS_OFFSET.to_string(), offset.to_string());
+            } else {
                 env_vars.remove(SECONDS_OFFSET);
             }
+            // A foreign __RUBASH_SHELL_START_EPOCH in the birth
+            // environment is likewise not an import: a fresh start
+            // derives the epoch at the insert site below, and the key
+            // is only ever read from the environment across the
+            // validated keep_shlvl respawn transport.
+            env_vars.remove(SHELL_START_EPOCH);
         }
         // keep_shlvl (a validated respawn) skips the whole export-set
         // recompute: GNU's forked child copies the variable table
@@ -2366,10 +2370,15 @@ impl Executor {
         env_vars
             .entry("TERM".to_string())
             .or_insert_with(|| "dumb".to_string());
-        env_vars.insert(
-            SHELL_START_EPOCH.to_string(),
-            (current_epoch_seconds() - imported_seconds_offset).to_string(),
-        );
+        // GNU shell.c:470: shell_start_time is this shell's own
+        // start on a fresh start; a validated respawn (keep_shlvl) is
+        // a fork, whose shell_start_time is the parent's — the
+        // transported value stands (or_insert). Fresh starts removed
+        // any foreign copy above, so or_insert cannot adopt one
+        // (rubash#4059).
+        env_vars
+            .entry(SHELL_START_EPOCH.to_string())
+            .or_insert_with(|| current_epoch_seconds().to_string());
         // GNU shell.c:1974-1986 (shell_initialize -> initialize_shell_options
         // set.def:607-630 via parse_shellopts set.def:600-604, and
         // initialize_bashopts shopt.def): a non-privileged shell applies the
