@@ -786,10 +786,18 @@ pub(in crate::executor) fn apply_stderr_append_redirect(
 }
 
 pub(in crate::executor) fn split_shell_path(path: &str) -> Vec<String> {
+    split_gnu_path(path)
+}
+
+fn is_path_separator(bytes: &[u8], entry_start: usize, index: usize) -> bool {
     if cfg!(windows) {
-        split_windows_shell_path(path)
+        match bytes[index] {
+            b';' => true,
+            b':' => !is_windows_drive_colon(bytes, entry_start, index),
+            _ => false,
+        }
     } else {
-        split_gnu_path(path)
+        bytes[index] == b':'
     }
 }
 
@@ -824,11 +832,11 @@ fn split_gnu_path(path: &str) -> Vec<String> {
         // extract_colon_unit: step past the colon the index rests on
         // (never at index 0 — a leading colon is a leading empty unit).
         let mut i = index;
-        if i > 0 && bytes[i] == b':' {
+        if i > 0 && is_path_separator(bytes, i, i) {
             i += 1;
         }
         let start = i;
-        while i < bytes.len() && bytes[i] != b':' {
+        while i < bytes.len() && !is_path_separator(bytes, start, i) {
             i += 1;
         }
         let mut p_index = i;
@@ -847,7 +855,7 @@ fn split_gnu_path(path: &str) -> Vec<String> {
     entries
 }
 
-fn split_windows_shell_path(path: &str) -> Vec<String> {
+pub(in crate::executor) fn split_windows_shell_path(path: &str) -> Vec<String> {
     let mut entries = Vec::new();
     let bytes = path.as_bytes();
     let mut entry_start = 0;
@@ -925,7 +933,6 @@ mod split_shell_path_tests {
         );
     }
 
-    #[cfg(not(windows))]
     #[test]
     fn unix_path_walk_matches_extract_colon_unit() {
         // rubash#2943: the (PATH -> visited elements) table GNU

@@ -3429,7 +3429,7 @@ pub(crate) fn process_path_to_shell(path: &str) -> String {
     if !cfg!(windows) {
         return path.to_string();
     }
-    split_shell_path(path)
+    super::support_names::split_windows_shell_path(path)
         .into_iter()
         .map(|entry| windows_drive_entry_to_shell(&entry))
         .collect::<Vec<_>>()
@@ -3460,6 +3460,9 @@ fn windows_drive_entry_to_shell(entry: &str) -> String {
 /// Logical shell PATH entries are converted to their real Windows directories
 /// before a native child process is started.
 pub(crate) fn shell_path_to_process(path: &str, env_vars: &HashMap<String, String>) -> String {
+    if path.is_empty() {
+        return String::new();
+    }
     let separator = if cfg!(windows) { ';' } else { ':' };
     shell_path_entries(path)
         .into_iter()
