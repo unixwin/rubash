@@ -3363,7 +3363,22 @@ impl Executor {
         };
         let expanded = expanded.as_ref();
         if expanded.is_empty() {
+            // GNU subst.c:11497-11510 (expand_word_internal, case '~'):
+            // a tilde prefix that resolves (even to "") jumps to
+            // add_quoted_string -> quote_string("") -> CTLNUL (subst.c:4780),
+            // so `~` with a set-but-empty $HOME produces one empty field (`""`),
+            // never zero fields (`HOME=; cd ~` -> `cd: null directory`,
+            // `HOME=; pushd ~` -> `pushd: null directory`, `HOME=; pushd -n ~`
+            // pushes `""`).
+            let tilde_expanded_to_empty = !word_to_expand.starts_with(STORAGE_WORD_PREFIX)
+                && !word_to_expand.starts_with(crate::executor::markers::QUOTED_WORD_PREFIX)
+                && crate::expand::tilde::tilde::expand_word_prefix(
+                    word_to_expand,
+                    &self.shell_state.env_vars,
+                )
+                .is_some_and(|value| value.is_empty());
             if cmd.words.first().is_some_and(|word| word == "[[")
+                || tilde_expanded_to_empty
                 || (!word_is_unquoted && self.empty_expanded_word_keeps_field(cmd, index, raw))
             {
                 vec![String::new()]
@@ -3914,10 +3929,19 @@ impl Executor {
                     self.shell_state.env_vars.get("IFS").map(String::as_str),
                 ));
             }
-            // A fully quoted empty alternate (foo:-quote-quote) is a
-            // quoted null: GNU yields one empty field, not zero
-            // (subst.c W_HASQUOTEDNULL).
-            if expanded.is_empty() && alternate.contains(['"', '\'']) {
+            // A fully quoted empty alternate (foo:-quote-quote) or a tilde
+            // alternate that expands to "" (HOME=; ${v:-~}) is a quoted null:
+            // GNU yields one empty field, not zero (subst.c W_HASQUOTEDNULL /
+            // subst.c:11509 add_quoted_string -> quote_string("") -> CTLNUL).
+            if expanded.is_empty()
+                && (alternate.contains(['"', '\''])
+                    || (!outer_double_quoted
+                        && crate::expand::tilde::tilde::expand_word_prefix(
+                            alternate,
+                            &self.shell_state.env_vars,
+                        )
+                        .is_some_and(|value| value.is_empty())))
+            {
                 return Some(vec![String::new()]);
             }
             return Some(self.field_split_values(&expanded));
