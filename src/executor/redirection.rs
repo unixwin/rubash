@@ -993,6 +993,42 @@ impl Executor {
                 self.exit_code = 1;
                 return Ok(Some(RedirectRejection::FatalNounset));
             }
+            // GNU redir.c:298 redirection_expand -> expand_words_no_vars:
+            // `:?`, bad substitution, and `:=` in a redirect word run at
+            // the same ordered do_redirections expansion point as nounset
+            // (routing diagnostics through earlier fd-2 redirects and
+            // containing external-command fatals in the forked child).
+            if redirect.kind != crate::parser::RedirectKind::HereDoc {
+                let target_word = redirect.target.as_str();
+                if !((target_word.starts_with(">(") || target_word.starts_with("<("))
+                    && target_word.ends_with(')'))
+                {
+                    let raw_target = (!redirect.target_metadata.raw.is_empty())
+                        .then_some(redirect.target_metadata.raw.as_str());
+                    if let Some((name, message, status)) = self
+                        .parameter_expansion_error_in_redirect_word_with_raw(
+                            target_word,
+                            raw_target,
+                        )
+                    {
+                        let mut stderr = Vec::new();
+                        writeln!(
+                            &mut stderr,
+                            "{}{}: {}",
+                            self.compound_redirect_error_prefix(cmd),
+                            name,
+                            message
+                        )?;
+                        self.write_redirect_diagnostic_at(cmd, index, &stderr)?;
+                        self.exit_code = status;
+                        if status == Self::FATAL_PARAMETER_EXPANSION_STATUS {
+                            return Ok(Some(RedirectRejection::FatalNounset));
+                        }
+                        return Ok(Some(RedirectRejection::Command));
+                    }
+                    self.apply_parameter_assignment_expansions_in_word(target_word);
+                }
+            }
             let target = self.expand_redirect_target(redirect);
             // GNU subst.c:12663-12668: failglob inside redirection_expand
             // prints `no match: WORD' (done, at the expansion) and DISCARDs
@@ -1787,9 +1823,6 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<bool, ExecuteError> {
-        if !crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset") {
-            return Ok(false);
-        }
         // Candidate list: the walker's construction — `redirects`
         // first, then the mirror fields, one occurrence per semantic
         // key (the mirrors are projections of list entries, not list
@@ -1841,6 +1874,32 @@ impl Executor {
                 self.write_redirect_diagnostic_at(cmd, index, &stderr)?;
                 self.exit_code = 1;
                 return Ok(true);
+            }
+            let target_word = redirect.target.as_str();
+            if !((target_word.starts_with(">(") || target_word.starts_with("<("))
+                && target_word.ends_with(')'))
+            {
+                let raw_target = (!redirect.target_metadata.raw.is_empty())
+                    .then_some(redirect.target_metadata.raw.as_str());
+                if let Some((name, message, status)) = self
+                    .parameter_expansion_error_in_redirect_word_with_raw(target_word, raw_target)
+                {
+                    if status == Self::FATAL_PARAMETER_EXPANSION_STATUS {
+                        let mut stderr = Vec::new();
+                        writeln!(
+                            &mut stderr,
+                            "{}{}: {}",
+                            self.compound_redirect_error_prefix(cmd),
+                            name,
+                            message
+                        )?;
+                        self.write_redirect_diagnostic_at(cmd, index, &stderr)?;
+                        self.exit_code = status;
+                        return Ok(true);
+                    }
+                    break;
+                }
+                self.apply_parameter_assignment_expansions_in_word(target_word);
             }
         }
         Ok(false)
