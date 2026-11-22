@@ -803,6 +803,7 @@ impl Executor {
         // excluded here.
         let fd_var_walk_undoable = self.fd_var_walk_undoable(&cmd);
         if cmd.words.first().map(String::as_str) != Some("exec")
+            && !self.command_is_assignment_only_statement(&cmd)
             && self.apply_dynamic_fd_var_redirects(&cmd, true, fd_var_walk_undoable)?
         {
             // rubash#2125: the applier rendered the diagnostic and set
@@ -838,7 +839,9 @@ impl Executor {
 
         let dispatch_result = if let Some(result) = self.execute_function_command_invocation(&cmd) {
             result
-        } else if self.execute_assignment_or_comment_command(&cmd) {
+        } else if self
+            .execute_assignment_or_comment_command(&cmd, original_words_had_command_substitution)?
+        {
             Ok(())
         } else if !command_needs_process_substitution_materialization(&cmd) {
             self.execute_materialized_command(&cmd, ProcessSubstitutionFiles::default())
