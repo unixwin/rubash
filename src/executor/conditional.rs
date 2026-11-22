@@ -2278,10 +2278,14 @@ fn quote_marked_chars_for_regexp(marked: &[(char, bool)]) -> String {
 /// A compiled `=~` pattern in the granularity the active locale model
 /// dictates (rubash#1061): the char engine for a UTF-8 locale, the byte
 /// engine otherwise. Captures are reported as storage strings in both
-/// modes; in byte mode a capture that is not valid UTF-8 (e.g. `.`
-/// splitting a multibyte character, exactly what glibc regexec yields)
-/// carries its stray bytes as U+E000 raw-byte marker pairs, which the
-/// normal output boundaries decode back to the original bytes.
+/// modes, through the same storage encoding plain assignment applies
+/// (`bytes_to_assignment_shell_text`, rubash#4125): carrier bytes in the
+/// captured text are marker-tagged before they can be mistaken for live
+/// markers at read-out boundaries, and in byte mode a capture that is
+/// not valid UTF-8 (e.g. `.` splitting a multibyte character, exactly
+/// what glibc regexec yields) carries its stray bytes as U+E000
+/// raw-byte marker pairs, which the normal output boundaries decode
+/// back to the original bytes.
 #[derive(Clone)]
 enum CompiledConditionalRegex {
     Text(regex::Regex),
@@ -2294,7 +2298,13 @@ impl CompiledConditionalRegex {
             CompiledConditionalRegex::Text(regex) => regex.captures(left).map(|captures| {
                 captures
                     .iter()
-                    .map(|capture| capture.map(|matched| matched.as_str().to_string()))
+                    .map(|capture| {
+                        capture.map(|matched| {
+                            crate::executor::substitution_metadata::bytes_to_assignment_shell_text(
+                                matched.as_str().as_bytes(),
+                            )
+                        })
+                    })
                     .collect()
             }),
             CompiledConditionalRegex::Bytes(regex) => {
@@ -2302,8 +2312,11 @@ impl CompiledConditionalRegex {
                     captures
                         .iter()
                         .map(|capture| {
-                            capture
-                                .map(|matched| regex_capture_bytes_to_storage(matched.as_bytes()))
+                            capture.map(|matched| {
+                                crate::executor::substitution_metadata::bytes_to_assignment_shell_text(
+                                    matched.as_bytes(),
+                                )
+                            })
                         })
                         .collect()
                 })
@@ -2347,39 +2360,6 @@ fn decode_regex_operand(value: &str) -> String {
     } else {
         decoded
     }
-}
-
-/// Convert one byte-mode capture into rubash's storage spelling: valid
-/// UTF-8 runs stay text; each invalid byte becomes a U+E000 raw-byte
-/// marker pair (executor::markers::push_raw_byte_marker), the same
-/// encoding `$'\xff'` data uses.
-fn regex_capture_bytes_to_storage(bytes: &[u8]) -> String {
-    if let Ok(text) = std::str::from_utf8(bytes) {
-        return text.to_string();
-    }
-    let mut out = String::new();
-    let mut rest = bytes;
-    loop {
-        match std::str::from_utf8(rest) {
-            Ok(text) => {
-                out.push_str(text);
-                break;
-            }
-            Err(error) => {
-                let valid = error.valid_up_to();
-                out.push_str(std::str::from_utf8(&rest[..valid]).unwrap_or_default());
-                let invalid_len = error.error_len().unwrap_or(rest.len() - valid);
-                for &byte in &rest[valid..valid + invalid_len] {
-                    crate::executor::markers::push_raw_byte_marker(&mut out, byte);
-                }
-                rest = &rest[valid + invalid_len..];
-                if rest.is_empty() {
-                    break;
-                }
-            }
-        }
-    }
-    out
 }
 
 /// POSIX ERE has no `(?...)` construct: glibc regcomp rejects every
