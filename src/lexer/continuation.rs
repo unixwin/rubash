@@ -507,6 +507,18 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
     // from swallowing the following lines into a dead group.
     let mut at_command = true;
     let mut cur_word = String::new();
+    // rubash#4132: quote state local to an open backquote body. While a
+    // backquote holds the stack top no quote frames are pushed (the body
+    // is atomic for the stack, rubash#1184), but the heredoc opacity arm
+    // below still reads the body's raw bytes — and a `<<` inside the
+    // body's own quotes is word data to the body's re-lex
+    // (parse.y:5305 read_token_word), never an operator. These flags
+    // track the body's own quote toggles so the heredoc arm can gate on
+    // them; escape pairs are consumed by the loop-top escape arm before
+    // a flag can see the escaped char, exactly as the frame's own
+    // consumption sees them. The flags reset with the frame.
+    let mut backquote_single = false;
+    let mut backquote_double = false;
     // perf19 case-pattern tracking — the same word machine the parked
     // close-char scan carries (`close_char_operator_context`,
     // update_command_substitution_case_depth; GNU parse.y:1037 case
@@ -666,6 +678,7 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
             && chars.get(i + 1) == Some(&'<')
             && chars.get(i + 2) != Some(&'<')
             && close_char_operator_context(top)
+            && !(top.is_some_and(|d| d.close == '`') && (backquote_single || backquote_double))
         {
             if let Some((next, terminator_found)) = skip_heredoc_top_level(&chars, i) {
                 line += chars[i..next].iter().filter(|c| **c == '\n').count();
@@ -780,6 +793,12 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
                 let popped_funsub = d.funsub;
                 let popped_command = d.command;
                 stack.pop();
+                if d.close == '`' {
+                    // rubash#4132: the body-local quote flags die with
+                    // the backquote frame (see backquote_single above).
+                    backquote_single = false;
+                    backquote_double = false;
+                }
                 if popped_funsub {
                     funsub_words.pop();
                 }
@@ -1061,6 +1080,19 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
         // body-internal balance is that layer's question, not this
         // scan's (the mirror gate in close_char_residuals_advance
         // keeps the two scans in lockstep).
+        // rubash#4132: advance the backquote-body quote flags (see the
+        // declaration above). This point is past every arm that consumes
+        // the char whole (escape pairs, the heredoc skip, the close arm
+        // for the closing backquote itself), so a flag flip here is
+        // exactly the state the body's re-lex would carry into the next
+        // char — which is where the heredoc arm reads it.
+        if top.is_some_and(|d| d.close == '`') {
+            match ch {
+                '\'' if !backquote_double => backquote_single = !backquote_single,
+                '"' if !backquote_single => backquote_double = !backquote_double,
+                _ => {}
+            }
+        }
         let ch = if top.is_some_and(|d| d.close == '`') {
             '\0'
         } else {
@@ -1105,6 +1137,9 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
                 });
             }
             '`' => {
+                // rubash#4132: a fresh backquote body starts unquoted.
+                backquote_single = false;
+                backquote_double = false;
                 stack.push(UnclosedDelim {
                     close: '`',
                     open_line: line,
@@ -3665,7 +3700,15 @@ pub(crate) fn comsub_residuals_advance(
             index += 3;
             continue;
         }
-        if state.backtick && ch == '<' && chars.get(index + 1) == Some(&'<') {
+        if state.backtick && !state.double && ch == '<' && chars.get(index + 1) == Some(&'<') {
+            // rubash#4132: the `!state.double` gate is this machine's
+            // share of the close-char fix — a `<<` inside a double-quoted
+            // span of the backquote body is word data to the body's
+            // re-lex (parse.y:5305 read_token_word), not a heredoc
+            // header, and the skip below would consume the body's
+            // closing quote and backquote as delimiter/body text. (The
+            // single-quoted span needs no gate here: the `state.single`
+            // inert arm above consumes its chars before this arm.)
             let (next, _closes, terminator_found) = skip_heredoc_in_chars_decided(&chars, index);
             // rubash#292 + perf17: park ONLY while the terminator line has
             // not arrived. Once it has, the heredoc's resume index is
@@ -5415,6 +5458,12 @@ pub(crate) struct CloseCharResidualState {
     pub(crate) case_pattern_paren_depth: usize,
     pub(crate) case_pattern_opener_available: bool,
     pub(crate) case_pattern_region_seen: bool,
+    /// rubash#4132: quote state local to an open backquote body — the
+    /// checkpointed mirror of the one-shot scan's backquote_single /
+    /// backquote_double locals (a backquote body can span lines, so the
+    /// flags must survive a checkpoint). See the one-shot scan.
+    pub(crate) backquote_single: bool,
+    pub(crate) backquote_double: bool,
     /// Word-level state for funsub-flagged delimiters, parallel to their
     /// stack order — the mirror of the one-shot scan's `funsub_words`
     /// (parse.y:5899 reserved_word_acceptable is token-level; rubash#4017).
@@ -5441,6 +5490,8 @@ impl Default for CloseCharResidualState {
             case_pattern_paren_depth: 0,
             case_pattern_opener_available: true,
             case_pattern_region_seen: false,
+            backquote_single: false,
+            backquote_double: false,
             funsub_words: Vec::new(),
         }
     }
@@ -5667,6 +5718,8 @@ pub(crate) fn close_char_residuals_advance(
             && chars.get(i + 1) == Some(&'<')
             && chars.get(i + 2) != Some(&'<')
             && close_char_operator_context(top)
+            && !(top.is_some_and(|d| d.close == '`')
+                && (state.backquote_single || state.backquote_double))
         {
             if let Some((next, terminator_found)) = skip_heredoc_top_level(&chars, i) {
                 if !terminator_found && park.is_none() {
@@ -5772,6 +5825,12 @@ pub(crate) fn close_char_residuals_advance(
                 let popped_funsub = d.funsub;
                 let popped_command = d.command;
                 state.stack.pop();
+                if d.close == '`' {
+                    // rubash#4132: the body-local quote flags die with
+                    // the backquote frame (mirror of the one-shot scan).
+                    state.backquote_single = false;
+                    state.backquote_double = false;
+                }
                 if popped_funsub {
                     state.funsub_words.pop();
                 }
@@ -6042,6 +6101,15 @@ pub(crate) fn close_char_residuals_advance(
         // backquote body needs no park, since its dispatch cannot
         // depend on the following character while the gate holds, and
         // a resumed scan re-derives the same state byte for byte.
+        // rubash#4132: advance the checkpointed backquote-body quote
+        // flags (mirror of the one-shot scan's flag advance above).
+        if top.is_some_and(|d| d.close == '`') {
+            match ch {
+                '\'' if !state.backquote_double => state.backquote_single = !state.backquote_single,
+                '"' if !state.backquote_single => state.backquote_double = !state.backquote_double,
+                _ => {}
+            }
+        }
         let ch = if top.is_some_and(|d| d.close == '`') {
             '\0'
         } else {
@@ -6086,6 +6154,9 @@ pub(crate) fn close_char_residuals_advance(
                 });
             }
             '`' => {
+                // rubash#4132: a fresh backquote body starts unquoted.
+                state.backquote_single = false;
+                state.backquote_double = false;
                 state.stack.push(UnclosedDelim {
                     close: '`',
                     open_line: state.line,
