@@ -92,6 +92,7 @@ pub(crate) fn shift_trap_action_lines(commands: &mut [CommandNode], delta: i64) 
         shift_slot(&mut node.line, delta);
         shift_slot(&mut node.logical_line, delta);
         shift_slot(&mut node.end_line, delta);
+        shift_slot(&mut node.subshell_end_line, delta);
         shift_slot(&mut node.heredoc_gather_line, delta);
         shift_parse_error_lines(node, delta);
         if let Some(pipeline) = &mut node.pipeline_command {
