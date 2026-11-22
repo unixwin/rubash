@@ -197,10 +197,8 @@ fn imported_bash_execution_string_kept_in_script_mode_replaced_in_c_mode() {
     // rubash#3534 gap E: BASH_EXECUTION_STRING dual mode. Script mode
     // keeps the imported cell; -c mode replaces it with the -c string
     // via the ordinary bind path.
-    let script_path = env::temp_dir()
-        .join(format!("issue3534_execstr_{}.sh", std::process::id()));
-    fs::write(&script_path, "echo \"ES=[$BASH_EXECUTION_STRING]\"\n")
-        .expect("write probe script");
+    let script_path = env::temp_dir().join(format!("issue3534_execstr_{}.sh", std::process::id()));
+    fs::write(&script_path, "echo \"ES=[$BASH_EXECUTION_STRING]\"\n").expect("write probe script");
     let script_out = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .env_clear()
         .env("BASH_EXECUTION_STRING", "execstr_imported")

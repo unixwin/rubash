@@ -35,10 +35,7 @@ fn issue3950_declared_unassigned_arrays_excluded_from_compgen() {
          declare -x x1; compgen -A export x; echo \"rc6=$?\"\n\
          declare s1; compgen -A variable s1; echo \"rc7=$?\"",
     );
-    assert_eq!(
-        stdout,
-        "rc1=1\nrc2=1\nrc3=1\nrc4=1\nrc5=1\nrc6=1\nrc7=1\n"
-    );
+    assert_eq!(stdout, "rc1=1\nrc2=1\nrc3=1\nrc4=1\nrc5=1\nrc6=1\nrc7=1\n");
     assert_eq!(stderr, "");
     assert_eq!(code, Some(0));
 }

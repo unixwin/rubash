@@ -41,7 +41,10 @@ fn issue3965_spawn_preserves_0xff_in_exported_and_prefix_env() {
          /usr/bin/printenv z\n\
          w=$(printf '\\377') /usr/bin/printenv w",
     );
-    assert_eq!(stdout, vec![0xff, b'\n', 0xff, b'\n', 0xff, b'\n', 0xff, b'\n']);
+    assert_eq!(
+        stdout,
+        vec![0xff, b'\n', 0xff, b'\n', 0xff, b'\n', 0xff, b'\n']
+    );
     assert_eq!(stderr, "");
     assert_eq!(code, Some(0));
 }
@@ -56,10 +59,7 @@ fn issue3965_spawn_preserves_0xff_in_env_builtin_and_pipeline() {
          export a=$'\\xff'\n\
          /bin/bash -c 'printf \"%s\" \"$a\"'",
     );
-    assert_eq!(
-        stdout,
-        vec![b'x', b'=', 0xff, b'\n', 0xff, b'\n', 0xff]
-    );
+    assert_eq!(stdout, vec![b'x', b'=', 0xff, b'\n', 0xff, b'\n', 0xff]);
     assert_eq!(stderr, "");
     assert_eq!(code, Some(0));
 }

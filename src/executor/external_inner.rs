@@ -7163,8 +7163,7 @@ fn apply_env_command_environment(
                             value,
                         );
                     if convert_native {
-                        crate::executor::path::external_env_value(name, &decoded, &env_map)
-                            .into()
+                        crate::executor::path::external_env_value(name, &decoded, &env_map).into()
                     } else {
                         decoded.into()
                     }

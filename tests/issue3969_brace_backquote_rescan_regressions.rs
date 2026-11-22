@@ -221,11 +221,7 @@ fn run_sh_c(script: &str) -> std::process::Output {
 /// command produces nothing, the NEXT script line runs, exit 0.
 fn assert_sh_discard_continues(script: &str, tail: &str) {
     let output = run_sh_script(script);
-    assert_eq!(
-        stdout_of(&output),
-        "CONTINUED\n",
-        "stdout for {script:?}"
-    );
+    assert_eq!(stdout_of(&output), "CONTINUED\n", "stdout for {script:?}");
     assert_eq!(output.status.code(), Some(0), "status for {script:?}");
     let stderr = stderr_of(&output);
     assert!(

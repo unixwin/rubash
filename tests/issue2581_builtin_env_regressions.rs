@@ -51,10 +51,7 @@ fn run_script(script: &str) -> (String, String, Option<i32>) {
 fn issue_2581_builtin_env_is_not_a_shell_builtin() {
     let (stdout, stderr, _code) = run_script("builtin env; echo \"rc=$?\"\n");
     assert_eq!(stdout, "rc=1\n", "stderr: {stderr}");
-    assert!(
-        stderr.contains("not a shell builtin"),
-        "stderr: {stderr}"
-    );
+    assert!(stderr.contains("not a shell builtin"), "stderr: {stderr}");
 }
 
 #[test]
@@ -65,10 +62,7 @@ fn issue_2581_builtin_env_assignment_form_fails() {
     let (stdout, stderr, _code) =
         run_script("builtin env ADDED2581=zzz printenv ADDED2581; echo \"rc=$?\"\n");
     assert_eq!(stdout, "rc=1\n", "stderr: {stderr}");
-    assert!(
-        stderr.contains("not a shell builtin"),
-        "stderr: {stderr}"
-    );
+    assert!(stderr.contains("not a shell builtin"), "stderr: {stderr}");
 }
 
 #[test]
@@ -84,10 +78,7 @@ fn issue_2581_enable_n_env_is_refused() {
         stdout, "envn_rc=1\nbuiltin_rc=1\nFOO2581=bar\nplain_rc=0\n",
         "stderr: {stderr}"
     );
-    assert!(
-        stderr.contains("not a shell builtin"),
-        "stderr: {stderr}"
-    );
+    assert!(stderr.contains("not a shell builtin"), "stderr: {stderr}");
 }
 
 #[test]
