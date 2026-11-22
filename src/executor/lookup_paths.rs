@@ -346,6 +346,7 @@ impl Executor {
                 // is FS_EXEC_PREFERRED (correct for execution and the
                 // lenient faces), so the strict gate lives here, at the
                 // -a consumption point (rubash#3825).
+                let elem_start = paths.len();
                 if anchored.is_file() && crate::executor::path::is_executable_file(&anchored) {
                     paths.push(drop_exe_probe_suffix(
                         name,
@@ -356,10 +357,17 @@ impl Executor {
                     for ext in executable_extensions() {
                         let candidate = candidate.with_extension(ext);
                         if candidate.is_file() {
-                            paths.push(drop_exe_probe_suffix(
+                            // niubash#993 S7: a `name` + `name.exe` pair in one PATH
+                            // element collapses to the single as-written join Git Bash
+                            // prints, while distinct PATH elements (e.g. `::`) keep
+                            // their own visit (rubash#4095).
+                            let display = drop_exe_probe_suffix(
                                 name,
                                 shell_display_path(&candidate.to_string_lossy().replace('\\', "/")),
-                            ));
+                            );
+                            if !paths[elem_start..].contains(&display) {
+                                paths.push(display);
+                            }
                         }
                     }
                 }
@@ -386,12 +394,6 @@ impl Executor {
             }
         }
 
-        // niubash#993 S7: a `name` + `name.exe` pair in one PATH
-        // element collapses to the single as-written join Git Bash
-        // prints — drop the consecutive duplicate the .exe strip just
-        // produced (the walk pushes the bare file first, then each
-        // PATHEXT hit).
-        paths.dedup();
         paths
     }
 }
