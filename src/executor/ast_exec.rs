@@ -3255,7 +3255,7 @@ impl Executor {
         let opener = &commands[open_index];
         let body = &commands[open_index..=closer_index.min(last)];
         let text = crate::executor::command_text::flat_subshell_region_source_text(body);
-        let line = opener.end_line;
+        let line = opener.subshell_end_line.or(opener.end_line);
         self.maybe_run_error_trap_for_flat_region(opener, text, line)
     }
 }

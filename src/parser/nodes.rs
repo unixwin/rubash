@@ -1233,6 +1233,8 @@ pub struct CommandNode {
     pub subshell: bool,
     /// This command closes the current subshell grouping.
     pub subshell_end: bool,
+    /// Closing `)` line of a flat `f() ( list )` subshell region (GNU execute_cmd.c:696).
+    pub subshell_end_line: Option<usize>,
     /// `for name in words; do ...; done`
     pub for_command: Option<Box<ForCommand>>,
     /// `(( expression ))` (boxed like the other compound payloads: the
@@ -1429,6 +1431,7 @@ impl CommandNode {
             inverted_command: None,
             subshell: false,
             subshell_end: false,
+            subshell_end_line: None,
             for_command: None,
             arithmetic_command: None,
             if_command: None,
