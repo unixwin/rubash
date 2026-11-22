@@ -692,7 +692,7 @@ impl Executor {
         let status = crate::script_driver::run_source(self, command, false);
         let interrupted = self.take_unit_signal_discard();
 
-        let length = read_back_line_length(self);
+        let length = read_back_line_length(self, line);
         let out_line = self.get_env("READLINE_LINE").map(str::to_owned);
         let clamp = |value: Option<&str>| -> Option<usize> {
             value
@@ -905,12 +905,14 @@ fn bind_kind_of(spec: crate::builtins::bind::BindingSpec) -> BindKind {
 
 /// READLINE_LINE value after the command — used to clamp
 /// READLINE_POINT/READLINE_MARK (readline_set_char_offset clamps to
-/// rl_end of the NEW line, bashline.c:4559-4569 + 4697-4702).
-fn read_back_line_length(executor: &Executor) -> usize {
+/// rl_end of the NEW line, or the unchanged input line when
+/// READLINE_LINE was unset and maybe_make_readline_line is a no-op;
+/// bashline.c:2808-2820, 4559-4569, 4692-4702).
+fn read_back_line_length(executor: &Executor, input_line: &str) -> usize {
     executor
         .get_env("READLINE_LINE")
         .map(|line| line.chars().count())
-        .unwrap_or(0)
+        .unwrap_or_else(|| input_line.chars().count())
 }
 
 fn same_keymap(entry: Option<&str>, current: Option<&str>) -> bool {
@@ -1016,6 +1018,30 @@ mod tests {
         );
         assert_eq!(outcome.line.as_deref(), Some("中文"));
         assert_eq!(outcome.point, Some(2));
+    }
+
+    #[test]
+    fn run_bind_x_unset_readline_line_preserves_point_and_clamps_to_input_line() {
+        let mut executor = Executor::new();
+        // When READLINE_LINE is unset, maybe_make_readline_line is a no-op
+        // (bashline.c:2808-2820, 4692-4693), so READLINE_POINT/READLINE_MARK
+        // remain clamped against the unchanged input line.
+        let unset_outcome = executor.run_bind_x_command("unset READLINE_LINE", "hello world", 5, 2);
+        assert_eq!(unset_outcome.line, None);
+        assert_eq!(unset_outcome.point, Some(5));
+        assert_eq!(unset_outcome.mark, Some(2));
+
+        // Setting READLINE_LINE="" replaces the buffer with empty, clamping to 0.
+        let empty_outcome = executor.run_bind_x_command("READLINE_LINE=", "hello world", 5, 2);
+        assert_eq!(empty_outcome.line.as_deref(), Some(""));
+        assert_eq!(empty_outcome.point, Some(0));
+        assert_eq!(empty_outcome.mark, Some(0));
+
+        // Unsetting READLINE_LINE while raising READLINE_POINT clamps to input length.
+        let clamped_outcome =
+            executor.run_bind_x_command("unset READLINE_LINE; READLINE_POINT=999", "hello", 2, 0);
+        assert_eq!(clamped_outcome.line, None);
+        assert_eq!(clamped_outcome.point, Some(5));
     }
 
     #[test]
