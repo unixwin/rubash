@@ -4,6 +4,7 @@
 //! - builtins/trap.def
 
 use super::diagnostic::diagnostic_prefix;
+use crate::platform::Platform;
 use crate::shell::var_table::VarTable;
 use std::collections::{BTreeSet, HashMap};
 use std::io::{self, Write};
@@ -35,289 +36,6 @@ pub(crate) const EX_USAGE: i32 = 2;
 /// status and the wrapper converts it back to the user-visible 2 in every
 /// non-exiting mode.
 const EX_USAGE_INTERNAL: i32 = 258;
-/// Positional signal-name table: entry i-1 is signal i's name (GNU's
-/// `signal_names[]` is indexed by signal number — support/signames.c:69
-/// initialize_signames, generated per target by support/mksignames.c from
-/// the TARGET machine's `<signal.h>`; Makefile.in:599-617/:775-804). Empty
-/// strings mark numbers the platform has no name for; `trap -l` and
-/// trap.c:236 `decode_signal` skip them.
-///
-/// * `not(unix)` (Windows mailbox): the literal Linux x86 table is the wire
-///   contract — `trap 17`/`kill -l 10`/BASH_TRAPSIG all speak Linux
-///   numbering there, and the GNU 5.3.0 baseline runs on WSL. Slots 32/33
-///   do not exist on Linux; GNU's `trap -l` skips them and accepts the
-///   specifiers silently. DO NOT renumber.
-/// * `target_os = "linux"`: same Linux table (RTMIN..RTMAX arithmetic names
-///   are GNU-generated at signames.c:92-139 and are Linux-only, matching
-///   the `#if defined (SIGRTMIN)` guard there).
-/// * `target_os = "android"`: bionic resolves the Linux kernel numbering
-///   for 1..31 (libc's android module pins SIGBUS=7, SIGUSR1=10,
-///   SIGSTKFLT=16, SIGPWR=30, SIGSYS=31, ...), so those slots match the
-///   Linux table. The realtime block follows bionic's own RT base:
-///   `__libc_current_sigrtmin()` is 41 and `__libc_current_sigrtmax()`
-///   is 64 on the Termux oracle (GNU bash 5.3.20 aarch64-linux-android
-///   lists `41) SIGRTMIN` through `64) SIGRTMAX`), so signals 32..40 are
-///   holes — GNU's `trap -l` skips them and accepts the numeric
-///   specifiers silently, exactly like the Linux 32/33 holes — and
-///   41..64 carry the signames.c:92-139 arithmetic names
-///   (SIGRTMIN..SIGRTMIN+11, SIGRTMAX-11..SIGRTMAX). The unix tests pin
-///   these slots against `__libc_current_sigrtmin/max` so a bionic ABI
-///   drift fails loudly instead of shipping a lying table.
-/// * other unix (macos/freebsd): the BSD-family numbering where
-///   7=EMT, 10=BUS, 12=SYS, 16=URG, 17=STOP, 18=TSTP, 19=CONT, 20=CHLD,
-///   23=IO, 29=INFO, 30=USR1, 31=USR2 (libc resolves these per target; the
-///   tests below pin every slot against libc::SIGxxx). No RT signals.
-#[cfg(not(unix))]
-pub(crate) const SIGNALS: [&str; 64] = [
-    "SIGHUP",
-    "SIGINT",
-    "SIGQUIT",
-    "SIGILL",
-    "SIGTRAP",
-    "SIGABRT",
-    "SIGBUS",
-    "SIGFPE",
-    "SIGKILL",
-    "SIGUSR1",
-    "SIGSEGV",
-    "SIGUSR2",
-    "SIGPIPE",
-    "SIGALRM",
-    "SIGTERM",
-    "SIGSTKFLT",
-    "SIGCHLD",
-    "SIGCONT",
-    "SIGSTOP",
-    "SIGTSTP",
-    "SIGTTIN",
-    "SIGTTOU",
-    "SIGURG",
-    "SIGXCPU",
-    "SIGXFSZ",
-    "SIGVTALRM",
-    "SIGPROF",
-    "SIGWINCH",
-    "SIGIO",
-    "SIGPWR",
-    "SIGSYS",
-    "",
-    "",
-    "SIGRTMIN",
-    "SIGRTMIN+1",
-    "SIGRTMIN+2",
-    "SIGRTMIN+3",
-    "SIGRTMIN+4",
-    "SIGRTMIN+5",
-    "SIGRTMIN+6",
-    "SIGRTMIN+7",
-    "SIGRTMIN+8",
-    "SIGRTMIN+9",
-    "SIGRTMIN+10",
-    "SIGRTMIN+11",
-    "SIGRTMIN+12",
-    "SIGRTMIN+13",
-    "SIGRTMIN+14",
-    "SIGRTMIN+15",
-    "SIGRTMAX-14",
-    "SIGRTMAX-13",
-    "SIGRTMAX-12",
-    "SIGRTMAX-11",
-    "SIGRTMAX-10",
-    "SIGRTMAX-9",
-    "SIGRTMAX-8",
-    "SIGRTMAX-7",
-    "SIGRTMAX-6",
-    "SIGRTMAX-5",
-    "SIGRTMAX-4",
-    "SIGRTMAX-3",
-    "SIGRTMAX-2",
-    "SIGRTMAX-1",
-    "SIGRTMAX",
-];
-
-/// Linux table: identical layout to the non-unix wire table above (it IS
-/// the Linux numbering; see the shared doc comment).
-#[cfg(target_os = "linux")]
-pub(crate) const SIGNALS: [&str; 64] = [
-    "SIGHUP",
-    "SIGINT",
-    "SIGQUIT",
-    "SIGILL",
-    "SIGTRAP",
-    "SIGABRT",
-    "SIGBUS",
-    "SIGFPE",
-    "SIGKILL",
-    "SIGUSR1",
-    "SIGSEGV",
-    "SIGUSR2",
-    "SIGPIPE",
-    "SIGALRM",
-    "SIGTERM",
-    "SIGSTKFLT",
-    "SIGCHLD",
-    "SIGCONT",
-    "SIGSTOP",
-    "SIGTSTP",
-    "SIGTTIN",
-    "SIGTTOU",
-    "SIGURG",
-    "SIGXCPU",
-    "SIGXFSZ",
-    "SIGVTALRM",
-    "SIGPROF",
-    "SIGWINCH",
-    "SIGIO",
-    "SIGPWR",
-    "SIGSYS",
-    "",
-    "",
-    "SIGRTMIN",
-    "SIGRTMIN+1",
-    "SIGRTMIN+2",
-    "SIGRTMIN+3",
-    "SIGRTMIN+4",
-    "SIGRTMIN+5",
-    "SIGRTMIN+6",
-    "SIGRTMIN+7",
-    "SIGRTMIN+8",
-    "SIGRTMIN+9",
-    "SIGRTMIN+10",
-    "SIGRTMIN+11",
-    "SIGRTMIN+12",
-    "SIGRTMIN+13",
-    "SIGRTMIN+14",
-    "SIGRTMIN+15",
-    "SIGRTMAX-14",
-    "SIGRTMAX-13",
-    "SIGRTMAX-12",
-    "SIGRTMAX-11",
-    "SIGRTMAX-10",
-    "SIGRTMAX-9",
-    "SIGRTMAX-8",
-    "SIGRTMAX-7",
-    "SIGRTMAX-6",
-    "SIGRTMAX-5",
-    "SIGRTMAX-4",
-    "SIGRTMAX-3",
-    "SIGRTMAX-2",
-    "SIGRTMAX-1",
-    "SIGRTMAX",
-];
-
-/// Android (bionic) table: Linux kernel numbering for 1..31 (see the table
-/// doc above for the libc-crate anchors), holes for 32..40, and the
-/// signames.c:92-139 arithmetic names for bionic's 41..64 realtime block.
-/// The 64-slot length keeps the `kill -l` NSIG range check identical to
-/// Linux. The unix tests (`positional_slots_match_libc`,
-/// `android_realtime_and_holes`, `trap_table_agrees_with_kill_table`) pin
-/// these slots whenever an android test runner exists.
-#[cfg(all(unix, target_os = "android"))]
-pub(crate) const SIGNALS: [&str; 64] = [
-    "SIGHUP",
-    "SIGINT",
-    "SIGQUIT",
-    "SIGILL",
-    "SIGTRAP",
-    "SIGABRT",
-    "SIGBUS",
-    "SIGFPE",
-    "SIGKILL",
-    "SIGUSR1",
-    "SIGSEGV",
-    "SIGUSR2",
-    "SIGPIPE",
-    "SIGALRM",
-    "SIGTERM",
-    "SIGSTKFLT",
-    "SIGCHLD",
-    "SIGCONT",
-    "SIGSTOP",
-    "SIGTSTP",
-    "SIGTTIN",
-    "SIGTTOU",
-    "SIGURG",
-    "SIGXCPU",
-    "SIGXFSZ",
-    "SIGVTALRM",
-    "SIGPROF",
-    "SIGWINCH",
-    "SIGIO",
-    "SIGPWR",
-    "SIGSYS",
-    "",
-    "",
-    "",
-    "",
-    "",
-    "",
-    "",
-    "",
-    "",
-    "SIGRTMIN",
-    "SIGRTMIN+1",
-    "SIGRTMIN+2",
-    "SIGRTMIN+3",
-    "SIGRTMIN+4",
-    "SIGRTMIN+5",
-    "SIGRTMIN+6",
-    "SIGRTMIN+7",
-    "SIGRTMIN+8",
-    "SIGRTMIN+9",
-    "SIGRTMIN+10",
-    "SIGRTMIN+11",
-    "SIGRTMAX-11",
-    "SIGRTMAX-10",
-    "SIGRTMAX-9",
-    "SIGRTMAX-8",
-    "SIGRTMAX-7",
-    "SIGRTMAX-6",
-    "SIGRTMAX-5",
-    "SIGRTMAX-4",
-    "SIGRTMAX-3",
-    "SIGRTMAX-2",
-    "SIGRTMAX-1",
-    "SIGRTMAX",
-];
-
-/// BSD-family table (macos/freebsd): positional names for signals 1..31 in
-/// the target's numbering (see the shared doc comment). Positional layout
-/// means no libc constants appear here; the tests pin each slot against
-/// libc::SIGxxx so CI fails on numbering drift.
-#[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
-pub(crate) const SIGNALS: [&str; 31] = [
-    "SIGHUP",
-    "SIGINT",
-    "SIGQUIT",
-    "SIGILL",
-    "SIGTRAP",
-    "SIGABRT",
-    "SIGEMT",
-    "SIGFPE",
-    "SIGKILL",
-    "SIGBUS",
-    "SIGSEGV",
-    "SIGSYS",
-    "SIGPIPE",
-    "SIGALRM",
-    "SIGTERM",
-    "SIGURG",
-    "SIGSTOP",
-    "SIGTSTP",
-    "SIGCONT",
-    "SIGCHLD",
-    "SIGTTIN",
-    "SIGTTOU",
-    "SIGIO",
-    "SIGXCPU",
-    "SIGXFSZ",
-    "SIGVTALRM",
-    "SIGPROF",
-    "SIGWINCH",
-    "SIGINFO",
-    "SIGUSR1",
-    "SIGUSR2",
-];
 
 pub fn execute(args: &[String]) -> io::Result<i32> {
     let mut env_vars = VarTable::default();
@@ -339,6 +57,21 @@ pub fn execute_with_io<W, E>(
     env_vars: &mut VarTable,
     stdout: &mut W,
     stderr: &mut E,
+) -> io::Result<i32>
+where
+    W: Write,
+    E: Write,
+{
+    execute_with_io_for_platform(args, env_vars, stdout, stderr, Platform::host())
+}
+
+/// [`execute_with_io`] parameterized by runtime [`Platform`].
+pub fn execute_with_io_for_platform<W, E>(
+    args: &[String],
+    env_vars: &mut VarTable,
+    stdout: &mut W,
+    stderr: &mut E,
+    platform: Platform,
 ) -> io::Result<i32>
 where
     W: Write,
@@ -380,7 +113,7 @@ where
     }
 
     if list_signals {
-        print_signal_list(stdout)?;
+        print_signal_list(platform, stdout)?;
         return Ok(0);
     }
 
@@ -398,7 +131,14 @@ where
 
     if index >= args.len() || print_trap_commands || print_actions {
         if args[index..].is_empty() {
-            print_traps(env_vars, None, stdout, print_actions, print_trap_commands)?;
+            print_traps(
+                env_vars,
+                None,
+                platform,
+                stdout,
+                print_actions,
+                print_trap_commands,
+            )?;
             return Ok(0);
         }
         // GNU builtins/trap.def:333 display_traps walks the operand list
@@ -418,11 +158,12 @@ where
         let prefix = diagnostic_prefix(env_vars);
         let mut invalid = false;
         for arg in &args[index..] {
-            match normalize_signal(arg) {
+            match normalize_signal_for_platform(arg, platform) {
                 Some(signal) => {
                     print_traps(
                         env_vars,
                         Some(std::slice::from_ref(&signal)),
+                        platform,
                         stdout,
                         print_actions,
                         print_trap_commands,
@@ -461,7 +202,7 @@ where
         // the special-builtin failure on); the wrapper converts it back to
         // the user-visible 2 in every non-exiting mode.
         let digits_only = !action.is_empty() && action.bytes().all(|b| b.is_ascii_digit());
-        if let Some(signal) = normalize_signal(action) {
+        if let Some(signal) = normalize_signal_for_platform(action, platform) {
             if !digits_only && crate::builtins::set::shell_option_enabled(env_vars, "posix") {
                 print_usage(stderr)?;
                 return Ok(EX_USAGE_INTERNAL);
@@ -655,18 +396,18 @@ where
     )
 }
 
-fn print_signal_list<W>(stdout: &mut W) -> io::Result<()>
+fn print_signal_list<W>(platform: Platform, stdout: &mut W) -> io::Result<()>
 where
     W: Write,
 {
     // GNU trap -l output is byte-identical to `kill -l` (Linux numbering,
     // 5 entries per line, tab-separated, trailing tab on the final partial
     // line). Slots 32/33 do not exist on Linux and are skipped.
-    let numbered: Vec<(usize, &str)> = SIGNALS
+    let numbered: Vec<(i32, &str)> = platform
+        .signal_table()
         .iter()
-        .enumerate()
-        .filter(|(_, name)| !name.is_empty())
-        .map(|(index, name)| (index + 1, *name))
+        .filter(|entry| !entry.sig_name.is_empty())
+        .map(|entry| (entry.number, entry.sig_name))
         .collect();
     let total = numbered.len();
     for (position, (number, signal)) in numbered.iter().enumerate() {
@@ -686,6 +427,10 @@ where
 }
 
 fn normalize_signal(signal: &str) -> Option<String> {
+    normalize_signal_for_platform(signal, Platform::host())
+}
+
+fn normalize_signal_for_platform(signal: &str, platform: Platform) -> Option<String> {
     let signal = signal.to_ascii_uppercase();
     match signal.as_str() {
         "0" | "EXIT" => return Some("EXIT".to_string()),
@@ -695,9 +440,10 @@ fn normalize_signal(signal: &str) -> Option<String> {
         _ => {}
     }
 
+    let table = platform.signal_table();
     if let Ok(number) = signal.parse::<usize>() {
         return number.checked_sub(1).and_then(|index| {
-            SIGNALS.get(index).copied().map(|name| {
+            table.get(index).map(|entry| {
                 // GNU trap.c keys a nameless (hole) slot by its number:
                 // decode_signal has no name for Linux 32/33 (bionic
                 // 32..40), yet the trap table holds those signals under
@@ -707,10 +453,10 @@ fn normalize_signal(signal: &str) -> Option<String> {
                 // the empty slot name here keyed every hole trap under
                 // "", so listings dropped them and `-p 38` printed an
                 // empty signal name.
-                if name.is_empty() {
+                if entry.sig_name.is_empty() {
                     number.to_string()
                 } else {
-                    name.to_string()
+                    entry.sig_name.to_string()
                 }
             })
         });
@@ -720,11 +466,10 @@ fn normalize_signal(signal: &str) -> Option<String> {
     if name.is_empty() {
         return None;
     }
-    SIGNALS
+    table
         .iter()
-        .copied()
-        .find(|candidate| !candidate.is_empty() && candidate.strip_prefix("SIG") == Some(name))
-        .map(str::to_string)
+        .find(|entry| !entry.bare_name.is_empty() && entry.bare_name == name)
+        .map(|entry| entry.sig_name.to_string())
 }
 
 /// GNU trap.c set_signal for the special traps. `pub(crate)` for the
@@ -834,11 +579,13 @@ fn store_orig_ignored_signals(env_vars: &mut VarTable, mut signals: Vec<String>)
 /// the entry-ignored bionic signal 38 of rubash#1124: GNU lists it as
 /// `trap -- '' 38`, rubash listed nothing.
 fn entry_ignored_key(number: i32) -> Option<String> {
-    let name = SIGNALS.get(number.checked_sub(1)? as usize).copied()?;
-    if name.is_empty() {
+    let entry = Platform::host()
+        .signal_table()
+        .get(number.checked_sub(1)? as usize)?;
+    if entry.sig_name.is_empty() {
         Some(number.to_string())
     } else {
-        Some(name.to_string())
+        Some(entry.sig_name.to_string())
     }
 }
 
@@ -940,7 +687,11 @@ pub(crate) fn seed_startup_traps(env_vars: &mut VarTable) {
             store_trap_list(env_vars, signals);
         }
     }
-    for signal in SIGNALS {
+    for entry in Platform::host().signal_table() {
+        if entry.sig_name.is_empty() {
+            continue;
+        }
+        let signal = entry.sig_name;
         let key = trap_key(signal);
         if env_vars.get(&key).is_some_and(String::is_empty) {
             let mut signals = trap_list(env_vars);
@@ -1071,6 +822,7 @@ pub(crate) fn clear_debug_trap(env_vars: &mut VarTable) {
 fn print_traps<W>(
     env_vars: &HashMap<String, String>,
     selected: Option<&[String]>,
+    platform: Platform,
     stdout: &mut W,
     actions_only: bool,
     print_commands: bool,
@@ -1092,8 +844,8 @@ where
     let list_all = posix && print_commands && selected.is_none();
     let signals: Vec<String> = match selected {
         Some(signals) => signals.to_vec(),
-        None if list_all => canonical_trap_order(),
-        None => canonical_trap_order()
+        None if list_all => canonical_trap_order(platform),
+        None => canonical_trap_order(platform)
             .into_iter()
             .filter(|signal| trap_list(env_vars).contains(signal))
             .collect(),
@@ -1146,17 +898,17 @@ fn display_signal_name(signal: &str, posix: bool) -> &str {
 /// Trap-table iteration order matching GNU trap.c display_traps: EXIT
 /// (index 0), real signals in numeric order, then DEBUG, ERROR, RETURN
 /// (rubash keys the ERR trap as "ERR").
-fn canonical_trap_order() -> Vec<String> {
+fn canonical_trap_order(platform: Platform) -> Vec<String> {
     std::iter::once("EXIT".to_string())
-        .chain(SIGNALS.iter().enumerate().map(|(index, signal)| {
-            // Slots 32/33 have no glibc name (SIGNALS holds ""); GNU's
+        .chain(platform.signal_table().iter().map(|entry| {
+            // Slots 32/33 have no glibc name (sig_name holds ""); GNU's
             // whole-table listings print them as bare numbers
             // (`trap -- - 32`), so the order keeps them under their
             // signal number (rubash#1054).
-            if signal.is_empty() {
-                (index + 1).to_string()
+            if entry.sig_name.is_empty() {
+                entry.number_str.to_string()
             } else {
-                signal.to_string()
+                entry.sig_name.to_string()
             }
         }))
         .chain(["DEBUG", "ERR", "RETURN"].iter().map(|s| s.to_string()))
@@ -1432,13 +1184,14 @@ mod tests {
     /// drift between trap.rs and kill.rs breaks here first.
     #[test]
     fn trap_table_agrees_with_kill_table() {
-        for (index, slot) in super::SIGNALS.iter().enumerate() {
+        let table = super::Platform::host().signal_table();
+        for (index, entry) in table.iter().enumerate() {
             let number = (index + 1).to_string();
             let kill_name = crate::builtins::kill::translate_signal(&number);
-            match (slot.is_empty(), kill_name) {
+            match (entry.sig_name.is_empty(), kill_name) {
                 (true, None) => {}
                 (false, Some(name)) => {
-                    assert_eq!(*slot, format!("SIG{name}"), "signal {}", index + 1);
+                    assert_eq!(entry.sig_name, format!("SIG{name}"), "signal {}", index + 1);
                 }
                 (true, Some(name)) => panic!(
                     "kill names signal {} ({name}) but trap slot {} is empty",
@@ -1446,13 +1199,14 @@ mod tests {
                     index + 1
                 ),
                 (false, None) => panic!(
-                    "trap names signal {} ({slot}) but kill has no name for it",
-                    index + 1
+                    "trap names signal {} ({}) but kill has no name for it",
+                    index + 1,
+                    entry.sig_name
                 ),
             }
         }
         // Reverse direction: every kill-table row lands on the same trap slot.
-        for number in 1..=super::SIGNALS.len() {
+        for number in 1..=table.len() {
             if let Some(name) = crate::builtins::kill::translate_signal(&number.to_string()) {
                 let expected = format!("SIG{name}");
                 assert_eq!(
@@ -1497,9 +1251,10 @@ mod tests {
             (libc::SIGUSR1, "SIGUSR1"),
             (libc::SIGUSR2, "SIGUSR2"),
         ] {
-            let slot = super::SIGNALS
+            let slot = super::Platform::host()
+                .signal_table()
                 .get(constant as usize - 1)
-                .copied()
+                .map(|entry| entry.sig_name)
                 .unwrap_or("<past end>");
             assert_eq!(slot, name, "slot for libc signal {name}");
             assert_eq!(
@@ -1601,15 +1356,16 @@ mod tests {
     #[cfg(not(unix))]
     #[test]
     fn wire_format_slots_are_linux_numbering() {
-        assert_eq!(super::SIGNALS.len(), 64);
-        assert_eq!(super::SIGNALS[16], "SIGCHLD");
-        assert_eq!(super::SIGNALS[17], "SIGCONT");
-        assert_eq!(super::SIGNALS[18], "SIGSTOP");
-        assert_eq!(super::SIGNALS[19], "SIGTSTP");
-        assert_eq!(super::SIGNALS[9], "SIGUSR1");
-        assert_eq!(super::SIGNALS[28], "SIGIO");
-        assert_eq!(super::SIGNALS[29], "SIGPWR");
-        assert_eq!(super::SIGNALS[33], "SIGRTMIN");
-        assert_eq!(super::SIGNALS[63], "SIGRTMAX");
+        let table = super::Platform::host().signal_table();
+        assert_eq!(table.len(), 64);
+        assert_eq!(table[16].sig_name, "SIGCHLD");
+        assert_eq!(table[17].sig_name, "SIGCONT");
+        assert_eq!(table[18].sig_name, "SIGSTOP");
+        assert_eq!(table[19].sig_name, "SIGTSTP");
+        assert_eq!(table[9].sig_name, "SIGUSR1");
+        assert_eq!(table[28].sig_name, "SIGIO");
+        assert_eq!(table[29].sig_name, "SIGPWR");
+        assert_eq!(table[33].sig_name, "SIGRTMIN");
+        assert_eq!(table[63].sig_name, "SIGRTMAX");
     }
 }

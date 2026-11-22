@@ -464,11 +464,12 @@ impl Executor {
         // merged stream (2>&1) reordered them. The OrderedOutputLog
         // (rubash#2699) preserves the production order across both fds.
         let log = OrderedOutputLog::new();
-        let status = crate::builtins::trap::execute_with_io(
+        let status = crate::builtins::trap::execute_with_io_for_platform(
             &cmd.words[1..],
             &mut self.shell_state.env_vars,
             &mut log.stdout_writer(),
             &mut log.stderr_writer(),
+            self.shell_state.platform,
         )?;
         self.write_buffered_builtin_output_chunks(cmd, &log)?;
         // GNU execute_cmd.c:4886-4888: a special builtin whose status

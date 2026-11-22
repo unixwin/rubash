@@ -32,11 +32,12 @@ impl Executor {
 
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let status = crate::builtins::kill::execute_with_io_posix(
+        let status = crate::builtins::kill::execute_with_io_posix_for_platform(
             &cmd.words[1..],
             &mut stdout,
             &mut stderr,
             self.posix_mode_enabled(),
+            self.shell_state.platform,
         )?;
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
         Ok(status)

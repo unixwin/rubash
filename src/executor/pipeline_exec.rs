@@ -8677,11 +8677,12 @@ impl Executor {
                 // merges them (`2>&1`). The split pair below stays the
                 // stage's result for the unmerged legs.
                 let log = super::trap_stack_builtins::OrderedOutputLog::new();
-                let status = crate::builtins::trap::execute_with_io(
+                let status = crate::builtins::trap::execute_with_io_for_platform(
                     &args,
                     &mut env_vars,
                     &mut log.stdout_writer(),
                     &mut log.stderr_writer(),
+                    self.shell_state.platform,
                 )?;
                 // The POSIX reset-by-name usage failure returns GNU's raw
                 // internal EX_USAGE (258) for the execute_trap wrapper's

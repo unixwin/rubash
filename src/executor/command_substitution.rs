@@ -1445,7 +1445,10 @@ impl Executor {
                 // before translating; a literal that names no signal keeps
                 // the historical empty-output behavior.
                 let expanded = self.expand_word(word);
-                if let Some(signal) = crate::builtins::kill::translate_signal(&expanded) {
+                if let Some(signal) = crate::builtins::kill::translate_signal_for_platform(
+                    self.shell_state.platform,
+                    &expanded,
+                ) {
                     self.last_command_substitution_status.set(Some(0));
                     return signal.to_string();
                 }
