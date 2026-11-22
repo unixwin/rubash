@@ -538,8 +538,9 @@ pub(super) fn assign_declare_names(
                 continue;
             }
         }
-        if is_noassign_bash_array(var_name)
-            && !variables.is_marked(crate::executor::UNSET_DYNAMIC_VARS, var_name)
+        let base_name = var_name.split('[').next().unwrap_or(var_name);
+        if is_noassign_bash_array(base_name)
+            && !variables.is_marked(crate::executor::UNSET_DYNAMIC_VARS, base_name)
         {
             continue;
         }

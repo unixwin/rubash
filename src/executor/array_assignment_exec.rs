@@ -452,7 +452,7 @@ impl Executor {
             self.exit_code = 0;
             return true;
         }
-        if name == "GROUPS" {
+        if name == "GROUPS" && !self.groups_shadowed() {
             self.exit_code = 0;
             return true;
         }
