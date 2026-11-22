@@ -11,7 +11,774 @@
 ### 修复
 
 - **深审修复波（1.5.1 向，2026-11-04）**：两轮深度审计（约 214 条经队长复核的发现）中可局部修复项全部落地——解析器诊断归因对齐 GNU（case/if/函数/算术-for/命令替换/EOF 各形态的报错令牌与行号，#2739–#2754、#2679）；heredoc 展开上下文统一（#2676、#2681）；解析器挂死与解析期代码执行两处高危关闭（#2682、#2686）；状态变更内建在重定向失败时不再执行（#2692）；环境导入不再误剥小写变量的导出标记（#2723）；compspec 锚定与补全分发面修正（#2724、#2726、#2727）；词法/展开/作用域多处 GNU 对齐（#2668–#2675、#2756–#2767、#2778）。每条修复均带以 issue 号命名的回归钉。结构性余项（单一展开管线、fdwalk 等）按 1.5.1 专项六件工程推进，残差均已逐条立单。
-- **GNU 差分修复波（2026-11-04 – 11-22）**：1.5.1 里程碑累计关闭 457 单，全部以 GNU Bash 5.3.20 为规范源、经真 oracle 逐形差分定谳后修复，每条均带以 issue 号命名的回归钉。按主题粗分（单据可跨族）：fd/重定向约 76、解析与诊断约 46、引号与词法约 33、执行与子进程约 33、展开约 30、declare/readonly/local 约 27、算术约 27、参数展开约 24、作业控制与 wait 约 21、case 约 19、补全约 19、heredoc/herestring 约 17、数组/assoc 约 16、`[[ ]]` 约 14、procsub 约 13、nounset 约 12、glob 约 12、trap 约 10、coproc 约 4。冻结头为 master `eeb424da`（#4067 合入点）；已知轮换/环境性 census 红与 goldens #4038 切片非确定性均已逐项定性、不属本版回归（见发版卷宗冻结头测试总表）。
+- **GNU 差分修复波（2026-11-04 – 11-22）**：2026-11-03 至 11-22 窗口内本仓共关闭 703 单（其中挂 1.5.1 里程碑 456 单；四仓同期合计关闭 926 单、合并 PR 1060 张），全部以 GNU Bash 5.3.20 为规范源、经真 oracle 逐形差分定谳后修复，每条均带以 issue 号命名的回归钉。按主题机械归类（每单只计一族）：fd/重定向 80、解析与诊断 68、引号与词法 28、执行与子进程 59、展开 10、declare/readonly/local 33、算术 28、参数展开 38、作业控制与 wait 40、case 23、补全 16、heredoc/herestring 23、数组/assoc 31、[[ ]] 18、procsub 19、nounset 13、glob 8、trap 19、coproc 18、其他 131，合计 703（完整清单见下）。冻结头为 master `eeb424da`（#4067 合入点）；已知轮换/环境性 census 红与 goldens #4038 切片非确定性均已逐项定性、不属本版回归（见发版卷宗冻结头测试总表）。
+
+### 完整清单
+
+窗口（2026-11-03 – 11-22）内关闭的 703 单按主题机械归类如下（每单只计一族，标题逐字取自 issue 原文）：
+
+#### fd/重定向（80 单）
+
+- #2395 [bug] exec 接管道 stdin 时物化残留临时文件且重定向丢失
+- #2613 [fd] 管道 stage 子进程根本不交付 {var} 绑定（EBADF，W3 stage 方言）
+- #2615 [fd] {var} 分配在模型空间而非 OS 空间，$v 数字与 GNU 分歧（文件结果一致）
+- #2662 [upstream] read: `read -d` with a high-byte (>= 0x80) delimiter reads nothing
+- #2688 [A2-01] Spawn fd aliasing: children inherit the same file at duplicate descriptor numbers
+- #2689 [A2-02] command <external> as a pipeline stage drops the command's own redirections
+- #2690 [A2-03] /dev/stdout reopen (O_TRUNC) semantics missing on the exec redirect face
+- #2691 [A2-04] >&/dev/fd/N and >&/dev/stderr fail with ENOENT instead of duplicating the fd
+- #2718 [B2-F06] Redirect-only commands expand redirect words before binding their (permanent) assignments
+- #2748 [B6-R10] `function NAME` without `()` and with a redirection is run as an external command
+- #2773 driver: set -v echoes rendered commands at execution time, not input lines as read [B4-F04]
+- #2775 fd: varredir_close OFF ignored — command-scoped {var} fds always closed at command end [B4-F13]
+- #2787 [B6-R13 face 4, decision D3] -c route reports status 2 for a read-time comsub failure; GNU reports 127
+- #2793 /dev/tcp 进程内可用，但 socket fd≥3 不随外部子进程传递；/dev/udp 静默丢包
+- #2803 [bug] exec with a command treats >&fd / >&- as output to a file named fd / -
+- #2821 [bug] 带命令的 exec 只应用最低编号的输出重定向，其余输出重定向被静默丢弃
+- #2848 [GAP-12 tail] Session face for the retained invocation's shopt flags (enter_interactive read)
+- #2880 [bug] Background fifo reader can die before applying its redirects — parent's exec 6> fifo open deadlocks (run-test test1.sub dance)
+- #2883 Interactive read -p prompt renders raw-byte marker pairs instead of the control bytes
+- #2979 printf: remaining locale faces (byte_mode, \u gate, decimal_point) read the process env, not the variable-table guard
+- #3046 exec in a pipeline/subshell ignores stdin redirect from a character device (reads EOF) and drops stderr redirects
+- #3061 [bug] printf -v 'x[0]' element bind leaks raw compound storage encoding on scalar read-back
+- #3104 raw-byte (U+E000) pairs leak at name-consumption boundaries: redirect targets, test/[ operands, source, cd (E000-domain counterpart of #3076)
+- #3187 [bug] read -t with invalid timeout is diagnosed only after redirection succeeds; GNU validates the timeout first
+- #3191 read -r -a 在单字节 locale 下字节域分裂丢空字段（#2819 残余）
+- #3201 comsub 外部子进程 ambient fd 交付不稳定（多数运行整段缺失，与 #2688 别名异源）
+- #3212 read -d 分隔符字节与后续数据字节构成合法 UTF-8 时在传输文本中不可见（joined 形态）
+- #3213 varredir 物化 fd 在 shell 自身 /proc/$$/fd 视图不可见（GNU 可见）
+- #3218 PATH/名字折叠丢逐字符来源：同名真 Latin-1 字与 byte char 混用取字节拼写，折叠串作键共享重定向旗标
+- #3221 junit-formatter.bats 仍报 15 instead of 13：嵌套 tap13 行经 ambient fd 3 泄漏（#3149 残余）
+- #3286 已删 cwd 下相对输出重定向至已存在 FIFO 即时 ENOENT（GNU 阻塞 rendezvous 后成功）
+- #3291 read: C.UTF-8 file loop fd_table mb serve diverges on multibyte delimiter remainder
+- #3293 read: byte-served path skips the -t timed judge (and invalidates the stream arrival table)
+- #3294 read -n: illegal UTF-8 sequence measured as 1-byte units (GNU/glibc mbrtowc consumes the whole sequence)
+- #3308 [bug][fd] 脚本模式 $(外部 | 外部)：管道首进程 stderr 绕过全部重定向直写控制台（-c 模式正常；GNU 无此行为）
+- #3311 [bug] exec with a command opens fd>=3 redirect targets but never passes the fd to the child
+- #3312 [bug] exec with a command routes device redirect targets through a /tmp sink file, silently swallowing write failures
+- #3313 [bug] exec with a command replaces <&- with /dev/null instead of closing stdin
+- #3325 timed 体内内层 compound 重定向失败不到达 ERR 裁决（time { if … < /bad; }）
+- #3334 [bug] read -n/-N counts characters instead of bytes in C locale
+- #3401 [bug] termsig death still delayed on comsub, blocking-read and simulated-exec waits (residual of #3284)
+- #3402 [bug] pipeline stage stderr bypasses the fd table on the Windows concurrent path (Windows face of #3308)
+- #3403 [bug] sequential redirect loop resolves 2>&1 against the live fd 1 target instead of the dup-time snapshot
+- #3432 [bug] test -ef/-nt/-ot resolve /proc/self/fd/N and /dev/fd/N to the wrong file (off by one fd)
+- #3539 [bug] $BASH_COMMAND of a top-level command renders redirections outside print_cmd.c print_redirection (>&2, 3>&2- dropped, &> split)
+- #3560 [bug] Windows: a command's own N>&- does not revoke the ambient fd N handed to a rubash child
+- #3640 [bug] Shell holds its startup cwd open on fd 3, so `exec 3>file` lands on fd 4
+- #3644 Windows：command_substitution_values.rs 的 use std::io::Read 在 Windows 上未使用
+- #3706 [bug] Group redirect `{ ...; } N<redir` does not restore fd N to its pre-group target
+- #3726 fd: /dev/tcp|udp bind restores a retired entry (same hazard as #3706)
+- #3727 fd: function-call stdin bindings restore retired fd 0 entries (same hazard as #3706)
+- #3728 fd: read from /dev/tcp restores a retired fd 0 entry (same hazard as #3706)
+- #3729 fd: stdio-marker reinstate restores a retired entry (same hazard as #3706)
+- #3733 fd: redirect failure mid-list does not undo partial binds (GNU undo_partial_redirects)
+- #3770 read on write-only fd 0 fails silently instead of `read: 0: read error: Bad file descriptor`
+- #3785 [bug] read -n/-N counts characters instead of bytes in C locale on redirected / pipeline stdin (follow-up to #3334)
+- #3792 [bug] cmd <&N on a write-only fd fails the redirect ("N: Bad file descriptor") instead of dup'ing the descriptor; emulated cat reads the file instead
+- #3814 子 shell 的 8<&- 泄漏到父 shell：( … ) 8<&- 后父 shell fd 8 损坏
+- #3815 嵌套组内层 fd 8 恢复落到野管道：{ { …; } 8</dev/null; …; } 8</dev/null
+- #3819 [bug] failed pipe creation under fd exhaustion is silently ignored; the pipeline runs instead of failing ("pipe error")
+- #3828 [bug] output redirects fail spuriously when umask strips owner-write from the created file ("f: Permission denied", rc 1, data lost)
+- #3852 redirect failure does not set the exit status (GNU sets $? to 1)
+- #3856 [bug] fd>=3 delivery to children dead on Windows since #3736: fork_respawn_transport_key strips __RUBASH_FD_* for every non-respawn birth
+- #3892 exec: {var} 重定向绑定在同 list 后续条目失败时被回滚（GNU varassign 无 undo 记录，绑定存活）
+- #3917 残差（#3640/#3891）：exec 3>file / exec 4>file 不落指定 fd，自带钉两格恒红
+- #3938 持久 exec 重定向落点的完整性残差：dup 源不物化 / ≥10 被占用保持虚拟回退 / 快照恢复留 dup 描述符（#3917 相邻面）
+- #3939 /dev/zero 的 <> 分裂模型：读写臂为两个文件描述，共享偏移与 GNU 分歧（P3）
+- #3943 [bug] read -d with a multibyte delimiter stops on a raw byte equal to the delimiter's codepoint
+- #3944 [bug] `read -d` with a single-byte delimiter >= 0x80 fails on file-backed input under a UTF-8 locale
+- #3945 [bug] `read -t 0` returns success when no input is available
+- #3985 subshell ( exec … >&3 ) 3>/dev/full: shell-side EACCES at fd binding instead of child's ENOSPC write failure
+- #3991 [gnu-baseline] redirect undo saves are never materialized: dup from a save slot fails EBADF (1>&10 after exec 9>file)
+- #3995 [gnu-baseline] cat - inside a file-redirected group poisons the next fd-0 read (silent empty, rc=0)
+- #3997 [gnu-baseline] fd-table /dev/full binding never reaches external children (ambient fd>=3 delivery drops the slot)
+- #3999 [gnu-baseline] read serve face has no undo-save resolution (0<&10 inside a read list still EBADF)
+- #4000 [gnu-baseline] move (N>&M-) retires a handle a same-walk dup still aliases: flush writes to a closed descriptor
+- #4024 [gnu-baseline] 同 list 从 walk save 槽 dup 回 stdio fd 得到死端点（静默丢输出），GNU 从真描述符 dup 正常
+- #4027 [gnu-baseline] 同 walk 先重绑 fd N（生 save）后 move 关 N：GNU 恢复 save 绑定，rubash 的 persist 关闭胜出致后续 >&N EBADF
+- #4044 [gnu-baseline] exec walk inside a nested context closing fd 1 also kills the parent shell's fd 1
+- #4054 [test-infra] issue3997 fd-enumeration pins assume a clean ancestor fd set — harden against harness-held fds
+
+#### 解析与诊断（68 单）
+
+- #2635 [bug] RLIMIT_NOFILE 软限内重定向目标 fd ≥ 限额时不报错（GNU: Bad file descriptor, rc 1）
+- #2637 [bug] history -c 带多余操作数时报错且不清表（GNU 静默 rc 0 清空）
+- #2639 [bug] times 无效选项报错独缺 line 1: 前缀（GNU: line 1: times: -x: invalid option）
+- #2665 [upstream] Diagnostic fidelity family: line-number drift, message shapes, Rust-format leakage, help layout, missing identifier diagnostic, carrier-byte leakage (7 micro-items)
+- #2680 [A1-F07] Parse/execute interleave: ;-separated commands before a later syntax error still execute
+- #2714 [B1-11] Diagnostic prolog hardcodes `bash` instead of the argv[0]-derived name (owner decision: impersonation vs fidelity)
+- #2725 [B5-01] Interactive stdin driver swallows the rest of the stream after compound-opener parse errors, then kills the session
+- #2728 [B5-04] Exported-function (BASH_FUNC_*%%) import: wrong silence/diagnostic split and a laxer shape check
+- #2734 [B5-17] Interactive-route diagnostics carry a `line N:` segment GNU omits (and a spurious `-c:` segment on -i -c)
+- #2739 [B6-R1] Syntax error at a continuation position blames the previous command's line and drops the source echo
+- #2741 [B6-R3] `if true then ...`: GNU blames the closing keyword `fi` (then is consumed as a condition argument); rubash blames `then`
+- #2742 [B6-R4] `while do done` / `until do done`: GNU blames `do`, rubash blames `done`
+- #2745 [B6-R7] `select` rejects a loop variable literally named `in`
+- #2751 [B6-R13] Command-substitution inner syntax errors: missing `while looking for matching ')'` suffix, fragment echo, per-level escalation lines, `-c` status 2 vs GNU 127
+- #2754 [B6-R17] EOF diagnostic arm reports first-command-line + 1, not the end-of-input line
+- #2755 [B6-R18] Bad-interpreter exec diagnostic carries a `line 1:` segment GNU omits
+- #2789 [read-time] comsub bodies validated at execution, not at read: skipped bodies never fail; parse-time body failures miss the -c 127 remap
+- #2791 [D1 残面] 诊断前缀冷路径字面量未随 argv[0]：builtin 本地 fallback 的 "bash"/"rubash" 字面量
+- #2796 [bug] cd 对软链父目录的 `..` 按物理路径解析，默认与 -L 下均偏离逻辑目录
+- #2871 [bug] bind set silently accepts invalid bell-style/keymap values (no "could not set value" diagnostic)
+- #2873 [bug] bind silently swallows malformed bind specs (no "no key sequence terminator" diagnostic)
+- #2924 inputrc / bind -f parser still drops old-style binding lines (second consumer of the #2914 arm)
+- #2947 [bug] POSIX-mode source diagnostic prints `.` instead of `source`
+- #2966 shift: out-of-range diagnostic prints the parsed count instead of GNU's word (and invents one for the implicit count)
+- #3008 printf %S 在 C locale 下应报错（宽字符转换失败），rubash 照常打印
+- #3040 Stored U+E314 value used as a name renders the E400 pair: command-not-found diagnostic and redirect filename
+- #3090 bind -f / history 文件面的相对文件名不锚定会话 cwd（进程 cwd 解析，平名复现）
+- #3091 管道成员 spawn 失败的状态与诊断塌陷：PIPESTATUS 为 0、诊断丢 ./ 拼写（平名复现）
+- #3193 [census] 产品字面 bash: 诊断前缀站点普查：逐点核 GNU 在不同 argv[0] 下的前缀真值
+- #3209 函数体首命令带重定向时报错行指向命令自身而非函数定义行（行戳捕获面）
+- #3222 命令未找到诊断的 stderr 写失败时退出码翻 1，GNU 保持 127（诊断收尾路径写错误传播进 exit_code）
+- #3254 main.rs 启动诊断族字面程序名不随 argv[0] 派生（-o/-O/-c/长选项/debugger 全族）
+- #3256 共享 diagnostic.rs / exec.rs 冷路径字面前缀收敛（待 #2968/#3214 合入后派）
+- #3268 已删 cwd 下进程内路径串解析同族残差：comsub 内 cat、cd ..、壳侧输入重定向、模拟 cp 操作数面
+- #3285 cd . 于已删 cwd：缺 getcwd 失败诊断且 PWD 拼写丢 /. 尾（#3268 b4 残差，resetpwd 路径）
+- #3300 后台函数体重解析行戳取决父进程退出时序（`background_first` box 报 line 2、本地/GNU 报 line 1）
+- #3328 重解析源回显行是 parser 重序列化文本而非原文行（__RUBASH_PARSE_SOURCE__ 跨度保真）
+- #3333 [bug] simulated mkdir -p diagnostic names the whole operand instead of the first failing component
+- #3335 [bug] cd . in a deleted cwd: pushd entry still fails rc 1; cd entry lacks getcwd diagnostic and PWD /. suffix
+- #3340 [bug] bind --help 非交互下缺失 line editing 警告（help 门先行跳过了处理器前导诊断）
+- #3343 [bug] unset 诊断路由谓词仍全表扫选项（操作数后 -f/-v 双置形分歧）
+- #3355 空 argv[0] 调用时 $0 被种成 /、诊断印 /: …（GNU 印空名）
+- #3388 未闭合的 [ 在解析期夭折整脚本（GNU 为运行时 missing ']' 错误、脚本继续）
+- #3396 pushd 相对目标按 $PWD 解析（未设/空/陈旧时失败；GNU 按真实 cwd 解析）
+- #3404 [bug] diagnostic re-print of a comsub inside a subscript keeps >&2 where GNU normalizes it to 1>&2
+- #3407 [bug] alias-body diagnostics report invocation line + body offset; GNU reports the invocation line
+- #3411 tests/issue3182_diagnostic_faces.rs:30 死字段使 master 全靶 -D warnings 红（#3373 钉善后）
+- #3412 空 argv0 的 -c 形态下 alias/unalias 诊断头仍印 bash:（应随空 $0 印 :）
+- #3415 非 shell shebang 的脚本直执行被当作 bash 执行：体报语法错 rc=2；shebang-only 文件静默 rc=0（#993 OMP 矩阵立项）
+- #3420 [bug] Background child spawn chdirs by raw path string without consulting the cwd anchor (deleted-cwd diagnostic + rc 1 where GNU is silent rc 0)
+- #3434 [bug] builtin diagnostics in a pipeline component print after later stdout
+- #3453 [bug] diagnostics to a closed fd: printf pass-abort and pipeline-stage resurrection vs GNU
+- #3574 cd entry in a deleted cwd does not emit GNU's chdir: diagnostic
+- #3635 cp emulation: failed create diagnostics drop the `regular file` kind (GNU copy.c copy_internal)
+- #3647 [parser] syntax error after `!` in reserved position does not echo the source line
+- #3648 [parser] `! } { }` runs `}` as a command instead of a syntax error
+- #3774 [fd] read 自身输出重定向 0>file 仍静默丢 EBADF 诊断（#3773 c4 残面）
+- #3777 [fd] Windows 上 read < 目录在重定向打开层报 Permission denied，达不到 EISDIR 诊断（issue1495 钉 X299 双边既存红）
+- #3808 parser: `>(...)` with a `{ ...; }` group body is rejected as `ambiguous redirect` (GNU accepts it)
+- #3813 modernish builtin.t 007 解析死亡：别名 { f() { + $(…) 内奇数撇号注释致 rc=2
+- #3818 [bug] input-redirect failures under fd exhaustion: wrong "N: Bad file descriptor" diagnostic, and "< file" on external commands silently dropped
+- #3827 [bug] exec-failure diagnostic prints the absolute path for commands found via a relative PATH entry (GNU prints the PATH-joined form, e.g. "sub/mycmd: Permission denied")
+- #3833 [parser] reserved words after pending-inversion `!` run as command words instead of syntax errors (siblings of #3648)
+- #3845 regression: golden_issue1230 — pipeline-stage spawn diagnostic leaks to stderr inside comsub (suspect #3631)
+- #3914 [bug] escaped newline inside a delimiter body is not counted in EOF diagnostic lines
+- #3936 while/until 体错误归属同族残差：parse_loop_body 吞掉 latched 错误、回退报 EOF-from-while 形（#3184 缺陷 B 同族）
+- #4028 [gnu-baseline] move 显式命名 fd 10（8>&10-）时 GNU 有 undo 期 Bad file descriptor 诊断，rubash 无
+- #4047 redirect failures inside async subshell bodies are swallowed whole (rc=0, no diagnostic)
+
+#### 引号与词法（28 单）
+
+- #2684 [A1-F12] Single-quoted double-quote inside $() inside double quotes breaks the scanner
+- #2706 [B1-04] Quoted expansion results lose IFS protection in mixed words ($a"$b" splits inside the quoted part)
+- #2708 [B1-06] Tilde expansion is not vetoed by quotes inside the tilde prefix (~'' expands; GNU leaves it literal)
+- #2747 [B6-R9] Function-definition errors blame `(` instead of the token after `()`
+- #2781 arith-for single-`)` headers keep the matched-pair EOF form instead of blaming the inner token (F4/R11 residual)
+- #2882 Escaped user U+E002 is eaten by blind QUOTED_NULL consumers (printf emits stray U+E400, echo emits nothing, concat drops the char)
+- #2959 set -k (keyword): assignment words are re-judged after expansion — quoted words with '=' are stripped, bare assignments lost
+- #2999 fix: comsub suffix folds backslash out of a preceding single-quoted segment
+- #3005 __git_ps1 分离头描述值泄漏载体字节 U+0010 与引号（t9903 六例）
+- #3017 fix: set listing of scalars with bare C0 bytes lacks $'...' quoting
+- #3020 [bug] hash-leading command word dropped as comment after quoting or expansion
+- #3029 [bug] non-ASCII command names printed raw in errors, GNU uses octal quoting
+- #3031 [bug] syntax-error token naming differs from GNU (pipe vs paren faces)
+- #3034 [bug] assignment y="($x)" leaks 0x10 + quotes into the stored value
+- #3089 [bug] Redirect target joining a quoted space segment with a substitution reports "ambiguous redirect"
+- #3103 unquoted splitting in command-word position (for list / set -- / args) loses data carrier bytes: \x1c eaten as glue, \x1f folded to '$'
+- #3263 信任条件 (a) 理论误触：同词 glue 落他字时引号内 IFS 空白未受保护仍被判可信（#3089 返工面外观察）
+- #3435 $(...) 跨度扫描对 backquote 组内未配平 " 盲（整文件误作未闭合引用）
+- #3495 [bug] unquoted digit-leading compound LHS should be a GNU parse-time syntax error
+- #3505 [bug] N>> append redirect (e.g. 3>>) rejected by the lexer
+- #3557 [bug] 命令位加引号的 '(' / '{' 被当作子 shell / 组命令（GNU 为普通 WORD，command not found）
+- #3582 [bug] unset 'a[~]' 诊断 token 应为 ~，rubash 报 /home/hatch（#3522 残差）
+- #3639 [bug] Trailing unquoted `{ }` after `!` is folded into one word "{ }"
+- #3663 [bug] Unquoted assignment x=a\\*e drops the backslash before * and ? (value becomes a*e), breaking the modernish DBLBRACKET guard
+- #3664 [bug] Double quotes inside a backquote command substitution inside double quotes cause a syntax error
+- #3838 [lexer] comsub alias pre-scan newlines untracked (second-order gap after #3678)
+- #3859 [bug] $(...) body walkers: ANSI-C $'...' escaped quote hides ')' — bare comsub EOF error, quoted comsub wrong value
+- #3904 unclosed-construct diagnostic fidelity: token-error wording (v=(a (echo) and closer char (v=(a[1 reports ')' for ']')
+
+#### 执行与子进程（59 单）
+
+- #2565 [env] 导入的已导出 LINES 不进子进程 env，COLUMNS 进（组合/导入链路不同形）
+- #2636 [bug] 子 shell 内的 ulimit 改动泄漏回父 shell（GNU 外层不变）
+- #2642 [bug] #2514 残差：command -v/-V env 仍被仿真注册表遮挡（GNU: /usr/bin/env）
+- #2652 [upstream] set -e: failure suppression in tested contexts (&&/||, !, conditions, eval) not honoured — shell exits at the first tested failure
+- #2661 [upstream] exec: executing a directory reports "not found" / exit 127 instead of "cannot execute: Is a directory" / 126
+- #2693 [A2-08] Pipeline-stage builtins are SIGPIPE-immune (PIPESTATUS 0 instead of 141)
+- #2694 [A2-09] umask set in a pipeline stage leaks back into the parent shell
+- #2696 [A2-13] Hash table stores absolutized path; type prints it instead of the as-found relative spelling
+- #2699 [A3-R58A] Multi-argument builtin stdout/stderr interleaving lost in the shared buffered-output path
+- #2717 [B2-F05] `command -v` reports non-executable slash-named files (no file_status qualification) and absolutizes them
+- #2722 [B3-F05] BASH_SUBSHELL over-counts when a `( )` is a pipeline stage (stage bump + paren bump)
+- #2723 [B5-05] Environment import silently de-exports every lowercase-first variable name (http_proxy & friends invisible to children)
+- #2736 [B5-18] type/hash introspection does not reflect emulated dispatch (sleep reported as its PATH body, never hashed)
+- #2753 [B6-R16] `--help` (CHECK_HELPOPT) missing from 36 of 55 builtins — no shared getopt help mechanism
+- #2783 comsub body error echo shows the body fragment, not the enclosing line (F4/R13 residual)
+- #2810 [api] Session 协作式取消：执行安全点轮询宿主取消令牌（不依赖信号）
+- #2881 External boundary leaks the E400 escape pair into child env/argv (decode_raw_byte_markers_to_byte_chars lacks the LITERAL_CHAR_ESCAPE arm)
+- #2884 Environment import is an unencoded entry point: inherited user values are interpreted as live carrier protocol
+- #2901 [test] bats-core: re-run scenario chain + own suite on current master — adjudicate DIV-D (zero-exec on the engine binary)
+- #2939 builtin: words after '--' re-checked as options instead of names
+- #2942 enable -n : does not persist: the disabled-builtin carrier is colon-separated and ':' round-trips to empty
+- #2949 BuiltinRow exposes pub fields of pub(crate) types (E0603 under -D warnings) — breaks niubash CI
+- #2958 builtin_diag::valid_number rejects vertical-tab-padded numbers GNU accepts (trim_ascii lacks 0x0B)
+- #2995 sleep Fastpath 仿真无 OS 子进程：ps 树杀链（bats 每测试超时）够不着在飞的 sleep
+- #3054 [bug] respawn serialization drops first_word_end_line (residual of #3028)
+- #3071 tempenv prefix assignment: self-referencing RHS is expanded twice into the child environment (PATH splice corrupts)
+- #3076 E400 literal-char pairs leak at command-lookup / slash-execve-classification / cd / exec operand boundaries (same family as #3040)
+- #3108 Session 快照把启动种子名误报 exported=true（from_environment 给种子表条目统一打 exported）
+- #3147 Describe of a fresh PATH walk absolutizes the display instead of the as-written join (command -v / type)
+- #3148 exec builtin face does not classify a bad interpreter (raw OS error, 127, line segment) where GNU reports sys_error bad interpreter, 126
+- #3198 已删 cwd 下前台外部命令 spawn 全部 rc 127（spawn 按陈旧逻辑 cwd chdir）
+- #3284 引擎等待面：前台命令执行期终止信号只在命令结束边界被消费，GNU 在等待中即信号死（niu #988 时序残差归宿）
+- #3310 [bug] exec does not decrement SHLVL
+- #3314 [bug] bad-interpreter exec exits 127 instead of 126 at top level
+- #3315 [bug] plain external commands get basename argv[0] instead of the full path
+- #3316 [bug] exec of a relative-path script leaves "/./" in $0
+- #3317 [bug] exec with an empty command exits 126 instead of 127
+- #3336 [bug] after pushd into a deleted cwd, external children run in the startup cwd instead of inheriting the deleted cwd
+- #3339 [bug] command <builtin> --help 重派发面未过 help 门（GNU 出 help）
+- #3347 [bug] respawn（脚本文件 spawn）在父壳伪造导出 $PWD 后从变量重派生逻辑 cwd——应随 respawn 运输集携带 logical_cwd 值
+- #3348 [bug] $PWD 被伪造后，comsub 内 cd / pwd -L 仍按变量派生逻辑值（状态克隆未覆盖的派生点）
+- #3358 [bug] Explicit 'hash name' records the absolutized path for relative PATH entries (follow-up of #2696)
+- #3387 times 在子 shell/命令替换/管道段印宿主进程累计 rusage（#2932 残差：模拟 fork 不清零时钟）
+- #3414 command 面 help 门未挂 prologue 钩子：bind 警告丢失、hash 拒绝被 help 抢先（#3381/#3385 双合后残面）
+- #3507 [test] dead_code in tests/issue2066_pipeline_host_flag_regressions.rs under -D warnings on Windows
+- #3512 [test] dead_code in tests/issue2304_numbered_devnull_spawn_regressions.rs under -D warnings
+- #3513 [test] dead_code in tests/issue2272_fdvar_spawn_delivery_regressions.rs under -D warnings
+- #3550 [bug] Pipeline member with a stale hashed path: wrong ENOENT name, status 0, PIPESTATUS collapses
+- #3551 [bug] hash table ignores HASH_CHKDOT: ./NAME created after hashing via PATH=.:… is not preferred
+- #3566 [bug] Windows prefix-concurrent pipeline drops the prefix's stdout when its last member wrote stderr
+- #3585 [macOS] external commands fail: Mach-O binaries treated as ENOEXEC candidates (cannot execute binary file, exit 126)
+- #3824 [bug] hash -p with an empty path stores "./": hash -t prints "./" and running the entry fails "./: Is a directory" (GNU stores "", run fails "No such file or directory")
+- #3825 [bug] hash and type -a accept a non-executable file found via PATH (GNU: "not found", rc 1)
+- #3865 [bug] issue2612 subshell-dup 4 cells red on master tip — introduced by #3849
+- #3875 [bug] probe-then-bind double-open：#3828 的剩余四处（env 腿、异步 spawn、pipeline stage、plan-decline）
+- #3905 comsub route: unclosed compound assignment inside $(...) reports EOF exit 2 / line 2, GNU reports 1 / line 1
+- #3932 plain-spawn child inherits live SHLVL instead of exported level
+- #3962 `exit` in a subshell stops the rest of the script when the sourced file has a multi-line string containing `<<`
+- #3965 [bug] 外部命令 spawn 组合路径把 env 值中的 0xFF 字节宽化为 U+00FF（字节不保真）
+
+#### 展开（10 单）
+
+- #2629 [fd] stage 括号 applier 对带副作用的 {var} 目标词重复展开（GNU 只展开一次）
+- #2651 [upstream] Expansion: POSIX mode rescans and re-expands the tilde result in an eval'd assignment (double expansion)
+- #2752 [B6-R15] Substring expansion evaluates offset:length eagerly; GNU evaluates the length only if the offset is in range (and nothing for unset values)
+- #2764 expansion: process-substitution pattern words are admitted but not executed at match time (split from #2687)
+- #2819 [bug] C locale 下多字节 IFS 字符按整字符拆分（GNU 按字节拆分）
+- #3255 script_driver 历史展开前缀与 invocation.rs API 种名仍落字面 "bash"
+- #3394 cd 不展开 CDPATH 条目中的 ~（GNU 先按 $HOME 展开再搜索）
+- #3650 [expansion] `read`-filled value compares unequal under `[`/`test` for control bytes 0x0c/0x11/0x13-0x1f
+- #3651 [expansion] junit formatter XML leaves `[0m[K` remnant where GNU strips the CSI sequence
+- #3826 [bug] commands are not found via a "~/..." entry in PATH: tilde is not expanded during PATH lookup (GNU expands it)
+
+#### declare/readonly/local（33 单）
+
+- #2658 [upstream] Attributes: readonly error inside a function is diagnosed twice and does not abort the function
+- #2700 [A3-DYN] Filtered declare listings omit dynamic variables and show a phantom BASH_LINENO cell
+- #2702 [A3-THISSH] Internal THIS_SH variable is visible in declare output (design question)
+- #2720 [B3-F02] Local bindings of dynamic variables never shadow: every read face consults the dynamic provider by name, bypassing the cell
+- #2770 variables: FUNCNAME has no listing view in declare/set output (split from #2700)
+- #2944 [bug] set -a (allexport) ignored by local/readonly initialization
+- #2964 [bug] set -a marks a flagless declare compound assignment inside a function (top-level quirk does not apply there)
+- #2970 getopts: a no-argument option unbinds OPTARG (readonly mark lost); GNU binds it empty
+- #2972 declare/typeset listing ignores attribute filter flags
+- #2973 declare/typeset listing renders dynamic variables with values (BASHPID/RANDOM), extra SECONDS entry, GROUPS shape
+- #2974 local -f/-F with no names prints function definitions; GNU prints nothing
+- #2980 declare arr[0]=x: subscript operand over-marked -x by the allexport post-pass (both contexts)
+- #3026 [bug] typeset listing shows BASH_ARGV0 and renders GROUPS=([0]="0")
+- #3048 Residual diagnostic_prefix copies still pair frame line with top-level script name (printf/set/declare/setattr/kill/alias/help/shift/exit/shopt)
+- #3049 bats.bats #71 (Don't hang on CTRL-C, issue #353) hangs forever: inner test registration hits "BATS_TEST_TAGS: readonly variable", latch never fires
+- #3066 declare -a conversion of an existing scalar locale var skips the locale funnel (GNU warns again with the element value)
+- #3186 [bug] readonly/export accept invalid identifiers silently: GNU diagnoses "not a valid identifier" (#2665 D6)
+- #3338 [bug] declare/typeset/unset 在首操作数后继续扫描选项（GNU internal_getopt 首个非选项词即止）
+- #3344 [bug] declare -f --help 不出帮助（-f 分流先于帮助门，GNU rc=2 出 help）
+- #3345 [bug] declare -p 缺名诊断报告序与 GNU 不同（选项形名在先）
+- #3350 declare 复合赋值元素边界被整 token 引号判定合并（首元素含引号时 n=1，GNU n=2）
+- #3408 [bug] declare -p mixed diagnostic/output still reversed on a merged stream (follow-up to #3324)
+- #3421 [bug] readonly-PWD bind family: after a failed readonly pushd bind and directory deletion, 'cd .' loses the getcwd diagnostic line
+- #3487 [bug] bare `declare` omits the function definitions GNU prints
+- #3529 [bug] local -p 两形态诊断仍与 GNU 有差（execute_local 预-pass 机制）
+- #3533 [bug] export NAME=v 撞 readonly 时不设 export 属性（GNU setattr.def 赋值失败后仍 set_var_attribute）
+- #3534 [bug] 导入的 bash 托管名（BASH/HOSTNAME/OPTIND/RANDOM/EUID…）丢 export 属性/被重建，GNU 逐名保留 att_exported
+- #3609 [compat] local/declare shadowing a readonly outer-scope var spuriously reports readonly variable
+- #3661 [bug] POSIXLY_CORRECT assigned at runtime does not switch export -p to POSIX form, breaking isset -x (modernish suite gate)
+- #3782 [bug] scalar declare -i/local -i += does not wrap at int64 (GNU wraps)
+- #3820 [bug] getopts treats ':' as a valid option letter and leaves OPTARG empty for a declared '?' option
+- #3946 [bug] `declare -p` and `${x@Q}` print U+2028/U+2029 raw instead of GNU's `$'...'` octal form
+- #4060 [gnu-baseline] assignment/unset/local on imported bash-managed scalar names rejected by static att_noassign table
+
+#### 算术（28 单）
+
+- #2641 [bug] let 对只读变量的报错绕过命令级 stderr 重定向（2>&1 / 2>file / 2>/dev/null 均失效）
+- #2648 [upstream] Arithmetic expansion: parenthesised operand after `<`/`>` inside `$(( ))` is also executed as a command
+- #2654 [upstream] Arithmetic: error inside an array subscript is silently swallowed (missing diagnostic)
+- #2677 [A1-F02] $(( 1 + 2)x) is a fatal syntax error instead of GNU's recoverable parse fallback
+- #2685 [A1-F15] Nested arithmetic expansion fails at depth 52 (GNU fine at 500)
+- #2707 [A3-R1] Readonly-variable diagnostics from read / (( )) bypass the command's stderr redirection
+- #2713 [B1-10] Substring/arithmetic diagnostics trim the raw expression text GNU echoes verbatim
+- #2715 [B1-12] Command substitution inside `$(( ))` is mis-scanned when the body contains `;` or yields multiple lines
+- #2749 [B6-R11] Arithmetic-for fallback manufactures the header error for failures after a complete header (post-header junk, EOF, unclosed header)
+- #2780 eval 'for ((...' unclosed-header diagnostic names the wrong line (F4/R11 residual)
+- #3022 [bug] ${foo/[/]-} misrouted to arithmetic parsing
+- #3023 [bug] array subscript $"..." not evaluated as arithmetic
+- #3024 [bug] unset ${foo:t5:h2:l} errors arithmetically instead of short-circuiting to empty
+- #3059 [bug] arithmetic assignment to a locale variable never warns on setlocale failure (((LC_ALL = 5)) silent)
+- #3078 Same-expression arithmetic diagnostics and locale warnings print in opposite order vs GNU (deferred diag flush vs bind-time warning)
+- #3085 [bug] Array subscript $'...' leaks the $ into the arithmetic error token (GNU reports 'x y', rubash reports $'x y')
+- #3086 [bug] $"..." inside $((...)) bodies and ${...} default words is not decoded as a locale string (shared walker has no $" arm)
+- #3182 [bug] Diagnostic text leaks internal carrier bytes: command-not-found E400 pair, parameter-unset \x1c, arithmetic token \x01 (#2665 D7/D8, #2879 F5)
+- #3184 [bug] Syntax-error message shapes diverge: unexpected-token choice, source-line echo, arithmetic token rendering (#2665 D2)
+- #3204 并置复合命令的语法错误点名差：第二个 ((…)) 起头时 GNU 点名算术体首 token（2），rubash 点名 (
+- #3246 算术 nameref 非法标识符报错不入求值序：序反/展开形缺失/marker 跨命令泄漏/状态被报告器劫持为 1
+- #3287 致命快赋值后算术致命/展开错误标志跨命令泄漏：后续 (( )) 求值被跳过、诊断全静默
+- #3295 算术文本内展开期诊断被入口标签误标：下标/嵌套展开应无标签
+- #3383 混合赋值语句与 subshell-prefix 路径忽略 arithmetic_error（#3287 Owed 3 缺口，待探针坐实 GNU 期望）
+- #3406 [bug] (( )) fd-0 redirect failure reports the command's first line; GNU reports its completion line
+- #3456 [bug] pipeline-element prefix assignment ignores fatal arithmetic error (rubash#3383 face 2)
+- #3541 [bug] ${a[$(...)]:?err}: an arithmetic error in the subscript still emits the :? report
+- #3649 [expansion] arithmetic write side effect lost in list-subject substring expansion (`a[@]`/`@`)
+
+#### 参数展开（38 单）
+
+- #2649 [upstream] Expansion: `${!*}` / `${!@}` rejected as "bad substitution" instead of performing indirect expansion
+- #2650 [upstream] Expansion: nested `$'name'` (extquote) as a parameter name is rejected inside `${...#...}` patterns
+- #2704 [B1-03] Tilde-prefixed words: the remainder of the word is never expanded (~/$a, ~/${a}, ~+/$a stay literal)
+- #2711 [B1-08] `${#@...}` / `${#*...}` with an operator suffix is silently accepted instead of bad substitution
+- #2712 [B1-09] `${!nr@A}` on a nameref renders the value; GNU renders the target NAME as the value (bug-compat decision)
+- #2759 expansion: quoted-site IFS protection lost at unquoted ${arr[@]} junctions (residual of #2706)
+- #2762 expansion: parameter-error pre-scan is not order-aware (${a:?} falsely fires after ${a:=ok})
+- #2772 expansion: extquote OFF ignored inside double-quoted ${...} (lex-time verdict not threaded) [B4-F02]
+- #2794 [Q6 残面] ${var:?} 展开错误不浮出 discard 面：分类契约与交互驱动均不可见
+- #3019 [bug] bad substitution exits 0, GNU exits 1 (${} and 16 more shapes)
+- #3027 [bug] ${var=word} assignment leaks into preceding ${var:+word} in the same word
+- #3030 [bug] extra bad substitution error inside dollar-quoted string, GNU reports only command-not-found
+- #3058 [bug] assignment RHS with a command substitution + ${v:+":${v}"} injects 0x1C before every space (carrier-byte leak, same family as #3034)
+- #3063 ${?} substring expansion returns empty instead of slicing the $? value
+- #3088 [bug] ${var:-word} alternate expansion results lose backslash protection (flat and nested forms)
+- #3092 [bug] ${ cmd; } inside PS0/PS1 runs in a subshell while BASH_VERSION reports 5.3 (kills bash-preexec PS0 backend)
+- #3116 [bug] alternate word: source \$ not recognised as escape in unquoted alternate (${x:-a\$b} yields [a\] not [a$b])
+- #3117 [bug] alternate word: dq-span \q wrongly unescaped (${x:-"a\qb"} yields [aqb] not [a\qb])
+- #3260 :? 诊断路径对双引号 span 漏载体恢复：${q:?...} 错误词面泄漏 IFS_GLUE(\x1c)
+- #3296 子串偏移展开的诊断丢标签：${v:ref=1:2} 应带 v: 标签（GNU 有、我方无）
+- #3433 [bug] bad substitution diagnostic leaks PUA marker U+E31B for assignment-like words with ${-...}
+- #3441 bad substitution 诊断引片段而非整词（未加引号的 a=${-x} 形）
+- #3499 [bug] bad substitution 多报诊断且不丢弃命令（DISCARD）
+- #3500 [bug] compound 赋值元素词 bad substitution 诊断引片段而非元素词
+- #3501 [bug] 模式词里的 bad substitution 应静默（GNU 不作参数展开诊断）
+- #3502 [bug] ${v:?${-x}} 多报一行 v: （:? 与 bad substitution 竞发次序）
+- #3542 [bug] PS4 with ${q:?err}: GNU reports and prints the prompt literally, rubash substitutes the message
+- #3543 [bug] bad substitution diagnostic cites a comsub from raw text (>&2) where GNU prints the print_comsub form (1>&2)
+- #3581 [bug] 带引号的 "${a[@]#...}" 单 "" 元素应诊断，rubash 静默（#3501 残差）
+- #3784 [bug] ${!0} / ${!00} silently expand instead of erroring, and ${!#} is empty when $# is 0
+- #3963 `${x//\\\\/@}` replaces each backslash, not each pair
+- #3972 [bug] `${ }` 同行纯空白体报 bad substitution/EOF，GNU 5.3.20 输出空串
+- #4003 [gnu-baseline] quoted non-blank IFS chars inside ${} defaults lose protection: false ambiguous redirect (condition-(b) sibling of #3263)
+- #4017 [gnu-baseline] funsub 体以复合命令结尾无分隔符被拒（bad substitution），GNU 正常运行
+- #4029 [gnu-baseline] bad substitution 诊断前引号定界符与反斜杠已丢失（#4025 钉 3 只断言 contains）
+- #4035 ${#v} counts byte-marker (extended UTF-8) sequences by bytes instead of as one character — length-face residual of #3947
+- #4062 [gnu-baseline] ${name:-default} treats import-preserved bash-managed scalars as unset
+- #4080 [gnu-baseline] 未闭合 ${ 的诊断文本与 GNU 分歧：GNU 报 token 语法错误，rubash 报 unexpected EOF
+
+#### 作业控制与 wait（40 单）
+
+- #2340 [bug] kill + wait 后已终止作业条目的保留与 GNU 不一致（jobs 计数 0 vs 1）
+- #2660 [upstream] Async: background job inside a redirected compound command keeps the outer stdout (compound redirections not inherited)
+- #2698 [A2-16] Killed job still listed by jobs after its death notice was printed
+- #2729 [B5-07] Shell-only SIGINT during a foreground wait is re-raised after the child exits, whatever the child did
+- #2730 [B5-08] Emulated `sleep` has no real child for the wait machinery: group SIGINT cannot kill it; shell-only SIGTERM kills the shell instantly
+- #2731 [B5-03] Interactive monitor mode defaults ON without a terminal (piped -i route)
+- #2735 [B5-09] Signal-death notices are printed even when the shell dies by the same signal
+- #2768 [bug] Paren subshell inherits the parent job table; GNU starts it empty (jobs/disown diverge)
+- #2769 jobs: boundary death notices carry the just-finished command's line stamp (GNU stamps the next line)
+- #2774 interactive: shell claims monitor mode without job control; missing init diagnostics [B4-F05]
+- #2777 jobs: stopped (SIGSTOP) job reported as Running; checkjobs wording follows wrong state [B4 obs]
+- #2834 [bug] ^Z echo is glued to the Stopped notice (missing newline)
+- #2835 [bug] ^C at an empty prompt defers the next exit (shell stays alive)
+- #2836 [bug] Interactive shell stops itself on ^Z instead of only the foreground job
+- #2837 [bug] ^C aborting a partial line swallows the next line whole
+- #2838 [bug] ^Z stopping a sleep inside a for-loop hangs the shell (no prompt)
+- #2849 [bug] kill -KILL %1 + immediate exit is refused: the SIGKILL death is claimed one command cycle too late
+- #2851 [bug] Subshell inside a loop stopped by ^Z does not abandon the parent loop (r70 slice-4 residual R1)
+- #2859 [GAP queue] Session jobs-count face for the host BackgroundJobs prompt segment
+- #2886 Bare disown fails on a ^Z-stopped current job (disown: current: no such job) while jobs lists it with the + marker
+- #2896 [bug] wait re-wait semantics are inverted: jobspec vs pid after the job is consumed
+- #2897 [bug] wait in a subshell reaps the parent shell's jobs
+- #2898 [bug] wait with a pid above INT_MAX is treated as a pid instead of an invalid job spec
+- #2925 [bug] kill -INT does not kill a non-monitor async job; GNU wait returns 130
+- #2927 [bug] kill rejects pid operands with surrounding whitespace; GNU parses them (strtol)
+- #2928 [bug] Killed job-death notice printed on async reap in -c mode; GNU prints it only at wait
+- #2929 [bug] Killed job-death notice bypasses exec 2> redirect; GNU writes it to the redirected stderr
+- #2931 [bug] jobs -x accepts other options before it and swallows -l after it; GNU errors / runs the command
+- #2933 [bug] wait -p A -p 1bad validates the first -p, GNU validates the last
+- #2935 [bug] wait/disown stopped-job warning pins expect `bash:` prefix; D1 argv[0] prolog renders the absolute binary path
+- #2948 monitor flag m in $- does not track job-control availability (set without a tty, never set for library one-shots)
+- #2983 bats file_setup_teardown #8: kill -SIGINT -- -$PID reports No such process for the bats subprocess group
+- #3051 PTY byte-level ^D exits immediately with stopped jobs, bypassing the EOF deferral (pipe Ok(0) path only)
+- #3321 controlling_terminal_available 只试 stderr tty：后台进程组下 ctty 误判
+- #3637 [bug] Async-job signal-death notice lost after an intervening foreground wait, doubled after `jobs`
+- #3638 [bug] `wait %%` / `wait %+` after the job table drains resolve a stale current-job pointer
+- #3656 CI: 普查步在 issue2875 转红后永不可达（lib 步先失败即终止 job）
+- #3662 [bug] Background jobs never run when a defined function contains a background job inside a command substitution ($( : & … ))
+- #3802 Windows: jobs table renders signal-killed job as `Exit 137` instead of `Killed`
+- #3803 Windows: immediate wait after a job's death prints no signal-death notice
+
+#### case（23 单）
+
+- #2678 [A1-F04] Tokens after case ;& / ;;& parsed as a new command instead of clause patterns
+- #2679 [A1-F05] Case-header parse errors blame the wrong token and drop file:line source context
+- #2687 [A1-F17] Unquoted < / > in case and [[ ]] patterns treated as literal characters instead of operators
+- #2701 [B1-01] `:?`/`:=` semantics lost outside the main word pipeline (redirect words, arithmetic, case patterns, select lists, subscripts, nested fragments)
+- #2740 [B6-R2] `case in esac` (missing subject) blames the previous line and drops the source echo
+- #2743 [B6-R5] Case-clause error resync blames the resync token (esac) instead of the offending token
+- #2744 [B6-R6] Case pattern list starting with `|` is accepted (acceptance bug)
+- #2784 $(case x in) is intercepted by the comsub extractor's case-aware scan before the body parser runs (F4/R13 residual)
+- #2830 [parser] 长 eval 串内 case 模式表反斜杠续行解析失败（modernish 初始化残废）
+- #2916 bind -m keymap validation is case-sensitive; GNU accepts EMACS/vi etc. in any case
+- #3000 fix: escaped reserved words + continuation in a case pattern list fail to parse (harden.mm shape)
+- #3014 case 图案双引号段把 E400 转义对当裸 quoted-null 吃掉：带引用空字符的图案必 NOMATCH
+- #3045 ${var=word} assignment is lost in case-subject / for-word-list expansion
+- #3084 DQ-backslash case subject loses the backslash (Refs #3045)
+- #3105 OS-argv positional params enter storage unencoded: bare carrier bytes stripped at word finalization (case/substring still see them)
+- #3189 [bug] extglob quoted literal '[' never matches: case 'a[b' in @("a[b")) should match (#3050 family residual)
+- #3235 case 子句命令的行戳来源与 GNU 分歧：应取 pattern 行（compoundcmd_lineno 族，#3209 残差）
+- #3306 comsub unclosed-case residuals: space-separated a|/a;; bodies never arm the read-time extractor region (end-to-end rc 2, GNU 127); () empty-pattern forms stay disarmed at gate stage 4
+- #3307 REPL completeness face still judges gate-released unclosed-case comsub units as unclosed (PS2 continuation instead of immediate syntax error)
+- #3623 [bug] $(case $(cmd) in ...) nested single-command comsub in case subject truncates the outer substitution
+- #3628 case-in-comsub: syntax-error diagnostics report the wrong unexpected token (GNU names the token)
+- #3790 [bug] declare -l/-u apply full Unicode case mappings (İ→i+dot, ß→SS, ﬀ→FF) and convert in the C locale; GNU uses locale-aware simple mappings
+- #3834 comsub 内含 case + 尾随文本（body 位）仍报 syntax error：GNU rc0 / master rc2
+
+#### 补全（16 单）
+
+- #2610 [complete] alias 跳后 -F/-C 绑定的 $1 仍是原敲词（GNU 传重建行首词）
+- #2611 [compgen] 内建 -F 执行不绑定 pcomp_curcs，函数内 compopt 误报未在补全函数中
+- #2719 [B2-F08] `complete -I` (initial-word) specs are stored in the regular compspec table (no itable); `complete -p` shows them where GNU errors
+- #2724 [B5-10] Programmable completion resolves the compspec for the line's FIRST word, whatever segment the cursor is in
+- #2726 [B5-12] COMP_WORDS handed to -F/-C completion hooks is truncated at the cursor and drops empty words
+- #2727 [B5-13] compgen ignores the -o default and -o bashdefault fallbacks
+- #2737 [B5-14] compgen/compspec -A user does not handle the `~` word shape (~ro matches nothing)
+- #2738 [B5-11] API gap: `complete -E` / `complete -I` are engine-honored but unreachable through the host gate; no selective special-compspec query exists
+- #2776 completion: compgen applies FIGNORE filtering; GNU compgen does not [B4 obs]
+- #2846 [bug] Windows drive-letter words fail through complete_detailed under default COMP_WORDBREAKS (engine carve-out)
+- #2856 [B5-11] complete -E / -I host gate unreachable — contract candidate Session::has_compspec_at
+- #2900 [test] add real bash-completion distribution file to eco corpus + chain test triggering _comp_expand_glob eval (follow-up to #2876)
+- #2904 [test] git test-lib: standing slice grows t9902-completion + t9903-bash-prompt; re-run slice on current master
+- #2907 [test] git contrib: chain the real git-completion.bash (_git in a live completion attempt) + git-prompt.sh (__git_ps1 in a dirty repo)
+- #3125 [bug] interactive source does not push a BASH_SOURCE frame (REPL-sourced file sees empty stack; blocks bash-completion suite fixture)
+- #3951 [bug] `env` is registered as a shell builtin (compgen/enable/hash/builtin disagree with GNU)
+
+#### heredoc/herestring（23 单）
+
+- #2676 [A1-F01] Heredoc body expansion applies := before :- (operator order differs from argument expansion)
+- #2681 [A1-F08] ${x:=...} in a heredoc feeding an external command persists in the parent shell
+- #2682 [A1-F09] Heredoc on an if/while/until condition command hangs the parser
+- #2686 [A1-F16] Heredoc delimiter word undergoes command substitution at parse time (executes commands)
+- #2761 heredoc: bodies on raw-empty null commands are never expanded (empty-words dispatch bypass)
+- #2763 executor: heredoc-body funsub exit latch lingers into the next command
+- #2765 parser: heredoc body pairing can cross frame tiers (3+ heredocs on one line spanning a nested if header)
+- #2930 [bug] `<<` inside $(( )) in a larger word is mis-lexed as a heredoc; rest of the line is swallowed
+- #3003 解析回归：含「. 」token 的行之后 && 衔接 heredoc 解析崩坏（t1300 中止于 198/219）
+- #3021 [bug] empty-word command with heredoc returns comsub status instead of 0
+- #3183 [bug] Diagnostic line-number accounting: suite shapes from #2665 D1 unprobed on current master (heredoc warning prefixes, break/eval/redir line attribution)
+- #3195 heredoc/herestring redirector at/above RLIMIT_NOFILE soft limit is silently bound (Refs #2635 residual)
+- #3578 heredoc: 限下双 heredoc 同 list 绑定丢失第一条（exec 14<<A 15<<B，#3576 复核带出的存量缺陷）
+- #3654 heredoc: exec 先 herestring 后编号 heredoc 时 heredoc 绑定丢失（exec <<<w 14<<A，#3578 残差）
+- #3655 heredoc: 同 fd 先 heredoc 后普通文件重定向时顺序不生效（exec 14<<A 14>file，GNU 后者胜）
+- #3725 fd: loop heredoc bind restores a retired entry (same hazard as #3706)
+- #3823 funsub ${ ... } 体内 # 注释/heredoc 解析死亡，${x:-$(...)} 闭合 } 漏入输出（真 lexer 层，#3813 续作）
+- #3864 [bug] #3855 parameter_errors.rs regresses 30+ pin cells across funsub/heredoc/compound faces (census 86→120)
+- #3893 exec: {var}<< heredoc 的 fd 分配在 list 尾部发生，晚于同 list 后续条目的 undo-save 认领（GNU 按位分配）
+- #3894 simple command: {var}<< heredoc body 被错绑到 fd 0（GNU 只绑分配 fd，fd0 不受影响）
+- #3906 funnel face: apply_dynamic_fd_var_redirects applies {var} heredocs after the plain list, not at list position (GNU: at list position)
+- #3964 `$(</dev/stdin)` and `cat /dev/stdin` read nothing from a pipe or here-string in some positions
+- #3967 `<<<` inside `$( )` is read as a here-document within a top-level `{ }` group
+
+#### 数组/assoc（31 单）
+
+- #2595 [expand] 预扫描 :? 臂对下标内命令替换仍双重执行（#2558 残面）
+- #2596 [expand] :? 嵌套进 :-/:+ 词内误致命（预扫描算子解析，字面下标+已 set 亦中招）
+- #2631 [freeze-1.5.0] executor_tests hygiene: three wrong pins (BASH_ARGC/ARGV vs GNU 5.3.20) + parallel-fd full-run hang at mapfile -u3 pin
+- #2634 [bug] extdebug 开→关后 BASH_ARGC 为空数组，GNU 为 ([0]="0")
+- #2655 [upstream] PANIC: assignment through a nameref to an array element desyncs typed cell vs mirror store (variable_state.rs:1092/1106)
+- #2656 [upstream] Arrays: `declare -p` prints elements in insertion order after delete + re-add (GNU: index order)
+- #2657 [upstream] Arrays: `unset` of an associative element whose key is a quote/backslash character fails as "not a valid identifier"
+- #2703 [A3-F2] Associative assignment with bracket-bearing keys stores the value with its quotes retained
+- #2710 [A3-V1] test -v is blind to frame arrays FUNCNAME and BASH_SOURCE inside functions
+- #2779 executor: pipeline brace-group staged input starves the next reader after mapfile -n (A2-11 residual)
+- #2876 [bug] eval'd compound array assignment with an extglob element is a syntax error even with extglob on (bash-completion _comp_expand_glob shape)
+- #2945 [bug] set -a wrongly marks arrays -x
+- #2946 [bug] Associative array assignment evaluates the subscript twice
+- #2963 [bug] set -a does not mark a scalar assignment over an existing indexed array
+- #2971 export/readonly -aA: indexed attribute should win; assoc ghost remains
+- #3065 locale funnel reads raw compound storage for array-bound locale vars (false warning + leaked 0x1D in message)
+- #3097 locale funnel: element-assign and for-bind channels never fire for array locale vars; declare channel's funnel projection misses the array marks
+- #3102 array mirror serialization panics/garbles multi-element assignments whose elements carry raw-byte pairs (\x1f proven)
+- #3107 alias 定义后 declare -p BASH_ALIASES 在 debug 构建 panic：typed assoc cell 与镜像不一致（variable_state.rs:1106）
+- #3192 单引号 / ANSI-C 引号段在数组汇合后缀位丢尾随空格（#2759 残余）
+- #3203 scanner 保留字位镜像缺 ARITH_CMD/COND_END 臂：复合命令后下标词跨度在空格处断裂（a[1 2]=3 被读成 a[1 + 2]=3）
+- #3225 bad array subscript 诊断在非字面/模式/子串展开形翻倍（4 次 vs GNU 2 次；#2527 同族残面）
+- #3494 [bug] declare 'a[]=x' does not create the empty array GNU creates
+- #3521 [bug] unset 经 nameref 指 assoc 数组 + 引号键仍报 not a valid identifier（#3493 残差）
+- #3522 [bug] unset 索引数组反引号键静默 rc 0，GNU 为 rc 1（#3493 残差）
+- #3573 Compound assignment to an undeclared name infers assoc from string subscripts; GNU builds an indexed array
+- #3613 compound-declare 三重展开：错误 token 泄漏 PUA 载体且空数组被创建（GNU 未赋值）
+- #3659 [bug] mapfile/read -a into declare -i/-l/-u array skips attribute conversion (GNU converts)
+- #3660 [bug] mapfile -C callback reading mapfile's stdin sees EOF instead of the next unread line (GNU interleaves)
+- #3950 [bug] `compgen -A arrayvar` / `-A variable` list declared-but-never-assigned arrays
+- #3969 [bug] brace 反引号积粘连时 GNU 重扫报 bad substitution，rubash 字面保留/数组路径跨积配对执行
+
+#### [[ ]]（18 单）
+
+- #2646 [upstream] Parser: reserved word `then` not accepted directly after `(( ))` / `[[ ]]`
+- #2683 [A1-F10] Same-line shopt -s extglob not seen by a later [[ ]] on that line
+- #2750 [B6-R12] `[[ ]]` error resync: the follow-on `syntax error near` names `]]` instead of the following token
+- #2782 conditional follow-on walk truncates a glued redirect item to its first byte (F4/R12 residual)
+- #2785 a space before the closing paren extends a conditional's near-token by `)` inside comsub bodies (F4/R13 residual)
+- #2827 [perf] [[ =~ ]] 每求值重编译 regex：compile_conditional_regex 无缓存
+- #2987 bats timeout.bats: per-test timeout watchdog never fires; [[ ]] with '|' in generated -c code errors
+- #3025 [bug] [[ -t a && -z b ]] returns 1, GNU returns 2
+- #3100 [[ == ]] quoted RHS with extglob group never reaches the extglob matcher
+- #3202 comsub 内条件式体错误被外层语法错误抢占：$([[ a == b c) ) 的诊断优先序与 GNU 不符
+- #3227 cond 诊断: [[ a == #x ]] 的 syntax error near 令牌为 == 应为 ]]（# 注释语义分歧）
+- #3231 [bug] `[[ == ]]` quoted extglob group with a parenthesis inside the quotes does not match (GNU matches)
+- #3382 [[ ]] 操作数算术致命泄漏到下一命令（#3287 同族：分派缺 abort 检查）
+- #3428 [[ ]] 反斜杠续行输入重定向失败报完成行，GNU 报起始行
+- #3545 [[ =~ ]] regex operand: carrier bytes (0x0c, 0x14..0x1f) from $'...' or after | never match
+- #3730 fd: [[ ]] stdio save restores retired fd 1/2 entries (same hazard as #3706)
+- #3783 [bug] test -v / [[ -v ]] reject positional parameter names (all-digit operands)
+- #3791 [bug] [[ =~ ]] rejects bracket expressions containing non-ASCII characters in the C locale ("invalid regular expression")
+
+#### procsub（19 单）
+
+- #2234 链式输出 procsub > >(A) > >(B) 载荷不穿链（GNU 穿链，物化模型边界）
+- #2526 [procsub] 被弃生产者在命令边界被等满全程（10.3s vs GNU 立即返回）（#1959 残面）
+- #3053 [bug] first-element line stamp gaps: time prefix and procsub redirect target (residual of #3028)
+- #3210 procsub body 内报错行差一行：body 文本行来源面（#1184 族相邻）
+- #3292 tests: lib-only runs false-red the issue2875 procsub cell when no rubash bin is built
+- #3299 复合命令 stdin procsub 体诊断行取 ambient 而非目标止行（`{…} < <(...)` / `while … < <(...)`）
+- #3337 [bug] backquote comsub 下 >(…) procsub fd 解析与 GNU 不一致（#3132 不透明规则只覆盖 $-组）
+- #3353 内建命令参数词的中段进程替换不拼接 /dev/fd（组体已生成执行，外部命令路线正常）
+- #3354 procsub 跨度提取的括号匹配对 backquote 组盲（组体内未配平括号使整段漏认领）
+- #3491 [procsub] numbered-fd output procsub 3> >(...) delivers nothing / Bad file descriptor
+- #3506 [bug] `N>>` append redirect with a procsub target is a parse-time syntax error (GNU accepts it)
+- #3731 fd: procsub-body parse restores a retired fd 0 entry (same hazard as #3706)
+- #3732 fd: procsub spawn-plan bind restores a retired entry (same hazard as #3706)
+- #3806 fd: deferred procsub body is dropped after an input rebind (GNU runs it at close)
+- #3900 residual(#3701): issue551 c6 procsub EOF line still red after #3897 — EOF line arm does not cover process substitution
+- #3941 procsub bodies leak inherited fd 3 (S1): simple-command body `>&3` succeeds instead of EBADF
+- #3980 procsub body builtin writing to inherited read-only fd fails silently (no Bad file descriptor diagnostic) — #3941 residual
+- #3994 [gnu-baseline] procsub redirect on a command-less assignment is bogusly diagnosed ENOENT (x=1 < <(sleep 1))
+- #4007 `case` subject: `<(…)` / `>(…)` text in a variable's value is run as a process substitution
+
+#### nounset（13 单）
+
+- #3199 算术下标内 $ 展开绕过 nounset（(( b[$undef]++ )) 静默，GNU 报 unbound variable）
+- #3200 算术元素值递归求值不触发 nounset（(( b[i]++ ))，b=(x y)，GNU 报 y: unbound variable）
+- #3251 算术裸形 $ 展开绕过 nounset（(( $undef )) 静默，GNU 报 unbound variable）
+- #3252 无 nounset 时算术下标诊断整体缺席（GNU 有 bad array subscript + not a valid identifier）
+- #3429 set -u 下重定向目标未绑定：GNU 中止脚本，rubash 打印诊断后继续执行
+- #3454 set -u unbound redirect target on if/while/for/case/[[]] continues instead of aborting
+- #3496 let 运算元 $ 形被 nounset 误捕：GNU 报算术语法错误，rubash 报 unbound variable
+- #3497 算术下标单引号内 $ 键被 nounset 误捕：GNU 报算术语法错误，rubash 报 unbound variable
+- #3498 eval 时裸名 nounset 报错误名：GNU 报 i，rubash 报下标 $undef
+- #3516 [bug] fd-2 redirect on a pipeline member forces sequential drain — unbounded producer hangs (yes | head -3 2>/dev/null)
+- #3540 [bug] set -u: unbound array element with a comsub subscript names `echo` and never runs the comsub
+- #3563 算术 nounset 同族残差：[[ ]] 操作数文本扫描、预扫描不见 $((k=1)) 绑定、nameref/declare -i/元素赋值诊断
+- #4001 [gnu-baseline] nounset (set -u) in redirect words: residual cluster 535/3429/1915 pins still red after closures
+
+#### glob（8 单）
+
+- #2647 [upstream] Parser: unbalanced `[` inside an extglob group is a fatal parse error and silently truncates the script
+- #2664 [upstream] Glob: extglob alternative may match `/` in pathname expansion; slash-in-bracket cases halt output entirely
+- #2709 [B1-07] Glob: empty pathname components dropped next to `**` (**// arity collapse + result-name collapse)
+- #3050 extglob group quoted literals never match: extglob_match_literal_with_case lacks the CTLESC escape arm (pure-ASCII repro)
+- #3205 同行 shopt -s extglob 泄漏进同一读单元后段词法（&& 段 glob 生效 / 命令位 !( 误判），GNU 以单元开始态为准
+- #3208 未引号未闭合 `[` 的 extglob 组在解析期误报 EOF：@(a[b) 应正常解析为 NOMATCH（lexer/skip.rs）
+- #3224 extglob 反向泄漏：门开读入的模式节点被执行期 shopt -u 实时态臂拒绝，GNU 回退字面展开（#3205 残余）
+- #3229 未闭合 extglob 组的解析诊断归属错误：报 ( 语法错而非 )-EOF
+
+#### trap（19 单）
+
+- #2630 [perf] trap disposition reconcile fast path dead under entry-ignored signals (~2x per-command tax); multi_session_isolation crawl is this, not a deadlock
+- #2638 [bug] trap -p 遇无效信号规格时整批丢弃有效项（GNU 逐项处理）
+- #2640 [bug] 子 shell 的 EXIT trap 触发后，后续 EXIT trap 一律不再触发
+- #2659 [upstream] Traps: ERR trap does not fire on a redirection error of a compound command (set -e consequence also missing)
+- #2692 [A2-07] State-mutating builtins execute despite failed redirections (export/readonly/declare/umask/alias/trap)
+- #2716 [B2-F04] EXIT-trap string syntax error replaces the pending exit status; diagnostics lack the `exit trap:` context
+- #2824 [bug] 脚本模式 history 保存漏记 trap 行本身（记录行集与 GNU 不一致）
+- #2828 [perf] 运行时文本（trap/eval/source）缺内容键 parse 缓存：现仅 DEBUG trap 单槽，且键须含 alias 状态
+- #2926 [bug] kill -l/-s reject trap pseudo-signals ERR/DEBUG/RETURN; GNU maps them to 66/65/67
+- #2969 [bug] DEBUG trap 内 break/continue：for 触发点误报 only meaningful，且体命令被吞
+- #2991 command substitution inside a DEBUG trap handler hangs under set -eET
+- #3093 [bug] first DEBUG-trap firing precedes the history write - 633;E carries the previous command
+- #3320 verbose 读点覆盖残差三面：eval 逐行采样 / trap 动作读边界 / 交互 fallback 路
+- #3324 pipeline stage 输出跨流失序：trap -p 列表与诊断合流顺序与 GNU 不符
+- #3327 DEBUG/RETURN/ERR trap 动作重解析同样未置源名上下文（debug/return/error trap）
+- #3409 [bug] EXIT trap fires inside a pipeline element (type ls | cat prints the trap output twice)
+- #3553 复合命令自身重定向失败的 ERR trap 内 $LINENO 与 GNU 不一致（line_number_for_err_trap 未移植）
+- #3641 [bug] Trap action reparse silently accepts unclosed quotes (EXIT/ERR/DEBUG)
+- #4002 [gnu-baseline] signal/trap deferral residual cluster: 1034/1035/1036/698/977 pins still red after closures
+
+#### coproc（18 单）
+
+- #2695 [A2-10] Coproc death is not noticed until wait (stale COPROC fds read as EOF)
+- #2746 [B6-R8] Bare `coproc` falls through to external-command lookup instead of a syntax error
+- #2802 [bug] Process substitution is passed literally in async/coproc commands instead of being expanded
+- #2890 [bug] coproc with an empty compound body is accepted instead of a syntax error
+- #2891 [bug] disown closes coproc pipe fds: reads/writes fail Bad file descriptor
+- #2892 [bug] Second read past EOF on a coproc fd fails Bad file descriptor
+- #2893 [bug] Coproc as a pipeline head prints a spurious Broken pipe diagnostic
+- #2894 [bug] Coproc body does not inherit traps
+- #2895 [bug] Coproc as a pipeline tail is not set up: COPROC stays unset
+- #2918 coproc parse-error diagnostic echoes only the offending token; GNU echoes the full source line
+- #3032 [bug] coproc invalid-identifier message shows unexpanded name, GNU shows (null)
+- #3267 coproc rejects redirect-first body: `coproc >x name` is a syntax error
+- #3301 coproc 折叠体诊断行取首叶起行而非止行（`coproc { foooo\\<NL>bar; }` GNU 2 / 我方 1）
+- #3305 read coproc serve 未收敛到单位语义：分隔符首字节泄入记录、-n 单位首字节截断、续字节值分隔符逐字节误判
+- #3633 coproc: a coproc childs exec >&- leaks the c2p write end, and COPROC stays bound after the child exits
+- #3948 [bug] `read -u` on a coproc fd at EOF retires the coproc before any reap point
+- #3949 [bug] `coproc cmd &` (trailing ampersand) does not establish COPROC/COPROC_PID
+- #4008 `coproc … >file`: reading `${COPROC[0]}` never sees EOF
+
+#### 其他（131 单）
+
+- #2606 [bind] 注册表以书写字符串为键，同一键的 \C-u 与 $'\025' 拼写并存（GNU 以字节序列 canonical 化）
+- #2653 [upstream] Alias: alias whose value contains a newline is registered but never expanded
+- #2705 [A3-T1] printf %(...)T ignores Olson TZ names (renders as UTC)
+- #2721 [B3-F03] FUNCNEST overflow does not abort the enclosing command list (no DISCARD-class unwind)
+- #2732 [B5-02] Interactive BASH_SOURCE[0] for REPL-defined functions is the shell name, not `main`
+- #2733 [B5-16] histexpand (`H` in $-) missing on the `-i -c` and `-i script` interactive routes
+- #2771 variables: POSIX-mode in-function kept-tempenv conversion unwired (split from #2720)
+- #2797 [bug] pwd -L 照印 $PWD 变量原文，不做逻辑目录规范化
+- #2798 [bug] pwd -P 在 cwd 已删时不报 getcwd 错，静默印陈旧目录且 rc 0
+- #2799 [bug] 子壳启动丢弃继承的逻辑 PWD，重置为物理路径
+- #2820 [bug] pushd 对非法 -<字母> 首参与目录参数报 too many arguments（GNU：invalid number + usage，rc 2）
+- #2833 [GAP-13] bind/readline 装配面契约化 + 账本记账修正波（十轮复审产出）
+- #2847 [bug] Ledger tripwire does not validate §6 item paths against actual exports
+- #2853 [GAP-13 follow-up] bind_registry types never demoted to internal (Q-E remainder)
+- #2860 [GAP queue] Retire the stray-close arm onto Session::run (GAP-2 parked arm)
+- #2872 [bug] bind -s/-S macro listing prints control characters raw instead of canonical escapes
+- #2874 [bug] bind -X listing prints the -x command unescaped; -x command text over-interprets \n and \t
+- #2875 [test-harness] Input process-substitution child resolves its exe without the test-binary fallback
+- #2879 [audit] Systematic sweep of the C0/PUA carrier protocol (markers.rs) — the recurring ESC/control-byte incident family
+- #2885 Marker protocol enforcement gates: per-channel leak-golden coverage, blind-consumer lint, registry completeness (sweep #2879 follow-up)
+- #2903 [test] oh-my-bash + bash-it: re-run the host (niu) chains now that the phase-1 interactive gate is closed (niu#806 family)
+- #2906 [test] mvdan/sh: pin the 559-snippet extractor and add an execution differential (not -n only)
+- #2908 [test] ruby-build: execute the corpus copy offline (--definitions + fake-definition install) as a golden
+- #2910 [docs] eco manual-run list: one recorded home for the MANUAL faces (fzf live, ble.sh rendering, oh-my-niu gallery, nvm slow/iojs)
+- #2914 bind: old-style keyname specs (Control-t:/Meta-x:) are silently dropped
+- #2915 bind 'set: foo' is silently swallowed; GNU truncates at ':' and reports the variable name
+- #2920 consumer_tests::shell_spelling_to_native drops the drive separator, failing a Windows test
+- #2923 bind prefix-meta (ISKMAP) has no registry kind: sub-map never materializes in listings
+- #2932 [bug] times prints stub 0m0.000s instead of real process times
+- #2936 umask: bare '-' rejected, post-'--' words ignored, '--help' misparsed
+- #2937 dirs/pushd/popd: option loop stops at the first index word; rotation and '-n' mishandled
+- #2938 enable: '-a'/'-n' filter precedence wrong — '-an' prints nothing instead of the full listing
+- #2940 type: '-type'/'--type' (and '-path'/'-all') not rewritten by the prescan
+- #2943 [bug] type -a reports the cwd match once per empty PATH element; GNU collapses adjacent empty elements
+- #2955 shopt: --help in option position does not print the long help (reports -- as invalid option)
+- #2956 shift/return/break: numeric validity must be checked before the too-many-arguments (no_args) check
+- #2957 set: apply loop lacks the '?' arm — set -o? reports an invalid option and returns 1 instead of usage + 0
+- #2960 set -t (onecmd): script reader never honors just_one_command — execution continues past the setting command
+- #2961 set: apply-loop 'i' (forced_interactive) has no state slot — set -ovi leaves $- without i
+- #2965 [bug] printf %d with a multibyte char constant uses the code point in the C locale; GNU uses the first byte
+- #2975 bare unalias exits 1; GNU exits 2
+- #2981 bats file_setup_teardown #5/#6: nested-run failure trace lines land at different indices
+- #2982 bats file_setup_teardown #7: bats_debug_trap/bats_error_trap command not found in the .src run context
+- #2984 bats junit-formatter: four standalone failures (XML escaping, FD3 teardown_suite marking, setup error paths)
+- #2985 bats load.bats tail #24/#26 fail standalone (failure-wording face)
+- #2988 bats warnings.bats: BW01/BW02 stack-trace line lands off lines[4] in reentrant_run capture
+- #3004 __git_complete_index_file 对含 \x1c–\x1f 字节的文件名返回空候选（t9902 #165）
+- #3009 printf -v 写 LC_ALL 不发 setlocale 失败警告（赋值通道有），funnel 旁路写残余面
+- #3013 契约补齐：BindKindView::Keymap 公开面 + 两侧账本行（#2993 后续）
+- #3016 fix: U+E316 (PROMPT_ESCAPE_GUARD) typed-data folds to backslash in assignment concatenation
+- #3018 [test] E6: debugger/JSON (DAP) channel has no marker-leak golden cell
+- #3028 [bug] error line number after backslash-continuation is off by one
+- #3035 [bug] error inside a sourced-file function reports the top-level script filename
+- #3038 expand_prompt renders the E400 escape pair for a stored U+E314 value instead of the raw char
+- #3060 [bug] for-loop over a locale variable warns twice on setlocale failure (GNU: once)
+- #3074 DAP/JSON channel renders variable values undecoded (storage carrier encoding leaks into variables/evaluate)
+- #3083 Debugger snapshot values for BASH_VERSINFO / DIRSTACK carry a literal \x1d text prefix (capture-time dynamic-declaration RHS extraction)
+- #3106 emulated chmod treats a post-mode '--' as a file operand
+- #3111 [tests] stderr assertions hardcode "bash:" prefix, red on the rubash binary path (issue639 9 cells + issue2754 1 cell)
+- #3149 bats junit-formatter: nested fixture-suite tap13 lines leak into outer TAP stream in full-file runs (Executed 15 instead of 13, rc=1)
+- #3185 [bug] help listing layout: two-column fill is not column-major at COLUMNS=80 (#2665 D5)
+- #3194 bind -X 列序与 GNU 分歧：rubash 按注册序、GNU 按键序字节序
+- #3196 pushd 不查 CDPATH（cd 同形正常）
+- #3197 pushd // 被归一化成 /（dirs 顶与 PWD 均错）
+- #3207 入口编码契约缺口：SessionBuilder env 种子与 VariablesView::set 裸 set_env 落存储（#3105 同机制残余）
+- #3211 动态关联变量整表复合赋值被对账丢弃（BASH_ALIASES=([x]=…) 无属主落点门）
+- #3219 ulimit 硬限角：父 shell 软/硬限读回 777/777，GNU 为 4096/4096（rlimit 虚拟化口径待定）
+- #3230 [perf] bats gather 阶段在现 master 下病态缓慢（疑 #3177 后回归）
+- #3275 删后原地重建目录的幽灵穿越：静止会话经复活路径读到新目录内容（GNU 仍坐死 inode 报 ENOENT）
+- #3276 进程内模拟 mkdir/rm/touch 在已删 cwd 下同红（#3268 同族普查）
+- #3289 issue977 pin delivery settle too tight: 500ms window flakes under box load
+- #3318 [bug] $BASH is the resolved binary path instead of the invocation path
+- #3322 set_args_may_set_onecmd 的 'o' 前截断漏检（set -ot）
+- #3329 [bug] history -s drops empty / whitespace-only entries
+- #3330 [bug] unix process_console_size stub: help width ignores window size when COLUMNS unset
+- #3349 [bug] 已删 cwd 下 pwd -P 失败后，默认 pwd / pwd -L 仍印陈旧逻辑串——GNU 经 resetpwd 毒化后同面转红
+- #3357 part_024 times 两格断言写死交互裸名前缀（应按名源链派生：bash: line 1:）
+- #3359 [bug] Deleted file hashed via a relative PATH entry is not re-validated on lookup
+- #3372 #3218 残差：追加漏斗与同胞消费者仍走折叠串键（同串碰撞未除）+ type 显示面
+- #3391 fc -s 两面分歧：替换空结果 quirk 与脚本模式追加非替换（PR #3390 Owed）
+- #3392 history 条目在 HISTTIMEFORMAT 设定前创建仍被盖墙钟戳（GNU 为空戳、显示 ??、-a/-w 不写 # 行）
+- #3393 history -r 无条件重组多行条目（GNU 仅当 HISTTIMEFORMAT 在读之前已设才重组）
+- #3395 cd -P 经相对 CDPATH 条目命中的回显被绝对化（GNU 回显条目+参数原样相对路径；#1329 follow-up）
+- #3397 part_024 三格 dirs 期望缺陷：期望 dirs 跟随 PWD= 赋值（GNU 四形实测均不跟随；仅测试面）
+- #3405 [bug] at EOF inside an unclosed compound, GNU reports the innermost open construct's error; rubash reports the outer EOF error
+- #3410 [bug] set -- -t still routes -t as an option after -- (over-acceptance)
+- #3413 空值 BASH_ARGV0 import 被当作未设置（回落 argv[0] 种值，GNU 尊重空值）
+- #3416 [bug] Simulated cp stat classification: intermediate non-directory reported as ENOENT instead of ENOTDIR
+- #3417 [test] issue2702 pin file: dead 'stderr' field is a second full-target -D warnings baseline point
+- #3425 [bug] Simulated chmod stat classification: intermediate non-directory reported as ENOENT instead of ENOTDIR
+- #3430 CI 不跑新回归钉 stem：Rust tests 只跑精选 nextest 表
+- #3448 chmod apply body ignores dead cwd (node stat classifies, apply still uses string paths)
+- #3457 [bug] missing/unreadable --init-file/--rcfile is diagnosed instead of silently skipped
+- #3488 [ecosuite] bats timeout.bats #2/#3: timed-out test's process tree/pipe not reaped, outer run takes full 10s
+- #3489 [ecosuite] junit-formatter: ANSI CSI sequences not stripped before XML escaping
+- #3503 [test] #[cfg(unix)] helpers in unix-only pin stems break full --tests under -D warnings on Windows
+- #3514 [test] dead_code in tests/issue3413_bash_argv0_empty_import.rs under -D warnings
+- #3515 [test] unused-mut in tests/issue2071_test_empty_path_regressions.rs under -D warnings
+- #3517 [bug] $SHELLOPTS 是静态物化快照：set -o/命令行/环境导入都不更新它（派生视图缺失）
+- #3527 [test] dead_code in tests/issue2883_read_prompt_carrier_regressions.rs under -D warnings on Windows
+- #3535 history: comment-char arming is sticky in GNU — reads after unset HISTTIMEFORMAT are still armed
+- #3546 pattern bracket expression: carrier bytes (0x0c, 0x14..0x1f) inside [...] never match
+- #3568 [bug] common::issue2197_wait_bounded_* 两 pin 在 Windows 环境失效（X299 双边 0/2，Linux 9/9 全绿）
+- #3570 [bug][unix] Startup PWD repair rewrites literal backslashes in the physical cwd
+- #3571 [ledger] api-ledger.md §5 wording 'by declaration patterns only' is stale after #3556 (paired rubash/niubash change)
+- #3572 [ledger] check-api-ledger.py: #[path] only recognized on the immediately preceding line
+- #3575 POSIX same_file arm missing: pwd -L prints stale path in a deleted cwd under set -o posix
+- #3619 [bug] $'\u/\U decode consults the requested locale name, not the surviving locale after a failed setlocale
+- #3625 截断 Mach-O（< 28 字节头）在 macOS 上被承认为原生、execve 失败路径未实测
+- #3645 fc -s =x 空模式替换被当成命令名（GNU 视为替换）
+- #3772 tests/issue1794: cfg(unix)-gated helpers are dead code under RUSTFLAGS="-D warnings" on Windows
+- #3776 [test-hygiene] issue523 钉文件在 cfg(windows) 下 use std::io::Write 未使用，整树 -D warnings 检查在 Windows 上硬错（#3772 同类）
+- #3779 [test-hygiene] 整树 -D warnings 普查：16 个钉文件共 31 处死代码/未用 import（#3772/#3776 同类，Windows 腿）
+- #3786 [bug] printf %f-family rounds exact-half decimals down (1.2345 -> 1.234, GNU 1.235)
+- #3787 [bug] echo -e drops \u/\U escapes for non-scalar code points under UTF-8 locales (GNU encodes them as-is)
+- #3788 [bug] cd/pushd into a directory without search permission reports success although the directory change never happens
+- #3789 [test-hygiene] issue3255 钉文件在 cfg(unix) mod interactive 内 use super::* 未使用，整树 -D warnings 检查硬错（#3772/#3776 同类）
+- #3798 net bind `<>` opens two TCP connections where GNU opens one
+- #3800 [test-hygiene] issue3255 interactive cell asserts literal bash: prefix but rubash: contains it as a substring
+- #3816 字面控制字节常量损坏：32 个 CC 常量中 10 个被替换为元字符
+- #3839 [ci] UTF-8 boundary hygiene gate red on master since #3630 (strmatch.rs 5 unreviewed widenings)
+- #3851 regression: issue1868_empty_output_builtin_still_pairs_fifo_open hangs and panics on master
+- #3866 [bug] #3861 leaves issue3782 negative-side wrap pin red on master (fail-first cell never went green)
+- #3899 regression(#3897): unclosed compound assignment at EOF exits 2, GNU exits 1 (compat_issue78)
+- #3909 [bug] extdebug enabled at startup (-O/--debug) does not latch the BASH_ARGC bottom frame
+- #3918 残差：issue3185 茎恒红——pwd 表项 [-LPW] 扩展后期望格未重生成
+- #3921 残差：零长匹配切半载体 pair；字面 U+E000 按一单元走边界（#3546 余项）
+- #3924 pwd usage 行断言互斥：issue705/issue3348 断言 [-LP]，issue2753/2791 断言 [-LPW]
+- #3942 [bug] printf %q emits non-printable multibyte chars raw instead of $'\ooo' escapes in UTF-8 locales
+- #3947 [bug] `$'\U...'` with a code point above U+10FFFF is left literal instead of being encoded
+- #4059 [gnu-baseline] printf %T -2 start time shifted by imported SECONDS offset
 
 ## [1.4.3] - 2026-10-22
 
