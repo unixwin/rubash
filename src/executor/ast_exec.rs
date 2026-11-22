@@ -2440,6 +2440,9 @@ impl Executor {
                                 }
                             }
                         }
+                        if self.evalerror_arith_pending.replace(false) {
+                            self.errexit_suppressed_terminal.set(true);
+                        }
                     }
                     Err(ExecuteError::IoError(error)) => {
                         // rubash#440: a closed output (SIGPIPE analogue) is a
@@ -2577,6 +2580,9 @@ impl Executor {
                             None,
                         )?;
                         return Err(self.errexit_exit(self.exit_code));
+                    }
+                    if self.evalerror_arith_pending.replace(false) {
+                        self.errexit_suppressed_terminal.set(true);
                     }
                     close_subshell_region_if_ended!(command);
                     index += 1;
@@ -2895,7 +2901,9 @@ impl Executor {
                     // the flag survived every DISCARD source (assignment
                     // and argument forms included) and wrongly exempted
                     // later failures under `set -e`.
-                    self.evalerror_arith_pending.set(false);
+                    if self.evalerror_arith_pending.replace(false) {
+                        self.errexit_suppressed_terminal.set(true);
+                    }
                 }
                 Err(ExecuteError::IoError(error)) => {
                     // rubash#440: a closed output (SIGPIPE analogue) is this
@@ -3097,6 +3105,7 @@ impl Executor {
                 && self.suppress_errexit == 0
                 && self.exit_code != 0
                 && !self.evalerror_arith_pending.get()
+                && !self.errexit_suppressed_terminal.get()
                 && !command.inverted
                 && command.and_or().is_none()
             {
