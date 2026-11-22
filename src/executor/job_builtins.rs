@@ -620,7 +620,8 @@ impl Executor {
                 if matches!(
                     var_name,
                     "BASH_ARGC" | "BASH_ARGV" | "BASH_SOURCE" | "BASH_LINENO"
-                ) {
+                ) && !is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, var_name)
+                {
                     let mut stderr = Vec::new();
                     writeln!(
                         stderr,

@@ -1849,9 +1849,26 @@ pub(super) fn is_noassign_bash_array(name: &str) -> bool {
     // (variables.c:1892), BASH_LINENO (variables.c:1893). PIPESTATUS is
     // NOT one: variables.c:6299-6301 creates it with plain
     // make_new_array_variable, so binds to it are ordinary stores
-    // (rubash#2369).
+    // (rubash#2369). src/builtins/declare/storage.rs carries a twin of
+    // this table for the declare path — keep the name sets in sync.
     matches!(
         name,
         "BASH_ARGC" | "BASH_ARGV" | "BASH_LINENO" | "BASH_SOURCE" | "FUNCNAME" | "GROUPS"
     )
+}
+
+/// True when `name` still refers to a live `att_noassign` dynamic array:
+/// the static carrier test above, keyed on the variable's actual state.
+/// A name severed by `unset`, or preserved as an imported ordinary
+/// scalar at startup (GNU `variables.c:1255-1277` / `1827-1841` returns
+/// an existing imported cell without installing `att_noassign`), is NOT
+/// live, so assignment/unset/local gates stand down for it
+/// (rubash#4060). This helper is the single encoding of the live
+/// verdict — gate sites call it rather than re-encoding the mark test.
+pub(in crate::executor) fn is_live_noassign_bash_array(
+    env_vars: &crate::shell::var_table::VarTable,
+    name: &str,
+) -> bool {
+    let base = name.split('[').next().unwrap_or(name);
+    is_noassign_bash_array(base) && !is_marked_var(env_vars, super::UNSET_DYNAMIC_VARS, base)
 }

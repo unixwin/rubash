@@ -3083,7 +3083,8 @@ impl Executor {
                     .nameref_target_name(&name)
                     .unwrap_or_else(|| name.clone());
                 let resolved_base = resolved.split('[').next().unwrap_or(resolved.as_str());
-                is_noassign_bash_array(resolved_base).then(|| (name, resolved_base.to_string()))
+                is_live_noassign_bash_array(&self.shell_state.env_vars, resolved_base)
+                    .then(|| (name, resolved_base.to_string()))
             })
             .collect()
     }

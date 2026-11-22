@@ -215,7 +215,9 @@ impl Executor {
             // no-op. Element/nameref-target unbinding must not run here.
             if nameref_only {
                 if let Some(checked) = self.last_nameref_for_unset(&name) {
-                    if matches!(checked.as_str(), "BASH_LINENO" | "BASH_SOURCE") {
+                    if matches!(checked.as_str(), "BASH_LINENO" | "BASH_SOURCE")
+                        && !is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, &checked)
+                    {
                         diag.free(format_args!("{name}: cannot unset"));
                         nameref_status = 1;
                         continue;
