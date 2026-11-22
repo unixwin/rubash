@@ -1919,8 +1919,26 @@ impl Executor {
                     _ => None,
                 },
             };
+            let is_procsub_pipe = matches!(
+                &entry.read,
+                Some(FdReadEndpoint::File(file)) if procsub_pipe(&file.path, file.handle)
+            ) || matches!(
+                &entry.write,
+                Some(FdWriteEndpoint::File(file)) if procsub_pipe(&file.path, file.handle)
+            );
+            #[cfg(unix)]
             if let Some(handle) = stat_handle {
                 if let Some((dev, ino, sec, nsec)) = crate::fd::fd_stat_parts(handle) {
+                    // rubash#4103: GNU's fork-based process_substitute
+                    // creates consecutive procsub pipes within the same
+                    // coarse kernel jiffy, giving them identical mtimes
+                    // within the same second. Rubash spawns an external
+                    // child per procsub, which crosses jiffy ticks and
+                    // creates sub-second nsec differences. Truncate
+                    // procsub pipe mtime to whole-second granularity so
+                    // same-second procsub pipes compare equal under
+                    // `-nt`/`-ot`.
+                    let nsec = if is_procsub_pipe { 0 } else { nsec };
                     self.shell_state.env_vars.insert(
                         format!("{FD_STAT_PREFIX}{fd}"),
                         format!("{dev} {ino} {sec} {nsec}"),
