@@ -104,8 +104,11 @@ pub(super) fn parse_case_command(
 
     let mut clauses = Vec::new();
     while i < tokens.len() {
-        while i < tokens.len() && tokens[i].kind == TokenKind::Semicolon {
+        while i < tokens.len() && tokens[i].kind == TokenKind::Semicolon && tokens[i].line_break {
             i += 1;
+        }
+        if i < tokens.len() && tokens[i].kind == TokenKind::Semicolon {
+            return Some(case_near_error_node(tokens, start, i));
         }
         // A clause terminator's `;;' re-enters the pattern-list state (GNU
         // parse.y:3710 sets PST_CASEPAT), so the empty-case rule applies

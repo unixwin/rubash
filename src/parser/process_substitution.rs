@@ -698,29 +698,30 @@ fn process_substitution_source(tokens: &[Token]) -> String {
 
     // Whether a line-break separator at `from` is one the canonical
     // reprint joins with the `;' spelling rather than a verbatim
-    // newline: the end of the body (a trailing separator separates
-    // nothing) and the closer/continuation keywords (esac / fi / done /
-    // then / else / elif / do / `}' / `)'). The #1024 newline fold below
-    // is owed only BETWEEN two commands; before a closer there is no
-    // second command, so those positions keep the `;' spelling the
-    // #373/#381/#390 adjudication pins (`case esac in ; esac`,
-    // `echo bye ;` — rubash#1859). `in` is deliberately absent from the
-    // list: `case x ; in` is a GNU syntax error (oracle-verified), so a
-    // break before `in` keeps the verbatim newline.
+    // newline: only the end of the body (a trailing separator separates
+    // nothing — `echo bye ;`, rubash#1859). A break before a
+    // closer/continuation keyword (esac / fi / done / then / else /
+    // elif / do / `}' / `)') prints the verbatim newline instead: the
+    // `;' spelling there is not re-parseable — the source string is
+    // re-parsed when the substitution is parsed and again by the
+    // respawned `rubash -c` child that runs the body, and the case
+    // parser rejects a literal `;' after `in` (parse.y:1225-1236), so
+    // the recomposed `case esac in ; esac` was misread as a literal
+    // `;' and broke the #373/#381/#390 adjudication pin
+    // `test_process_substitution_keeps_case_pattern_starting_with_esac`,
+    // whose body is a real newline (oracle-verified: GNU accepts the
+    // newline form, errors on the literal `;' form — rubash#4084).
+    // GNU's own printer keeps the body's newlines (parse.y:4632
+    // print_comsub), so the verbatim spelling is the faithful one.
+    // `in` is deliberately absent from the list: `case x ; in` is a
+    // GNU syntax error (oracle-verified), so a break before `in`
+    // keeps the verbatim newline.
     let next_keeps_semicolon_spelling = |from: usize| -> bool {
-        match tokens[from + 1..]
+        // Only the body's end keeps the `;' spelling: there is no
+        // following token at all, so nothing after it is re-parsed.
+        tokens[from + 1..]
             .iter()
-            .find(|t| t.kind != TokenKind::Semicolon)
-        {
-            None => true,
-            Some(t) => {
-                t.kind == TokenKind::Keyword
-                    && matches!(
-                        t.value.as_str(),
-                        "esac" | "fi" | "done" | "then" | "else" | "elif" | "do" | "}" | ")"
-                    )
-            }
-        }
+            .all(|t| t.kind == TokenKind::Semicolon)
     };
 
     for (index, token) in tokens.iter().enumerate() {
@@ -739,10 +740,11 @@ fn process_substitution_source(tokens: &[Token]) -> String {
         // holds a bare newline: at the body's START (`cat <(\necho hi\n)`
         // produced a leading `;' → "unexpected token `;'") or doubled after
         // another `;'/`;;' (`;;\nesac' → ";; ;"). Fold ONLY those stray
-        // positions to the verbatim `\n`; mid-body and trailing separators
-        // keep the `;' spelling the #373/#381/#390 adjudication pins
-        // (`case esac in ; esac`, `echo bye ;` — GNU-verified wt33/wt39
-        // bytes).
+        // positions to the verbatim `\n`; mid-body breaks fold to `\n`
+        // by the #1024 rule below, breaks before a closer fold to `\n`
+        // as well (rubash#4084: the `;' spelling there is not
+        // re-parseable), and only the trailing separator keeps the `;'
+        // spelling (`echo bye ;` — GNU-verified wt33/wt39 bytes).
         if token.kind == TokenKind::Semicolon
             && token.line_break
             && (source.is_empty() || source.ends_with(';') || source.ends_with('\n'))
@@ -783,10 +785,12 @@ fn process_substitution_source(tokens: &[Token]) -> String {
         // of collapsing to line 1. An explicit `;` before the newline
         // (`a;\nb`) keeps the `;` spelling above — the canonical model
         // numbers that shape like GNU without a second separator.
-        // rubash#1859: "mid-body" means between two commands — a break
-        // before a closer/continuation keyword or at the body's end is
-        // not between commands and keeps the `;` spelling (see
-        // next_keeps_semicolon_spelling).
+        // rubash#1859: "mid-body" means between two commands.
+        // rubash#4084: a break before a closer/continuation keyword is
+        // no longer kept as `;' — the spelling is not re-parseable
+        // (see next_keeps_semicolon_spelling), so it folds to the
+        // verbatim `\n` like a mid-body break; only a break at the
+        // body's end keeps the `;' spelling.
         if token.kind == TokenKind::Semicolon
             && token.line_break
             && !source.is_empty()

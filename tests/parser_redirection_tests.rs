@@ -576,8 +576,14 @@ fn test_process_substitution_keeps_case_pattern_starting_with_esac() {
     // (rubash#390: the outer grammar owns the diagnostic; GNU names the
     // stray `;;`, probe wt39 cases13/a5 byte-identical to GNU 5.3.0:
     // `syntax error near unexpected token `;;'' rc 2).
+    // rubash#4084: the recomposed source now prints the body's real
+    // newline before `esac` instead of the `;' spelling — the `;'
+    // spelling is not re-parseable (the case parser rejects a literal
+    // `;' after `in`), and GNU accepts the newline form
+    // (oracle p03/p04: `case x in` / `esac` rc 0; p05: this body is
+    // clean inside, the error is the outer `;;`).
     assert_eq!(process.len(), 1);
-    assert_eq!(process[0].source, "case esac in ; esac");
+    assert_eq!(process[0].source, "case esac in\nesac");
     // The procsub's inner command is the CLEAN empty case; the error lives
     // on the outer command as the `;;' rejection.
     assert!(process[0].commands[0].case_command.is_some());

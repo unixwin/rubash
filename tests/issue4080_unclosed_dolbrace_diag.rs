@@ -12,9 +12,8 @@
 //! and funsub bodies that reach actual EOF (`echo ${ echo x }`) print
 //! `unexpected EOF while looking for matching '}'`.
 //!
-//! The `case x in ; esac` / `echo ${ case x in ; }` shapes live in the
-//! split case-`;` PR (rubash#4084 graft): they need the case rule, not
-//! the funsub machinery.
+//! Also pins `case x in ; esac` / `echo ${ case x in ; }` (`parse.y:1225-1236`
+//! `case_command` only allows `newline_list`, not `;`).
 
 use std::fs;
 use std::path::PathBuf;
@@ -88,6 +87,11 @@ fn issue4080_funsub_token_errors_name_token_and_echo_line() {
             "line 1: `echo ${ fi }'",
         ),
         (
+            "echo ${ case x in ; }\n",
+            "line 1: syntax error near unexpected token `;' while looking for matching `}'",
+            "line 1: `echo ${ case x in ; }'",
+        ),
+        (
             "echo ${| in }\n",
             "line 1: syntax error near unexpected token `in' while looking for matching `}'",
             "line 1: `echo ${| in }'",
@@ -150,3 +154,27 @@ fn issue4080_unclosed_param_and_eof_funsub_keep_eof_diag() {
     }
 }
 
+#[test]
+fn issue4080_comsub_and_case_semicolon_errors() {
+    let scratch = Scratch::new("comsub-case");
+
+    let (_out, err, rc) = scratch.run("echo $( case x in )\n");
+    assert_eq!(rc, 2, "stderr:\n{err}");
+    assert!(
+        err.contains("line 1: syntax error near unexpected token `)'"),
+        "stderr:\n{err}"
+    );
+    assert!(
+        err.contains("line 1: `echo $( case x in )'"),
+        "stderr:\n{err}"
+    );
+
+    for script in ["case x in ; esac\n", "case x in a) :;; ; esac\n"] {
+        let (_out, err, rc) = scratch.run(script);
+        assert_eq!(rc, 2, "script {script:?} rc; stderr:\n{err}");
+        assert!(
+            err.contains("line 1: syntax error near unexpected token `;'"),
+            "script {script:?} stderr:\n{err}"
+        );
+    }
+}
