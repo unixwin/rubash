@@ -2209,6 +2209,7 @@ impl Executor {
             errexit_unwind_armed: false,
             errexit_suppressed_terminal: Cell::new(false),
             unit_signal_discard: false,
+            unit_cancelled: false,
             unit_expansion_error_discard: false,
             termsig_death_pending: None,
             termsig_death_trap_status: None,
@@ -2410,6 +2411,10 @@ impl Executor {
             exec_replaced: false,
             subshell_signal_death: None,
             fg_sigint_unwind: false,
+            // rubash#2810: the fork copy is the same host run — it
+            // inherits the cancellation token so a `$(while ...)` body
+            // unwinds with the parent's run.
+            cancel_token: self.cancel_token.clone(),
             stopped_loop_breaking: 0,
             // rubash#1175: a fork copy shares the parent shell's process;
             // it must never execve that process away.

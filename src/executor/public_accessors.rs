@@ -1093,6 +1093,47 @@ impl Executor {
         std::mem::take(&mut self.unit_expansion_error_discard)
     }
 
+    /// rubash#2810: install (or clear) the host's cooperative
+    /// cancellation token. `None` is the zero-cost default: every
+    /// safe point's poll degrades to a single `Option` branch.
+    /// `api::Session::build` installs the session's token through
+    /// here; a direct `Executor` host can do the same.
+    pub fn set_cancel_token(&mut self, token: Option<crate::api::CancelToken>) {
+        self.cancel_token = token;
+    }
+
+    /// rubash#2810: the installed token, if any (the session clones
+    /// it for the host's write end).
+    pub fn cancel_token(&self) -> Option<crate::api::CancelToken> {
+        self.cancel_token.clone()
+    }
+
+    /// rubash#2810: one relaxed atomic load — the read every safe
+    /// point performs. `false` when no token is installed.
+    pub(crate) fn host_cancel_requested(&self) -> bool {
+        self.cancel_token
+            .as_ref()
+            .is_some_and(crate::api::CancelToken::is_cancelled)
+    }
+
+    /// rubash#2810: record that the current unit ended in a
+    /// cooperative cancellation (see Executor::unit_cancelled).
+    pub fn note_unit_cancelled(&mut self) {
+        self.unit_cancelled = true;
+    }
+
+    /// rubash#2810: take-style read of the unit cancellation record.
+    pub fn take_unit_cancelled(&mut self) -> bool {
+        std::mem::take(&mut self.unit_cancelled)
+    }
+
+    /// rubash#2810: clear a stale cancellation record at a fresh
+    /// run's entry (the grouped driver calls it alongside the
+    /// discard pendings it clears).
+    pub(crate) fn clear_unit_cancelled(&mut self) {
+        self.unit_cancelled = false;
+    }
+
     /// rubash#2233: non-consuming read of the hangup-death mark — the
     /// SIGHUP view of the generalized termsig-death mark (see
     /// Executor::termsig_death_pending). The interactive reader peeks

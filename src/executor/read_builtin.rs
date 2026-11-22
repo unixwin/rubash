@@ -2515,6 +2515,16 @@ impl Executor {
                     128 + signal
                 };
             }
+            // rubash#2810: the cancel abandoned the acquisition (the
+            // wait loops return early on the token) — assign nothing,
+            // report 1; the boundary poll raises HostCancelled next.
+            if self.host_cancel_requested() {
+                return if invalid_name {
+                    self.finish_read_error(cmd, &stderr, 1)
+                } else {
+                    1
+                };
+            }
             let read_eof = self.take_read_eof_no_delimiter();
             // GNU read.def assign_vars (post-read): the -a target is
             // located through builtins/common.c:988
@@ -2707,6 +2717,13 @@ impl Executor {
                 // (ported from PR #1702's shape set).
                 self.fg_sigint_unwind = true;
                 130
+            } else if self.host_cancel_requested() {
+                // rubash#2810: the token abandoned the acquisition —
+                // assign nothing; the boundary poll raises the
+                // dedicated unwind. Consume any co-recorded signal
+                // abort so it cannot leak into a later read.
+                let _ = self.take_read_interrupted_signal();
+                1
             } else if self.fd_table.read_error.is_some() {
                 // GNU read.def:911: a hard read(2) failure (EISDIR when
                 // the input descriptor names a directory) is reported as
@@ -3058,7 +3075,14 @@ impl Executor {
             // the partial assignment above and the builtin returns
             // 128+SIGALRM=142 (read.def:539-562).
             let mut interrupt_signal = None;
-            let status = if let Some(signal) = self.take_read_interrupted_signal() {
+            let status = if self.host_cancel_requested() {
+                // rubash#2810: the token abandoned the acquisition —
+                // assign nothing (the boundary poll raises
+                // HostCancelled next); consume any co-recorded signal
+                // so it cannot leak into a later read.
+                let _ = self.take_read_interrupted_signal();
+                1
+            } else if let Some(signal) = self.take_read_interrupted_signal() {
                 interrupt_signal = Some(signal);
                 128 + signal
             } else if self.take_read_timed_out() {

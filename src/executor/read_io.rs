@@ -120,6 +120,12 @@ impl Executor {
             if self.take_read_sigint_abort() {
                 return true;
             }
+            // rubash#2810: cooperative cancel abandons the acquisition
+            // like the aborts above; the boundary poll then raises the
+            // dedicated unwind (no signal verdict is recorded here).
+            if self.host_cancel_requested() {
+                return true;
+            }
             // rubash#3401 (face 2): the `-t` deadline loop polled SIGINT
             // only — a termsig rode out the whole timeout. Drain it per
             // slice too; the caller abandons on `read_interrupted_signal`
@@ -456,6 +462,11 @@ impl Executor {
             // honored while the editor waits (read.def's readline
             // timeout/interrupt shape).
             if self.take_read_sigint_abort() {
+                return Some(None);
+            }
+            // rubash#2810: cooperative cancel abandons the editor wait;
+            // the boundary poll raises the dedicated unwind after.
+            if self.host_cancel_requested() {
                 return Some(None);
             }
             if let Some(deadline) = self.read_deadline {
@@ -2700,6 +2711,12 @@ impl Executor {
                 if self.read_deadline.is_none() {
                     loop {
                         if self.take_read_sigint_abort() {
+                            return None;
+                        }
+                        // rubash#2810: cooperative cancel abandons the
+                        // byte read; the boundary poll raises the
+                        // dedicated unwind after.
+                        if self.host_cancel_requested() {
                             return None;
                         }
                         #[cfg(unix)]

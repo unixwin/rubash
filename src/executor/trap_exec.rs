@@ -3778,6 +3778,13 @@ impl Executor {
                 self,
             );
         loop {
+            // rubash#2810: the token poll inside the wait loop — one
+            // relaxed load per 50ms slice, same cadence as the signal
+            // checks below. This returns the dedicated unwind, NOT a
+            // signal verdict: no trap fires, no 128+N is synthesized.
+            if self.host_cancel_requested() {
+                return Err(ExecuteError::HostCancelled);
+            }
             let now = std::time::Instant::now();
             if now >= deadline {
                 return Ok(None);

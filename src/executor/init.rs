@@ -1627,6 +1627,7 @@ impl Executor {
             errexit_unwind_armed: false,
             errexit_suppressed_terminal: Cell::new(false),
             unit_signal_discard: false,
+            unit_cancelled: false,
             unit_expansion_error_discard: false,
             termsig_death_pending: None,
             termsig_death_trap_status: None,
@@ -1704,6 +1705,7 @@ impl Executor {
             exec_replaced: false,
             subshell_signal_death: None,
             fg_sigint_unwind: false,
+            cancel_token: None,
             stopped_loop_breaking: 0,
             // rubash#1175: a process root IS its process's shell; the
             // image-replacement gates live at the exec dispatcher.

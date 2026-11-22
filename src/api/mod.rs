@@ -84,6 +84,7 @@
 //! can never disagree about what a variable looks like.
 
 pub mod bind;
+pub mod cancel;
 pub mod capabilities;
 pub mod completion_attempt;
 pub mod completion_view;
@@ -95,6 +96,7 @@ pub mod syntax;
 pub mod views;
 
 pub use bind::{BindEntryView, BindKindView, BindRemovalView, BindView};
+pub use cancel::CancelToken;
 #[cfg(windows)]
 pub use capabilities::ElevationHandler;
 pub use capabilities::{

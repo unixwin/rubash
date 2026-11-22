@@ -529,6 +529,18 @@ pub enum ExecuteError {
     /// propagate it untouched (like LastpipeExit); drivers treat it as
     /// the end of the current input unit with exit_code already 130.
     SigintUnwind,
+    /// rubash#2810: the session's cooperative cancellation token was
+    /// observed set at an engine safe point (the list walker's
+    /// statement boundary, the canonical-counter fast loop's trap
+    /// tick, or an engine-owned blocking wait — the `sleep`
+    /// emulation's slices, the `read` acquisition's polls, `select`'s
+    /// query). This is NOT a signal: no trap fires, no status is
+    /// synthesized from it, and frames propagate it untouched like
+    /// SigintUnwind. Drivers end the current unit on it and record
+    /// the fact (`Executor::unit_cancelled`) so the run reports a
+    /// distinct cancellation classification — never a spoofed
+    /// 128+SIGINT.
+    HostCancelled,
 }
 
 impl std::fmt::Display for ExecuteError {
@@ -551,6 +563,7 @@ impl std::fmt::Display for ExecuteError {
             ExecuteError::LastpipeExit(code) => write!(f, "exit code: {}", code),
             ExecuteError::BrokenPipe => write!(f, "broken pipe"),
             ExecuteError::SigintUnwind => write!(f, "interrupt: discarding current command line"),
+            ExecuteError::HostCancelled => write!(f, "run cancelled by host"),
         }
     }
 }
@@ -691,6 +704,15 @@ pub struct Executor {
     /// fact per group (the pending itself is consumed inside
     /// run_source_impl and never reached the classification).
     unit_signal_discard: bool,
+    /// rubash#2810: `run_source_impl` records that the unit ended in a
+    /// cooperative cancellation — the host's [`api::CancelToken`]
+    /// tripped an engine safe point and unwound the unit with
+    /// `ExecuteError::HostCancelled`. Taken per unit like
+    /// `unit_signal_discard` so the run reports the distinct
+    /// cancellation classification (api `Flow::Cancelled` /
+    /// `RunClassification::cancelled`) instead of folding into a
+    /// plain status or a spoofed signal verdict.
+    unit_cancelled: bool,
     /// rubash#2794: the unit's terminal word-expansion error was
     /// adjudicated an interactive DISCARD — the FATAL class
     /// (`${var:?}`, nounset unbound, bad @-transform) took
@@ -1263,6 +1285,14 @@ pub struct Executor {
     /// state: set only by a wait, consumed by the boundary that
     /// immediately follows it.
     fg_sigint_unwind: bool,
+    /// rubash#2810: the host's cooperative cancellation token — the
+    /// engine's read end of `api::CancelToken`. `None` means no token
+    /// was installed: every safe point's poll is then a single
+    /// `Option` branch, the zero-cost "token unset" path. Command-
+    /// substitution fork copies inherit the handle (their body is the
+    /// same host run); process-fresh executors (respawn children)
+    /// construct with `None` and never observe it.
+    cancel_token: Option<crate::api::CancelToken>,
     /// rubash#2838: GNU jobs.c:4335-4343 set_job_status_and_cleanup —
     /// a foreground job stopped by SIGTSTP while `loop_level > 0`
     /// sets `breaking = loop_level` ("Suspending a job with SIGTSTP
