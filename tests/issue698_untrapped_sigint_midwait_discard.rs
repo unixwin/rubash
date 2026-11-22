@@ -28,9 +28,10 @@
 //! rules of §6.4 apply instead). The unix section pins the
 //! surrounding invariants: the interactive PTY face stays GNU, the
 //! non-interactive die-by-signal shape is preserved, and a queued
-//! kill(2)-class SIGINT consumed mid-sleep is forgotten with its
-//! classification (it must not leak a discard mark into a later
-//! genuine `exit` of the same unit).
+//! kill(2)-class SIGINT delivered while an interactive session
+//! waits on a real-child `sleep` is adjudicated at the command
+//! boundary as a DISCARD at status 130, discarding the rest of
+//! the unit (captain oracle ruling: graft4066-dossier §1.2).
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -411,14 +412,21 @@ mod unix_faces {
         );
     }
 
-    // ---- The mid-sleep fold bookkeeping (unix): a queued
-    // kill(2)-class SIGINT that lands during an interactive
-    // session's builtin sleep is consumed by the mid-wait drain and
-    // then FORGOTTEN (GNU: the shell-only delivery leaves the real
-    // child running; the virtual child sleeps on, rubash#1640). Its
-    // discard classification must be forgotten with it — a mark left
-    // pending would misclassify a later genuine `exit` in the same
-    // unit as a discard and the session would refuse to exit.
+    // ---- Real-child sleep boundary (unix, post-rubash#3488):
+    // `sleep` on unix is a real spawned foreground child, not the
+    // in-process virtual child. A queued kill(2)-class / mailbox
+    // SIGINT that lands while an interactive session waits on `sleep`
+    // does not kill the real child, and is NOT forgotten mid-sleep —
+    // it is adjudicated at the command boundary as an interactive
+    // DISCARD (GNU jobs.c:3315 ADDINTERRUPT / throw_to_top_level:
+    // status 130, Flow::Completed, subsequent commands in the unit
+    // such as `exit 3` do not run). Oracle provenance: captain pty
+    // probes B1/B2 against GNU bash 5.3.20 (interactive shell,
+    // SIGINT to the shell pid only, child untouched; x3 runs,
+    // identical) — graft4066-dossier §1.2. The pre-#3488 fold
+    // reading of this shape (delivery forgotten, unit completes)
+    // was measured against the virtual-child era and does not
+    // survive the real-child adjudication.
 
     struct DrivenRun {
         status: i32,
@@ -465,37 +473,44 @@ mod unix_faces {
     }
 
     #[test]
-    fn issue698_forgotten_mid_sleep_sigint_leaves_no_discard_mark() {
+    fn issue698_mid_sleep_sigint_discards_rest_of_unit() {
         let _guard = serial();
-        // The queued SIGINT lands mid-sleep and is forgotten there;
-        // the unit's real `exit 3` must still classify as an exit.
+        // Post-rubash#3488: `sleep 3` is a real child on unix, so the
+        // mailbox SIGINT is deferred until `sleep 3` finishes and then
+        // discards the rest of the unit (`exit 3` does not run).
+        // Oracle: probe B2 (unit `sleep 3; exit 3`, SIGINT to the
+        // shell only) — GNU leaves the shell alive at status 130
+        // with `exit 3` unexecuted (graft4066-dossier §1.2).
         let run = drive_interactive_unit("sleep 3; exit 3", "fold-bookkeeping");
         assert!(
             run.elapsed >= Duration::from_millis(2500),
             "the shell-only delivery must not abort the sleep: {:?}",
             run.elapsed
         );
-        assert_eq!(run.status, 3);
+        assert_eq!(run.status, 130);
         assert!(
-            matches!(run.flow, Flow::ExitRequested(3)),
-            "a genuine exit after a forgotten interrupt stays an exit: {:?}",
+            matches!(run.flow, Flow::Completed),
+            "interactive untrapped SIGINT after foreground sleep discards the unit: {:?}",
             run.flow
         );
     }
 
     #[test]
-    fn issue698_forgotten_mid_sleep_sigint_completes_normally() {
+    fn issue698_mid_sleep_sigint_settles_at_130_as_discard() {
         let _guard = serial();
+        // Oracle: probe B1 (unit `sleep 3`, SIGINT to the shell
+        // only) — GNU sleeps in full and reports status 130 at the
+        // boundary (graft4066-dossier §1.2).
         let run = drive_interactive_unit("sleep 3", "fold-normal");
         assert!(
             run.elapsed >= Duration::from_millis(2500),
             "the sleep must run to completion: {:?}",
             run.elapsed
         );
-        assert_eq!(run.status, 0);
+        assert_eq!(run.status, 130);
         assert!(
             matches!(run.flow, Flow::Completed),
-            "a forgotten delivery changes nothing: {:?}",
+            "interactive untrapped SIGINT settles at 130 as a discard: {:?}",
             run.flow
         );
     }
