@@ -464,12 +464,16 @@ impl Executor {
     /// below: tokenize + parse the body ONCE and run the full admission
     /// whitelist (a leading `cat` that does not stand down, rubash#320
     /// no file redirection, rubash#1130 no expansion error in the body).
-    /// `emit_warnings` is set only by the typed entry point, which owns
-    /// the delimited-by-end-of-file here-document warning; the readback
-    /// entry stays silent for that one so a comsub expanded through
-    /// both paths warns once. The header-close warning at the top of
-    /// this function is entry-independent (rubash#1982).
-    fn heredoc_comsub_plan(&self, source: &str, emit_warnings: bool) -> Option<HeredocComsubPlan> {
+    /// Both here-document warnings (the header-close warning at the top
+    /// of this function and the delimited-by-end-of-file warning at the
+    /// bottom) are entry-independent: a comsub in a double-quoted word
+    /// is produced entirely by the readback entry, and gating either
+    /// warning on the typed entry silenced it completely for that shape
+    /// (rubash#1982 for the header-close warning, rubash#4128 for the
+    /// delimited one). Once-ness across the two entries is the
+    /// `last_heredoc_warning_source` dedup's contract, not an entry
+    /// split.
+    fn heredoc_comsub_plan(&self, source: &str) -> Option<HeredocComsubPlan> {
         if !source.contains("<<") {
             return None;
         }
@@ -508,18 +512,18 @@ impl Executor {
             // gathers it anyway (heredoc7.sub line 17).
             // rubash#1982: this warning belongs to the substitution's
             // parse, not to one expansion face — GNU emits it whichever
-            // way the word is expanded, so it must not ride
-            // `emit_warnings` (some shapes are produced entirely by the
-            // readback entry, which used to silence it completely).
+            // way the word is expanded, so it must not ride an entry
+            // flag (some shapes are produced entirely by the readback
+            // entry, which an entry split used to silence completely).
             // The textual check covers sources that still carry the
             // header-line `)`; reader-produced sources carry the
             // rotation's marker instead (header_close_marked above).
             // Once-ness across faces is already the decline memo's
             // contract (a typed decline is recorded and the readback
             // retry never re-plans the same source), so no second
-            // emission site exists for one expansion episode.
-            // `emit_warnings` now owns only the
-            // delimited-by-end-of-file warning further below.
+            // emission site exists for one expansion episode. The
+            // delimited-by-end-of-file warning further below is
+            // entry-independent for the same reason (rubash#4128).
             let start_line = self
                 .shell_state
                 .env_vars
@@ -698,7 +702,7 @@ impl Executor {
         {
             return None;
         }
-        if emit_warnings && (closed_by_paren || command_has_warned_heredoc(first)) {
+        if closed_by_paren || command_has_warned_heredoc(first) {
             // Deduplicate: the same comsub can be expanded through multiple
             // paths (expand_assignment_value_inner and
             // expand_embedded_parameters_mut), which would emit the warning
@@ -732,7 +736,7 @@ impl Executor {
     }
 
     fn heredoc_comsub_typed_output(&mut self, source: &str) -> Option<String> {
-        let plan = self.heredoc_comsub_plan(source, true);
+        let plan = self.heredoc_comsub_plan(source);
         let result = match &plan {
             // rubash#2681: this shortcut produces a command
             // substitution's captured output without running the real
@@ -779,7 +783,7 @@ impl Executor {
             // An unrelated heredoc attempt ends the recorded episode.
             *memo = None;
         }
-        let Some(plan) = self.heredoc_comsub_plan(source, false) else {
+        let Some(plan) = self.heredoc_comsub_plan(source) else {
             *self.heredoc_admission_declined_source.borrow_mut() =
                 Some(heredoc_admission_memo_key(source));
             return None;
