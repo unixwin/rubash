@@ -105,6 +105,26 @@ pub fn execute(
 /// the probe's own error then stands, exactly as before.
 pub(crate) type CwdAnchorResolver<'a> = &'a dyn Fn(&Path) -> Option<io::Result<PathBuf>>;
 
+/// Outcome of running the `cd` builtin.
+///
+/// `path_adopting_move` is `true` when `change_to_directory`
+/// (`builtins/cd.def:522`) successfully `chdir`ed through a namespace path
+/// resolution, so the session may adopt the inode that path names now — even
+/// if `bindpwd` subsequently failed on a readonly `PWD`/`OLDPWD` or the new
+/// path string equals the previous `cwd` (a directory deleted and recreated
+/// at the same path). It is `false` when the EFFECTIVE chdir operand is a
+/// relative dot-only spelling: that chdir re-selects the current cwd inode
+/// itself rather than re-entering it by path. Physical mode always uses the
+/// verbatim operand
+/// (`builtins/cd.def:600` `chdir (nolinks ? newdir : tdir)`); in logical mode
+/// the same inode-preserving form is the canon-failed verbatim fallback, or a
+/// poisoned entry whose NULL `the_current_working_directory` makes
+/// `make_absolute` return the relative operand unchanged (`general.c:885-902`).
+pub(crate) struct CdOutcome {
+    pub(crate) status: i32,
+    pub(crate) path_adopting_move: bool,
+}
+
 pub(crate) fn execute_with_io<'a, I, W, E>(
     args: I,
     env_vars: &mut crate::shell::var_table::VarTable,
@@ -119,10 +139,41 @@ where
     W: Write,
     E: Write,
 {
+    execute_with_io_outcome(
+        args,
+        env_vars,
+        cwd,
+        anchor_resolver,
+        logical_cwd,
+        stdout,
+        stderr,
+    )
+    .map(|outcome| outcome.status)
+}
+
+pub(crate) fn execute_with_io_outcome<'a, I, W, E>(
+    args: I,
+    env_vars: &mut crate::shell::var_table::VarTable,
+    cwd: &mut PathBuf,
+    anchor_resolver: Option<CwdAnchorResolver<'_>>,
+    logical_cwd: &mut Option<String>,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> io::Result<CdOutcome>
+where
+    I: IntoIterator<Item = &'a str>,
+    W: Write,
+    E: Write,
+{
     let args: Vec<&str> = args.into_iter().collect();
     let (mode, first_operand) = match parse_options(&args, env_vars, stderr)? {
         Ok(parsed) => parsed,
-        Err(status) => return Ok(status),
+        Err(status) => {
+            return Ok(CdOutcome {
+                status,
+                path_adopting_move: false,
+            })
+        }
     };
 
     if args.len().saturating_sub(first_operand) > 1 {
@@ -139,12 +190,18 @@ where
         // 2, 2026-10-18). The diagnostic itself was being dropped by the
         // executor's buffered-stdout flush (printf_path_builtins.rs),
         // fixed there.
-        return Ok(EX_USAGE);
+        return Ok(CdOutcome {
+            status: EX_USAGE,
+            path_adopting_move: false,
+        });
     }
 
     let Some(target) = resolve_target(args.get(first_operand).copied(), env_vars, cwd, stderr)?
     else {
-        return Ok(EXECUTION_FAILURE);
+        return Ok(CdOutcome {
+            status: EXECUTION_FAILURE,
+            path_adopting_move: false,
+        });
     };
 
     // GNU builtins/cd.def (cd_builtin error tail): when every attempt
@@ -295,9 +352,15 @@ where
             PrintPath::Never => {}
         }
         if failed {
-            return Ok(EXECUTION_FAILURE);
+            return Ok(CdOutcome {
+                status: EXECUTION_FAILURE,
+                path_adopting_move: false,
+            });
         }
-        return Ok(EXECUTION_SUCCESS);
+        return Ok(CdOutcome {
+            status: EXECUTION_SUCCESS,
+            path_adopting_move: false,
+        });
     }
 
     // G-02: the move itself is a session-state change, not a process
@@ -350,6 +413,13 @@ where
         physical: PathBuf,
         pwd_value: String,
         stayed_deleted_dot: Option<io::Error>,
+        /// Whether the effective chdir reached the destination through a
+        /// namespace path. The one successful form for which this is false
+        /// is a relative dot-only effective operand: `chdir(".")` (or its
+        /// `./` spellings) re-selects the cwd inode itself, so refreshing
+        /// the G-02 anchor by path would cross into a recreated ghost the
+        /// real chdir never entered.
+        path_adopting: bool,
     }
     // The GNU verbatim-chdir success shared by BOTH modes
     // (builtins/cd.def:522 change_to_directory): a dot-only operand
@@ -383,6 +453,7 @@ where
                     } else {
                         Some(cwd_error)
                     },
+                    path_adopting: false,
                 });
             }
         }
@@ -394,6 +465,11 @@ where
                 pwd_value: shell_pwd_display_path(&physical.to_string_lossy()),
                 physical,
                 stayed_deleted_dot: None,
+                // Physical mode's chdir uses `newdir`, not the physical
+                // canonicalization (`builtins/cd.def:600`): a dot-only
+                // operand is resolved inside the current cwd inode even
+                // when its old path spelling now names a recreated ghost.
+                path_adopting: !operand_is_dot_only(target_display),
             }),
             Err(error) => deleted_dot_move(shell_pwd_display_path(&cwd.to_string_lossy()), error),
         },
@@ -441,6 +517,19 @@ where
                     pwd_value: shell_pwd_display_path(&logical_dest_display),
                     physical,
                     stayed_deleted_dot: None,
+                    // With a stored logical base, GNU's make_absolute turns
+                    // even `cd .` into an absolute spelling; when canon
+                    // succeeds, chdir(tdir) re-enters that path and adopts
+                    // the directory it names now (cd.def:535-542, 600). A
+                    // poisoned entry is different: getcwd could not restore
+                    // the_current_working_directory in the dead cwd, so
+                    // make_absolute returns the relative operand unchanged
+                    // (general.c:889-902). sh_canonpath then strips the dot
+                    // components without an existence check
+                    // (lib/sh/pathcanon.c:145-150, 193-207), and the
+                    // successful chdir is still `chdir(".")` in the dead
+                    // inode — not an adoption of the recreated path.
+                    path_adopting: !(entry_poisoned && operand_is_dot_only(target_display)),
                 }),
                 _ => match probe(&native_target) {
                     // GNU's canon-failed fallback: chdir(newdir)
@@ -452,6 +541,11 @@ where
                         pwd_value: shell_pwd_display_path(&physical.to_string_lossy()),
                         physical,
                         stayed_deleted_dot: None,
+                        // This is the verbatim-chdir fallback. A non-dot
+                        // operand walks away from the current inode (and may
+                        // legitimately re-enter a recreated sibling such as
+                        // `../a`); a dot-only operand re-selects the inode.
+                        path_adopting: !operand_is_dot_only(target_display),
                     }),
                     Err(error) => deleted_dot_move(logical_pwd_var_display(&old_logical), error),
                 },
@@ -462,6 +556,7 @@ where
         physical,
         pwd_value,
         stayed_deleted_dot,
+        path_adopting,
     } = match probed {
         Ok(move_outcome) => move_outcome,
         Err(error) => {
@@ -496,6 +591,7 @@ where
                     pwd_value: shell_pwd_display_path(&path.to_string_lossy()),
                     physical: path,
                     stayed_deleted_dot: None,
+                    path_adopting: !operand_is_dot_only(target_display),
                 },
                 verdict => {
                     let error = match verdict {
@@ -526,7 +622,10 @@ where
                         crate::posix_errors::message(&error)
                     )?;
                     stderr.flush()?;
-                    return Ok(EXECUTION_FAILURE);
+                    return Ok(CdOutcome {
+                        status: EXECUTION_FAILURE,
+                        path_adopting_move: false,
+                    });
                 }
             }
         }
@@ -625,11 +724,16 @@ where
         _ => {}
     }
 
-    if failed {
-        return Ok(EXECUTION_FAILURE);
-    }
+    let status = if failed {
+        EXECUTION_FAILURE
+    } else {
+        EXECUTION_SUCCESS
+    };
 
-    Ok(EXECUTION_SUCCESS)
+    Ok(CdOutcome {
+        status,
+        path_adopting_move: path_adopting,
+    })
 }
 
 /// Keep the directory stack's top slot bound to the directory a cd

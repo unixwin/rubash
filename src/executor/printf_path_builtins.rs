@@ -486,31 +486,36 @@ impl Executor {
         // in the live shell for every redirect shape (`cd dir > f`, `>>f`,
         // `2>f`, ...), exactly as for the unredirected form. Every branch
         // must therefore funnel through the one sync point below.
-        let cwd_before = self.shell_state.cwd.clone();
-        let status = self.execute_cd_redirect_bound(cmd)?;
+        let outcome = self.execute_cd_redirect_bound(cmd)?;
         self.sync_cd_variables();
         // rubash#3198: warm the cwd inode anchor at the moment the
         // directory is entered, so a later unlink of the directory
         // cannot strand every spawn on a path that no longer resolves
         // (see stamp_spawn_cwd in external_inner.rs).
         //
-        // rubash#3421: the gate is the MOVE, not the status — the
-        // #3384 union gate ("cwd 变即刷新") applied to pushd's
-        // wrapper but not here. A readonly-bind failure still leaves
-        // the chdir standing (cd.def bindpwd runs after the chdir),
-        // so a `cd` that moved under a failed bind must warm the
-        // anchor for the entered directory, or a later relative walk
-        // from the deleted cwd (e.g. `cd ../b`) strands on the dead
-        // spelling. A failed cd moves nothing, so the gate stays shut
-        // there; a no-op success (`cd .` in a live dir) keeps the
-        // already-warm anchor.
-        if self.shell_state.cwd != cwd_before {
+        // rubash#3421 / rubash#4089: the gate is whether the effective
+        // `chdir` adopted a namespace path (`builtins/cd.def:522`
+        // `change_to_directory`), not `cwd != cwd_before`, the exit
+        // status, or chdir success alone:
+        // - a readonly-bind failure still leaves the chdir standing
+        //   (cd.def bindpwd runs after chdir);
+        // - logical `cd` by path — including bare logical `cd .` whose
+        //   make_absolute base is the stored logical cwd — can re-enter a
+        //   directory recreated at the same string and MUST refresh;
+        // - a relative dot-only effective operand (`cd -P .`, or the
+        //   logical verbatim/poisoned-entry form) re-selects the current
+        //   cwd inode itself. It does not enter the recreated ghost even
+        //   though chdir succeeds, so refreshing by path would cross over.
+        if outcome.path_adopting_move {
             self.refresh_cwd_anchor();
         }
-        Ok(status)
+        Ok(outcome.status)
     }
 
-    fn execute_cd_redirect_bound(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
+    fn execute_cd_redirect_bound(
+        &mut self,
+        cmd: &CommandNode,
+    ) -> Result<crate::builtins::cd::CdOutcome, ExecuteError> {
         use std::io::Write as _;
         // GNU redir.c do_redirections applies EVERY redirect of the simple
         // command in the current shell before the builtin runs and undoes
@@ -597,7 +602,7 @@ impl Executor {
             }
         }
 
-        let (status, stdout_buffer, stderr_buffer) = {
+        let (outcome, stdout_buffer, stderr_buffer) = {
             let mut stdout_default: Vec<u8> = Vec::new();
             let mut stderr_default: Vec<u8> = Vec::new();
             let mut stdout_sink = match (&mut stdout_file, &stdout_dup, stdout_null) {
@@ -634,7 +639,7 @@ impl Executor {
                     None
                 }
             };
-            let status = crate::builtins::cd::execute_with_io(
+            let outcome = crate::builtins::cd::execute_with_io_outcome(
                 cmd.words[1..].iter().map(String::as_str),
                 &mut self.shell_state.env_vars,
                 &mut self.shell_state.cwd,
@@ -692,7 +697,7 @@ impl Executor {
                     self.write_default_stderr(&stderr_default)?;
                 }
             }
-            (status, stdout_buffer, stderr_buffer)
+            (outcome, stdout_buffer, stderr_buffer)
         };
 
         // Dispatch fd-dup buffers. GNU dup2 shares the open file
@@ -726,7 +731,7 @@ impl Executor {
             }
         }
 
-        Ok(status)
+        Ok(outcome)
     }
 
     pub(in crate::executor) fn sync_cd_variables(&mut self) {
