@@ -187,6 +187,44 @@ fn parameter_assignment_target(inner: &str) -> Option<String> {
     None
 }
 
+/// Whether `word` carries a top-level `${...}` fragment that assigns —
+/// through a top-level `=`/`:=` or an eager secondary text (subscript /
+/// substring / pattern spans), the same targets the assignment pre-scan
+/// in `apply_parameter_assignment_expansions_in_word` hoists
+/// (rubash#1169). Command-substitution bodies are skipped: their
+/// assignments belong to the child context, exactly as the pre-scan
+/// skips them. The quoted reroutes added for rubash#4004 consult this:
+/// a word with an assignment fragment keeps the master's routing,
+/// because the #1169 freeze/apply machinery keys on those routes — a
+/// quoted-entry render bypasses the frozen-fragment consult, so an
+/// earlier fragment would read the post-assignment value
+/// (issue3045's `case_subject_left_to_right_freeze`).
+pub(in crate::executor) fn word_has_assignment_fragment(word: &str) -> bool {
+    let quoted_word = word.starts_with(STORAGE_WORD_PREFIX);
+    let mut consumed = 0usize;
+    while let Some(rel) = word[consumed..].find("${") {
+        let start = consumed + rel;
+        let (_in_double, inside_cs) =
+            scan_word_prefix_quote_state(&word[..start], quoted_word);
+        let body_start = start + 2;
+        let Some(end) = matching_parameter_brace(&word[body_start..]) else {
+            break;
+        };
+        if inside_cs {
+            consumed = body_start + end + 1;
+            continue;
+        }
+        let inner = &word[body_start..body_start + end];
+        if parameter_assignment_target(inner).is_some()
+            || !secondary_assignment_targets(inner).is_empty()
+        {
+            return true;
+        }
+        consumed = body_start + end + 1;
+    }
+    false
+}
+
 /// Whether `name` — the left-hand side of a top-level `=`/`:=` split of
 /// a `${...}` body — is syntactically an assignment target: a plain shell
 /// name, a subscripted name (`name[sub]`, the admission
@@ -535,6 +573,39 @@ impl Executor {
         ))
     }
 
+    /// Embedded-parameter walk for a word the lexer marked fully
+    /// double-quoted (STORAGE_WORD_PREFIX, lexer/word.rs): quote removal
+    /// stripped every `"` delimiter, so the walker's own in_double tracker
+    /// never engages even though every character sits inside the
+    /// double-quoted region. GNU expand_word_internal tracks
+    /// per-character quote flags instead (subst.c:11639-11673 CTLESC /
+    /// Q_DOUBLE_QUOTES), so re-enter the walk inside a synthetic
+    /// `"..."` span: fragments then dispatch with in_double set — the
+    /// same quoted bit the mutable walker passes as
+    /// SubstitutionQuoteContext::DoubleQuoted (embedded_mutations.rs
+    /// fragment_context), which routes the `${var op word}` RHS through
+    /// the double-quoted expansion (subst.c:7982-7993
+    /// parameter_brace_expand_rhs). Without it `"a b${W:-'}'}"` lost the
+    /// quotes in the default word and produced `a b}` where GNU produces
+    //  `a b'}'` (rubash#4004).
+    fn expand_embedded_parameters_fully_quoted(&self, word: &str) -> String {
+        let quoted = format!("\"{word}\"");
+        self.expand_embedded_parameters(&quoted)
+    }
+
+    /// Fallback walk for a word that is not one whole `${...}` span:
+    /// the fully-quoted re-entry above, unless the word carries an
+    /// assignment fragment — those words keep the plain walk so the
+    /// rubash#1169 freeze/apply machinery sees the master's routing
+    /// (see `word_has_assignment_fragment`).
+    fn expand_embedded_parameters_quote_aware(&self, word: &str) -> String {
+        if word_has_assignment_fragment(word) {
+            self.expand_embedded_parameters(word)
+        } else {
+            self.expand_embedded_parameters_fully_quoted(word)
+        }
+    }
+
     pub(in crate::executor) fn expand_quoted_parameter_word(&self, word: &str) -> String {
         // TODO(subst.c/parse.y): Quoted parameter expansion should carry
         // CTLESC/CTLQUOTEMARK state from the parser. This preserves the
@@ -544,10 +615,10 @@ impl Executor {
             .strip_prefix("${")
             .and_then(|word| word.strip_suffix('}'))
         else {
-            return self.expand_embedded_parameters(word);
+            return self.expand_embedded_parameters_quote_aware(word);
         };
         if !braced_parameter_spans_whole_word(word) {
-            return self.expand_embedded_parameters(word);
+            return self.expand_embedded_parameters_quote_aware(word);
         }
 
         // GNU subst.c:9777-9917 `parameter_brace_expand` dispatches on
