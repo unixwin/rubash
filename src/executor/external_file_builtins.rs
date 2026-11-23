@@ -514,8 +514,51 @@ impl Executor {
         if prefixes.is_empty() {
             prefixes.push(operand);
         }
+        // rubash#4150 (Windows face): two prefix shapes must not
+        // take the plain per-prefix funnel resolution. A bare
+        // drive prefix of a drive-absolute operand (`C:` in
+        // `C:/x`) is the drive ROOT — GNU make_ancestors never
+        // creates the root — while the funnel encodes it as the
+        // relative name `C<U+F03A>`, which the session path
+        // cwd-joins into a stray directory in the cwd. And when
+        // a non-final component carries a colon (`x:y/z`),
+        // independent resolution is not chain-preserving: the
+        // funnel encodes a colon only in the FINAL component, so
+        // the prefix `x:y` lands under its encoded name while the
+        // full operand keeps the literal colon, and the operand's
+        // parent is never the directory the walk just created.
+        // Such operands resolve as a chain instead: the first
+        // prefix as usual (or as the drive root), each later
+        // prefix by resolving only the component it adds — as a
+        // standalone final component — and joining it onto the
+        // previous prefix's resolved path. Every other operand
+        // resolves exactly as before. The bare `C:` OPERAND (no
+        // following '/') keeps the funnel's relative colon-name
+        // encoding: the Git Bash agreement of the report's
+        // example 3 rides on it, so the funnel itself is
+        // deliberately untouched.
+        let chain_walk = cfg!(windows) && mkdir_colon_component_chains(operand);
+        let mut chain_parent: Option<std::path::PathBuf> = None;
+        let mut previous_prefix_len = 0usize;
         for prefix in prefixes {
-            let native = shell_path_to_windows(prefix, &self.shell_state.env_vars);
+            let mut native = shell_path_to_windows(prefix, &self.shell_state.env_vars);
+            if cfg!(windows) {
+                if let Some(drive) = mkdir_drive_root_prefix(operand, prefix) {
+                    native = std::path::PathBuf::from(format!("{}:\\", drive.to_ascii_uppercase()));
+                } else if chain_walk {
+                    if let Some(parent) = &chain_parent {
+                        let component = prefix[previous_prefix_len..].trim_start_matches('/');
+                        if !component.is_empty() && !component.contains('/') {
+                            native = parent
+                                .join(shell_path_to_windows(component, &self.shell_state.env_vars));
+                        }
+                    }
+                }
+                if chain_walk {
+                    chain_parent = Some(native.clone());
+                }
+            }
+            previous_prefix_len = prefix.len();
             let joined = self.session_path(native.clone());
             let node = CpNode::at_root(self.cp_operand_root(&native, &joined));
             match node.create_dir() {
@@ -3594,6 +3637,56 @@ fn rm_declines(words: &[String]) -> bool {
 /// flag position" (before the `--` terminator): -m/--mode in every
 /// form, -v/--verbose, -Z/--context, bundles carrying them, unknown
 /// options, and the --help/--version info requests.
+/// rubash#4150: a prefix that is exactly a drive designator —
+/// `C:` or `/C:` — while the operand continues past it with '/'
+/// names the drive root, not a relative directory: the operand
+/// is drive-absolute, and GNU coreutils mkdir.c `make_ancestors`
+/// never creates the root. Returns the drive letter. A bare
+/// `C:` OPERAND (nothing follows it) is not a root spelling —
+/// it keeps the funnel's relative colon-name encoding, the
+/// Git Bash agreement of the report's example 3.
+fn mkdir_drive_root_prefix(operand: &str, prefix: &str) -> Option<char> {
+    let letter = match prefix.as_bytes() {
+        [letter, b':'] if letter.is_ascii_alphabetic() => *letter as char,
+        [b'/', letter, b':'] if letter.is_ascii_alphabetic() => *letter as char,
+        _ => return None,
+    };
+    if operand.as_bytes().get(prefix.len()) == Some(&b'/') {
+        Some(letter)
+    } else {
+        None
+    }
+}
+
+/// rubash#4150: whether the operand carries a colon in a
+/// non-final component (`x:y/z`, `C:/a:b/c`). The funnel
+/// encodes a colon only in the final component, so for these
+/// operands resolving each ancestor prefix independently is
+/// not chain-preserving — the walk resolves them as a chain
+/// instead (see mkdir_create_parents). A leading drive
+/// designator (`C:` of a drive-absolute operand) is a root
+/// spelling, not a name colon, and does not count.
+fn mkdir_colon_component_chains(operand: &str) -> bool {
+    let components: Vec<&str> = operand.split('/').filter(|c| !c.is_empty()).collect();
+    if components.len() < 2 {
+        return false;
+    }
+    let mut first = 0;
+    let head = components[0];
+    if head.len() == 2 && head.as_bytes()[0].is_ascii_alphabetic() && head.as_bytes()[1] == b':' {
+        // The designator counts only when the operand continues
+        // with '/' right after it (drive-absolute); `C:foo/z`
+        // keeps `C:foo` as an ordinary colon component.
+        let after = if operand.starts_with('/') { 3 } else { 2 };
+        if operand.as_bytes().get(after) == Some(&b'/') {
+            first = 1;
+        }
+    }
+    components[first..components.len() - 1]
+        .iter()
+        .any(|component| component.contains(':'))
+}
+
 /// The operand text truncated after each of its components, in
 /// order: `a/b` -> ["a", "a/b"], `./a/b` -> [".", "./a",
 /// "./a/b"], `a/./b` -> ["a", "a/.", "a/./b"], `a//b` ->
