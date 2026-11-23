@@ -494,25 +494,40 @@ pub(super) fn assignment_value_is_quoted(raw: &str) -> bool {
 
     // Quotes inside a `${...}` body belong to the expansion itself (GNU keeps
     // them for the expansion stage), not to the assignment's quoting state.
+    // The same holds for a top-level arithmetic unit (`$((...))` / `$[...]`):
+    // GNU hands the whole unit to the arithmetic expander (subst.c:10862
+    // chk_arithsub -> expand_arith_string), so a quote inside it — typically
+    // inside a nested `$(...)`, as in `x=$(( $(echo "1") + 1 ))` — is the
+    // unit's own text, not the assignment's quoting. Counting it marked the
+    // RHS quoted, which closed the lone-arithmetic fast path and left the
+    // expression stored as text (rubash#4130). Skip the whole unit with the
+    // lexer's corrected span scanners; a unit they cannot close falls
+    // through to the per-character walk below, exactly as before.
+    let chars: Vec<char> = value.chars().collect();
+    let byte_offsets: Vec<usize> = value.char_indices().map(|(offset, _)| offset).collect();
     let mut in_backtick = false;
     let mut escaped = false;
     let mut expansion_depth = 0usize;
     let mut in_single = false;
     let mut in_double = false;
-    let mut chars = value.chars().peekable();
-    while let Some(ch) = chars.next() {
+    let mut index = 0usize;
+    while index < chars.len() {
+        let ch = chars[index];
         if escaped {
             escaped = false;
+            index += 1;
             continue;
         }
 
         if ch == '\\' && !in_single {
             escaped = true;
+            index += 1;
             continue;
         }
 
         if ch == '`' && !in_single {
             in_backtick = !in_backtick;
+            index += 1;
             continue;
         }
 
@@ -520,8 +535,8 @@ pub(super) fn assignment_value_is_quoted(raw: &str) -> bool {
             match ch {
                 '\'' if !in_double => in_single = !in_single,
                 '"' if !in_single => in_double = !in_double,
-                '$' if !in_single && !in_double && chars.peek() == Some(&'{') => {
-                    chars.next();
+                '$' if !in_single && !in_double && chars.get(index + 1) == Some(&'{') => {
+                    index += 1;
                     expansion_depth += 1;
                 }
                 '}' if !in_single && !in_double => {
@@ -533,20 +548,44 @@ pub(super) fn assignment_value_is_quoted(raw: &str) -> bool {
                 }
                 _ => {}
             }
+            index += 1;
             continue;
         }
 
-        if ch == '$' && chars.peek() == Some(&'{') {
-            chars.next();
+        if ch == '$' && chars.get(index + 1) == Some(&'{') {
             expansion_depth = 1;
             in_single = false;
             in_double = false;
+            index += 2;
             continue;
+        }
+
+        if ch == '$' && !in_backtick {
+            if chars.get(index + 1) == Some(&'(') && chars.get(index + 2) == Some(&'(') {
+                // `dollar_double_paren_is_arithmetic` takes the text at the
+                // `( (` opener; a `$((` it calls a command substitution is
+                // not an arithmetic unit and is not skipped.
+                if super::skip::dollar_double_paren_is_arithmetic(&value[byte_offsets[index] + 1..])
+                {
+                    if let Some(end) =
+                        super::skip::skip_arith_substitution_corrected(&chars, index + 3)
+                    {
+                        index = end;
+                        continue;
+                    }
+                }
+            } else if chars.get(index + 1) == Some(&'[') {
+                if let Some(len) = super::skip::arraysub_span_len(&chars[index + 1..]) {
+                    index = index + 1 + len;
+                    continue;
+                }
+            }
         }
 
         if !in_backtick && matches!(ch, '"' | '\'') {
             return true;
         }
+        index += 1;
     }
 
     false

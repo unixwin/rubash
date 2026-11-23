@@ -1632,13 +1632,27 @@ impl Executor {
         // used `:=` words a second time. Leave the whole braced region to
         // the embedded-parameter walker, which consumes `${...}` as one
         // fragment with the operator's lazy semantics.
+        //
+        // The same unit discipline applies to a top-level arithmetic
+        // region (`$((...))` / `$[...]`): GNU expands the whole
+        // expression first and evaluates it once (subst.c:10862
+        // chk_arithsub -> expand_arith_string -> evalexp), so a `$(...)`
+        // nested inside the expression is part of that unit, not a
+        // top-level span. Splitting it out left `$(( ` and ` + 1 ))` as
+        // plain text around the substitution output — the value was
+        // stored unevaluated (rubash#4130). Leave the whole arithmetic
+        // region to the embedded walker, like the braced regions.
         let braced_regions = top_level_braced_parameter_regions(&value, &all_spans);
+        let arithmetic_regions = top_level_arithmetic_regions(&value, &all_spans);
         let spans: Vec<_> = all_spans
             .into_iter()
             .filter(|span| {
                 !braced_regions
                     .iter()
                     .any(|(start, end)| span.start >= *start && span.end <= *end)
+                    && !arithmetic_regions
+                        .iter()
+                        .any(|(start, end)| span.start >= *start && span.end <= *end)
             })
             .collect();
         if spans.is_empty() {
@@ -4687,6 +4701,99 @@ fn top_level_braced_parameter_regions(
         index += 1;
     }
     regions
+}
+
+/// Byte ranges `[start, end)` of every top-level arithmetic region
+/// (`$((...))` / `$[...]`, closing delimiter inclusive) in `value` —
+/// the sibling of `top_level_braced_parameter_regions` for the other
+/// expansion unit GNU keeps whole (subst.c:10862 chk_arithsub ->
+/// expand_arith_string -> evalexp). The walk mirrors the braced one
+/// (backslash, quote state, whole command-substitution spans skipped);
+/// each region's end is measured by the embedded walker's own
+/// extraction collectors, so the extent is the extraction the
+/// evaluator itself performs, not a second scanner. A `$((` that
+/// GNU's chk_arithsub verdict calls a command substitution
+/// (dollar_double_paren_is_arithmetic == false) is not a region, and
+/// an unclosed unit is left unrecorded (the walker reports it).
+fn top_level_arithmetic_regions(
+    value: &str,
+    spans: &[crate::executor::substitution_metadata::SubstitutionSpan],
+) -> Vec<(usize, usize)> {
+    let span_ends_by_start: std::collections::HashMap<usize, usize> =
+        spans.iter().map(|span| (span.start, span.end)).collect();
+    let bytes = value.as_bytes();
+    let mut regions = Vec::new();
+    let mut index = 0usize;
+    let mut single = false;
+    let mut double = false;
+    while index < bytes.len() {
+        let ch = bytes[index];
+        if ch == b'\\' && !single {
+            index += 2;
+            continue;
+        }
+        if ch == b'\'' && !double {
+            single = !single;
+            index += 1;
+            continue;
+        }
+        if ch == b'"' && !single {
+            double = !double;
+            index += 1;
+            continue;
+        }
+        if single {
+            index += 1;
+            continue;
+        }
+        if let Some(&span_end) = span_ends_by_start.get(&index) {
+            index = span_end;
+            continue;
+        }
+        if ch == b'$'
+            && ((bytes.get(index + 1) == Some(&b'(')
+                && bytes.get(index + 2) == Some(&b'(')
+                && crate::lexer::dollar_double_paren_is_arithmetic(&value[index + 1..]))
+                || bytes.get(index + 1) == Some(&b'['))
+        {
+            if let Some(end) = arithmetic_region_end(value, index) {
+                regions.push((index, end));
+                index = end;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    regions
+}
+
+/// End byte (exclusive) of the arithmetic unit opening at `start`
+/// (`$((` or `$[`), measured by running the embedded walker's own
+/// extraction collectors over the tail and counting what they leave
+/// unconsumed. `None` when the unit never closes.
+fn arithmetic_region_end(value: &str, start: usize) -> Option<usize> {
+    let tail = &value[start..];
+    let mut chars = tail.chars().peekable();
+    let closed = if tail.starts_with("$((") {
+        chars.next();
+        chars.next();
+        chars.next();
+        crate::executor::embedded_mutations::collect_dollar_paren_arithmetic_expansion(&mut chars).1
+    } else if tail.starts_with("$[") {
+        chars.next();
+        chars.next();
+        crate::executor::embedded_mutations::collect_dollar_bracket_arithmetic_expansion(
+            &mut chars, false,
+        )
+        .1
+    } else {
+        return None;
+    };
+    if !closed {
+        return None;
+    }
+    let remaining: usize = chars.map(|ch| ch.len_utf8()).sum();
+    Some(start + tail.len() - remaining)
 }
 
 /// Split a compound assignment body into element tokens, treating single

@@ -3540,7 +3540,7 @@ fn command_substitution_needs_ast_execution(commands: &[CommandNode]) -> bool {
 // GNU subst.c treats a syntactically command-like $((...)) body as a
 // command substitution fallback, even though arithmetic parsing rejects it.
 // Keep ordinary arithmetic diagnostics (notably 1/0 and invalid octal 08).
-fn collect_dollar_paren_arithmetic_expansion(
+pub(in crate::executor) fn collect_dollar_paren_arithmetic_expansion(
     chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
 ) -> (String, bool) {
     // GNU parse.y parse_comsub -> parse_matched_pair(P_ARITH): after `$((`
