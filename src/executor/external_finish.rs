@@ -60,7 +60,11 @@ impl Executor {
     /// adopt it instead of re-opening the mirror target by path
     /// (the cat emulation's writers are the bind for its fd 1
     /// mirror; GNU opens the entry once, redir.c:237).
-    fn take_parked_output_mirror(&mut self, cmd: &CommandNode, target: &str) -> Option<File> {
+    pub(in crate::executor) fn take_parked_output_mirror(
+        &mut self,
+        cmd: &CommandNode,
+        target: &str,
+    ) -> Option<File> {
         let position = self.output_entry_position(cmd, 1, target);
         let file_fd = self.take_pending_preopened(position, target)?;
         let dup = crate::fd::duplicate_handle(file_fd.handle).ok()?;
