@@ -703,18 +703,31 @@ impl Executor {
             return None;
         }
         if closed_by_paren || command_has_warned_heredoc(first) {
-            // Deduplicate: the same comsub can be expanded through multiple
-            // paths (expand_assignment_value_inner and
-            // expand_embedded_parameters_mut), which would emit the warning
-            // twice. Track the last warning source and skip duplicates.
+            // Deduplicate within one command dispatch only: the same
+            // comsub occurrence can be planned through multiple expansion
+            // paths of the SAME command (expand_assignment_value_inner and
+            // expand_embedded_parameters_mut; a typed plan whose produce
+            // declines is retried by the readback entry), which would emit
+            // the warning twice for one GNU parse. The record is stamped
+            // with the dispatch's preopened_generation — the same
+            // per-command scoping the parked-handle channel uses, whose
+            // walks (prepare probes included) all run inside the
+            // generation — so a later command whose comsub source is
+            // textually identical still warns: GNU make_cmd.c:627
+            // make_here_document warns per heredoc occurrence per parse,
+            // with no cross-command dedup (rubash#4140).
+            let generation = self.preopened_generation.get();
             let should_emit = self
                 .last_heredoc_warning_source
                 .borrow()
-                .as_deref()
-                .map(|last| last != source)
+                .as_ref()
+                .map(|(last, last_generation)| {
+                    *last_generation != generation || last.as_str() != source.as_str()
+                })
                 .unwrap_or(true);
             if should_emit {
-                *self.last_heredoc_warning_source.borrow_mut() = Some(source.to_string());
+                *self.last_heredoc_warning_source.borrow_mut() =
+                    Some((source.to_string(), generation));
                 self.report_command_substitution_heredoc_warning(&source, first);
             }
         }
