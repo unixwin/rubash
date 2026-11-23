@@ -683,6 +683,29 @@ impl Executor {
                     // same-scope local already marked.
                     let nested_readonly = !locally_scoped
                         && is_marked_var(&self.shell_state.env_vars, READONLY_VARS, lhs);
+                    // rubash#4123: the local-copy refusal. When the operand
+                    // WOULD localize (locally_scoped) but the variable it
+                    // copies from is the readonly GLOBAL — the name lives
+                    // in no local scope — GNU's make_local_variable refuses
+                    // the copy itself (variables.c:2658): the nested
+                    // declare reports through builtin_error with
+                    // this_command_name = the enclosing function
+                    // (builtins/common.c:240 sh_readonly), the bind is
+                    // skipped, and the outer builtin's own pre-check then
+                    // reports the same operand under its own name — two
+                    // layers, no abort. A readonly mark carried by an
+                    // OUTER frame's local never refuses the copy (varenv19:
+                    // the fresh local binds mutable), so presence in any
+                    // local scope disqualifies this arm; the same-scope
+                    // case is nested_readonly's (the bound instance itself
+                    // is readonly).
+                    let nested_copy_refused = locally_scoped
+                        && is_marked_var(&self.shell_state.env_vars, READONLY_VARS, lhs)
+                        && !self
+                            .shell_state
+                            .local_var_scopes
+                            .iter()
+                            .any(|scope| scope.contains_key(lhs));
                     if nested_assoc_convert || nested_indexed_convert {
                         let kind = if nested_assoc_convert {
                             "indexed to associative"
@@ -772,6 +795,26 @@ impl Executor {
                             // echo, next line sees $? 1, E1 never created).
                             self.raise_evalerror_abort();
                             return Err(());
+                        }
+                    } else if nested_copy_refused {
+                        // rubash#4123: emit ONLY the first (function-named)
+                        // layer here, at the nested-bind adjudication
+                        // point — the bind is skipped and the outer builtin
+                        // reports the second layer under its own name when
+                        // it processes the operand, exactly as GNU's two
+                        // sh_readonly layers fall out of
+                        // expand_declaration_argument (subst.c:12949) +
+                        // declare_internal. No DISCARD: the function
+                        // continues.
+                        match self.shell_state.function_name_stack.first() {
+                            Some(func) => eprintln!(
+                                "{}{func}: {lhs}: readonly variable",
+                                self.diagnostic_prefix()
+                            ),
+                            None => eprintln!(
+                                "{}{lhs}: readonly variable",
+                                self.diagnostic_prefix()
+                            ),
                         }
                     }
                 }
