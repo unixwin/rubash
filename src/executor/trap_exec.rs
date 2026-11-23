@@ -6173,6 +6173,44 @@ impl Executor {
         }
     }
 
+    /// rubash#4135: adjudicate one stdio fd (0 or 2) of the
+    /// `<(...)` producer spawn. The plain verdict is the ambient
+    /// table's (ambient_procsub_spawn_fd, rubash#2212). When this
+    /// spawn binds a `< <(...)` redirect target of a compound
+    /// command's own list, `binder_saves` carries that list's undo
+    /// saves and an fd the list itself rebinds resolves through its
+    /// save slot — the PRE-LIST state — instead of the post-binder
+    /// table entry: GNU's do_redirections forks the producer at the
+    /// entry's own turn (redir.c:767), before the list's later
+    /// entries apply, so `while ...; done < <(echo e >&2)
+    /// 2>/dev/null` still prints `e`. The earliest save of the fd
+    /// holds the pre-list state (later saves hold walk-intermediate
+    /// states). A save slot the binder pass has not materialized
+    /// yet needs no override: no binder has touched the fd, so its
+    /// current entry still IS the pre-list state and the plain
+    /// adjudication reads it.
+    fn procsub_producer_stdio_disposition(
+        &self,
+        fd: u32,
+        binder_saves: &[(usize, u32, u32)],
+    ) -> super::external_setup::ProcsubSpawnFd {
+        if let Some((_, slot, _)) = binder_saves
+            .iter()
+            .filter(|(_, _, source)| *source == fd)
+            .min_by_key(|(index, _, _)| *index)
+        {
+            if self
+                .fd_table
+                .entries
+                .get(slot)
+                .is_some_and(|entry| !entry.closed)
+            {
+                return self.ambient_procsub_spawn_fd(*slot);
+            }
+        }
+        self.ambient_procsub_spawn_fd(fd)
+    }
+
     /// rubash#1021 helper: spawn a `<(source)` body as a child shell
     /// writing to a pipe, the way GNU process_substitute forks instead
     /// of collecting output first (subst.c:6362). The child gets the
@@ -6185,8 +6223,9 @@ impl Executor {
         &mut self,
         source: &str,
         line: Option<usize>,
+        binder_saves: &[(usize, u32, u32)],
     ) -> Option<Rc<FileFd>> {
-        use std::process::{Command, Stdio};
+        use std::process::Command;
         let exe = test_rubash_binary_from_env()
             .or_else(test_rubash_binary_from_current_exe)
             .or_else(|| std::env::current_exe().ok())
@@ -6506,9 +6545,34 @@ impl Executor {
         for (key, value) in env_entries {
             child.env(key, value);
         }
-        child.stdin(Stdio::inherit());
+        // rubash#4135: GNU's process_substitute fork (subst.c:6412
+        // make_child) inherits the expansion-time descriptor table
+        // and replaces only fd 1 with the pipe (subst.c:6557) — the
+        // producer's fd 0 / fd 2 are the AMBIENT bindings of those
+        // fds (an enclosing group's or function's redirection, a
+        // live capture scope, an `exec 2>`), not the process
+        // standard handles `Stdio::inherit()` delivers. Resolve
+        // them through the same adjudication the consumer's
+        // plan-untouched fds use (ambient_procsub_spawn_fd,
+        // rubash#2212 / rubash#4129) and the same stdio conversion
+        // (procsub_plan_stdio); an Inherit verdict keeps
+        // Stdio::inherit(), so here-string / heredoc / pipe
+        // endpoints on the enclosing fd 0 / fd 2 behave exactly as
+        // before. A CaptureWrite verdict on fd 2 registers the
+        // producer as a writer of the capture scope (rubash#2484),
+        // like the fd >= 3 transport above; StreamWrite needs no
+        // registration (rubash#3149).
+        let stdin_disposition = self.procsub_producer_stdio_disposition(0, binder_saves);
+        let stderr_disposition = self.procsub_producer_stdio_disposition(2, binder_saves);
+        if matches!(
+            stderr_disposition,
+            super::external_setup::ProcsubSpawnFd::CaptureWrite(_)
+        ) {
+            used_capture_write_end = true;
+        }
+        child.stdin(self.procsub_plan_stdio(Some(&stdin_disposition)));
         child.stdout(writer);
-        child.stderr(Stdio::inherit());
+        child.stderr(self.procsub_plan_stdio(Some(&stderr_disposition)));
         self.stamp_spawn_cwd(&mut child);
         // A foreign child ignores the __RUBASH_FD_* env stamps: it
         // needs the descriptors themselves at their slot numbers
@@ -6593,7 +6657,7 @@ impl Executor {
         source: &str,
         line: Option<usize>,
     ) -> bool {
-        let Some(file_fd) = self.spawn_input_process_substitution_child(source, line) else {
+        let Some(file_fd) = self.spawn_input_process_substitution_child(source, line, &[]) else {
             return false;
         };
         self.set_fd_input_file(fd, file_fd, fd != 0);
