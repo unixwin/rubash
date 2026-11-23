@@ -2730,7 +2730,10 @@ impl Executor {
     /// null device — the same approximation the coproc stderr
     /// plan uses for a closed fd 2. Any resolution failure falls
     /// back to inherit rather than failing the spawn.
-    fn procsub_plan_stdio(&self, disposition: Option<&ProcsubSpawnFd>) -> Stdio {
+    pub(in crate::executor) fn procsub_plan_stdio(
+        &self,
+        disposition: Option<&ProcsubSpawnFd>,
+    ) -> Stdio {
         match disposition {
             None | Some(ProcsubSpawnFd::Inherit) => Stdio::inherit(),
             Some(ProcsubSpawnFd::File { read, write }) => {
@@ -4595,7 +4598,7 @@ impl Executor {
         source: &str,
         line: Option<usize>,
     ) -> Option<u32> {
-        let file_fd = self.spawn_input_process_substitution_child(source, line)?;
+        let file_fd = self.spawn_input_process_substitution_child(source, line, &[])?;
         let fd = self.allocate_process_substitution_word_fd();
         self.fd_table
             .open_input(fd, FdReadEndpoint::File(file_fd), true);

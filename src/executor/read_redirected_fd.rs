@@ -107,7 +107,9 @@ impl Executor {
             // record reader observes real arrival). Collection below
             // is the spawn-failure fallback.
             if let Some(scratch) = self.allocate_dynamic_fd() {
-                if let Some(file_fd) = self.spawn_input_process_substitution_child(source, line) {
+                if let Some(file_fd) =
+                    self.spawn_input_process_substitution_child(source, line, &[])
+                {
                     self.fd_table
                         .open_input(scratch, FdReadEndpoint::File(file_fd), true);
                     let line = self.fd_table.read_text(

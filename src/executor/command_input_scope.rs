@@ -1017,9 +1017,25 @@ impl Executor {
                     // the compound forever. The timed collection below
                     // is the spawn-failure fallback (its recorded
                     // schedule served #1141 before a live pipe could).
+                    // rubash#4135: the compound's binder passes have
+                    // already applied this command's own list, so the
+                    // producer resolves any fd that list rebinds
+                    // through the list's undo saves (the pre-list
+                    // state — see procsub_producer_stdio_disposition
+                    // in trap_exec.rs).
+                    let binder_saves: Vec<(usize, u32, u32)> = match &self.compound_binder_saves {
+                        Some((ptr, len, saves))
+                            if (*ptr, *len)
+                                == (cmd.redirects.as_ptr() as usize, cmd.redirects.len()) =>
+                        {
+                            saves.clone()
+                        }
+                        _ => Vec::new(),
+                    };
                     if let Some(file_fd) = self.spawn_input_process_substitution_child(
                         &source,
                         super::command_text::procsub_body_seed_line(cmd, self.ambient_line.get()),
+                        &binder_saves,
                     ) {
                         let saved_fd0_entry = self.fd_table.saved_entry(0)?;
                         let saved_function_stdin =
@@ -1644,6 +1660,7 @@ impl Executor {
                 if let Some(file_fd) = self.spawn_input_process_substitution_child(
                     source,
                     super::command_text::procsub_body_seed_line(cmd, self.ambient_line.get()),
+                    saves_by_index,
                 ) {
                     self.set_fd_input_file(fd, file_fd, true);
                     if redirect.kind == crate::parser::RedirectKind::ReadWrite {
