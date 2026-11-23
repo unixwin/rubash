@@ -1949,12 +1949,17 @@ pub struct Executor {
     /// materialize the very file the discarded element must never
     /// create. Same shape as `pipeline_stage_restricted_refused` above.
     pipeline_stage_bad_substitution_discarded: Cell<bool>,
-    /// Tracks the source of the last heredoc EOF warning emitted from
-    /// command_substitution_heredoc_output_mut_typed, to avoid duplicate
-    /// warnings when the same comsub is expanded through multiple paths
+    /// Tracks the (source, dispatch generation) of the last heredoc EOF
+    /// warning emitted from command_substitution_heredoc_output_mut_typed,
+    /// to avoid duplicate warnings when the same comsub occurrence is
+    /// planned through multiple expansion paths of one command dispatch
     /// (expand_assignment_value_inner → expand_command_substitution_mut_typed
     /// and expand_embedded_parameters_mut → expand_command_substitution_mut).
-    last_heredoc_warning_source: RefCell<Option<String>>,
+    /// The generation stamp (preopened_generation) scopes the dedup to
+    /// that single dispatch: GNU warns per heredoc occurrence per parse
+    /// (make_cmd.c:627), so a record left by an earlier command must not
+    /// suppress a later command's identical source (rubash#4140).
+    last_heredoc_warning_source: RefCell<Option<(String, u64)>>,
     /// Decline-only memo for the heredoc comsub shortcut: the
     /// (IFS_GLUE-stripped) source whose most recent admission attempt
     /// declined. The mut dispatcher tries the typed heredoc entry
