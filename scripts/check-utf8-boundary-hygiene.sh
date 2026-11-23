@@ -103,6 +103,11 @@ src/executor/declare_local.rs::Opt\(c\) => letters\.push\(\(c as char
 # rendered lossy via String::from_utf8_lossy, see scan_flag_only_spec.)
 src/executor/declare_local.rs::letters\.push\(\(c as char, sign == b'-'\)\)
 src/executor/execution_misc.rs::(as_bytes\(\)\[0\] as char|out\.push\(byte as char\)|b'0' \+ .*as char)
+# external_file_builtins.rs: `mkdir_drive_root_prefix` (#4150) widens the
+# matched byte only under the same match arm's `is_ascii_alphabetic()`
+# guard — the byte is an ASCII drive letter by construction, never a
+# UTF-8 continuation byte (same shape as the cd.rs/pwd.rs drive entries).
+src/executor/external_file_builtins.rs::\*letter as char
 src/executor/init.rs::bytes\[0\] as char
 src/executor/parameter_case.rs::\} as char\);
 src/executor/parameter_core.rs::bytes\[index\] as char
