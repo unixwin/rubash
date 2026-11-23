@@ -646,6 +646,7 @@ pub(crate) const HASH_ENV_FIELD_SEP: char = SUBSCRIPT_CARRIER;
 // EXACT __RUBASH_DECLARED_UNSET_VARS - serialized variable-name set (declared unset) for child/subshell state transfer
 // EXACT __RUBASH_DIR_STACK - state key (dir stack) - serialized across the respawn/subshell boundary; see the owning subsystem
 // EXACT __RUBASH_DISABLED_BUILTINS - state key (disabled builtins) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_ENV_CONV_EXCL - env-value path-conversion exclusion list (user-set control read at native spawn, #4154; renamed from MSYS2_ENV_CONV_EXCL)
 // EXACT __RUBASH_ERREXIT - state key (errexit) - serialized across the respawn/subshell boundary; see the owning subsystem
 // EXACT __RUBASH_EVAL_CONTEXT - state key (eval context) - serialized across the respawn/subshell boundary; see the owning subsystem
 // EXACT __RUBASH_EXPORTED_FUNCTIONS - state key (exported functions) - serialized across the respawn/subshell boundary; see the owning subsystem
