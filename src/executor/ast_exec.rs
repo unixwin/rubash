@@ -45,6 +45,17 @@ impl Executor {
         self.evalerror_exit_toomany_pending.set(false);
         self.evalerror_line.set(None);
         self.reader_command_line.set(None);
+        // rubash#4159: the arithmetic expansion-error latches are the same
+        // staleness class — they are one command's expansion verdict,
+        // consumed by that command's own abort_on_expansion_errors funnel.
+        // A finished run can leave them latched (the redirect-gate scan
+        // latches them after the owning command's funnel has passed), and
+        // a later unit's first command must not inherit the verdict (the
+        // command-substitution child state copy zeroes them for the same
+        // reason, command_substitution.rs).
+        self.shell_state.arithmetic_expansion_error.set(false);
+        self.shell_state.arithmetic_fatal_error.set(false);
+        self.shell_state.arithmetic_nounset_error.set(false);
         // A fresh reader-level run is a GNU observation point for
         // deferred background-job completions (job_builtins.rs
         // refresh_background_jobs): the reap visibility mark advances.
@@ -1270,6 +1281,21 @@ impl Executor {
                 self.evalerror_arith_pending.set(false);
                 self.evalerror_exit_toomany_pending.set(false);
                 self.evalerror_line.set(None);
+                // rubash#4159: the DISCARD is settled here — the next
+                // command runs. The failing command's arithmetic
+                // expansion-error latches are part of that settlement:
+                // they are a per-command verdict for
+                // abort_on_expansion_errors, but the redirect-gate scan
+                // latches them after the owning command's funnel has
+                // passed, so they are still standing. Left latched, the
+                // next command's own funnel would consume them as ITS
+                // failure and discard a command GNU runs (the discard
+                // would eat one command past its list, contra
+                // jump_to_top_level (DISCARD), eval.c:111 — only the
+                // failing command's own list is abandoned).
+                self.shell_state.arithmetic_expansion_error.set(false);
+                self.shell_state.arithmetic_fatal_error.set(false);
+                self.shell_state.arithmetic_nounset_error.set(false);
             }
             // Resolved once here and reused by the `-n` gates below (the
             // dispatch branch already needed this lookup per command).
