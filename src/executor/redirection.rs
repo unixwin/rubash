@@ -724,6 +724,47 @@ impl Executor {
         self.nounset_unbound_parameter(&masked_target)
     }
 
+    /// The redirect-word expansion-error verdict as one query, for
+    /// the spawn-time redirect walks that resolve a command's
+    /// redirections in the parent (`resolve_background_stdio`'s stdio
+    /// resolution, `apply_coproc_redirects`): the same two checks
+    /// `reject_invalid_redirects` runs at an entry's ordered
+    /// do_redirections point — the masked `nounset` query above,
+    /// then the `:?` / bad-substitution / bad-subscript scan whose
+    /// own nounset arm is skipped (the query just covered it), with
+    /// the walker's exemptions (here-document entries, process-
+    /// substitution words). The verdict is a property of the WORD,
+    /// not of which walk expands it (GNU redir.c:298
+    /// redirection_expand -> expand_words_no_vars): a walk that
+    /// expands an erroring word through the silent
+    /// `expand_redirect_target` instead manufactures a bogus target
+    /// (the `:?` message text, or the empty string) and the error
+    /// GNU's forked child reports is lost (rubash#4099).
+    pub(in crate::executor) fn redirect_word_expansion_error(
+        &self,
+        redirect: &Redirect,
+    ) -> Option<(String, String, i32)> {
+        if let Some(name) = self.redirect_word_nounset_hit(redirect) {
+            return Some((
+                name,
+                "unbound variable".to_string(),
+                Self::FATAL_PARAMETER_EXPANSION_STATUS,
+            ));
+        }
+        if redirect.kind == crate::parser::RedirectKind::HereDoc {
+            return None;
+        }
+        let target_word = redirect.target.as_str();
+        if (target_word.starts_with(">(") || target_word.starts_with("<("))
+            && target_word.ends_with(')')
+        {
+            return None;
+        }
+        let raw_target = (!redirect.target_metadata.raw.is_empty())
+            .then_some(redirect.target_metadata.raw.as_str());
+        self.parameter_expansion_error_in_redirect_word_with_raw(target_word, raw_target)
+    }
+
     pub(in crate::executor) fn reject_invalid_redirects(
         &mut self,
         cmd: &CommandNode,
