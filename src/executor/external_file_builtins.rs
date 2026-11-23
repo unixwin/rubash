@@ -2402,8 +2402,25 @@ impl Executor {
                     self.exit_code = 0;
                     return Ok(true);
                 }
-                let file =
-                    self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?;
+                // rubash#4138: adopt the retained walk's parked open
+                // for this entry before re-opening by path. The
+                // emulation layer's retained walk already performed
+                // the entry's one open (GNU redir.c do_redirections
+                // opens each entry exactly once); under `set -C` the
+                // path re-open's O_EXCL then judges the file that
+                // very open created and refuses a target that did
+                // not exist before the command (`cat <<EOF > new`
+                // failed rc=1 and left the walk's empty file). The
+                // sibling writers (write_cat_output, open_cat_
+                // output_sink) already adopt through
+                // take_parked_output_mirror; this heredoc arm kept
+                // the pre-#3875 re-open shape.
+                let file = match self.take_parked_output_mirror(cmd, &target) {
+                    Some(file) => file,
+                    None => {
+                        self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?
+                    }
+                };
                 crate::fd::write_file_all(&file, &output)?;
                 self.exit_code = 0;
                 return Ok(true);
