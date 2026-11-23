@@ -2808,6 +2808,39 @@ impl Executor {
             if deferred_fd[fd as usize] {
                 continue;
             }
+            // rubash#4099: a redirect word carrying a parameter-
+            // expansion error (nounset hit, `${x:?}`, bad
+            // substitution) is never resolved here — the silent
+            // expander returns a bogus target for an erroring word
+            // (the `:?` message text becomes a created file, a
+            // nounset word becomes an unopenable empty string), the
+            // redirect is consumed, and the diagnostic GNU's async
+            // child reports (execute_cmd.c:1761-1763
+            // execute_in_subshell applies do_redirections after the
+            // fork) is lost or displaced by a later word's error.
+            // The word joins this walk's cannot-resolve class (see
+            // the doc comment above): leave it unconsumed, and the
+            // respawned child re-runs it through the ordinary reject
+            // gate, which reports the first error in list order.
+            // The child's diagnostic routes through fd 2 as bound
+            // AT this list position, so fd 2's subsequence defers
+            // with it (the rubash#1862 rollback): a later `2>file`
+            // or `2>/dev/null` this walk already resolved into the
+            // spawn stdio would otherwise hand the child a binding
+            // GNU's child has not applied yet at the error point —
+            // and a deferred `2>file` also keeps the parent from
+            // creating a file GNU's child dies before reaching.
+            if self.redirect_word_expansion_error(redirect).is_some() {
+                Self::background_stdio_defer_fifo_fds(
+                    &mut stdio,
+                    &base_stdio,
+                    &mut slot_writes,
+                    &mut consumed,
+                    &mut deferred_fd,
+                    &[2],
+                );
+                continue;
+            }
             let mut dup_source: Option<u32> = None;
             let resolved = match redirect.kind {
                 RedirectKind::Input => {
@@ -6789,6 +6822,13 @@ impl Executor {
         if body_stdin.is_none() {
             if let Some(redirect) = &cmd.redirect_in {
                 if redirect.fd.unwrap_or(0) == 0 {
+                    // rubash#4099: same gate as the ordered loop
+                    // below — an erroring input word must not reach
+                    // the silent expander (see there).
+                    if let Some((name, message, _)) = self.redirect_word_expansion_error(redirect) {
+                        eprintln!("{}{}: {}", self.diagnostic_prefix(), name, message);
+                        return Ok(CoprocRedirectOutcome::Declined);
+                    }
                     let target = self.expand_redirect_target(redirect);
                     if is_closed_redirect_target(&target) {
                         child.stdin(Stdio::null());
@@ -6862,6 +6902,22 @@ impl Executor {
         let mut extra_bindings: std::collections::BTreeMap<u32, CoprocFdBinding> =
             std::collections::BTreeMap::new();
         for redirect in &cmd.redirects {
+            // rubash#4099: a redirect word carrying a parameter-
+            // expansion error (nounset hit, `${x:?}`, bad
+            // substitution) is adjudicated before the silent
+            // expander can manufacture a bogus target from it (the
+            // `:?` message text opened as a file, a nounset word's
+            // empty expansion opened as the session directory).
+            // GNU applies the coproc child's redirections in the
+            // forked child (execute_cmd.c:2555 execute_in_subshell),
+            // where the error is reported and only the child dies;
+            // this parent walk's counterpart is the Declined
+            // disposition the ambiguous-redirect arms below already
+            // use: report the diagnostic once, create no coproc.
+            if let Some((name, message, _)) = self.redirect_word_expansion_error(redirect) {
+                eprintln!("{}{}: {}", self.diagnostic_prefix(), name, message);
+                return Ok(CoprocRedirectOutcome::Declined);
+            }
             let target = self.expand_redirect_target(redirect);
             match redirect.kind {
                 crate::parser::RedirectKind::Output
