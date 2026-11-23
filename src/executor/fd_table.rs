@@ -184,9 +184,7 @@ impl FileFd {
     /// they cover GNU's read+write terminal descriptor.
     pub(crate) fn open_readwrite_pair(path: PathBuf) -> std::io::Result<(Rc<Self>, Rc<Self>)> {
         #[cfg(windows)]
-        if crate::fd::is_dos_device_path(&path)
-            && path.to_string_lossy().eq_ignore_ascii_case("CON")
-        {
+        if super::execution_misc::is_con_device_path(&path) {
             let read = crate::fd::open_file_read(std::path::Path::new("CONIN$"))?;
             let write = crate::fd::open_file_write(std::path::Path::new("CONOUT$"))?;
             return Ok((

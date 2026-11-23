@@ -4620,18 +4620,30 @@ fn shell_path_to_windows_inner(path: &str, env_vars: &HashMap<String, String>) -
         return PathBuf::from("NUL");
     }
 
-    // Map standard I/O pseudo-devices to Windows console devices.
-    // CON is the Windows console device that can be used for both input and output.
-    // This provides better compatibility with tools expecting POSIX /dev/stdin etc.
+    // Map the standard I/O pseudo-devices to Windows console devices,
+    // minted in device-namespace form (`\\.\...`). The namespace form
+    // is absolute, so no consumer can anchor it at a cwd: the bare
+    // relative products this arm used to return (CON / CONIN$ /
+    // CONOUT$) were cwd-joined by session_path and by
+    // process-cwd-relative opens, and a directory-qualified
+    // `C:\dir\CON` is an ordinary file on Windows, not the console —
+    // `echo x > /dev/tty` created a real ./CON file (rubash#4151).
+    // The device namespace names the console object itself from any
+    // directory (crate::fd::is_dos_device_path already recognizes
+    // the `\\.\` form). CON resolves to the input buffer under
+    // GENERIC_READ and the screen buffer under GENERIC_WRITE, so a
+    // single name covers `< /dev/tty` and `> /dev/tty` alike (GNU
+    // open("/dev/tty") binds the controlling terminal). The /dev/std*
+    // members name fds, not the console: every redirect face
+    // classifies them through special_paths::fd_alias_target before
+    // any filesystem open (redir.c:601 `_redir_special_filenames`),
+    // so this mapping is the operand faces' landing (the emulated
+    // file builtins and friends), never a redirect's.
     if cfg!(windows) {
         match normalized.as_str() {
-            "/dev/stdin" => return PathBuf::from("CONIN$"),
-            "/dev/stdout" | "/dev/stderr" => return PathBuf::from("CONOUT$"),
-            // GNU open("/dev/tty") binds the controlling terminal; the
-            // Windows console device CON resolves to the input buffer under
-            // GENERIC_READ and the screen buffer under GENERIC_WRITE, so a
-            // single name covers `< /dev/tty` and `> /dev/tty` alike.
-            "/dev/tty" => return PathBuf::from("CON"),
+            "/dev/stdin" => return PathBuf::from(r"\\.\CONIN$"),
+            "/dev/stdout" | "/dev/stderr" => return PathBuf::from(r"\\.\CONOUT$"),
+            "/dev/tty" => return PathBuf::from(r"\\.\CON"),
             _ => {}
         }
     }
@@ -5240,6 +5252,32 @@ mod tests {
     use std::collections::HashSet;
     #[cfg(windows)]
     use std::fs;
+
+    #[cfg(windows)]
+    #[test]
+    fn dev_console_devices_map_to_device_namespace() {
+        // rubash#4151: the /dev/std* and /dev/tty funnel products
+        // must be device-namespace paths — absolute, so no consumer
+        // can cwd-join them into regular CON / CONIN$ / CONOUT$
+        // files in the session's current directory.
+        let env = HashMap::new();
+        for (spelling, expected) in [
+            ("/dev/stdin", r"\\.\CONIN$"),
+            ("/dev/stdout", r"\\.\CONOUT$"),
+            ("/dev/stderr", r"\\.\CONOUT$"),
+            ("/dev/tty", r"\\.\CON"),
+        ] {
+            let mapped = shell_path_to_windows(spelling, &env);
+            assert_eq!(mapped, PathBuf::from(expected), "{spelling}");
+            assert!(mapped.is_absolute(), "{spelling} -> {mapped:?}");
+        }
+        // Control: /dev/null keeps its bare-name product — NUL is a
+        // device in every directory, so the join cannot hurt it.
+        assert_eq!(
+            shell_path_to_windows("/dev/null", &env),
+            PathBuf::from("NUL")
+        );
+    }
 
     #[cfg(windows)]
     #[test]
