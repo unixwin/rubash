@@ -1209,8 +1209,21 @@ impl GroupScanFeeder {
                 found_with_warning = true;
             } else if self.in_comsub
                 && comparable.starts_with(value.as_str())
-                && comparable[value.len()..].trim().is_empty()
+                && comparable[value.len()..]
+                    .replace(crate::executor::markers::IFS_GLUE, "")
+                    .trim()
+                    .is_empty()
             {
+                // rubash#4141: the residue after the delimiter may carry
+                // the reader's IFS_GLUE record byte — the outer reader
+                // splices it in front of the closing `)` to record that
+                // the substitution closed on this line (make_cmd.c:
+                // 602-611), and extraction consumes the `)` itself, so
+                // in the re-tokenized body the record is the only trace
+                // of GNU's PST_EOFTOKEN terminator (make_cmd.c:606-611).
+                // The glue is reader metadata, never body text: a
+                // delimiter followed only by glue and whitespace ends
+                // the document here, like the exact-line arm above.
                 found = true;
             }
             if !found {
