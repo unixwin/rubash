@@ -4385,13 +4385,44 @@ impl Executor {
             Some((read, sink)) => (Stdio::from(read), Some(sink)),
             None => (Stdio::piped(), None),
         };
+        // rubash#4129: GNU's process_substitute fork (subst.c:6362)
+        // inherits the shell's whole ambient fd table — the spawn plan
+        // (rubash#2195) only records the consuming command's own
+        // redirect prefix, so a plan-untouched fd 1/2 is the AMBIENT
+        // binding of that fd (a live capture scope, an enclosing group
+        // redirection, an `exec >`), not the process standard handle
+        // `Stdio::inherit()` delivers. Resolve plan-untouched fds 1/2
+        // through the same ambient adjudication the fd >= 3 pass above
+        // uses (ambient_procsub_spawn_fd, rubash#2212); a CaptureWrite
+        // verdict registers this consumer as a writer of the capture
+        // scope, like the fd >= 3 transport's CaptureWrite arm.
+        // StreamWrite needs no registration (the stage pipe orders its
+        // own bytes, rubash#3149).
+        let ambient_stdout = if live.stdout.is_none() && spawn_plan.get(1).is_none() {
+            let disposition = self.ambient_procsub_spawn_fd(1);
+            if matches!(disposition, ProcsubSpawnFd::CaptureWrite(_)) {
+                used_capture_write_end = true;
+            }
+            Some(disposition)
+        } else {
+            None
+        };
+        let ambient_stderr = if live.stderr.is_none() && spawn_plan.get(2).is_none() {
+            let disposition = self.ambient_procsub_spawn_fd(2);
+            if matches!(disposition, ProcsubSpawnFd::CaptureWrite(_)) {
+                used_capture_write_end = true;
+            }
+            Some(disposition)
+        } else {
+            None
+        };
         let stdout_stdio = match live.stdout {
             Some(write) => Stdio::from(write),
-            None => self.procsub_plan_stdio(spawn_plan.get(1)),
+            None => self.procsub_plan_stdio(spawn_plan.get(1).or(ambient_stdout.as_ref())),
         };
         let stderr_stdio = match live.stderr {
             Some(write) => Stdio::from(write),
-            None => self.procsub_plan_stdio(spawn_plan.get(2)),
+            None => self.procsub_plan_stdio(spawn_plan.get(2).or(ambient_stderr.as_ref())),
         };
         let mut process = std::process::Command::new(&exe);
         process
