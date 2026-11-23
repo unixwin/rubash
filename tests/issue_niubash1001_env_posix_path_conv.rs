@@ -1,6 +1,6 @@
 //! Regression tests for unixwin/niubash#1001: POSIX paths in environment
 //! variable values are converted to Windows form when spawning native Windows
-//! executables, while honoring `MSYS2_ENV_CONV_EXCL`, keeping URLs/non-path
+//! executables, while honoring `__RUBASH_ENV_CONV_EXCL`, keeping URLs/non-path
 //! values untouched, and preserving `PWD` verbatim.
 
 #![cfg(windows)]
@@ -66,18 +66,37 @@ fn urls_and_non_path_values_stay_untouched() {
 }
 
 #[test]
-fn msys2_env_conv_excl_excludes_matching_variables() {
+fn rubash_env_conv_excl_excludes_matching_variables() {
     let (code, stdout, stderr) = run_rubash(
-        r#"MSYS2_ENV_CONV_EXCL='FOO;CARGO_' FOO=/d/x CARGO_TARGET_DIR=/d/Temp/niucheck OTHER=/d/y cmd /c "echo %FOO% %CARGO_TARGET_DIR% %OTHER%""#,
+        r#"__RUBASH_ENV_CONV_EXCL='FOO;CARGO_' FOO=/d/x CARGO_TARGET_DIR=/d/Temp/niucheck OTHER=/d/y cmd /c "echo %FOO% %CARGO_TARGET_DIR% %OTHER%""#,
         &[],
     );
     assert_eq!(code, Some(0), "stdout: {stdout} stderr: {stderr}");
     assert_eq!(stdout.trim(), r"/d/x /d/Temp/niucheck D:\y");
 
     let (code, stdout, stderr) = run_rubash(
-        r#"MSYS2_ENV_CONV_EXCL='*' FOO=/d/x cmd /c "echo %FOO%""#,
+        r#"__RUBASH_ENV_CONV_EXCL='*' FOO=/d/x cmd /c "echo %FOO%""#,
         &[],
     );
     assert_eq!(code, Some(0), "stdout: {stdout} stderr: {stderr}");
     assert_eq!(stdout.trim(), "/d/x");
+}
+
+#[test]
+fn msys2_env_conv_excl_name_is_no_longer_honored() {
+    // #4154 ruling (b'): the escape hatch lives under the house prefix only;
+    // the MSYS2 name confers no exemption, so values convert as usual.
+    let (code, stdout, stderr) = run_rubash(
+        r#"MSYS2_ENV_CONV_EXCL='*' FOO=/d/x cmd /c "echo %FOO%""#,
+        &[],
+    );
+    assert_eq!(code, Some(0), "stdout: {stdout} stderr: {stderr}");
+    assert_eq!(stdout.trim(), r"D:\x");
+
+    let (code, stdout, stderr) = run_rubash(
+        r#"MSYS2_ENV_CONV_EXCL='FOO' FOO=/d/x OTHER=/d/y cmd /c "echo %FOO% %OTHER%""#,
+        &[],
+    );
+    assert_eq!(code, Some(0), "stdout: {stdout} stderr: {stderr}");
+    assert_eq!(stdout.trim(), r"D:\x D:\y");
 }

@@ -3730,10 +3730,10 @@ pub(in crate::executor) fn external_child_uses_native_env(
     }
 }
 
-fn env_var_excluded_by_msys2_conv_excl(name: &str, env_vars: &HashMap<String, String>) -> bool {
+fn env_var_excluded_by_rubash_conv_excl(name: &str, env_vars: &HashMap<String, String>) -> bool {
     let Some(excl) = env_vars
         .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case("MSYS2_ENV_CONV_EXCL"))
+        .find(|(k, _)| k.eq_ignore_ascii_case("__RUBASH_ENV_CONV_EXCL"))
         .map(|(_, v)| v.as_str())
     else {
         return false;
@@ -3756,7 +3756,7 @@ fn env_var_excluded_by_msys2_conv_excl(name: &str, env_vars: &HashMap<String, St
 
 /// Convert POSIX-style paths inside an environment variable value to Windows
 /// form for a native child process (unixwin/niubash#1001), honoring
-/// `MSYS2_ENV_CONV_EXCL` and keeping contract-verbatim variables (`PWD`,
+/// `__RUBASH_ENV_CONV_EXCL` and keeping contract-verbatim variables (`PWD`,
 /// `OLDPWD`, `PATH`, `TMPDIR`, `__RUBASH_*`), URLs, and non-path values
 /// untouched.
 pub(in crate::executor) fn external_env_value(
@@ -3771,12 +3771,12 @@ pub(in crate::executor) fn external_env_value(
             || name.eq_ignore_ascii_case("TMPDIR")
             || name.eq_ignore_ascii_case("PWD")
             || name.eq_ignore_ascii_case("OLDPWD")
-            || name.eq_ignore_ascii_case("MSYS2_ENV_CONV_EXCL")
+            || name.eq_ignore_ascii_case("__RUBASH_ENV_CONV_EXCL")
             || name.eq_ignore_ascii_case("MSYS2_ARG_CONV_EXCL")
             || name.eq_ignore_ascii_case("MSYS_NO_PATHCONV")
             || name == "_"
             || name.starts_with("__RUBASH_")
-            || env_var_excluded_by_msys2_conv_excl(name, env_vars)
+            || env_var_excluded_by_rubash_conv_excl(name, env_vars)
         {
             return value.to_string();
         }
