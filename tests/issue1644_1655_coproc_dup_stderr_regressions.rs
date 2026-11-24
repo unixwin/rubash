@@ -157,7 +157,10 @@ fn coproc_word_target_is_r_err_and_out_and_fd2_word_is_ambiguous() {
     ));
     assert_eq!(stdout, "O\nE\n");
     let (stdout, stderr, _) = rubash_c("coproc echo hi 2>&word; echo \"after rc=$?\"");
-    assert_eq!(stdout, "after rc=1\n");
+    // rubash#4170: the ambiguous redirect declines in the child
+    // (execute_cmd.c:2546), so the launch registers and the
+    // statement reports GNU's 0, not the pre-#4170 Declined 1.
+    assert_eq!(stdout, "after rc=0\n");
     assert_eq!(stderr.matches("ambiguous redirect").count(), 1);
     assert!(stderr.contains("word: ambiguous redirect"));
     let _ = std::fs::remove_dir_all(&dir);
