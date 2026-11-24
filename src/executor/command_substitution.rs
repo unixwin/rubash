@@ -814,6 +814,18 @@ impl Executor {
         *self.shell_state.debug_trap_command.borrow_mut() = Some(source.trim().to_string());
         let result = self.expand_command_substitution_inner(source, context);
         self.shell_state.restore_interior(&saved_state);
+        // rubash#4184: that same parent wait_for (subst.c:7449,
+        // inside command_substitute) is a coproc disposal point —
+        // coproc_reap runs on wait_for's return path (jobs.c:3494),
+        // so a coproc death recorded before the substitution retires
+        // once the substitution completes. Carry
+        // the emulated foreground-wait mark so the next boundary
+        // refresh flushes the pending retirement on the same cadence
+        // as the subshell (rubash#4181) and emulated-external faces.
+        // Parent-side bookkeeping only: the substitution child's own
+        // coproc endpoints are NOT severed (the comsub write face is
+        // GNU-correct as-is, rubash#4181 q3).
+        self.note_emulated_foreground_wait();
         // subst.c command_substitute: after wait_for (pid) in the parent, the
         // substitution child's wait status is recorded in
         // last_command_exit_value (the same rule the funsub form documents at
