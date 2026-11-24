@@ -6,6 +6,102 @@
 
 ## [Unreleased]
 
+## [1.5.2] - 2026-11-24
+
+### 修复
+
+- **GNU 差分修复波（2026-11-22 – 11-24）**：窗口内本仓共关闭 48 单，其中 8 单（#2810、#2828、#3965、#4001、#4002、#4059、#4060、#4080）已列入 1.5.1 清单、不重复计入，本版新增 40 单（四仓同期共关闭 61 单、合并 PR 91 张；四仓本版新增合计 51 单），全部以 GNU Bash 5.3.20 为规范源、经真 oracle 逐形差分定谳后修复，每条均带以 issue 号命名的回归钉。按主题机械归类（每单只计一族）：fd/重定向 6、引号与词法 1、执行与子进程 1、declare/readonly/local 2、算术 3、参数展开 2、作业控制与 wait 1、case 1、补全 1、heredoc/herestring 5、数组/assoc 2、`[[ ]]` 2、procsub 6、trap 1、其他 6，合计 40（完整清单见下）。冻结头为 master `ce1eb288`（外部贡献者 jhermelink 的 #4171 合入点）。
+- **推进波要点**：外部报告面大部全清——ShiomiHC 第二批八单（#4125、#4127–#4133）与 xuangeyouneihan 的 #4138、#4149 均已修复关单（同批仅余 #4126 待作者返工）。其中 #4149 把 #684 的控制台行规程推广到进程内模拟 `cat` 的三个 stdin 读者（共享纯裁决单元 `veof_verdict` 与 `ConsoleLineDiscipline` 状态机，`read` 的两处内联裁决同步迁入、无第二走法）；#4158 让进程内 `eval` 经普通重定向计划安装输入侧（绑定点在内建分发层，避开 `mapfile -C` 的 #3660 共享流绑定）；#4159 在两处算术求值点结算 DISCARD 类重定向展开失败的 latch；#4171（jhermelink）剥除进程内管道阶段操作数的 blank guard 泄漏，与简单命令路径的物化契约对齐。本波残差另立 #4166、#4170、#4172、#4175 跟踪。
+
+### 完整清单
+
+窗口（2026-11-22 – 11-24）内关闭、本版新增的 40 单按主题机械归类如下（每单只计一族，标题逐字取自 issue 原文）：
+
+#### fd/重定向（6 单）
+
+- #4099 重定向词内 :? 参数错误对普通命令被误判整脚本致命（GNU 只判命令失败续行）
+- #4131 A builtin's `> file` stays open after the builtin returns, so a pipeline started right after cannot open the file with read-only sharing
+- #4146 Failed expansion with 2>/dev/null leaks fd 2 to /dev/null for the rest of the script
+- #4151 Redirecting, `touch`ing or `cp`ing to `/dev/tty`, `/dev/stdin`, `/dev/stdout` or `/dev/stderr` creates regular `CON`, `CONIN$`, `CONOUT$` files in the current directory
+- #4158 eval's own input redirections are silently dropped (output side fine)
+- #4159 A DISCARD-class redirect expansion failure silently swallows the NEXT command in the list
+
+#### 引号与词法（1 单）
+
+- #4132 [gnu-baseline] Sourced file: backquote body containing `<<` misroutes a later `exit` to the parent script (residual of #3962/#4018)
+
+#### 执行与子进程（1 单）
+
+- #4149 行内Ctrl-D把提交行切开：子进程收到EOF，后半段被shell执行，提示符也不换行
+
+#### declare/readonly/local（2 单）
+
+- #3970 [bug] declare 家族复合赋值不做 brace 展开：declare e=({1..3}) 只存 1 个元素（GNU 3）
+- #4123 [gnu-baseline] declare/local compound assignment to readonly in function: missing function-named first diagnostic (follow-up to #2658)
+
+#### 算术（3 单）
+
+- #2826 [perf] 算术求值缺通用编译缓存：每求值新建 parser，现以三条形状 fastpath 代替
+- #4090 [longtail G5] errexit: arithmetic expansion error must DISCARD the command and continue (assignment / echo / [[ ]] faces)
+- #4130 Assignment: `$(( … $(cmd) … ))` is stored as text when the RHS is quoted or not a lone `$(( ))`
+
+#### 参数展开（2 单）
+
+- #4004 [gnu-baseline] double-quoted ${} span boundary: quoted } inside default ends span early, filename diverges from GNU
+- #4068 [gnu-baseline] bad-substitution pre-scan discard skips word-internal comsub side effects
+
+#### 作业控制与 wait（1 单）
+
+- #4097 wait after STOP+CONT+KILL must report 147 silently (currently 137 plus a Killed notice)
+
+#### case（1 单）
+
+- #4031 [gnu-baseline] case 体在 $( 嵌套 placement 下被 case-pattern tracker 误读（#4026 钉文件自承残差）
+
+#### 补全（1 单）
+
+- #4101 bind -x widget 只 unset READLINE_LINE 时 READLINE_POINT 被钳制到 0（应保持原值）
+
+#### heredoc/herestring（5 单）
+
+- #4093 herestring to an external command: ${var:=word} in the herestring must not persist in the parent (child-context expansion)
+- #4128 `"$( … )"`: a quoted `<<X` spanning lines appends 0x1c to the last word before `)`
+- #4138 #1025 落下了heredoc
+- #4140 Unterminated-heredoc EOF warning is deduplicated across distinct commands in one script
+- #4141 Quoted comsub with piped heredoc leaks the delimiter line (with 0x1c) into output
+
+#### 数组/assoc（2 单）
+
+- #4098 数组元素赋值不应用重定向（入向静默 rc=0、出向不建文件）
+- #4102 导入 GROUPS 的元素面仍走 live 组数组（${GROUPS[0]} / GROUPS[0]=e）
+
+#### `[[ ]]`（2 单）
+
+- #4125 `[[ =~ ]]`: `BASH_REMATCH` drops or rewrites the bytes 0x11, 0x17, 0x18, 0x1a, 0x1c, 0x1f
+- #4133 [gnu-baseline] [[ =~ ]] under LC_ALL=C re-encodes subject bytes 0x80-0xff as UTF-8 (split from #4125)
+
+#### procsub（6 单）
+
+- #3094 [design] process substitution yields /dev/fd/N: enumerated cases of where that path resolves and where it does not
+- #4092 [longtail G8] compound procsub diagnostic reports the compound's own line instead of the ambient frame line
+- #4103 /dev/fd procsub 管道同秒内建时 -nt/-ot 视 mtime 有严格序（GNU 视其相等）
+- #4127 Windows: inside `<(…)`, `>(…)` and `coproc`, variables whose names differ only in case become one variable
+- #4129 `>(…)`: the consumer ignores the fd 1 / fd 2 redirections around the command — its output escapes `$( )`, `{ …; } > file`, `2> file` and `exec >`
+- #4135 `<(…)`: the producer ignores the fd 0 / fd 2 redirections around the command — its stderr escapes `{ …; } 2> file`, `$( … 2>&1)`, `f 2> file` and `exec 2>`
+
+#### trap（1 单）
+
+- #4096 ERR trap: pipeline region adjudication in a subshell function reports the body line instead of the region (close-paren) line
+
+#### 其他（6 单）
+
+- #2812 [perf] 测量专用构建变体：feature 门控的分配计数，计时与分配两轴分离
+- #4094 empty HOME: cd ~ must fail with 'null directory'; pushd ~ / pushd -n ~ empty-expansion faces
+- #4095 type -a under-reports ./ matches for repeated empty PATH elements (visit/fold accounting missing)
+- #4105 Windows 原生路径转换改写导出 POSIX 路径（issue149 基线红）
+- #4150 `mkdir -p C:/x` (or `/c/x`) creates a stray `C:` directory in the current directory
+- #4154 env-value conversion (#4064) collides with the #149 verbatim export contract — boundary ruling needed
+
 ## [1.5.1] - 2026-11-22
 
 ### 修复
