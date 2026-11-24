@@ -1412,6 +1412,32 @@ pub(crate) fn strip_ansi_c_ifs_guard_cow(value: &str) -> std::borrow::Cow<'_, st
 pub(crate) fn ansi_c_ifs_guard_to_ifs_glue(value: &str) -> String {
     replace_ansi_c_ifs_guard(value, IFS_GLUE_STR)
 }
+
+/// Remove every IFS_GLUE carrier from `value`, copying all other text
+/// verbatim — the pair-aware form of the bare `.replace(IFS_GLUE, "")`
+/// strips the marker-lint (L3) keeps out of consumer code.
+///
+/// Pair soundness: IFS_GLUE is a PREFIX carrier — [`protect_ifs_chars`]
+/// splices it in front of the character it protects, and that following
+/// character is data this walk preserves. The glue byte itself is
+/// always protocol: a user-typed U+001C never arrives as a bare char
+/// (typed C0 data rides raw-byte marker pairs, whose codepoints are
+/// distinct and pass through untouched), so dropping every bare glue
+/// cannot fold data into protocol. Consumer: the heredoc gatherer's
+/// comsub delimiter test, where the outer reader's glue record lands
+/// in the residue after the delimiter (rubash#4141).
+pub(crate) fn strip_ifs_glue(value: &str) -> String {
+    if !value.contains(IFS_GLUE) {
+        return value.to_string();
+    }
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch != IFS_GLUE {
+            out.push(ch);
+        }
+    }
+    out
+}
 /// `str::replace` that borrows when the needle is absent.
 ///
 /// GNU's expansion passes restore markers IN PLACE over C strings — a value
@@ -1749,6 +1775,23 @@ mod tests {
             );
             assert!(chars.next().is_none());
         }
+    }
+
+    /// `strip_ifs_glue` drops the protocol glue and preserves the data
+    /// char each glue protects (rubash#4141 consumer: the heredoc
+    /// gatherer's comsub delimiter residue test).
+    #[test]
+    fn strip_ifs_glue_drops_carrier_preserves_data() {
+        assert_eq!(strip_ifs_glue(""), "");
+        assert_eq!(strip_ifs_glue("plain"), "plain");
+        assert_eq!(strip_ifs_glue("\u{1c}"), "");
+        // Glue in front of a protected space: glue drops, space stays.
+        assert_eq!(strip_ifs_glue("a\u{1c} b"), "a b");
+        assert_eq!(strip_ifs_glue("\u{1c}\u{1c}x"), "x");
+        // A raw-byte pair encoding a typed U+001C is distinct
+        // codepoints and passes through untouched.
+        let pair = encode_raw_byte_marker(0x1c);
+        assert_eq!(strip_ifs_glue(&pair), pair);
     }
 
     // =====================================================================
