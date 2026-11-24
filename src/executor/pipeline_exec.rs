@@ -8931,12 +8931,28 @@ impl Executor {
                         // its `.exe` spelling (`/usr/bin/seq`) opens like the
                         // spawned cat.exe sees it (same exists-first rule as
                         // the argv funnel).
-                        match fs::read(self.session_path(
-                            crate::executor::path::windows_operand_file_path(
+                        let operand_path =
+                            self.session_path(crate::executor::path::windows_operand_file_path(
                                 shell_path_to_windows(&path, &self.shell_state.env_vars),
                                 &self.shell_state.env_vars,
-                            ),
-                        )) {
+                            ));
+                        // rubash#4175: GNU cat.c — the same refusal as
+                        // the simple-command serve: a last stage under
+                        // an exec-persisted stdout writes to that file,
+                        // so an operand naming it is reported and
+                        // skipped instead of being read and written
+                        // back. A middle stage's fd 1 binds the pipe,
+                        // so command_stdout_file_target finds no file
+                        // target and nothing fires there.
+                        if self.cat_operand_is_output_file(command, &operand_path) {
+                            stderr.push_str(&format!(
+                                "{}cat: {path}: input file is output file\n",
+                                self.diagnostic_prefix()
+                            ));
+                            status = 1;
+                            continue;
+                        }
+                        match fs::read(operand_path) {
                             Ok(bytes) => stream.extend(bytes),
                             Err(_) => {
                                 stderr.push_str(&format!(

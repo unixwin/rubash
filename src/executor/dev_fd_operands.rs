@@ -367,6 +367,33 @@ pub(in crate::executor) struct DevFdOperandRead {
     pub stdout_file: bool,
 }
 
+/// Whether two paths name the same file: device+inode identity
+/// where the platform exposes it (hard links and symlink spellings
+/// name the same file), else canonicalized-path equality (which
+/// still resolves symlink and `.` spellings). An unreadable side
+/// never matches.
+#[cfg(unix)]
+fn paths_name_same_file(first: &Path, second: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata(first), std::fs::metadata(second)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    }
+}
+
+/// Whether two paths name the same file: device+inode identity
+/// where the platform exposes it (hard links and symlink spellings
+/// name the same file), else canonicalized-path equality (which
+/// still resolves symlink and `.` spellings). An unreadable side
+/// never matches.
+#[cfg(not(unix))]
+fn paths_name_same_file(first: &Path, second: &Path) -> bool {
+    match (std::fs::canonicalize(first), std::fs::canonicalize(second)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
 /// The redirect a command applies to descriptor `fd` — the ordered
 /// `redirects` list carries every redirection (a `None` fd means the
 /// kind's default descriptor), while `2>` is kept only in `redirect_err`.
@@ -1207,6 +1234,37 @@ impl Executor {
             FdWriteEndpoint::Stderr => crate::fd::disk_file_path(crate::fd::process_std_handle(2)),
             _ => None,
         }
+    }
+
+    /// Whether a plain path operand names the file the command's fd 1
+    /// writes to — GNU cat.c's "input file is output file" judgment
+    /// for the plain-operand serves of the emulated cat (rubash#4175).
+    /// The /dev/fd face above judges by binding (the operand IS a
+    /// descriptor); a plain operand needs the filesystem judgment
+    /// cat.c makes with fstat — device+inode identity, which also
+    /// catches the `./out`, symlink and hard-link spellings of the
+    /// target. The target comes from command_stdout_file_target, so
+    /// an exec-persisted stdout (`exec >file`, the fd-table fallback)
+    /// is covered exactly like a command-level redirect. The operand
+    /// must be a non-empty regular file: GNU serves an empty target
+    /// silently (the same carve-out the /dev/fd face encodes as
+    /// `!read.bytes.is_empty()`), a missing operand keeps its ENOENT
+    /// face, and a directory keeps its EISDIR face.
+    pub(in crate::executor) fn cat_operand_is_output_file(
+        &mut self,
+        cmd: &CommandNode,
+        operand_path: &Path,
+    ) -> bool {
+        let Ok(operand_meta) = std::fs::metadata(operand_path) else {
+            return false;
+        };
+        if !operand_meta.is_file() || operand_meta.len() == 0 {
+            return false;
+        }
+        let Some(target) = self.command_stdout_file_target(cmd) else {
+            return false;
+        };
+        paths_name_same_file(operand_path, &target)
     }
 
     /// Read a `/dev/fd/N`-family operand for an in-process file builtin
