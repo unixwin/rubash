@@ -23,15 +23,17 @@
 //! execute_cmd.c:2477 execute_coproc (redirects applied in the
 //! child via execute_in_subshell at :2555).
 //!
-//! Known residual, asserted as-is below: GNU's coproc STATEMENT
-//! returns EXECUTION_SUCCESS once the child is forked
+//! Statement-status face (closed by rubash#4170): GNU's coproc
+//! STATEMENT returns EXECUTION_SUCCESS once the child is forked
 //! (execute_cmd.c:2592), whatever the child's redirects do.
 //! Rubash's parent-side walk cannot fork first, so an erroring
-//! coproc redirect word takes the walk's existing Declined
-//! disposition — diagnostic printed once, no coproc created,
-//! statement status 1, script continues. The pins assert the
-//! diagnostic / continuation / no-bogus-target faces and mark the
-//! statement status with this note.
+//! coproc redirect word takes the walk's Declined disposition —
+//! the diagnostic is printed once and the caller spawns a
+//! stillborn child, so the coproc registers and the statement
+//! reports 0. The pins below assert the diagnostic /
+//! continuation / no-bogus-target faces together with that
+//! status; tests/issue4170_coproc_declined_launch.rs pins the
+//! registration / wait / routing faces.
 //!
 //! Verified against the cloud GNU Bash 5.3.20 oracle via script
 //! files (stdout, stderr, exit status, and created files compared).
@@ -238,15 +240,14 @@ fn issue4099_background_badsub_reports_without_bogus_file() {
 
 #[test]
 fn issue4099_coproc_qmark_reports_and_script_continues() {
-    // Statement status is the documented Declined residual (1, not
-    // GNU's 0 — see the file header); the diagnostic, the
-    // continuation, and the absence of a bogus target are the
-    // #4099 faces.
+    // Statement status is GNU's 0 since rubash#4170 (the Declined
+    // launch still registers); the diagnostic, the continuation,
+    // and the absence of a bogus target are the #4099 faces.
     let (out, err, code, files, _) = run_script(
         "cop",
         "set -u\ncoproc cat >${UNSET1:?qmsg} 2>$UNSET2\necho \"rc=$?\"\n",
     );
-    assert_eq!(out, "rc=1\n");
+    assert_eq!(out, "rc=0\n");
     assert_eq!(err, "probe.sh: line 2: UNSET1: qmsg\n");
     assert_eq!(code, Some(0));
     assert!(files.is_empty(), "no bogus `qmsg` target: {files:?}");
@@ -258,7 +259,7 @@ fn issue4099_coproc_nounset_reports_unbound() {
     // opened as the session directory).
     let (out, err, code, files, _) =
         run_script("cop_noun", "set -u\ncoproc cat >$UNSET1\necho \"rc=$?\"\n");
-    assert_eq!(out, "rc=1\n");
+    assert_eq!(out, "rc=0\n");
     assert_eq!(err, "probe.sh: line 2: UNSET1: unbound variable\n");
     assert_eq!(code, Some(0));
     assert!(
@@ -271,7 +272,7 @@ fn issue4099_coproc_nounset_reports_unbound() {
 fn issue4099_coproc_input_word_qmark_reports() {
     let (out, err, code, files, _) =
         run_script("cop_input", "coproc cat <${UNSET1:?qmsg}\necho \"rc=$?\"\n");
-    assert_eq!(out, "rc=1\n");
+    assert_eq!(out, "rc=0\n");
     assert_eq!(err, "probe.sh: line 1: UNSET1: qmsg\n");
     assert_eq!(code, Some(0));
     assert!(files.is_empty(), "no bogus `qmsg` target: {files:?}");
@@ -282,7 +283,7 @@ fn issue4099_coproc_badsub_reports_and_script_continues() {
     // Pre-fix the walk created `pre` and the script aborted.
     let (out, err, code, files, _) =
         run_script("cop_badsub", "coproc cat > pre${-x}\necho \"rc=$?\"\n");
-    assert_eq!(out, "rc=1\n");
+    assert_eq!(out, "rc=0\n");
     assert_eq!(err, "probe.sh: line 1: pre${-x}: bad substitution\n");
     assert_eq!(code, Some(0));
     assert!(files.is_empty(), "no bogus `pre` target: {files:?}");
