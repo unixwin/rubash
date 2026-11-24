@@ -6086,8 +6086,18 @@ pub(in crate::executor) enum CatParsed<'a> {
 /// GNU getopt_long over cat's argv: short clusters (-benstuvAET), long
 /// options with unambiguous-prefix matching, `--' terminator, `-'
 /// operand, and argv permutation (options after operands still parse).
-/// Words glued to redirection operators and redirect-target words stay
-/// out of the operand list, like the previous classifier kept them.
+/// `cmd.words` is pure argv: the parser has already separated every
+/// redirection into the node's redirect fields (execute_cmd.c builds
+/// the child's argv from the word list alone; redirections travel in
+/// their own list), so no word here is redirect syntax — a word that
+/// happens to spell a redirect target, or a quoted `>`/`<`, is a
+/// genuine operand. This parser therefore never re-derives
+/// redirections from word text. An earlier classifier did (dropping
+/// any word equal to a redirect target, and any word shaped like a
+/// redirect operator plus the word after it), which silently emptied
+/// the operand list of `cat out >> out`: the serve fell through to
+/// the no-operand stdin drain and blocked on fd 0 (rubash#4180), and
+/// `cat '>' f` lost both operands the same way.
 /// Shared owner: both the simple-command path (external_cat) and the
 /// inline pipeline stage arm parse through this one function
 /// (niubash#165 — a second, option-dropping parser there lost -n/-s/-E
@@ -6097,20 +6107,7 @@ pub(in crate::executor) fn parse_cat_argv(cmd: &CommandNode) -> CatParsed<'_> {
     let mut options = CatOptions::default();
     let mut operands: Vec<&String> = Vec::new();
     let mut options_done = false;
-    let redirect_targets = cat_redirect_targets(cmd);
-    let mut skip_next = false;
     for word in cmd.words.iter().skip(1) {
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
-        if is_cat_redirect_operator_word(word) {
-            skip_next = true;
-            continue;
-        }
-        if redirect_targets.iter().any(|target| *target == word) {
-            continue;
-        }
         if !options_done && word.starts_with("--") && word.len() > 2 {
             let name = &word[2..];
             // Exact match wins even when the name is also a prefix of a
@@ -6269,34 +6266,6 @@ fn cat_v_content(line: &[u8], options: &CatOptions) -> Vec<u8> {
     } else {
         line.to_vec()
     }
-}
-
-fn cat_redirect_targets(cmd: &CommandNode) -> Vec<&String> {
-    [
-        cmd.redirect_in.as_deref(),
-        cmd.redirect_out.as_deref(),
-        cmd.append.as_deref(),
-        cmd.redirect_err.as_deref(),
-        cmd.redirect_err_append.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .map(|redirect| &redirect.target)
-    .collect()
-}
-
-fn is_cat_redirect_operator_word(word: &str) -> bool {
-    matches!(
-        word,
-        "<" | ">" | ">|" | ">>" | "2>" | "2>|" | "2>>" | "&>" | "&>>"
-    ) || word.chars().next().is_some_and(|ch| ch.is_ascii_digit())
-        && matches!(
-            word.chars()
-                .skip_while(|ch| ch.is_ascii_digit())
-                .collect::<String>()
-                .as_str(),
-            "<" | ">" | ">|" | ">>"
-        )
 }
 
 impl Executor {
