@@ -1209,8 +1209,7 @@ impl GroupScanFeeder {
                 found_with_warning = true;
             } else if self.in_comsub
                 && comparable.starts_with(value.as_str())
-                && comparable[value.len()..]
-                    .replace(crate::executor::markers::IFS_GLUE, "")
+                && crate::executor::markers::strip_ifs_glue(&comparable[value.len()..])
                     .trim()
                     .is_empty()
             {
