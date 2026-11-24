@@ -1116,6 +1116,43 @@ impl GroupScanFeeder {
         self.heredoc_prefix_present
     }
 
+    /// GNU make_cmd.c:602-611: when the `)` closing the command
+    /// substitution sits on the heredoc delimiter line (e.g. `EOF)`),
+    /// the heredoc is "delimited by end-of-file" and a warning is
+    /// issued. Splice the reader's IFS_GLUE record byte before the
+    /// first `)` after the delimiter on the physical line just
+    /// appended so the substitution's plan can detect the case. The
+    /// search is scoped to that appended line: `rfind` on the whole
+    /// logical line could land on the pushed-back `)` itself (delim
+    /// `)`) or on a `)` from an earlier line. A mid-string rewrite
+    /// invalidates every positional scan cache. Returns whether the
+    /// buffer was rewritten.
+    fn mark_comsub_heredoc_delimiter_paren(
+        &mut self,
+        line: &str,
+        comparable: &str,
+        delimiter: &str,
+    ) -> bool {
+        let line_start = self.logical_line.len() - line.len();
+        let delim_end = line_start + (line.len() - comparable.len()) + delimiter.len();
+        let Some(rel_pos) = self.logical_line[delim_end..].find(')') else {
+            return false;
+        };
+        self.logical_line
+            .insert(delim_end + rel_pos, crate::executor::markers::IFS_GLUE);
+        // Mid-string rewrite: positional scan caches invalid.
+        self.brace_cache.clear();
+        self.param_open_cache = None;
+        self.boundary = None;
+        self.opener = None;
+        self.posix_scan.reset();
+        self.heredoc_scan_upto = 0;
+        self.heredoc_prefix_present = false;
+        self.rebuild_comsub_mirror();
+        self.group_clean = false;
+        true
+    }
+
     /// Feed one physical line (its raw text without the '\n'). The caller
     /// passes the byte length of the whole accumulated input AFTER this line
     /// was appended: the original loop derives `line_had_terminator` from
@@ -1530,30 +1567,9 @@ impl GroupScanFeeder {
                 };
                 if comparable.starts_with(front.delimiter.as_str())
                     && comparable[front.delimiter.len()..].contains(')')
+                    && self.mark_comsub_heredoc_delimiter_paren(line, comparable, &front.delimiter)
                 {
-                    // Insert \x1c before the first `)` after the delimiter
-                    // in the logical line. The search is scoped to the
-                    // physical line just appended: `rfind` on the whole
-                    // logical line could land on the pushed-back `)` itself
-                    // (delim `)`) or on a `)` from an earlier line.
-                    let line_start = self.logical_line.len() - line.len();
-                    let delim_end =
-                        line_start + (line.len() - comparable.len()) + front.delimiter.len();
-                    if let Some(rel_pos) = self.logical_line[delim_end..].find(')') {
-                        self.logical_line
-                            .insert(delim_end + rel_pos, crate::executor::markers::IFS_GLUE);
-                        // Mid-string rewrite: positional scan caches invalid.
-                        self.brace_cache.clear();
-                        self.param_open_cache = None;
-                        self.boundary = None;
-                        self.opener = None;
-                        self.posix_scan.reset();
-                        self.heredoc_scan_upto = 0;
-                        self.heredoc_prefix_present = false;
-                        self.rebuild_comsub_mirror();
-                        self.group_clean = false;
-                        comsub_state_changed = true;
-                    }
+                    comsub_state_changed = true;
                 }
             }
             self.comsub_heredocs.clear();
@@ -1566,10 +1582,21 @@ impl GroupScanFeeder {
             } else {
                 line
             };
-            if comparable == front.delimiter
-                || (comparable.starts_with(front.delimiter.as_str())
-                    && comparable[front.delimiter.len()..].contains(')'))
+            if comparable == front.delimiter {
+                self.comsub_heredocs.remove(0);
+            } else if comparable.starts_with(front.delimiter.as_str())
+                && comparable[front.delimiter.len()..].contains(')')
             {
+                // The delimiter line carries the `)` closing THIS
+                // substitution and then opens the next one (e.g.
+                // `E); w=$(cat <<E`): the record insert applies exactly
+                // as in the no-substitution-open arm above, or the
+                // earlier substitution's plan never sees the
+                // delimiter-line mark and its end-of-file warning is
+                // lost (rubash#4169).
+                if self.mark_comsub_heredoc_delimiter_paren(line, comparable, &front.delimiter) {
+                    comsub_state_changed = true;
+                }
                 self.comsub_heredocs.remove(0);
             }
         }
