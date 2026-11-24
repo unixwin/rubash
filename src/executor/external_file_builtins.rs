@@ -3012,6 +3012,11 @@ impl Executor {
             }
         }
         if cmd.redirect_in.is_none() && cmd.heredoc.is_none() && cmd.here_string.is_none() {
+            // rubash#4149: a live console stdin is collected through
+            // the canonical line discipline, like the streaming arms.
+            if self.console_line_discipline_armed() {
+                return self.disciplined_process_stdin_bytes().unwrap_or_default();
+            }
             let mut stdin = std::io::stdin().lock();
             let mut bytes = Vec::new();
             let _ = stdin.read_to_end(&mut bytes);
@@ -3070,6 +3075,12 @@ impl Executor {
         // recreates (truncates) it per call, so a per-8 KiB-chunk caller kept
         // only the last chunk (niubash#198).
         let mut sink = self.open_cat_output_sink(cmd)?;
+        // rubash#4149: a live console stdin streams through the
+        // canonical line discipline; every other source keeps the
+        // raw chunk copy below.
+        if self.console_line_discipline_armed() {
+            return self.stream_disciplined_cat_stdin(cmd, &mut sink);
+        }
         let mut stdin = std::io::stdin().lock();
         let mut buffer = [0_u8; 8192];
         loop {
@@ -3108,6 +3119,76 @@ impl Executor {
         }
         Ok(())
     }
+
+    /// rubash#4149: whether the inherited process stdin is a Windows
+    /// console in line-input mode — the one stdin source whose bytes
+    /// need the canonical line discipline (read_helpers::
+    /// ConsoleLineDiscipline). Pipes, files and Unix ttys already
+    /// deliver the GNU stream (a Unix kernel applies the discipline
+    /// itself), so their readers keep the raw copies below.
+    fn console_line_discipline_armed(&self) -> bool {
+        cfg!(windows)
+            && super::read_helpers::stdin_veof_armed(crate::fd::process_std_handle(0), false)
+    }
+
+    /// rubash#4149: collect the inherited process stdin through the
+    /// canonical line discipline (console source only; see
+    /// console_line_discipline_armed). Byte-wise reads like the read
+    /// transports (read_helpers::read_stdin_until), so an EOF verdict
+    /// stops the collection with the rest of the stream still queued
+    /// for the next reader.
+    fn disciplined_process_stdin_bytes(&mut self) -> Result<Vec<u8>, ExecuteError> {
+        let handle = crate::fd::process_std_handle(0);
+        let mut discipline = super::read_helpers::ConsoleLineDiscipline::new();
+        let mut out = Vec::new();
+        loop {
+            let buf = crate::fd::read_some(handle, 1).map_err(ExecuteError::IoError)?;
+            if buf.is_empty() {
+                discipline.finish(&mut out);
+                break;
+            }
+            if discipline.feed(buf[0], &mut out) {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    /// rubash#4149: stream the inherited process stdin through the
+    /// canonical line discipline into the cat output sink (console
+    /// source only), emitting each line/flush as it becomes
+    /// deliverable — GNU cat.c's byte-copy loop under a canonical
+    /// tty, where a VEOF flush reaches the child before any newline.
+    fn stream_disciplined_cat_stdin(
+        &mut self,
+        cmd: &CommandNode,
+        sink: &mut Option<File>,
+    ) -> Result<(), ExecuteError> {
+        let handle = crate::fd::process_std_handle(0);
+        let mut discipline = super::read_helpers::ConsoleLineDiscipline::new();
+        let mut out: Vec<u8> = Vec::new();
+        loop {
+            let buf = crate::fd::read_some(handle, 1).map_err(ExecuteError::IoError)?;
+            let verdict = if buf.is_empty() {
+                discipline.finish(&mut out);
+                true
+            } else {
+                discipline.feed(buf[0], &mut out)
+            };
+            if !out.is_empty() {
+                let chunk = std::mem::take(&mut out);
+                match sink.as_mut() {
+                    Some(file) => crate::fd::write_file_all(file, &chunk)?,
+                    None => self.write_cat_output(cmd, &chunk)?,
+                }
+            }
+            if verdict {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     fn stream_inherited_cat(
         &mut self,
         cmd: &CommandNode,
@@ -3120,6 +3201,14 @@ impl Executor {
             // across the whole stream, so a formatting invocation reads to
             // EOF first (GNU streams; the in-process emulation buffers —
             // bounded by the input, like every other emulated reader).
+            // rubash#4149: a live console stdin is collected through
+            // the canonical line discipline instead of raw.
+            if self.console_line_discipline_armed() {
+                let input = self.disciplined_process_stdin_bytes()?;
+                self.write_cat_output(cmd, &cat_format(&input, options))?;
+                self.exit_code = 0;
+                return Ok(true);
+            }
             let mut stdin = std::io::stdin().lock();
             let mut input = Vec::new();
             stdin.read_to_end(&mut input)?;
@@ -3128,6 +3217,14 @@ impl Executor {
             return Ok(true);
         }
         let mut sink = self.open_cat_output_sink(cmd)?;
+        // rubash#4149: a live console stdin streams through the
+        // canonical line discipline; every other source keeps the
+        // raw chunk copy below.
+        if self.console_line_discipline_armed() {
+            self.stream_disciplined_cat_stdin(cmd, &mut sink)?;
+            self.exit_code = 0;
+            return Ok(true);
+        }
         let mut stdin = std::io::stdin().lock();
         let mut buffer = [0_u8; 8192];
         loop {

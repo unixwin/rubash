@@ -1578,6 +1578,145 @@ pub(in crate::executor) fn stdin_veof_armed(
         && crate::fd::console_line_input_mode(stdin_handle)
 }
 
+/// The canonical line discipline's verdict for one received byte
+/// (rubash#4149): the VEOF byte (0x04, Ctrl-D) at an empty line buffer
+/// is the EOF — a zero-length read (lib/sh/zread.c:99 sees EOF;
+/// read.def:767 breaks with eof=1); with bytes buffered it flushes
+/// exactly those bytes to the reader with no EOF and no newline;
+/// every other byte is data. GNU gets all three from the kernel's
+/// canonical mode (termios VEOF); a Windows cooked console has no
+/// such discipline (see stdin_veof_armed), so the engine's transports
+/// apply the verdict themselves — the read transports (#684) and the
+/// foreground-child stdin discipline below share this one decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::executor) enum VeofVerdict {
+    /// Not the VEOF byte: ordinary data.
+    Data,
+    /// VEOF with a non-empty buffer: deliver the buffered bytes now,
+    /// no EOF, no newline appended.
+    Flush,
+    /// VEOF at an empty buffer: the read returns 0 (EOF).
+    Eof,
+}
+
+pub(in crate::executor) fn veof_verdict(byte: u8, buffer_empty: bool) -> VeofVerdict {
+    if byte != 0x04 {
+        return VeofVerdict::Data;
+    }
+    if buffer_empty {
+        VeofVerdict::Eof
+    } else {
+        VeofVerdict::Flush
+    }
+}
+
+/// The canonical line discipline for a foreground child's console
+/// stdin, as a byte-stream state machine (rubash#4149). GNU hands a
+/// foreground child the tty in canonical mode and the KERNEL applies
+/// the discipline: VEOF flush/EOF (see veof_verdict) and ICRNL (a CR,
+/// an LF, or a CRLF pair each terminate a line and arrive as one
+/// '\n'). A Windows cooked console applies neither — it assembles a
+/// line and hands its raw bytes, CRLF and 0x04 included, to whoever
+/// reads — so the engine's own stdin transports for foreground
+/// consumers (the emulated cat's inherited-stdin readers) run the
+/// stream through this machine when stdin_veof_armed holds. Bytes
+/// past an EOF verdict are never consumed: feed() reports the
+/// verdict and the caller stops reading, leaving the rest of the
+/// stream to the next reader exactly as the kernel discipline does.
+/// All other bytes — other C0 controls included — are the child's
+/// data and pass through untouched (this is a line discipline, not
+/// the shell reader's bridge normalization, #434).
+pub(in crate::executor) struct ConsoleLineDiscipline {
+    line: Vec<u8>,
+    pending_cr: bool,
+    eof: bool,
+}
+
+impl ConsoleLineDiscipline {
+    pub(in crate::executor) fn new() -> Self {
+        Self {
+            line: Vec::new(),
+            pending_cr: false,
+            eof: false,
+        }
+    }
+
+    /// Feed one byte; newly deliverable bytes are appended to `out`.
+    /// Returns true when the EOF verdict fired — the caller stops
+    /// reading at once.
+    pub(in crate::executor) fn feed(&mut self, byte: u8, out: &mut Vec<u8>) -> bool {
+        if self.eof {
+            return true;
+        }
+        if self.pending_cr {
+            self.pending_cr = false;
+            // The held CR terminated the buffered line (ICRNL: a CR
+            // arrives as NL). A following LF is the CRLF pair's
+            // second half and is swallowed; anything else is the
+            // next line's first byte and falls through.
+            out.append(&mut self.line);
+            out.push(b'\n');
+            if byte == b'\n' {
+                return false;
+            }
+        }
+        match veof_verdict(byte, self.line.is_empty()) {
+            VeofVerdict::Eof => {
+                self.eof = true;
+                true
+            }
+            VeofVerdict::Flush => {
+                out.append(&mut self.line);
+                false
+            }
+            VeofVerdict::Data => match byte {
+                b'\r' => {
+                    self.pending_cr = true;
+                    false
+                }
+                b'\n' => {
+                    out.append(&mut self.line);
+                    out.push(b'\n');
+                    false
+                }
+                _ => {
+                    self.line.push(byte);
+                    false
+                }
+            },
+        }
+    }
+
+    /// The source itself reached EOF: flush a buffered partial line
+    /// (and a held CR's line ending) into `out`.
+    pub(in crate::executor) fn finish(&mut self, out: &mut Vec<u8>) {
+        if self.pending_cr {
+            self.pending_cr = false;
+            out.append(&mut self.line);
+            out.push(b'\n');
+        } else {
+            out.append(&mut self.line);
+        }
+    }
+
+    /// Whole-buffer form for buffered consumers: the disciplined
+    /// bytes, truncated at an EOF verdict (the remainder belongs to
+    /// the next reader; a drain-style consumer cannot leave it
+    /// unread, which is that consumer's pre-existing model), plus
+    /// whether the verdict fired.
+    pub(in crate::executor) fn disciplined(input: &[u8]) -> (Vec<u8>, bool) {
+        let mut discipline = Self::new();
+        let mut out = Vec::new();
+        for &byte in input {
+            if discipline.feed(byte, &mut out) {
+                return (out, true);
+            }
+        }
+        discipline.finish(&mut out);
+        (out, false)
+    }
+}
+
 pub(in crate::executor) fn read_stdin_until(
     deadline: Option<std::time::Instant>,
     silent: bool,
@@ -1723,20 +1862,24 @@ pub(in crate::executor) fn read_stdin_until(
                     break;
                 }
                 buf => {
-                    // niubash#684: canonical-console VEOF — see
-                    // stdin_veof_armed. At an empty record the marker
+                    // niubash#684: canonical-console VEOF — the
+                    // shared verdict (veof_verdict, gated by
+                    // stdin_veof_armed). At an empty record the marker
                     // IS the EOF; do not count it as a read byte (the
                     // callers key EOF-with-nothing-served on the byte
                     // count, exactly like a zread that returned 0).
                     // Mid-record the marker only flushes the buffered
                     // prefix — already delivered byte-wise — so it is
                     // dropped and the record continues.
-                    if veof_armed && buf[0] == 0x04 {
-                        if output.is_empty() {
-                            eof = true;
-                            break;
+                    if veof_armed {
+                        match veof_verdict(buf[0], output.is_empty()) {
+                            VeofVerdict::Eof => {
+                                eof = true;
+                                break;
+                            }
+                            VeofVerdict::Flush => continue,
+                            VeofVerdict::Data => {}
                         }
-                        continue;
                     }
                     read += buf.len();
                     decoder.queue_byte(buf[0]);
@@ -2391,5 +2534,158 @@ impl Executor {
             }
         }
         status
+    }
+}
+
+#[cfg(test)]
+mod console_line_discipline_tests {
+    use super::{veof_verdict, ConsoleLineDiscipline, VeofVerdict};
+
+    /// Drive the discipline the way the streaming consumers do: feed
+    /// byte-wise, stop the moment the EOF verdict fires (unfed bytes
+    /// stay with the source), and call finish() only when the source
+    /// itself ended without a verdict. Returns (delivered bytes,
+    /// eof verdict fired, bytes consumed).
+    fn run(input: &[u8]) -> (Vec<u8>, bool, usize) {
+        let mut discipline = ConsoleLineDiscipline::new();
+        let mut out = Vec::new();
+        let mut consumed = 0usize;
+        let mut eof = false;
+        for &byte in input {
+            consumed += 1;
+            if discipline.feed(byte, &mut out) {
+                eof = true;
+                break;
+            }
+        }
+        if !eof {
+            discipline.finish(&mut out);
+        }
+        (out, eof, consumed)
+    }
+
+    #[test]
+    fn veof_verdict_table() {
+        assert_eq!(veof_verdict(0x04, true), VeofVerdict::Eof);
+        assert_eq!(veof_verdict(0x04, false), VeofVerdict::Flush);
+        assert_eq!(veof_verdict(b'x', true), VeofVerdict::Data);
+        assert_eq!(veof_verdict(b'x', false), VeofVerdict::Data);
+        assert_eq!(veof_verdict(b'\n', true), VeofVerdict::Data);
+    }
+
+    /// rubash#4149, reporter byte table: `abc` + Enter reaches the
+    /// child as `abc\n` (4 bytes) under GNU — the CRLF a cooked
+    /// console delivers is normalized by the discipline (ICRNL).
+    /// Niubash 1.5.1 delivered the raw 5 bytes.
+    #[test]
+    fn crlf_line_arrives_as_lf() {
+        let (out, eof, _) = run(b"abc\r\n");
+        assert_eq!(out, b"abc\n");
+        assert!(!eof);
+    }
+
+    /// rubash#4149 (the p.txt script): a line typed and submitted,
+    /// then ^D at an empty buffer + Enter — the ^D is the EOF, it
+    /// fires the moment the byte is fed (the rest of that cooked
+    /// line is never consumed), and the file keeps only the first
+    /// line's 4 disciplined bytes.
+    #[test]
+    fn empty_buffer_veof_is_eof_and_stops_the_stream() {
+        let (out, eof, consumed) = run(b"abc\r\n\x04\r\n");
+        assert_eq!(out, b"abc\n");
+        assert!(eof);
+        assert_eq!(consumed, 6, "only the ^D byte itself is consumed");
+    }
+
+    /// rubash#4149 (the q.txt script): three empty lines then ^D —
+    /// 3 bytes under GNU (one LF each), not the 6 raw CRLF bytes
+    /// 1.5.1 delivered.
+    #[test]
+    fn blank_lines_then_veof() {
+        let (out, eof, consumed) = run(b"\r\n\r\n\r\n\x04\r\n");
+        assert_eq!(out, b"\n\n\n");
+        assert!(eof);
+        assert_eq!(consumed, 7);
+    }
+
+    /// rubash#4149 (the r.txt script): `x` + ^D flushes `x` with no
+    /// newline and no EOF; the Enter after it completes an empty
+    /// line; a second empty line; a final ^D at an empty buffer is
+    /// the EOF. GNU total: `x\n\n`.
+    #[test]
+    fn midline_veof_flushes_without_newline_or_eof() {
+        let (out, eof, _) = run(b"x\x04\r\n\r\n\x04\r\n");
+        assert_eq!(out, b"x\n\n");
+        assert!(eof);
+    }
+
+    /// GNU table row `abc` + ^D + ^D: the first ^D flushes `abc`
+    /// (child still running), the second, at the now-empty buffer,
+    /// is the EOF.
+    #[test]
+    fn second_veof_after_flush_is_eof() {
+        let (out, eof, _) = run(b"abc\x04\x04");
+        assert_eq!(out, b"abc");
+        assert!(eof);
+    }
+
+    /// The original report's cut line: ^D at the head of a line
+    /// makes that read the EOF; the text after it on the same typed
+    /// line is NOT the child's data — it stays unread for the
+    /// shell's next read (here: never fed at all).
+    #[test]
+    fn veof_at_line_head_leaves_the_tail_unread() {
+        let (out, eof, consumed) = run(b"\x04echo hi\r\n");
+        assert_eq!(out, b"");
+        assert!(eof);
+        assert_eq!(consumed, 1);
+    }
+
+    /// A lone CR is a line ending too (ICRNL maps CR to NL): `a`,
+    /// Enter, `b`, Enter is two lines.
+    #[test]
+    fn lone_cr_terminates_a_line() {
+        let (out, eof, _) = run(b"a\rb\n");
+        assert_eq!(out, b"a\nb\n");
+        assert!(!eof);
+    }
+
+    /// A genuine source EOF flushes a partial line with no newline
+    /// appended.
+    #[test]
+    fn source_eof_flushes_partial_line() {
+        let (out, eof, _) = run(b"abc");
+        assert_eq!(out, b"abc");
+        assert!(!eof);
+    }
+
+    /// A genuine source EOF right after a CR still completes that
+    /// line (the CR was a line ending, not data).
+    #[test]
+    fn source_eof_after_cr_completes_the_line() {
+        let (out, eof, _) = run(b"abc\r");
+        assert_eq!(out, b"abc\n");
+        assert!(!eof);
+    }
+
+    /// The discipline is not the bridge normalization (#434): other
+    /// C0 bytes in a child's input are the child's data.
+    #[test]
+    fn other_control_bytes_are_data() {
+        let (out, eof, _) = run(b"a\x01b\n");
+        assert_eq!(out, b"a\x01b\n");
+        assert!(!eof);
+    }
+
+    /// The buffered form truncates at the EOF verdict: bytes after
+    /// it belong to the next reader, never to this consumer.
+    #[test]
+    fn disciplined_truncates_at_the_verdict() {
+        let (out, eof) = ConsoleLineDiscipline::disciplined(b"abc\r\n\x04\r\necho x\r\n");
+        assert_eq!(out, b"abc\n");
+        assert!(eof);
+        let (out, eof) = ConsoleLineDiscipline::disciplined(b"abc\r\n");
+        assert_eq!(out, b"abc\n");
+        assert!(!eof);
     }
 }

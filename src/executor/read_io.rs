@@ -2738,19 +2738,23 @@ impl Executor {
                     eof = true;
                     break;
                 }
-                // niubash#684: canonical-console VEOF — see
-                // read_helpers::stdin_veof_armed. At an empty record the
-                // 0x04 marker IS the EOF (and the verdict recording
-                // below treats it exactly like the zero-length read);
-                // mid-record it flushes the buffered prefix — already
-                // delivered byte-wise — so it is dropped and the record
-                // continues.
-                if veof_armed && buf[0] == 0x04 {
-                    if output.is_empty() {
-                        eof = true;
-                        break;
+                // niubash#684: canonical-console VEOF — the shared
+                // verdict (read_helpers::veof_verdict, gated by
+                // read_helpers::stdin_veof_armed). At an empty record
+                // the 0x04 marker IS the EOF (and the verdict
+                // recording below treats it exactly like the
+                // zero-length read); mid-record it flushes the
+                // buffered prefix — already delivered byte-wise — so
+                // it is dropped and the record continues.
+                if veof_armed {
+                    match super::read_helpers::veof_verdict(buf[0], output.is_empty()) {
+                        super::read_helpers::VeofVerdict::Eof => {
+                            eof = true;
+                            break;
+                        }
+                        super::read_helpers::VeofVerdict::Flush => continue,
+                        super::read_helpers::VeofVerdict::Data => {}
                     }
-                    continue;
                 }
                 decoder.queue_byte(buf[0]);
             }
