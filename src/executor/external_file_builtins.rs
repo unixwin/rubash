@@ -2723,6 +2723,25 @@ impl Executor {
                     }
                     continue;
                 }
+                // rubash#4175: GNU cat.c — an operand naming the file
+                // fd 1 writes to is refused, never served. This bites
+                // hardest under an exec-persisted stdout: the serve
+                // below reads the whole file and the finish emit
+                // writes it back onto itself (the file doubles), where
+                // a spawned cat fstats its inherited fd 1 and reports
+                // the collision. The /dev/fd face above judges by
+                // binding; plain operands judge by filesystem
+                // identity (cat_operand_is_output_file). Bare, like
+                // every cat diagnostic (rubash#1596).
+                if self.cat_operand_is_output_file(cmd, &win) {
+                    writeln!(
+                        &mut diagnostics,
+                        "{prog}: {}: input file is output file",
+                        target
+                    )?;
+                    status = 1;
+                    continue;
+                }
                 // `<(cmd)` carrier path: the word names a draining stream —
                 // serve the shared remainder (subst.c:7143).
                 // rubash#3198: the plain read goes through the cwd
