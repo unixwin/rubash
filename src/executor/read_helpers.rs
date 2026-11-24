@@ -1715,6 +1715,25 @@ impl ConsoleLineDiscipline {
         discipline.finish(&mut out);
         (out, false)
     }
+
+    /// Text form of the whole-buffer transform, for the drain-style
+    /// inherited-stdin consumer (read_inherited_process_stdin_to_string,
+    /// rubash#4172): that consumer drains the console text first and
+    /// consumes it whole, so the verdicts are computed over the
+    /// drained text — truncated at an EOF verdict, the remainder
+    /// dropped (the drain already took it; it cannot be left unread,
+    /// which is that consumer's pre-existing model). The transform
+    /// only drops or rewrites bytes below 0x80 (the VEOF byte, CR,
+    /// LF) and truncates at the VEOF byte itself, so a multi-byte
+    /// UTF-8 sequence (all bytes >= 0x80) is never split: valid UTF-8
+    /// in, valid UTF-8 out.
+    pub(in crate::executor) fn disciplined_text(input: &str) -> String {
+        let (bytes, _eof) = Self::disciplined(input.as_bytes());
+        // Cannot fail by the invariant above (the transform never
+        // splits a multi-byte sequence); fall back to empty rather
+        // than lossy replacement bytes, which would invent data.
+        String::from_utf8(bytes).unwrap_or_default()
+    }
 }
 
 pub(in crate::executor) fn read_stdin_until(
@@ -2687,5 +2706,41 @@ mod console_line_discipline_tests {
         let (out, eof) = ConsoleLineDiscipline::disciplined(b"abc\r\n");
         assert_eq!(out, b"abc\n");
         assert!(!eof);
+    }
+
+    /// rubash#4172: the drain consumer's text form runs the same
+    /// verdicts over the drained text. The byte table mirrors the
+    /// streaming table above (the reporter's p/q/r rows on #4149),
+    /// at the text layer the drain serves.
+    #[test]
+    fn disciplined_text_byte_table() {
+        let text = ConsoleLineDiscipline::disciplined_text;
+        // ICRNL: a CRLF line arrives as one LF-terminated line.
+        assert_eq!(text("abc\r\n"), "abc\n");
+        // A line-start VEOF truncates the served text at the verdict;
+        // the drained tail past it is dropped (a drain cannot leave
+        // it unread — the consumer's pre-existing model).
+        assert_eq!(text("abc\r\n\x04\r\necho x\r\n"), "abc\n");
+        // An immediate VEOF serves empty text: the consumer was
+        // served an instant EOF.
+        assert_eq!(text("\x04"), "");
+        assert_eq!(text("\x04abc\r\n"), "");
+        // Mid-line VEOF flushes the buffered bytes, no EOF, no
+        // newline; the following lines continue (reporter r row).
+        assert_eq!(text("x\x04\r\n\r\n\x04\r\n"), "x\n\n");
+        // abc + ^D + ^D: flush, then EOF at the emptied buffer.
+        assert_eq!(text("abc\x04\x04"), "abc");
+        // Three blank lines then VEOF: one LF each, not raw CRLF.
+        assert_eq!(text("\r\n\r\n\r\n\x04\r\n"), "\n\n\n");
+        // Source EOF flushes a partial line; a trailing CR still
+        // completes its line.
+        assert_eq!(text("abc"), "abc");
+        assert_eq!(text("abc\r"), "abc\n");
+        // A lone CR is a line ending too (ICRNL).
+        assert_eq!(text("a\rb\n"), "a\nb\n");
+        // Other C0 bytes are the consumer's data, untouched.
+        assert_eq!(text("a\x01b\n"), "a\x01b\n");
+        // Multi-byte UTF-8 is never split by the transform.
+        assert_eq!(text("héllo\r\n"), "héllo\n");
     }
 }

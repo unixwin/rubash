@@ -3125,8 +3125,11 @@ impl Executor {
     /// need the canonical line discipline (read_helpers::
     /// ConsoleLineDiscipline). Pipes, files and Unix ttys already
     /// deliver the GNU stream (a Unix kernel applies the discipline
-    /// itself), so their readers keep the raw copies below.
-    fn console_line_discipline_armed(&self) -> bool {
+    /// itself), so their readers keep the raw copies below. The one
+    /// armed gate for every inherited-stdin consumer — the streaming
+    /// and buffered cat readers here, and the drain-style text
+    /// consumer (read_inherited_process_stdin_to_string, rubash#4172).
+    pub(in crate::executor) fn console_line_discipline_armed(&self) -> bool {
         cfg!(windows)
             && super::read_helpers::stdin_veof_armed(crate::fd::process_std_handle(0), false)
     }
