@@ -2219,6 +2219,39 @@ impl Executor {
         // a fresh inheritable handle (the shared slot handle's inherit flag
         // is never touched, so concurrent spawns cannot race) and the child
         // learns the fd->handle binding through __RUBASH_FD_* env keys.
+        //
+        // rubash#4185: the deliveries below are the respawned child's
+        // fd-table snapshot, and GNU's forked child is born with NO
+        // coproc endpoints — coproc_closeall runs at every fork site
+        // (execute_cmd.c:1714 execute_in_subshell, :4229 the
+        // null-command fork, :4575 the simple-command fork), whatever
+        // the payload shape. Run the #4181 severance
+        // (FdTable::close_coproc_endpoints_for_subshell) over a clone
+        // of the live table and let it decide what the snapshot
+        // carries: a coproc arm the snapshot dropped is not delivered,
+        // so the child's slot stays closed and a redirect naming it
+        // there fails EBADF, as in GNU. Deliveries still take their
+        // handles from the LIVE entry (handle identity and cross-slot
+        // description sharing are the live table's facts), nothing is
+        // retired, and no shared handle is closed — the parent's own
+        // endpoints are untouched, so its coproc sees no false EOF.
+        let child_fd_snapshot = {
+            let mut snapshot = self.fd_table.clone();
+            snapshot.close_coproc_endpoints_for_subshell();
+            snapshot
+        };
+        let snapshot_carries_read = |fd: &u32| {
+            child_fd_snapshot
+                .entries
+                .get(fd)
+                .map_or(false, |entry| entry.read.is_some())
+        };
+        let snapshot_carries_write = |fd: &u32| {
+            child_fd_snapshot
+                .entries
+                .get(fd)
+                .map_or(false, |entry| entry.write.is_some())
+        };
         let mut extra_handles: Vec<crate::fd::HANDLE> = Vec::new();
         let mut fd_shared_dups: HashMap<usize, crate::fd::HANDLE> = HashMap::new();
         for (fd, entry) in &self.fd_table.entries {
@@ -2238,10 +2271,12 @@ impl Executor {
                     f.path.to_string_lossy().into_owned(),
                     Rc::as_ptr(f) as usize,
                 )),
-                Some(FdReadEndpoint::CoprocStdout { fd, .. }) => Some((
-                    fd.handle,
-                    fd.path.to_string_lossy().into_owned(),
-                    Rc::as_ptr(fd) as usize,
+                Some(FdReadEndpoint::CoprocStdout {
+                    fd: coproc_file, ..
+                }) if snapshot_carries_read(fd) => Some((
+                    coproc_file.handle,
+                    coproc_file.path.to_string_lossy().into_owned(),
+                    Rc::as_ptr(coproc_file) as usize,
                 )),
                 Some(endpoint) => endpoint.standard_backing().and_then(|(handle, label)| {
                     // A Windows GUI parent has no standard handle
@@ -2277,10 +2312,12 @@ impl Executor {
                     f.path.to_string_lossy().into_owned(),
                     Rc::as_ptr(f) as usize,
                 )),
-                Some(FdWriteEndpoint::CoprocStdin { fd, .. }) => Some((
-                    fd.handle,
-                    fd.path.to_string_lossy().into_owned(),
-                    Rc::as_ptr(fd) as usize,
+                Some(FdWriteEndpoint::CoprocStdin {
+                    fd: coproc_file, ..
+                }) if snapshot_carries_write(fd) => Some((
+                    coproc_file.handle,
+                    coproc_file.path.to_string_lossy().into_owned(),
+                    Rc::as_ptr(coproc_file) as usize,
                 )),
                 Some(endpoint) => endpoint.standard_backing().and_then(|(handle, label)| {
                     #[cfg(windows)]
