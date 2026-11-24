@@ -2669,6 +2669,39 @@ impl FdTable {
         self.retire_write_arm(fd, outgoing_write);
     }
 
+    /// rubash#4181: GNU execute_cmd.c:1713-1715 (execute_in_subshell)
+    /// runs coproc_closeall in the forked child — a subshell never
+    /// inherits the parent's coproc endpoints, live or dead, so a
+    /// redirect naming one inside `( )` fails EBADF while the
+    /// parent's own endpoints stay untouched. The in-place subshell
+    /// region runs on this live table after the parent's saved_table
+    /// snapshot (whose duplicated descriptors insulate the parent),
+    /// so the child's view is severed by dropping the coproc arms
+    /// WITHOUT retiring them: the retire path closes the shared
+    /// descriptor, and GNU's child-side close releases only the
+    /// child's inherited copy — the coproc sees no EOF the parent
+    /// does not hold open itself through the snapshot's duplicate.
+    pub(crate) fn close_coproc_endpoints_for_subshell(&mut self) {
+        let fds: Vec<u32> = self.entries.keys().copied().collect();
+        for fd in fds {
+            let has_coproc_arm = self.entries.get(&fd).map_or(false, |entry| {
+                matches!(entry.read, Some(FdReadEndpoint::CoprocStdout { .. }))
+                    || matches!(entry.write, Some(FdWriteEndpoint::CoprocStdin { .. }))
+            });
+            if !has_coproc_arm {
+                continue;
+            }
+            let entry = self.entry_mut(fd, false);
+            if matches!(entry.read, Some(FdReadEndpoint::CoprocStdout { .. })) {
+                entry.read = None;
+            }
+            if matches!(entry.write, Some(FdWriteEndpoint::CoprocStdin { .. })) {
+                entry.write = None;
+            }
+            entry.closed = entry.read.is_none() && entry.write.is_none();
+        }
+    }
+
     pub(crate) fn is_open_for_read(&self, fd: u32) -> bool {
         self.entries
             .get(&fd)

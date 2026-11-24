@@ -4764,6 +4764,12 @@ impl Executor {
         // entries still alias the same open file description — reads in the
         // subshell advance the shared offset, matching fork().
         let saved_fd_table = self.fd_table.saved_table();
+        // rubash#4181: GNU execute_cmd.c:1713-1715 — the forked child
+        // closes every coproc endpoint (coproc_closeall) before its
+        // own redirects bind, so the region's live table drops them
+        // here; the saved table above restores the parent's endpoints
+        // at the boundary.
+        self.fd_table.close_coproc_endpoints_for_subshell();
         let saved_depth = self.shell_state.subshell_depth.get();
         // GNU execute_cmd.c runs `( list )` via execute_in_subshell ->
         // make_child: the forked child owns its own cwd, so a `cd` in the
@@ -5176,6 +5182,15 @@ impl Executor {
         self.command_expansion_failed.set(saved_expansion_failed);
         self.exec_replaced = saved_exec_replaced;
         self.exit_trap_ran.set(saved_exit_trap_ran);
+        // rubash#4181: the parent WAITS for the forked subshell child
+        // (execute_cmd.c execute_in_subshell -> wait_for), and that
+        // wait is a coproc disposal point (the notify_and_cleanup
+        // inside wait_for, jobs.c:3494 -> coproc_reap) — a coproc
+        // death recorded before the `( )` is retired before the next
+        // command expands. The in-place region performs no real wait,
+        // so record the emulated one, like the other whole-command
+        // emulations (see note_emulated_foreground_wait).
+        self.note_emulated_foreground_wait();
         // rubash#1461: this layer died by a signal (see the trap skip in
         // the body closure above) — queue the parent-side death notice
         // with the layer's fake BASHPID, like a reaped job's (jobs.c:4625
