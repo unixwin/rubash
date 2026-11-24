@@ -2886,6 +2886,23 @@ impl Executor {
         if output.is_empty() {
             return None;
         }
+        // rubash#4172: a live console stdin is served through the
+        // canonical line discipline, like the streaming foreground
+        // readers (#4149) — GNU hands every tty consumer the kernel-
+        // disciplined stream (VEOF verdicts + ICRNL), so the drained
+        // text gets the same verdicts computed over it via the
+        // whole-buffer form. This consumer's model is drain-first,
+        // so a line-start VEOF truncates the served text at the
+        // verdict but cannot stop the drain or leave the tail
+        // unread; a transform that empties the text still serves
+        // Some("") — the consumer was served an instant EOF (GNU sed
+        // prints nothing and exits 0; GNU mapfile yields an empty
+        // array), where None would re-enter the fallback cascade.
+        // Unarmed sources (pipes, files, Unix ttys) keep the raw
+        // drain byte-for-byte.
+        if self.console_line_discipline_armed() {
+            output = super::read_helpers::ConsoleLineDiscipline::disciplined_text(&output);
+        }
         Some(output)
     }
 }
