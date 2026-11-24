@@ -7003,7 +7003,7 @@ impl Executor {
                 if expanded.starts_with(STORAGE_WORD_PREFIX)
                     || expanded.starts_with(crate::executor::markers::QUOTED_WORD_PREFIX)
                 {
-                    out.push(expanded.replace(crate::executor::markers::CTLESC, ""));
+                    out.push(unguard_pipeline_operand(&expanded));
                     continue;
                 }
                 // Quoted words (e.g. "*.txt") must not be glob-expanded.
@@ -7011,7 +7011,7 @@ impl Executor {
                 if crate::executor::command_prepare::raw_word_suppresses_pathname_expansion(
                     raw, metadata,
                 ) {
-                    out.push(expanded.replace(crate::executor::markers::CTLESC, ""));
+                    out.push(unguard_pipeline_operand(&expanded));
                     continue;
                 }
                 match glob::pathname_expand_word(
@@ -7021,7 +7021,7 @@ impl Executor {
                 ) {
                     glob::PathnameExpansion::Matches(matches) => out.extend(matches),
                     glob::PathnameExpansion::NoMatch => {
-                        out.push(expanded.replace(crate::executor::markers::CTLESC, ""))
+                        out.push(unguard_pipeline_operand(&expanded))
                     }
                     // rubash#1540: failglob in a pipeline element was
                     // silently degraded to the literal word (no
@@ -7038,7 +7038,7 @@ impl Executor {
                         if !self.evalerror_failglob_pending.replace(true) {
                             self.report_failglob(&pattern);
                         }
-                        out.push(expanded.replace(crate::executor::markers::CTLESC, ""))
+                        out.push(unguard_pipeline_operand(&expanded))
                     }
                 }
             }
@@ -8824,7 +8824,7 @@ impl Executor {
                     if value.starts_with(STORAGE_WORD_PREFIX)
                         || value.starts_with(crate::executor::markers::QUOTED_WORD_PREFIX)
                     {
-                        file_operands.push(value.replace(crate::executor::markers::CTLESC, ""));
+                        file_operands.push(unguard_pipeline_operand(&value));
                         continue;
                     }
                     // Quoted words (e.g. "*.txt") must not be glob-expanded.
@@ -8838,7 +8838,7 @@ impl Executor {
                     if crate::executor::command_prepare::raw_word_suppresses_pathname_expansion(
                         raw, metadata,
                     ) {
-                        file_operands.push(value.replace(crate::executor::markers::CTLESC, ""));
+                        file_operands.push(unguard_pipeline_operand(&value));
                         continue;
                     }
                     match glob::pathname_expand_word(
@@ -8848,7 +8848,7 @@ impl Executor {
                     ) {
                         glob::PathnameExpansion::Matches(matches) => file_operands.extend(matches),
                         glob::PathnameExpansion::NoMatch | glob::PathnameExpansion::Fail(_) => {
-                            file_operands.push(value.replace(crate::executor::markers::CTLESC, ""))
+                            file_operands.push(unguard_pipeline_operand(&value))
                         }
                     }
                 }
@@ -10916,4 +10916,17 @@ impl Drop for SpeculativeExpansionGuard {
     fn drop(&mut self) {
         SPECULATIVE_EXPANSION.with(|flag| flag.set(self.0));
     }
+}
+
+/// Argv boundary for an operand the in-process pipeline stage arms
+/// expand themselves: CTLESC quoting pairs are dropped and the
+/// ANSI_C_IFS_GUARD split-transport (the carrier an escaped blank such as
+/// `a\ b` lexes to) is stripped, the same contract
+/// command_prepare::materialize_expanded_command_word applies to a
+/// simple command's argv. Without the strip the guard reached the file
+/// open as part of the name (`cat a\ b | wc -l`).
+fn unguard_pipeline_operand(value: &str) -> String {
+    crate::executor::markers::strip_ansi_c_ifs_guard(
+        &value.replace(crate::executor::markers::CTLESC, ""),
+    )
 }
