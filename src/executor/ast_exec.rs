@@ -664,6 +664,13 @@ impl Executor {
                         // wait_for) — the forkless region closes here, so the
                         // wait-side fire belongs at every close path.
                         self.close_flat_region_err_adjudication(commands, index)?;
+                        // rubash#4181: the parent's wait for the forked
+                        // child is a coproc disposal point (jobs.c:3494
+                        // notify_and_cleanup -> coproc_reap); the
+                        // forkless region performs no real wait, so
+                        // record the emulated one (see the node-form
+                        // entry in compound_exec.rs).
+                        self.note_emulated_foreground_wait();
                     }
                 }
             };
@@ -701,6 +708,12 @@ impl Executor {
                     // adjudication — GNU's :769 run_error_trap precedes the
                     // :777 ERREXIT jump (execute_cmd.c:769-795).
                     self.close_flat_region_err_adjudication(commands, index)?;
+                    // rubash#4181: the parent's wait for the forked
+                    // child is a coproc disposal point (jobs.c:3494
+                    // notify_and_cleanup -> coproc_reap); the forkless
+                    // region performs no real wait, so record the
+                    // emulated one (see close_subshell_region_if_ended).
+                    self.note_emulated_foreground_wait();
                 }
                 // The dead subshell's status is a failing command status in
                 // the parent: under `set -e` it exits the script unless the
@@ -1489,6 +1502,12 @@ impl Executor {
                 }
                 subshell_state = Some(self.shell_state.clone_for_child_save());
                 subshell_fd_table = Some(self.fd_table.saved_table());
+                // rubash#4181: GNU execute_cmd.c:1713-1715 — the forked
+                // child closes every coproc endpoint (coproc_closeall),
+                // so the region's live table drops them here; the saved
+                // table above restores the parent's at the boundary.
+                // Same step as the node-form entry in compound_exec.rs.
+                self.fd_table.close_coproc_endpoints_for_subshell();
                 subshell_timed_stdin = Some(self.timed_stdin.clone());
                 // rubash#2851: bank the enclosing loop depth across
                 // the boundary (see the field doc on ShellState): the
