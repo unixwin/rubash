@@ -1646,6 +1646,15 @@ impl Executor {
             .and_then(|rest| rest.strip_suffix(')'))
         {
             if command_substitution_spans_whole_word(word) {
+                // rubash#4190: the word is exactly this one substitution
+                // — occurrence ordinal 0 at offset 0 of the site frame
+                // (no frame outside command-word expansion; the mark
+                // then never resolves).
+                self.comsub_site_mark
+                    .set(Some(crate::executor::ComsubSiteMark {
+                        ordinal: 0,
+                        line_offset: 0,
+                    }));
                 return Some(self.expand_command_substitution(source));
             }
         }

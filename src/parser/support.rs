@@ -278,6 +278,11 @@ pub(super) fn push_command_word(cmd: &mut CommandNode, token: &Token) {
     }
     if token.value == "time" {}
     cmd.words.push(token.value.clone());
+    // rubash#4190: stamp the word's physical start line beside the word
+    // (Token::position, the start counterpart of the #3028 end-line
+    // stamp) — the executor's comsub site frame reads it as the
+    // element line for per-occurrence warning attribution.
+    cmd.word_start_lines.push(token.position);
     cmd.word_kinds.push(token.kind.clone());
 }
 

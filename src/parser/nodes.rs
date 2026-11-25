@@ -1140,6 +1140,18 @@ pub enum CoprocBodyKind {
 pub struct CommandNode {
     /// The command words (first is the command name)
     pub words: Vec<String>,
+    /// rubash#4190: the PHYSICAL start line of each word token,
+    /// index-aligned with `words` when populated by the parser's word
+    /// intake (`push_command_word` stamps `Token::position`, the start
+    /// counterpart of the #3028 end-line stamp). A word's text cannot
+    /// recover this: backslash-newline continuations BETWEEN words are
+    /// elided by the lexer and live in no word's text, so a comsub in a
+    /// later word of a continued command has no text-derived line. The
+    /// executor's comsub site frame consumes it (the heredoc warning's
+    /// per-occurrence header line); consumers must treat a length
+    /// mismatch with `words` (synthetic or re-assembled nodes) as
+    /// "unstamped" and fall back, never index blindly.
+    pub word_start_lines: Vec<usize>,
     pub word_metadata: Vec<WordMetadata>,
     /// Lexer kind for each command word, used for quote-sensitive expansion
     /// decisions while the parser still stores words as strings.
@@ -1398,6 +1410,7 @@ impl CommandNode {
     pub fn new() -> Self {
         Self {
             words: Vec::new(),
+            word_start_lines: Vec::new(),
             word_metadata: Vec::new(),
             word_kinds: Vec::new(),
             time_head_plain_word: false,

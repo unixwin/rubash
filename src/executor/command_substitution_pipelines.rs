@@ -473,7 +473,35 @@ impl Executor {
     /// delimited one). Once-ness across the two entries is the
     /// `last_heredoc_warning_source` dedup's contract, not an entry
     /// split.
-    fn heredoc_comsub_plan(&self, source: &str) -> Option<HeredocComsubPlan> {
+    /// rubash#4190: take the mark a comsub dispatch site set for the
+    /// funnel call in flight and resolve it against the current site
+    /// frame. A site exists only when both halves are present and the
+    /// frame belongs to the current dispatch generation — a frame a
+    /// cloned child executor inherited is stale by construction. The
+    /// heredoc entries are the only consumers: every route to the plan
+    /// passes one of them, and a dispatch whose mark was already taken
+    /// by an earlier face of the same funnel episode has either
+    /// produced (no second plan follows) or declined into the decline
+    /// memo (which skips the readback re-plan), so a taken mark never
+    /// strands a later plan of the same occurrence.
+    fn take_comsub_site(&self) -> Option<crate::executor::ComsubSite> {
+        let mark = self.comsub_site_mark.take()?;
+        let frame = self.comsub_site_frame.get()?;
+        if frame.generation != self.preopened_generation.get() {
+            return None;
+        }
+        Some(crate::executor::ComsubSite {
+            slot: frame.slot,
+            ordinal: mark.ordinal,
+            header_line: frame.line + mark.line_offset,
+        })
+    }
+
+    fn heredoc_comsub_plan(
+        &self,
+        source: &str,
+        site: Option<crate::executor::ComsubSite>,
+    ) -> Option<HeredocComsubPlan> {
         if !source.contains("<<") {
             return None;
         }
@@ -578,14 +606,21 @@ impl Executor {
         // parse (parse_comsub yyparse + gather_here_documents), so seed the
         // body numbering from the command's START line, not the
         // execution-time line_number (rubash#201: comsub-eof0.sub).
-        let comsub_start_line = self
-            .shell_state
-            .env_vars
-            .get("__RUBASH_CMD_START_LINE")
-            .or_else(|| self.shell_state.env_vars.get("__RUBASH_CURRENT_LINE"))
-            .and_then(|line| line.parse::<usize>().ok())
-            .unwrap_or(1)
-            + self.comsub_leading_newlines.get();
+        // rubash#4190: with a resolved occurrence site, the seed is the
+        // occurrence's own header line instead — every comsub of one
+        // command used to inherit the command's first line, so a
+        // substitution on a later physical line (a later word, a
+        // continuation) reported the first occurrence's lines.
+        let comsub_start_line = match site {
+            Some(site) => site.header_line,
+            None => self
+                .shell_state
+                .env_vars
+                .get("__RUBASH_CMD_START_LINE")
+                .or_else(|| self.shell_state.env_vars.get("__RUBASH_CURRENT_LINE"))
+                .and_then(|line| line.parse::<usize>().ok())
+                .unwrap_or(1),
+        } + self.comsub_leading_newlines.get();
         let tokens = crate::lexer::tokenize_comsub_body_marked(
             &source,
             self.posix_mode_enabled(),
@@ -716,15 +751,37 @@ impl Executor {
             // textually identical still warns: GNU make_cmd.c:627
             // make_here_document warns per heredoc occurrence per parse,
             // with no cross-command dedup (rubash#4140).
+            //
+            // rubash#4190: with a resolved occurrence site, the dedup
+            // keys on the occurrence identity (slot, ordinal) instead of
+            // the source text — two DISTINCT occurrences in one dispatch
+            // whose sources are textually identical are different sites
+            // and both warn, while the same occurrence's two entry faces
+            // mint the same identity and warn once. The legacy
+            // (source, generation) record is still written on a marked
+            // emission, so an unmarked re-plan of the same source inside
+            // this dispatch (a face whose dispatch site minted no mark)
+            // stays suppressed by the legacy check below.
             let generation = self.preopened_generation.get();
-            let should_emit = self
-                .last_heredoc_warning_source
-                .borrow()
-                .as_ref()
-                .map(|(last, last_generation)| {
-                    *last_generation != generation || last.as_str() != source.as_str()
-                })
-                .unwrap_or(true);
+            let should_emit = match site {
+                Some(site) => {
+                    if self.heredoc_warning_sites_generation.get() != generation {
+                        self.heredoc_warning_sites.borrow_mut().clear();
+                        self.heredoc_warning_sites_generation.set(generation);
+                    }
+                    self.heredoc_warning_sites
+                        .borrow_mut()
+                        .insert((site.slot, site.ordinal))
+                }
+                None => self
+                    .last_heredoc_warning_source
+                    .borrow()
+                    .as_ref()
+                    .map(|(last, last_generation)| {
+                        *last_generation != generation || last.as_str() != source.as_str()
+                    })
+                    .unwrap_or(true),
+            };
             if should_emit {
                 *self.last_heredoc_warning_source.borrow_mut() =
                     Some((source.to_string(), generation));
@@ -749,7 +806,8 @@ impl Executor {
     }
 
     fn heredoc_comsub_typed_output(&mut self, source: &str) -> Option<String> {
-        let plan = self.heredoc_comsub_plan(source);
+        let site = self.take_comsub_site();
+        let plan = self.heredoc_comsub_plan(source, site);
         let result = match &plan {
             // rubash#2681: this shortcut produces a command
             // substitution's captured output without running the real
@@ -785,6 +843,10 @@ impl Executor {
         &self,
         source: &str,
     ) -> Option<String> {
+        // rubash#4190: take the occurrence mark before the memo check —
+        // a memo hit returns without planning, and a mark left set
+        // would leak into a later plan of the same element expansion.
+        let site = self.take_comsub_site();
         {
             let mut memo = self.heredoc_admission_declined_source.borrow_mut();
             if memo.as_deref() == Some(heredoc_admission_memo_key(source).as_str()) {
@@ -796,7 +858,7 @@ impl Executor {
             // An unrelated heredoc attempt ends the recorded episode.
             *memo = None;
         }
-        let Some(plan) = self.heredoc_comsub_plan(source) else {
+        let Some(plan) = self.heredoc_comsub_plan(source, site) else {
             *self.heredoc_admission_declined_source.borrow_mut() =
                 Some(heredoc_admission_memo_key(source));
             return None;
