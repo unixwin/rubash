@@ -2556,6 +2556,20 @@ pub(crate) fn scan_line_for_comsub_heredoc_headers(
             '<' if !single
                 && !double
                 && bytes.get(index + 1) == Some(&b'<')
+                && bytes.get(index + 2) == Some(&b'<') =>
+            {
+                // `<<<` is the here-string operator, a single token:
+                // skip all three bytes. Stepping over only the first
+                // `<` lets the remaining `<<` be misread as a heredoc
+                // header whose delimiter is the here-string word,
+                // which queues a bogus header ahead of the real one
+                // and costs the real heredoc its delimiter-line mark
+                // (and its end-of-file warning) — rubash#4193.
+                index += 3;
+            }
+            '<' if !single
+                && !double
+                && bytes.get(index + 1) == Some(&b'<')
                 && bytes.get(index + 2) != Some(&b'<') =>
             {
                 index += 2;
