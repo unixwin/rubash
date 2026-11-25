@@ -5966,6 +5966,69 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ntfs_colon_mapping_encodes_every_component() {
+        // rubash#4188: the funnel encodes ':' in EVERY component, not
+        // only the final one — the build side (the named-mkdir chain)
+        // and the MSYS contract both encode per component, so a
+        // lookup that stops at the final component cannot reach a
+        // directory the shell itself created (`mkdir -p x:y/z` then
+        // `[ -d x:y/z ]` missed). The mapping fn is platform-free
+        // text handling, so these pins run on every host; the
+        // windows-only call site gates their effect.
+        let enc = |s: &str| map_ntfs_colon_final_component(PathBuf::from(s));
+        // Non-final components (the #4188 shapes).
+        assert_eq!(enc(r"x:y\z"), PathBuf::from("x\u{F03A}y\\z"));
+        assert_eq!(enc("x:y/z"), PathBuf::from("x\u{F03A}y/z"));
+        assert_eq!(
+            enc(r"a:b\c:d\e:f"),
+            PathBuf::from("a\u{F03A}b\\c\u{F03A}d\\e\u{F03A}f")
+        );
+        // Final-component shapes keep the #359 behavior.
+        assert_eq!(enc("a:b.log"), PathBuf::from("a\u{F03A}b.log"));
+        assert_eq!(
+            enc("2026-09-30 14:48:26 UTC.log"),
+            PathBuf::from("2026-09-30 14\u{F03A}48\u{F03A}26 UTC.log")
+        );
+        // The leading drive designator is exempt in its absolute
+        // form only; the rest of the path still encodes.
+        assert_eq!(enc(r"C:\x:y"), PathBuf::from("C:\\x\u{F03A}y"));
+        assert_eq!(
+            enc("C:/x:y/z:w"),
+            PathBuf::from("C:/x\u{F03A}y/z\u{F03A}w")
+        );
+        assert_eq!(enc("C:\\"), PathBuf::from("C:\\"));
+        assert_eq!(enc(r"D:\plain\path"), PathBuf::from(r"D:\plain\path"));
+        // A bare `C:` is a RELATIVE colon name (the #4150 control:
+        // Git Bash creates the encoded name in the cwd), and a
+        // drive-relative `C:foo` is an ordinary colon component —
+        // neither is the absolute designator.
+        assert_eq!(enc("C:"), PathBuf::from("C\u{F03A}"));
+        assert_eq!(enc("C:foo"), PathBuf::from("C\u{F03A}foo"));
+        // A designator-shaped component mid-path is not the path's
+        // drive: it encodes like any other component (the doubled
+        // drive text stays anchored under its first drive — only
+        // the invalid component takes the encoded spelling).
+        assert_eq!(
+            enc(r"Z:\nope\D:\repo\x"),
+            PathBuf::from("Z:\\nope\\D\u{F03A}\\repo\\x")
+        );
+        // UNC: server/share carry no colon; components encode.
+        assert_eq!(
+            enc(r"\\srv\share\a:b\c"),
+            PathBuf::from("\\\\srv\\share\\a\u{F03A}b\\c")
+        );
+        assert_eq!(enc(r"\\srv\share"), PathBuf::from(r"\\srv\share"));
+        // Verbatim / device prefixes keep their designator.
+        assert_eq!(enc(r"\\?\D:\a:b"), PathBuf::from("\\\\?\\D:\\a\u{F03A}b"));
+        assert_eq!(
+            enc(r"\\?\UNC\srv\share\a:b\c:d"),
+            PathBuf::from("\\\\?\\UNC\\srv\\share\\a\u{F03A}b\\c\u{F03A}d")
+        );
+        // No colon beyond the designator: returned untouched.
+        assert_eq!(enc(r"C:\plain"), PathBuf::from(r"C:\plain"));
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_tmp_prefers_tmpdir_even_with_shell_root() {
