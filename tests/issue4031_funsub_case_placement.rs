@@ -181,4 +181,3 @@ fn issue4031_funsub_compound_tail_no_separator() {
         assert_eq!(err, "", "stderr not empty; script:\n{script}");
     }
 }
-

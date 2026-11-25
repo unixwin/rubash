@@ -148,10 +148,7 @@ fn redirect_discard_second_function_call_runs() {
 fn redirect_discard_last_command_status_is_one() {
     // The pM tail: the failing call is the script's last command, so
     // the DISCARD status becomes the script's status.
-    let run = run_script(
-        "lastfunc",
-        "f() { echo 2>/dev/null > ${a[1x]}; }\nf\n",
-    );
+    let run = run_script("lastfunc", "f() { echo 2>/dev/null > ${a[1x]}; }\nf\n");
     assert_eq!(run.stdout, "");
     assert_eq!(run.code, Some(1));
     let run = run_script("lasttop", "echo hi > ${a[1x]}\n");

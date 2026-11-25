@@ -308,7 +308,10 @@ fn echo_assignment_fragments_see_ordered_values() {
     let dir = temp_dir("ordered");
     let out = run("unset -v a; echo \"${a:-d}/${a:=x}/${a:-e}\"", &dir);
     expect_ok(&out, "ordered fragment values");
-    assert_eq!(out.stdout, b"d/x/x\n", "fragments must render d, x, x in order");
+    assert_eq!(
+        out.stdout, b"d/x/x\n",
+        "fragments must render d, x, x in order"
+    );
     let _ = fs::remove_dir_all(&dir);
 }
 
