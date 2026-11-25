@@ -1029,6 +1029,8 @@ impl Executor {
                         source,
                         super::command_text::procsub_body_seed_line(cmd, self.ambient_line.get()),
                         &[],
+                        0,
+                        None,
                     ) {
                         self.fd_table
                             .open_input(fd, FdReadEndpoint::File(file_fd), true);

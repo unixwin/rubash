@@ -1443,6 +1443,7 @@ impl Executor {
                 &carrier_by_position,
                 &no_input_carriers,
                 &no_input_streams,
+                false,
             );
             compound_outputs.push(CompoundOutputProcsub {
                 path,
