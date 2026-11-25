@@ -649,6 +649,46 @@ pub(in crate::executor) struct TempenvBoundFrame {
     pub(in crate::executor) records: Vec<(String, String, String, String)>,
 }
 
+/// rubash#4190: the driver half of a comsub occurrence's identity —
+/// stamped by an element's expansion driver around that element's
+/// expansion (see the `comsub_site_frame` field). `generation` binds
+/// the stamp to one command dispatch: a frame inherited by a cloned
+/// child executor (whose dispatches run under later generations) is
+/// stale by construction and ignored.
+#[derive(Debug, Clone, Copy)]
+pub(in crate::executor) struct ComsubSiteFrame {
+    pub(in crate::executor) generation: u64,
+    /// Element slot within the dispatch (the word index for command
+    /// words).
+    pub(in crate::executor) slot: u32,
+    /// The element's physical start line in the enclosing input.
+    pub(in crate::executor) line: usize,
+}
+
+/// rubash#4190: the dispatch-site half of a comsub occurrence's
+/// identity — set immediately before a funnel call (see the
+/// `comsub_site_mark` field).
+#[derive(Debug, Clone, Copy)]
+pub(in crate::executor) struct ComsubSiteMark {
+    /// The substitution's enumeration ordinal within its element's
+    /// text (0-based, text order over `$(`/backquote spans).
+    pub(in crate::executor) ordinal: u32,
+    /// Newlines in the element text before this substitution's span.
+    pub(in crate::executor) line_offset: usize,
+}
+
+/// rubash#4190: a resolved per-occurrence identity for the comsub
+/// heredoc plan — frame and mark composed by the funnel that took the
+/// mark. `header_line` is the physical line of the occurrence's `<<`
+/// (element line + in-element offset), the seed GNU's parse-time
+/// gather would have used (make_cmd.c:627's `lineno`).
+#[derive(Debug, Clone, Copy)]
+pub(in crate::executor) struct ComsubSite {
+    pub(in crate::executor) slot: u32,
+    pub(in crate::executor) ordinal: u32,
+    pub(in crate::executor) header_line: usize,
+}
+
 /// Command executor
 #[derive(Debug)]
 pub struct Executor {
@@ -1974,6 +2014,34 @@ pub struct Executor {
     /// adjust heredoc warning line numbers: when `$(` is at end of line,
     /// the comsub body starts on the next line.
     comsub_leading_newlines: Cell<usize>,
+    /// rubash#4190: per-occurrence identity for comsub heredoc warnings,
+    /// in two halves (the `comsub_leading_newlines` Cell precedent — the
+    /// funnels keep their signatures). The FRAME is stamped by an
+    /// element's expansion driver (`expand_command_word` for command
+    /// words) around that element's expansion: which dispatch, which
+    /// element slot, the element's physical start line. The MARK is set
+    /// by a comsub dispatch site (the embedded walkers' substitution
+    /// arms, the fragment path, the whole-word fast paths) immediately
+    /// before it calls a funnel: the occurrence's ordinal within the
+    /// element text and the newlines preceding its span there. Both
+    /// entry faces of one occurrence enumerate the same element text in
+    /// the same order, so they mint the same (slot, ordinal); distinct
+    /// occurrences in one dispatch differ in slot or ordinal — the
+    /// quantity the old `(source text, generation)` dedup could not
+    /// see (plan-call sequences of "one occurrence, two faces" and
+    /// "two occurrences, one face each" are otherwise identical).
+    /// `heredoc_comsub_plan` resolves frame+mark into a `ComsubSite`
+    /// only when the frame's generation is the current dispatch's;
+    /// anything unstamped keeps the legacy seed and dedup.
+    comsub_site_frame: Cell<Option<ComsubSiteFrame>>,
+    comsub_site_mark: Cell<Option<ComsubSiteMark>>,
+    /// rubash#4190: identities that have already emitted the
+    /// delimited-by-end-of-file warning in the current dispatch
+    /// generation, keyed (slot, ordinal) — the per-occurrence
+    /// replacement for the source-text dedup within a stamped frame.
+    /// Cleared whenever the observed generation changes.
+    heredoc_warning_sites: RefCell<std::collections::HashSet<(u32, u32)>>,
+    heredoc_warning_sites_generation: Cell<u64>,
     /// A current-shell (`${ ...; }` / `${| ...; }`) body that ran `exit N`
     /// aborts the enclosing (sub)shell with status N (GNU subst.c: the
     /// nofork body shares the shell's exit path). The walker records the

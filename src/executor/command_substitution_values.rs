@@ -1322,6 +1322,15 @@ impl Executor {
         // parse error latches the backtick companion so the enclosing
         // command recovers (issue #515).
         let saved_backtick_context = self.backtick_body_diagnostic.replace(true);
+        // rubash#4190: the word is exactly this one substitution —
+        // occurrence ordinal 0 at offset 0 of the site frame (outside
+        // command-word expansion no frame is stamped and the mark
+        // never resolves).
+        self.comsub_site_mark
+            .set(Some(crate::executor::ComsubSiteMark {
+                ordinal: 0,
+                line_offset: 0,
+            }));
         let output = super::command_substitution::with_comsub_raw_text(|| {
             self.expand_command_substitution_mut_typed_with_context(
                 &source,
@@ -1347,6 +1356,13 @@ impl Executor {
             decode_backtick_substitution_source(word.strip_prefix('`')?.strip_suffix('`')?);
         // Same ambient backtick window as the typed path (issue #515).
         let saved_backtick_context = self.backtick_body_diagnostic.replace(true);
+        // rubash#4190: whole-word substitution — ordinal 0, offset 0
+        // (see the typed twin above).
+        self.comsub_site_mark
+            .set(Some(crate::executor::ComsubSiteMark {
+                ordinal: 0,
+                line_offset: 0,
+            }));
         let expanded = super::command_substitution::with_comsub_raw_text(|| {
             self.expand_command_substitution_readback_with_context(
                 &source,

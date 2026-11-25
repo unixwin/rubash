@@ -675,6 +675,13 @@ impl Executor {
         // Top-level `${` ordinal for the cross-pass subscript-eval memo —
         // matches the pre-scan counter (SUB_RES_XPASS).
         let mut frag_index = 0usize;
+        // rubash#4190: top-level command-substitution ordinal within
+        // this word walk, for the occurrence-site mark the comsub arms
+        // mint before dispatching their funnel. The &self walker
+        // (embedded_parameters.rs) enumerates the same spans in the
+        // same order, so one occurrence's two entry faces mint the
+        // same ordinal.
+        let mut comsub_ordinal = 0u32;
         // Output length when the current double-quoted span opened, for the
         // quoted-null carrier below (alternate mode only).
         let mut dquote_open_len: Option<usize> = None;
@@ -1178,6 +1185,16 @@ impl Executor {
             }
 
             if ch == '`' {
+                // rubash#4190: this backquote span's occurrence identity
+                // within the word — the newlines before the span (the
+                // header line offset) and its comsub ordinal. The mark
+                // is set at the dispatch below, after the body scan.
+                let site_prefix_newlines = word
+                    [..word.len() - chars.clone().collect::<String>().len()]
+                    .matches('\n')
+                    .count();
+                let site_ordinal = comsub_ordinal;
+                comsub_ordinal += 1;
                 if quoted_site {
                     quoted_span_start = Some(output.len());
                     quoted_site = false;
@@ -1232,6 +1249,11 @@ impl Executor {
                         .replace(crate::executor::markers::DATA_DOLLAR, "$")
                         .replace(crate::executor::markers::PROTECTED_BACKSLASH, "\\");
                     let saved_backtick_context = self.backtick_body_diagnostic.replace(true);
+                    self.comsub_site_mark
+                        .set(Some(crate::executor::ComsubSiteMark {
+                            ordinal: site_ordinal,
+                            line_offset: site_prefix_newlines,
+                        }));
                     let substitution_output =
                         self.expand_command_substitution_mut_typed_with_context(&source, context);
                     self.backtick_body_diagnostic.set(saved_backtick_context);
@@ -1706,6 +1728,17 @@ impl Executor {
                     }
                 }
                 Some('(') => {
+                    // rubash#4190: this span's occurrence identity within
+                    // the word (see the backquote arm) — one ordinal per
+                    // `$(` span, whether the span resolves as arithmetic,
+                    // a forced comsub, or a plain comsub; the &self
+                    // walker enumerates identically.
+                    let site_prefix_newlines = word
+                        [..word.len() - chars.clone().collect::<String>().len()]
+                        .matches('\n')
+                        .count();
+                    let site_ordinal = comsub_ordinal;
+                    comsub_ordinal += 1;
                     chars.next();
                     if chars.peek().copied() == Some('(') {
                         chars.next();
@@ -1742,6 +1775,11 @@ impl Executor {
                                 // read-time failure of the enclosing command.
                                 let saved_arith_fallback =
                                     self.arith_fallback_comsub_body.replace(true);
+                                self.comsub_site_mark
+                                    .set(Some(crate::executor::ComsubSiteMark {
+                                        ordinal: site_ordinal,
+                                        line_offset: site_prefix_newlines,
+                                    }));
                                 let expanded = self.expand_command_substitution_mut_with_context(
                                     &expression,
                                     context,
@@ -1898,6 +1936,11 @@ impl Executor {
                         self.shell_state.arithmetic_expansion_error.set(true);
                         continue;
                     }
+                    self.comsub_site_mark
+                        .set(Some(crate::executor::ComsubSiteMark {
+                            ordinal: site_ordinal,
+                            line_offset: site_prefix_newlines,
+                        }));
                     let value =
                         protect_command_substitution_output(&substitution_result_visible_text(
                             &self.expand_command_substitution_mut_with_context(&source, context),

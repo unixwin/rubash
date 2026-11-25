@@ -361,6 +361,12 @@ impl Executor {
         // Top-level `${` ordinal for the cross-pass subscript-eval memo —
         // matches the pre-scan counter (SUB_RES_XPASS).
         let mut frag_index = 0usize;
+        // rubash#4190: top-level command-substitution ordinal within
+        // this word walk, twin of the embedded_mutations.rs walker's
+        // counter — the two walkers enumerate the same spans in the
+        // same order, so one occurrence's two entry faces mint the
+        // same occurrence-site mark.
+        let mut comsub_ordinal = 0u32;
         // rubash#2706: QUOTED_EXPANSION_SITE consumption, the &self
         // twin of the embedded_mutations.rs walker's (see its comment):
         // the flagged arm's result span is IFS-protected lazily at the
@@ -716,6 +722,15 @@ impl Executor {
             }
 
             if ch == '`' {
+                // rubash#4190: this backquote span's occurrence identity
+                // within the word (header line offset + comsub ordinal);
+                // the mark is set at the dispatch below.
+                let site_prefix_newlines = word
+                    [..word.len() - chars.clone().collect::<String>().len()]
+                    .matches('\n')
+                    .count();
+                let site_ordinal = comsub_ordinal;
+                comsub_ordinal += 1;
                 if quoted_site {
                     quoted_span_start = Some(output.len());
                     quoted_site = false;
@@ -771,6 +786,11 @@ impl Executor {
                     // body-parse `command substitution:` diagnostic GNU's
                     // parse_and_execute child reports (subst.c:7413).
                     let saved_backtick_context = self.backtick_body_diagnostic.replace(true);
+                    self.comsub_site_mark
+                        .set(Some(crate::executor::ComsubSiteMark {
+                            ordinal: site_ordinal,
+                            line_offset: site_prefix_newlines,
+                        }));
                     let expanded = self
                         .expand_command_substitution(&decode_backtick_substitution_source(&source));
                     self.backtick_body_diagnostic.set(saved_backtick_context);
@@ -1396,6 +1416,15 @@ impl Executor {
                     }
                 }
                 Some('(') => {
+                    // rubash#4190: this span's occurrence identity within
+                    // the word — one ordinal per `$(` span, arithmetic
+                    // resolutions included, matching the mutable walker.
+                    let site_prefix_newlines = word
+                        [..word.len() - chars.clone().collect::<String>().len()]
+                        .matches('\n')
+                        .count();
+                    let site_ordinal = comsub_ordinal;
+                    comsub_ordinal += 1;
                     chars.next();
                     if chars.peek().copied() == Some('(') {
                         chars.next();
@@ -1678,6 +1707,11 @@ impl Executor {
                                 || matches!(source_ch, ';' | '&' | '|' | '(' | ')' | '<' | '>');
                         }
                     }
+                    self.comsub_site_mark
+                        .set(Some(crate::executor::ComsubSiteMark {
+                            ordinal: site_ordinal,
+                            line_offset: site_prefix_newlines,
+                        }));
                     let value =
                         protect_command_substitution_output(&substitution_result_visible_text(
                             &self.expand_command_substitution(&source),

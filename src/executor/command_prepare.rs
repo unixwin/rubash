@@ -2350,12 +2350,26 @@ impl Executor {
         // closer quote in the fragment then closes the synthetic opener,
         // which is the GNU reading).
         let mut quote_state = LiteralFragmentQuoteState::None;
+        // rubash#4190: occurrence identity for this path's dispatches —
+        // substitution fragments in order are the word's comsub spans
+        // (a backquote anywhere in the word declines this path above,
+        // so the enumeration matches the word walkers'), and the
+        // running newline count over the preceding raw fragments is
+        // the header line offset within the word.
+        let mut fragment_comsub_ordinal = 0u32;
+        let mut fragment_prefix_newlines = 0usize;
         for fragment in raw_fragments {
             if fragment.substitution {
                 let context = fragment
                     .context
                     .unwrap_or(SubstitutionQuoteContext::Unquoted);
                 let source = fragment.text.strip_prefix("$(")?.strip_suffix(')')?;
+                self.comsub_site_mark
+                    .set(Some(crate::executor::ComsubSiteMark {
+                        ordinal: fragment_comsub_ordinal,
+                        line_offset: fragment_prefix_newlines,
+                    }));
+                fragment_comsub_ordinal += 1;
                 let output =
                     self.expand_command_substitution_mut_typed_with_context(source, context);
                 expanded_fragments.push(output.into_fragment());
@@ -2385,6 +2399,7 @@ impl Executor {
                     expanded_fragments.push(ExpandedFragment::literal(&literal, false));
                 }
             }
+            fragment_prefix_newlines += fragment.text.matches('\n').count();
         }
         let policy = if self.splits_unquoted_expanded_word(cmd, index, word) {
             SubstitutionSplitPolicy::Split
@@ -2399,6 +2414,49 @@ impl Executor {
     }
 
     pub(in crate::executor) fn expand_command_word(
+        &mut self,
+        cmd: &CommandNode,
+        index: usize,
+        word: &str,
+        raw: Option<&str>,
+    ) -> Vec<String> {
+        // rubash#4190: stamp this word's comsub site frame for the
+        // duration of its expansion — the element identity (dispatch
+        // generation, word slot, the word's physical start line) the
+        // heredoc plan keys per-occurrence warnings by. The start line
+        // is the parser's token stamp when the node's stamp vector is
+        // index-aligned with its words; otherwise the text floor
+        // (command line + newlines in the preceding words' texts —
+        // exact except for elided continuation gaps, where it degrades
+        // to the pre-#4190 seed rather than a wrong line). The saved
+        // frame is restored on exit: an enclosing element's expansion
+        // (a brace product, a nested dispatch on this executor) keeps
+        // its own frame.
+        let frame_line = if cmd.word_start_lines.len() == cmd.words.len() {
+            cmd.word_start_lines.get(index).copied()
+        } else {
+            None
+        }
+        .unwrap_or_else(|| {
+            cmd.line.unwrap_or(1)
+                + cmd.words[..index.min(cmd.words.len())]
+                    .iter()
+                    .map(|prior| prior.matches('\n').count())
+                    .sum::<usize>()
+        });
+        let saved_frame = self
+            .comsub_site_frame
+            .replace(Some(crate::executor::ComsubSiteFrame {
+                generation: self.preopened_generation.get(),
+                slot: index as u32,
+                line: frame_line,
+            }));
+        let expanded = self.expand_command_word_inner(cmd, index, word, raw);
+        self.comsub_site_frame.set(saved_frame);
+        expanded
+    }
+
+    fn expand_command_word_inner(
         &mut self,
         cmd: &CommandNode,
         index: usize,
@@ -2675,6 +2733,13 @@ impl Executor {
                 // here-string substitutions through.
                 .filter(|source| !source.contains("<<<"))
         }) {
+            // rubash#4190: the word is exactly this one substitution —
+            // occurrence ordinal 0 at offset 0 of the word's site frame.
+            self.comsub_site_mark
+                .set(Some(crate::executor::ComsubSiteMark {
+                    ordinal: 0,
+                    line_offset: 0,
+                }));
             let output = self.expand_command_substitution_with_context(
                 source,
                 SubstitutionQuoteContext::DoubleQuoted,
