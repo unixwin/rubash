@@ -204,8 +204,7 @@ pub(in crate::executor) fn word_has_assignment_fragment(word: &str) -> bool {
     let mut consumed = 0usize;
     while let Some(rel) = word[consumed..].find("${") {
         let start = consumed + rel;
-        let (_in_double, inside_cs) =
-            scan_word_prefix_quote_state(&word[..start], quoted_word);
+        let (_in_double, inside_cs) = scan_word_prefix_quote_state(&word[..start], quoted_word);
         let body_start = start + 2;
         let Some(end) = matching_parameter_brace(&word[body_start..]) else {
             break;

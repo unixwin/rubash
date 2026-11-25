@@ -141,7 +141,10 @@ fn assert_warns_once(script: &str, expected_stdout: &str) {
     let warnings = stderr
         .matches("warning: here-document at line 1 delimited by end-of-file (wanted `E')")
         .count();
-    assert_eq!(warnings, 1, "expected exactly one EOF warning, stderr: {stderr}");
+    assert_eq!(
+        warnings, 1,
+        "expected exactly one EOF warning, stderr: {stderr}"
+    );
     assert_eq!(code, Some(0), "exit code mismatch");
 }
 
