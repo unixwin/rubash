@@ -4535,7 +4535,7 @@ fn unix_bin_basename(name: &str) -> Option<&str> {
 pub(crate) fn shell_path_to_windows(path: &str, env_vars: &HashMap<String, String>) -> PathBuf {
     let mapped = shell_path_to_windows_inner(path, env_vars);
     if cfg!(windows) {
-        map_ntfs_colon_final_component(mapped)
+        map_ntfs_colon_components(mapped)
     } else {
         mapped
     }
@@ -4564,35 +4564,71 @@ pub(crate) fn path_buf_from_folded_name(text: &str) -> PathBuf {
     }
 }
 
-/// rubash#359: on Windows the Win32/NTFS layer reads `:` in the LAST path
+/// rubash#359: on Windows the Win32/NTFS layer reads `:` in a path
 /// component as the `name:stream` alternate-data-stream separator. A legal
 /// POSIX filename like `2026-09-30 14:48:26 UTC.log` therefore fails open()
 /// with EINVAL ("Invalid argument") — a single-colon name "succeeds" but
 /// silently targets an ADS on a different host file. GNU bash has no such
-/// rule (redir.c:706 redir_open passes the expanded filename to open(2)
-/// verbatim; `:` is an ordinary filename byte), and MSYS2/cygwin — the
-/// reference Windows POSIX layer — stores such names by encoding `:` as
-/// U+F03A from the Unicode private-use area (verified on this volume:
-/// Git Bash's `a:b.log` occupies the on-disk name `61 F03A 62 2E 6C 6F 67`).
-/// Do the same in this, the single shell-name -> NT-name funnel, so every
-/// consumer (redirect open, test/cd/stat, glob directory walks) agrees on
-/// one backing file. `shell_path_display_from_windows` reverses the
-/// encoding for shell-visible names. Only the final component is mapped:
-/// drive (`D:`) and server (`\\srv`) colons live in earlier components.
-fn map_ntfs_colon_final_component(path: PathBuf) -> PathBuf {
+/// rule (redir.c:298 redirection_expand expands the target as one word and
+/// redir.c:706 redir_open passes it to open(2) verbatim; `:` is an ordinary
+/// filename byte), and MSYS2/cygwin — the reference Windows POSIX layer —
+/// stores such names by encoding `:` as U+F03A from the Unicode
+/// private-use area in EVERY component (verified on this volume: Git
+/// Bash's `a:b.log` occupies the on-disk name `61 F03A 62 2E 6C 6F 67`,
+/// and its `x:y/z` tree is `x<F03A>y/z`, reachable by lookup under the
+/// same spelling). Do the same in this, the single shell-name -> NT-name
+/// funnel, so every consumer (redirect open, test/cd/stat, glob directory
+/// walks) agrees on one backing file. `shell_path_display_from_windows`
+/// reverses the encoding for shell-visible names (a plain replace, so it
+/// already decodes at this same per-component granularity).
+///
+/// rubash#4188: the mapping used to stop at the final component, which
+/// left every non-final colon literal — a directory the shell itself had
+/// just created per-component (the named-mkdir chain, #4150) was
+/// unreachable by lookup (`[ -d x:y/z ]`, `cd`, `ls` all missed). The
+/// mapping is now per-component. The one exemption is the path's own
+/// drive designator in its absolute form (`D:\`, `D:/`, also behind a
+/// verbatim/device prefix `\\?\D:\`): that colon is the drive syntax,
+/// not a filename byte. A bare `C:` reaching this funnel is a RELATIVE
+/// colon name — the #4150 control shape, where Git Bash creates the
+/// encoded name in the cwd — and a drive-relative `C:foo` or a
+/// designator-shaped component mid-path is an ordinary colon component;
+/// both encode like any other component.
+fn map_ntfs_colon_components(path: PathBuf) -> PathBuf {
     let text = path.to_string_lossy();
     if !text.contains(':') {
         return path;
     }
-    let tail_start = text
-        .rfind(['\\', '/'])
-        .map(|separator| separator + 1)
-        .unwrap_or(0);
-    let (head, tail) = text.split_at(tail_start);
-    if !tail.contains(':') {
+    // Byte offset where the filename components begin: skip a verbatim
+    // or device-namespace prefix (`\\?\`, `\\.\`, either slash flavor),
+    // then a drive designator — but only in its absolute form, i.e.
+    // followed by a separator. All prefix bytes are ASCII, so the
+    // offsets are char boundaries.
+    let bytes = text.as_bytes();
+    let mut start = 0;
+    if bytes.len() >= 4
+        && matches!(bytes[0], b'\\' | b'/')
+        && matches!(bytes[1], b'\\' | b'/')
+        && matches!(bytes[2], b'?' | b'.')
+        && matches!(bytes[3], b'\\' | b'/')
+    {
+        start = 4;
+    }
+    if bytes.len() >= start + 3
+        && bytes[start].is_ascii_alphabetic()
+        && bytes[start + 1] == b':'
+        && matches!(bytes[start + 2], b'\\' | b'/')
+    {
+        start += 2;
+    }
+    if !text[start..].contains(':') {
         return path;
     }
-    PathBuf::from(format!("{head}{}", tail.replace(':', "\u{F03A}")))
+    PathBuf::from(format!(
+        "{}{}",
+        &text[..start],
+        text[start..].replace(':', "\u{F03A}")
+    ))
 }
 
 fn shell_path_to_windows_inner(path: &str, env_vars: &HashMap<String, String>) -> PathBuf {
@@ -4871,9 +4907,11 @@ pub(crate) fn shell_path_display_from_windows(name: &str) -> String {
     if cfg!(windows) {
         name.replace(WINDOWS_LITERAL_STAR, "*")
             .replace(WINDOWS_LITERAL_QUESTION, "?")
-            // rubash#359: reverse map_ntfs_colon_final_component's U+F03A
+            // rubash#359: reverse map_ntfs_colon_components' U+F03A
             // encoding so shell-visible names (glob results, directory
-            // listings) show the POSIX filename byte.
+            // listings) show the POSIX filename byte. The replace is
+            // unscoped, so decoding is per-component just like the
+            // encoding (rubash#4188).
             .replace('\u{F03A}', ":")
     } else {
         name.to_string()
@@ -5942,13 +5980,17 @@ mod tests {
         // component (Win32: a colon is only valid at position 1; GNU stat
         // fails on the analogous doubled /mnt path), not a drive designator
         // — the joined text stays relative to the Z: root so `[[ -f ]]`
-        // fails like bashdb's `_Dbg_dir` join does on GNU.
+        // fails like bashdb's `_Dbg_dir` join does on GNU. Since
+        // rubash#4188 the funnel encodes that component like any other
+        // colon component (`D<F03A>`): the path is still anchored under
+        // Z:\nope (no tail truncation — the invariant this pin guards)
+        // and still names nothing that exists, so the stat still fails.
         assert_eq!(
             shell_path_to_windows(
                 "Z:/nope/D:/repo/rubash/target/bashdb-probe-target.sh",
                 &env_vars
             ),
-            PathBuf::from(r"Z:\nope\D:\repo\rubash\target\bashdb-probe-target.sh")
+            PathBuf::from("Z:\\nope\\D\u{F03A}\\repo\\rubash\\target\\bashdb-probe-target.sh")
         );
         // A drive pattern directly after the leading slash IS a prefix
         // drive designator (the `/D:/…` spelling).
@@ -5964,6 +6006,66 @@ mod tests {
             shell_path_to_windows("/dev/fd/1", &env_vars),
             PathBuf::from(r"\\.\RUBASH_UNSUPPORTED_DEVICE")
         );
+    }
+
+    #[test]
+    fn ntfs_colon_mapping_encodes_every_component() {
+        // rubash#4188: the funnel encodes ':' in EVERY component, not
+        // only the final one — the build side (the named-mkdir chain)
+        // and the MSYS contract both encode per component, so a
+        // lookup that stops at the final component cannot reach a
+        // directory the shell itself created (`mkdir -p x:y/z` then
+        // `[ -d x:y/z ]` missed). The mapping fn is platform-free
+        // text handling, so these pins run on every host; the
+        // windows-only call site gates their effect.
+        let enc = |s: &str| map_ntfs_colon_components(PathBuf::from(s));
+        // Non-final components (the #4188 shapes).
+        assert_eq!(enc(r"x:y\z"), PathBuf::from("x\u{F03A}y\\z"));
+        assert_eq!(enc("x:y/z"), PathBuf::from("x\u{F03A}y/z"));
+        assert_eq!(
+            enc(r"a:b\c:d\e:f"),
+            PathBuf::from("a\u{F03A}b\\c\u{F03A}d\\e\u{F03A}f")
+        );
+        // Final-component shapes keep the #359 behavior.
+        assert_eq!(enc("a:b.log"), PathBuf::from("a\u{F03A}b.log"));
+        assert_eq!(
+            enc("2026-09-30 14:48:26 UTC.log"),
+            PathBuf::from("2026-09-30 14\u{F03A}48\u{F03A}26 UTC.log")
+        );
+        // The leading drive designator is exempt in its absolute
+        // form only; the rest of the path still encodes.
+        assert_eq!(enc(r"C:\x:y"), PathBuf::from("C:\\x\u{F03A}y"));
+        assert_eq!(enc("C:/x:y/z:w"), PathBuf::from("C:/x\u{F03A}y/z\u{F03A}w"));
+        assert_eq!(enc("C:\\"), PathBuf::from("C:\\"));
+        assert_eq!(enc(r"D:\plain\path"), PathBuf::from(r"D:\plain\path"));
+        // A bare `C:` is a RELATIVE colon name (the #4150 control:
+        // Git Bash creates the encoded name in the cwd), and a
+        // drive-relative `C:foo` is an ordinary colon component —
+        // neither is the absolute designator.
+        assert_eq!(enc("C:"), PathBuf::from("C\u{F03A}"));
+        assert_eq!(enc("C:foo"), PathBuf::from("C\u{F03A}foo"));
+        // A designator-shaped component mid-path is not the path's
+        // drive: it encodes like any other component (the doubled
+        // drive text stays anchored under its first drive — only
+        // the invalid component takes the encoded spelling).
+        assert_eq!(
+            enc(r"Z:\nope\D:\repo\x"),
+            PathBuf::from("Z:\\nope\\D\u{F03A}\\repo\\x")
+        );
+        // UNC: server/share carry no colon; components encode.
+        assert_eq!(
+            enc(r"\\srv\share\a:b\c"),
+            PathBuf::from("\\\\srv\\share\\a\u{F03A}b\\c")
+        );
+        assert_eq!(enc(r"\\srv\share"), PathBuf::from(r"\\srv\share"));
+        // Verbatim / device prefixes keep their designator.
+        assert_eq!(enc(r"\\?\D:\a:b"), PathBuf::from("\\\\?\\D:\\a\u{F03A}b"));
+        assert_eq!(
+            enc(r"\\?\UNC\srv\share\a:b\c:d"),
+            PathBuf::from("\\\\?\\UNC\\srv\\share\\a\u{F03A}b\\c\u{F03A}d")
+        );
+        // No colon beyond the designator: returned untouched.
+        assert_eq!(enc(r"C:\plain"), PathBuf::from(r"C:\plain"));
     }
 
     #[cfg(windows)]
