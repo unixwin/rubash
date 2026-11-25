@@ -6184,30 +6184,54 @@ impl Executor {
         }
     }
 
-    /// rubash#4135: adjudicate one stdio fd (0 or 2) of the
+    /// rubash#4135/#4189: adjudicate one stdio fd (0 or 2) of the
     /// `<(...)` producer spawn. The plain verdict is the ambient
-    /// table's (ambient_procsub_spawn_fd, rubash#2212). When this
-    /// spawn binds a `< <(...)` redirect target of a compound
-    /// command's own list, `binder_saves` carries that list's undo
-    /// saves and an fd the list itself rebinds resolves through its
-    /// save slot — the PRE-LIST state — instead of the post-binder
-    /// table entry: GNU's do_redirections forks the producer at the
-    /// entry's own turn (redir.c:767), before the list's later
-    /// entries apply, so `while ...; done < <(echo e >&2)
-    /// 2>/dev/null` still prints `e`. The earliest save of the fd
-    /// holds the pre-list state (later saves hold walk-intermediate
-    /// states). A save slot the binder pass has not materialized
-    /// yet needs no override: no binder has touched the fd, so its
-    /// current entry still IS the pre-list state and the plain
-    /// adjudication reads it.
+    /// table's (ambient_procsub_spawn_fd, rubash#2212). GNU forks
+    /// the producer at its redirect entry's own turn —
+    /// do_redirections (redir.c:237) walks the list in order,
+    /// expanding each entry's word at its turn
+    /// (redirection_expand, redir.c:298; process_substitute,
+    /// subst.c:6362) — so the producer sees the fd state the
+    /// entries BEFORE its own leave behind, never the whole list's
+    /// effect and never the bare pre-list state. Two entry-time
+    /// corrections layer over the ambient verdict, in order:
+    ///
+    /// 1. A spawn plan (simple commands): the #2195 prefix plan
+    ///    computed for the producer's own list position names the
+    ///    fd's entry-time disposition directly.
+    /// 2. Binder saves (compound lists): `binder_saves` carries the
+    ///    list's undo saves grouped by the entry that earns them,
+    ///    and a save slot holds the state just BEFORE its entry
+    ///    applied. The state of `fd` at the spawn entry's turn is
+    ///    therefore the first save of `fd` earned at or after
+    ///    `spawn_index` (no entry between the turn and that save
+    ///    touches the fd, so the saved pre-state IS the turn
+    ///    state); when no later entry rebinds the fd, its current
+    ///    table entry is the turn state. #4135 took the earliest
+    ///    save unconditionally — the pre-list state — which agrees
+    ///    with the turn state only when the spawn entry precedes
+    ///    every save of the fd (its pitfall shapes: `while ...;
+    ///    done < <(echo e >&2) 2>/dev/null` still prints `e`); a
+    ///    list that rebinds the fd BEFORE the spawn entry
+    ///    (`done 2>/dev/null < <(...)`, rubash#4189) must let that
+    ///    earlier entry apply. A save slot the binder pass has not
+    ///    materialized yet needs no override: the walk has not
+    ///    reached the entry that earns it, so the fd's current
+    ///    entry still IS the turn state and the plain adjudication
+    ///    reads it.
     fn procsub_producer_stdio_disposition(
         &self,
         fd: u32,
         binder_saves: &[(usize, u32, u32)],
+        spawn_index: usize,
+        spawn_plan: Option<&super::external_setup::ProcsubSpawnPlan>,
     ) -> super::external_setup::ProcsubSpawnFd {
+        if let Some(disposition) = spawn_plan.and_then(|plan| plan.get(fd)) {
+            return disposition.clone();
+        }
         if let Some((_, slot, _)) = binder_saves
             .iter()
-            .filter(|(_, _, source)| *source == fd)
+            .filter(|(index, _, source)| *source == fd && *index >= spawn_index)
             .min_by_key(|(index, _, _)| *index)
         {
             if self
@@ -6235,6 +6259,8 @@ impl Executor {
         source: &str,
         line: Option<usize>,
         binder_saves: &[(usize, u32, u32)],
+        spawn_index: usize,
+        spawn_plan: Option<&super::external_setup::ProcsubSpawnPlan>,
     ) -> Option<Rc<FileFd>> {
         use std::process::Command;
         let exe = test_rubash_binary_from_env()
@@ -6573,8 +6599,10 @@ impl Executor {
         // producer as a writer of the capture scope (rubash#2484),
         // like the fd >= 3 transport above; StreamWrite needs no
         // registration (rubash#3149).
-        let stdin_disposition = self.procsub_producer_stdio_disposition(0, binder_saves);
-        let stderr_disposition = self.procsub_producer_stdio_disposition(2, binder_saves);
+        let stdin_disposition =
+            self.procsub_producer_stdio_disposition(0, binder_saves, spawn_index, spawn_plan);
+        let stderr_disposition =
+            self.procsub_producer_stdio_disposition(2, binder_saves, spawn_index, spawn_plan);
         if matches!(
             stderr_disposition,
             super::external_setup::ProcsubSpawnFd::CaptureWrite(_)
@@ -6668,7 +6696,8 @@ impl Executor {
         source: &str,
         line: Option<usize>,
     ) -> bool {
-        let Some(file_fd) = self.spawn_input_process_substitution_child(source, line, &[]) else {
+        let Some(file_fd) = self.spawn_input_process_substitution_child(source, line, &[], 0, None)
+        else {
             return false;
         };
         self.set_fd_input_file(fd, file_fd, fd != 0);

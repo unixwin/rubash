@@ -1629,17 +1629,49 @@ impl Executor {
                 // machinery resolves the alias to the live endpoint.
                 // The collected temp-carrier form below is the
                 // spawn-failure fallback.
-                if let Some(streamed) = self.process_substitution_child_fd_word(source, cmd_line) {
+                // rubash#4189: the producer forks at this entry's own
+                // turn, so it spawns with the #2195 prefix plan for
+                // its list position, fd 0 included (an input producer
+                // keeps its fd 0). The carrier maps hold what the
+                // faces before this arm have served so far; plain
+                // prefix entries capture directly in the walk.
+                let served_position = find_redirect_position(
+                    redirect.fd,
+                    true,
+                    &redirect.target,
+                    &[crate::parser::RedirectKind::Input],
+                );
+                let spawn_plan = served_position.map(|position| {
+                    let carrier_by_position: std::collections::HashMap<usize, PathBuf> =
+                        materialized_positions
+                            .iter()
+                            .map(|(_, position, carrier)| (*position, carrier.clone()))
+                            .collect();
+                    let input_carrier_by_position: std::collections::HashMap<usize, PathBuf> =
+                        input_carrier_positions.iter().cloned().collect();
+                    let input_streamed_by_position: std::collections::HashMap<
+                        usize,
+                        std::rc::Rc<FileFd>,
+                    > = input_streamed_positions.iter().cloned().collect();
+                    self.procsub_spawn_plan(
+                        &original_redirects,
+                        position,
+                        &carrier_by_position,
+                        &input_carrier_by_position,
+                        &input_streamed_by_position,
+                        true,
+                    )
+                });
+                if let Some(streamed) = self.process_substitution_child_fd_word_with_plan(
+                    source,
+                    cmd_line,
+                    spawn_plan.as_ref(),
+                ) {
                     let old_target = redirect.target.clone();
                     redirect.target = streamed;
                     // rubash#2235: record the served position and the
                     // live endpoint (see input_served_positions).
-                    if let Some(position) = find_redirect_position(
-                        redirect.fd,
-                        true,
-                        &old_target,
-                        &[crate::parser::RedirectKind::Input],
-                    ) {
+                    if let Some(position) = served_position {
                         input_served_positions.push(position);
                         if let Some(word_fd) = redirect
                             .target
@@ -2137,7 +2169,36 @@ impl Executor {
                 };
                 source.to_string()
             };
-            if let Some(streamed) = self.process_substitution_child_fd_word(&source, cmd_line) {
+            // rubash#4189: the producer forks at this entry's own
+            // turn — spawn it with the #2195 prefix plan for this
+            // list position, fd 0 included, exactly like the
+            // redirect_in field arm above.
+            let spawn_plan = {
+                let carrier_by_position: std::collections::HashMap<usize, PathBuf> =
+                    materialized_positions
+                        .iter()
+                        .map(|(_, position, carrier)| (*position, carrier.clone()))
+                        .collect();
+                let input_carrier_by_position: std::collections::HashMap<usize, PathBuf> =
+                    input_carrier_positions.iter().cloned().collect();
+                let input_streamed_by_position: std::collections::HashMap<
+                    usize,
+                    std::rc::Rc<FileFd>,
+                > = input_streamed_positions.iter().cloned().collect();
+                self.procsub_spawn_plan(
+                    &original_redirects,
+                    position,
+                    &carrier_by_position,
+                    &input_carrier_by_position,
+                    &input_streamed_by_position,
+                    true,
+                )
+            };
+            if let Some(streamed) = self.process_substitution_child_fd_word_with_plan(
+                &source,
+                cmd_line,
+                Some(&spawn_plan),
+            ) {
                 let old_target = rewritten.redirects[position].target.clone();
                 rewritten.redirects[position].target = streamed;
                 redirect_target_rewrites
@@ -2203,6 +2264,7 @@ impl Executor {
                 &carrier_by_position,
                 &input_carrier_by_position,
                 &input_streamed_by_position,
+                false,
             );
             files.outputs[*output_index].spawn_plan = plan;
         }
@@ -2221,8 +2283,13 @@ impl Executor {
     /// state cannot be captured faithfully is left Inherit (the
     /// pre-#2195 ambient behavior); an entry whose open fails stops
     /// the walk, matching do_redirections aborting at that entry.
-    /// The plan never touches fd 0: GNU's process_substitute
-    /// overrides the consumer's fd 0 with the substitution pipe.
+    /// The plan never touches fd 0 for a `>(...)` consumer: GNU's
+    /// process_substitute overrides the consumer's fd 0 with the
+    /// substitution pipe. An input `<(...)` producer keeps its fd 0
+    /// (only its fd 1 is overridden), so its faces pass
+    /// `include_fd0` and fd 0 entries join the same prefix plan
+    /// (rubash#4189); every pre-#4189 call site passes false and
+    /// keeps the historical skips verbatim.
     /// rubash#3491: executor-visible — the compound materializer
     /// computes the same prefix plan for its persistent consumers.
     pub(in crate::executor) fn procsub_spawn_plan(
@@ -2232,6 +2299,7 @@ impl Executor {
         carrier_by_position: &std::collections::HashMap<usize, PathBuf>,
         input_carrier_by_position: &std::collections::HashMap<usize, PathBuf>,
         input_streamed_by_position: &std::collections::HashMap<usize, std::rc::Rc<FileFd>>,
+        include_fd0: bool,
     ) -> ProcsubSpawnPlan {
         fn set(plan: &mut ProcsubSpawnPlan, fd: u32, disposition: ProcsubSpawnFd) {
             if let Some(slot) = plan.fds.iter_mut().find(|(candidate, _)| *candidate == fd) {
@@ -2291,7 +2359,7 @@ impl Executor {
                 | crate::parser::RedirectKind::ClobberOutput
                 | crate::parser::RedirectKind::Append => {
                     let fd = redirect.fd.unwrap_or(1);
-                    if fd == 0 {
+                    if fd == 0 && !include_fd0 {
                         continue;
                     }
                     if let Some(carrier) = carrier_by_position.get(&index) {
@@ -2322,7 +2390,7 @@ impl Executor {
                 }
                 crate::parser::RedirectKind::Input => {
                     let fd = redirect.fd.unwrap_or(0);
-                    if fd == 0 {
+                    if fd == 0 && !include_fd0 {
                         continue;
                     }
                     // rubash#2235: a streamed prefix entry binds the
@@ -2358,7 +2426,7 @@ impl Executor {
                 }
                 crate::parser::RedirectKind::ReadWrite => {
                     let fd = redirect.fd.unwrap_or(0);
-                    if fd == 0 {
+                    if fd == 0 && !include_fd0 {
                         continue;
                     }
                     match self.procsub_plan_capture(redirect, ProcsubPlanMode::ReadWrite, index) {
@@ -2381,7 +2449,7 @@ impl Executor {
                     let fd = redirect
                         .fd
                         .unwrap_or(if redirect.is_input_side() { 0 } else { 1 });
-                    if fd == 0 {
+                    if fd == 0 && !include_fd0 {
                         continue;
                     }
                     if is_closed_redirect_target(&redirect.target) {
@@ -2390,7 +2458,7 @@ impl Executor {
                         if let Some((source_fd, move_fd)) =
                             redirect_target_fd_and_move(&redirect.target)
                         {
-                            if source_fd != 0 && source_fd != fd {
+                            if (source_fd != 0 || include_fd0) && source_fd != fd {
                                 let disposition = plan
                                     .get(source_fd)
                                     .cloned()
@@ -2408,7 +2476,7 @@ impl Executor {
                     let fd = redirect
                         .fd
                         .unwrap_or(if redirect.is_input_side() { 0 } else { 1 });
-                    if fd != 0 {
+                    if fd != 0 || include_fd0 {
                         set(&mut plan, fd, ProcsubSpawnFd::Closed);
                     }
                 }
@@ -4598,7 +4666,19 @@ impl Executor {
         source: &str,
         line: Option<usize>,
     ) -> Option<u32> {
-        let file_fd = self.spawn_input_process_substitution_child(source, line, &[])?;
+        self.register_process_substitution_child_with_plan(source, line, None)
+    }
+
+    /// rubash#4189: register with the producer's entry-time spawn
+    /// plan (see procsub_producer_stdio_disposition in trap_exec.rs).
+    fn register_process_substitution_child_with_plan(
+        &mut self,
+        source: &str,
+        line: Option<usize>,
+        spawn_plan: Option<&ProcsubSpawnPlan>,
+    ) -> Option<u32> {
+        let file_fd =
+            self.spawn_input_process_substitution_child(source, line, &[], 0, spawn_plan)?;
         let fd = self.allocate_process_substitution_word_fd();
         self.fd_table
             .open_input(fd, FdReadEndpoint::File(file_fd), true);
@@ -4614,7 +4694,18 @@ impl Executor {
         source: &str,
         line: Option<usize>,
     ) -> Option<String> {
-        self.register_process_substitution_child(source, line)
+        self.process_substitution_child_fd_word_with_plan(source, line, None)
+    }
+
+    /// rubash#4189: the word form with the producer's entry-time
+    /// spawn plan (see register_process_substitution_child_with_plan).
+    pub(in crate::executor) fn process_substitution_child_fd_word_with_plan(
+        &mut self,
+        source: &str,
+        line: Option<usize>,
+        spawn_plan: Option<&ProcsubSpawnPlan>,
+    ) -> Option<String> {
+        self.register_process_substitution_child_with_plan(source, line, spawn_plan)
             .map(|fd| format!("/dev/fd/{fd}"))
     }
 

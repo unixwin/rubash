@@ -5241,6 +5241,27 @@ pub(in crate::executor) fn stdout_capture_write(output: &[u8]) -> io::Result<()>
     }
     STDOUT_CAPTURE.with(|capture| {
         if let Some(buffer) = capture.borrow_mut().as_mut() {
+            // rubash#4189: bytes a background writer (a `<(...)`
+            // producer whose fd 2 resolved to this scope, rubash#2484)
+            // already pushed into the background capture pipe were
+            // written BEFORE this foreground chunk in GNU's order —
+            // GNU's substitution child and the foreground share one
+            // pipe and the kernel merges by arrival (subst.c:7143).
+            // Drain what has arrived before appending, so the merge
+            // point is the write point instead of the scope-end drain
+            // (which stays as the backstop for bytes that arrive
+            // after the last foreground write).
+            let drained = BG_CAPTURE.with(|bg| {
+                bg.borrow_mut()
+                    .as_mut()
+                    .and_then(|state| state.drain_available().ok())
+            });
+            if let Some(drained) = drained {
+                if !drained.is_empty() {
+                    buffer.write_all(&drained)?;
+                    capture_timing_note_thread(&drained, buffer.len());
+                }
+            }
             buffer.write_all(output)?;
             capture_timing_note_thread(output, buffer.len());
         }

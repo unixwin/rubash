@@ -1017,12 +1017,12 @@ impl Executor {
                     // the compound forever. The timed collection below
                     // is the spawn-failure fallback (its recorded
                     // schedule served #1141 before a live pipe could).
-                    // rubash#4135: the compound's binder passes have
-                    // already applied this command's own list, so the
-                    // producer resolves any fd that list rebinds
-                    // through the list's undo saves (the pre-list
-                    // state — see procsub_producer_stdio_disposition
-                    // in trap_exec.rs).
+                    // rubash#4135/#4189: the compound's binder passes
+                    // have already applied this command's own list, so
+                    // the producer resolves any fd that list rebinds
+                    // through the list's undo saves at its own entry's
+                    // turn (see procsub_producer_stdio_disposition in
+                    // trap_exec.rs).
                     let binder_saves: Vec<(usize, u32, u32)> = match &self.compound_binder_saves {
                         Some((ptr, len, saves))
                             if (*ptr, *len)
@@ -1032,10 +1032,29 @@ impl Executor {
                         }
                         _ => Vec::new(),
                     };
+                    // rubash#4189: the spawn entry's turn is the
+                    // position of the redirect_in entry in the ordered
+                    // list — the mirror is a clone of that entry, so
+                    // the last (fd, kind, target) match is the mirrored
+                    // one. A node whose mirror cannot be found (a
+                    // rewritten list) falls back to position 0, the
+                    // pre-#4189 whole-list reading of the saves.
+                    let spawn_index = cmd
+                        .redirects
+                        .iter()
+                        .rposition(|entry| {
+                            entry.fd == redirect.fd
+                                && entry.kind == redirect.kind
+                                && entry.target == redirect.target
+                        })
+                        .unwrap_or(0);
+                    let spawn_plan = self.compound_procsub_spawn_plan(cmd, spawn_index);
                     if let Some(file_fd) = self.spawn_input_process_substitution_child(
                         &source,
                         super::command_text::procsub_body_seed_line(cmd, self.ambient_line.get()),
                         &binder_saves,
+                        spawn_index,
+                        Some(&spawn_plan),
                     ) {
                         let saved_fd0_entry = self.fd_table.saved_entry(0)?;
                         let saved_function_stdin =
@@ -1657,10 +1676,18 @@ impl Executor {
                 // (subst.c:6362) binds the forked body's pipe read end
                 // on the target fd; the collected form below is the
                 // spawn-failure fallback.
+                // rubash#4189: the walk binds this entry at its own
+                // turn, so the spawn adjudicates the list's saves at
+                // exactly this list position, with the prefix plan
+                // for the entries this walk does not bind (its
+                // sibling side) ahead of them.
+                let spawn_plan = self.compound_procsub_spawn_plan(cmd, start + offset);
                 if let Some(file_fd) = self.spawn_input_process_substitution_child(
                     source,
                     super::command_text::procsub_body_seed_line(cmd, self.ambient_line.get()),
                     saves_by_index,
+                    start + offset,
+                    Some(&spawn_plan),
                 ) {
                     self.set_fd_input_file(fd, file_fd, true);
                     if redirect.kind == crate::parser::RedirectKind::ReadWrite {
@@ -1909,6 +1936,35 @@ impl Executor {
         let saves = self.compound_list_saves_by_index(cmd);
         self.compound_binder_saves = Some((identity.0, identity.1, saves.clone()));
         saves
+    }
+
+    /// rubash#4189: the entry-time spawn plan for a `<(...)`
+    /// producer forked at `position` in `cmd`'s own redirect list —
+    /// the #2195 prefix plan with fd 0 included, computed from the
+    /// list itself (see procsub_producer_stdio_disposition). The
+    /// compound spawn faces consult it ahead of the binder saves:
+    /// at spawn time a prefix entry may exist nowhere in the fd
+    /// table — the sibling binder has not applied its side of the
+    /// list yet (the numbered walk runs first), and an fd 0 file
+    /// binding rides the FUNCTION_STDIN text channel, so its undo
+    /// save slot never materializes. Carrier maps stay empty: a
+    /// compound list's own substitution entries bind through the
+    /// table and the ambient verdict, and a prefix entry the walk
+    /// cannot capture declines to the saves, exactly as the simple
+    /// faces' plans decline to the ambient state.
+    fn compound_procsub_spawn_plan(
+        &mut self,
+        cmd: &CommandNode,
+        position: usize,
+    ) -> super::external_setup::ProcsubSpawnPlan {
+        self.procsub_spawn_plan(
+            &cmd.redirects,
+            position,
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+            true,
+        )
     }
 
     /// rubash#3991: the undo saves of `cmd`'s whole list, grouped
