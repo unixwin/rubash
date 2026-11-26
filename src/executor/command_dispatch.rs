@@ -837,6 +837,141 @@ impl Executor {
         outcome
     }
 
+    pub(in crate::executor) fn execute_status_builtin(
+        &mut self,
+        cmd: &CommandNode,
+        run: impl FnOnce(&mut Self, &CommandNode) -> Result<i32, ExecuteError>,
+    ) -> Result<(), ExecuteError> {
+        self.exit_code = run(self, cmd)?;
+        Ok(())
+    }
+
+    pub(in crate::executor) fn execute_no_output_status_builtin(
+        &mut self,
+        cmd: &CommandNode,
+        run: impl FnOnce(&mut Self, &CommandNode) -> Result<i32, ExecuteError>,
+    ) -> Result<(), ExecuteError> {
+        self.apply_no_output_builtin_redirects(cmd)?;
+        self.execute_status_builtin(cmd, run)
+    }
+
+    pub(in crate::executor) fn execute_constant_no_output_builtin(
+        &mut self,
+        cmd: &CommandNode,
+        status: fn() -> i32,
+    ) -> Result<(), ExecuteError> {
+        self.execute_no_output_status_builtin(cmd, |_, _| Ok(status()))
+    }
+
+    pub(in crate::executor) fn execute_constant_no_output_builtin_with_redirect_status(
+        &mut self,
+        cmd: &CommandNode,
+        status: fn() -> i32,
+    ) -> Result<(), ExecuteError> {
+        let redirect_failed = self.apply_no_output_builtin_redirects_with_status(cmd)?;
+        self.exit_code = if redirect_failed { 1 } else { status() };
+        Ok(())
+    }
+
+    pub(in crate::executor) fn execute_test_builtin(
+        &mut self,
+        cmd: &CommandNode,
+        bracket: bool,
+    ) -> Result<(), ExecuteError> {
+        self.execute_no_output_status_builtin(cmd, |executor, cmd| {
+            executor.execute_test_words(&cmd.words[1..], bracket, cmd)
+        })
+    }
+
+    pub(in crate::executor) fn execute_mapfile_builtin(
+        &mut self,
+        cmd: &CommandNode,
+    ) -> Result<(), ExecuteError> {
+        self.execute_no_output_status_builtin(
+            cmd,
+            |executor, cmd| Ok(executor.execute_mapfile(cmd)),
+        )
+    }
+
+    pub(in crate::executor) fn execute_read_builtin(
+        &mut self,
+        cmd: &CommandNode,
+    ) -> Result<(), ExecuteError> {
+        self.execute_status_builtin(cmd, |executor, cmd| Ok(executor.execute_read(cmd)))
+    }
+
+    pub(in crate::executor) fn execute_stack_builtin_status(
+        &mut self,
+        cmd: &CommandNode,
+        builtin: crate::builtins::pushd::StackBuiltin,
+    ) -> Result<(), ExecuteError> {
+        self.execute_status_builtin(cmd, |executor, cmd| {
+            executor.execute_stack_builtin(cmd, builtin)
+        })
+    }
+
+    pub(in crate::executor) fn execute_job_control_builtin(
+        &mut self,
+        cmd: &CommandNode,
+        builtin: crate::builtins::fg_bg::JobControlBuiltin,
+    ) -> Result<(), ExecuteError> {
+        self.execute_status_builtin(cmd, |executor, cmd| executor.execute_fg_bg(cmd, builtin))
+    }
+
+    pub(in crate::executor) fn execute_completion_builtin_status(
+        &mut self,
+        cmd: &CommandNode,
+        builtin: crate::builtins::complete::CompletionBuiltin,
+    ) -> Result<(), ExecuteError> {
+        self.execute_status_builtin(cmd, |executor, cmd| {
+            executor.execute_completion_builtin(cmd, builtin)
+        })
+    }
+
+    pub(in crate::executor) fn execute_identity_tool_or_external(
+        &mut self,
+        cmd: &CommandNode,
+        name: &str,
+    ) -> Result<(), ExecuteError> {
+        if self.registered_stand_down(name) {
+            return self.execute_external(cmd);
+        }
+        self.execute_status_builtin(cmd, |executor, cmd| {
+            Ok(executor.execute_identity_tool(cmd, name))
+        })
+    }
+
+    pub(in crate::executor) fn execute_console_mode_tool_or_external(
+        &mut self,
+        cmd: &CommandNode,
+    ) -> Result<(), ExecuteError> {
+        if self.emulated_external_stands_down("stty") {
+            return self.execute_external(cmd);
+        }
+        self.execute_status_builtin(cmd, |executor, cmd| {
+            Ok(executor.execute_console_mode_tool(cmd))
+        })
+    }
+
+    pub(in crate::executor) fn execute_fastpath_or_external(
+        &mut self,
+        cmd: &CommandNode,
+        name: &str,
+        try_fast_path: impl FnOnce(&mut Self, &CommandNode) -> Option<i32>,
+        record_resolution: impl FnOnce(&mut crate::shell::var_table::VarTable, &str),
+    ) -> Result<(), ExecuteError> {
+        if !self.emulated_external_stands_down(name) {
+            if let Some(status) = try_fast_path(self, cmd) {
+                // rubash#2736: an answered fast path records
+                // the PATH resolution, as GNU's locate does.
+                record_resolution(&mut self.shell_state.env_vars, name);
+                self.exit_code = status;
+                return Ok(());
+            }
+        }
+        self.execute_external(cmd)
+    }
+
     /// rubash#2753: the shared `--help` gate — GNU's CHECK_HELPOPT /
     /// CASE_HELPOPT (builtins/common.h:29-41), applied once here in
     /// the simple-command funnel instead of once per builtin parser.
@@ -870,7 +1005,11 @@ impl Executor {
     /// (including the pre-option-scan prologue replay, rubash#3340)
     /// lives in `apply_builtin_help` below, shared with the
     /// `builtin` re-dispatch.
-    fn builtin_help_gate(&mut self, cmd: &CommandNode, word: &str) -> Result<bool, ExecuteError> {
+    pub(in crate::executor) fn builtin_help_gate(
+        &mut self,
+        cmd: &CommandNode,
+        word: &str,
+    ) -> Result<bool, ExecuteError> {
         let Some(row) = super::builtin_table::builtin_table_row(word) else {
             return Ok(false);
         };

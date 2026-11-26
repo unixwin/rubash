@@ -119,126 +119,53 @@ impl Executor {
         // prologue (rubash#3340: `builtin bind --help` still warns,
         // `set +h; builtin hash --help` still refuses) is replayed
         // here exactly as in the funnel.
-        if let Some(row) = super::builtin_table::builtin_table_row(name) {
-            if super::builtin_opt::help_opt_requested(row, &args[1..]) {
-                self.apply_builtin_help(&builtin_cmd, row)?;
-                return Ok(());
-            }
+        if self.builtin_help_gate(&builtin_cmd, name)? {
+            return Ok(());
         }
         match name {
-            ":" => {
-                let redirect_failed =
-                    self.apply_no_output_builtin_redirects_with_status(&builtin_cmd)?;
-                self.exit_code = if redirect_failed {
-                    1
-                } else {
-                    crate::builtins::colon::colon()
-                };
-                Ok(())
-            }
-            "true" => {
-                let redirect_failed =
-                    self.apply_no_output_builtin_redirects_with_status(&builtin_cmd)?;
-                self.exit_code = if redirect_failed {
-                    1
-                } else {
-                    crate::builtins::colon::true_builtin()
-                };
-                Ok(())
-            }
-            "false" => {
-                let redirect_failed =
-                    self.apply_no_output_builtin_redirects_with_status(&builtin_cmd)?;
-                self.exit_code = if redirect_failed {
-                    1
-                } else {
-                    crate::builtins::colon::false_builtin()
-                };
-                Ok(())
-            }
-            "echo" => {
-                self.execute_echo(&builtin_cmd)?;
-                Ok(())
-            }
-            "printf" => {
-                self.exit_code = self.execute_printf(&builtin_cmd)?;
-                Ok(())
-            }
-            "pwd" => {
-                self.exit_code = self.execute_pwd(&builtin_cmd)?;
-                Ok(())
-            }
-            "cd" => {
-                self.exit_code = self.execute_cd(&builtin_cmd)?;
-                Ok(())
-            }
-            "hash" => {
-                self.exit_code = self.execute_hash(&builtin_cmd)?;
-                Ok(())
-            }
-            "help" => {
-                self.exit_code = self.execute_help(&builtin_cmd)?;
-                Ok(())
-            }
-            "alias" => {
-                self.exit_code = self.execute_alias(&builtin_cmd)?;
-                Ok(())
-            }
-            "unalias" => {
-                self.exit_code = self.execute_unalias(&builtin_cmd)?;
-                Ok(())
-            }
-            "export" => {
-                self.exit_code = self.execute_export(&builtin_cmd)?;
-                Ok(())
-            }
-            "readonly" => {
-                self.exit_code = self.execute_readonly(&builtin_cmd)?;
-                Ok(())
-            }
+            ":" => self.execute_constant_no_output_builtin_with_redirect_status(
+                &builtin_cmd,
+                crate::builtins::colon::colon,
+            ),
+            "true" => self.execute_constant_no_output_builtin_with_redirect_status(
+                &builtin_cmd,
+                crate::builtins::colon::true_builtin,
+            ),
+            "false" => self.execute_constant_no_output_builtin_with_redirect_status(
+                &builtin_cmd,
+                crate::builtins::colon::false_builtin,
+            ),
+            "echo" => self.execute_echo(&builtin_cmd),
+            "printf" => self.execute_status_builtin(&builtin_cmd, Executor::execute_printf),
+            "pwd" => self.execute_status_builtin(&builtin_cmd, Executor::execute_pwd),
+            "cd" => self.execute_status_builtin(&builtin_cmd, Executor::execute_cd),
+            "hash" => self.execute_status_builtin(&builtin_cmd, Executor::execute_hash),
+            "help" => self.execute_status_builtin(&builtin_cmd, Executor::execute_help),
+            "alias" => self.execute_status_builtin(&builtin_cmd, Executor::execute_alias),
+            "unalias" => self.execute_status_builtin(&builtin_cmd, Executor::execute_unalias),
+            "export" => self.execute_status_builtin(&builtin_cmd, Executor::execute_export),
+            "readonly" => self.execute_status_builtin(&builtin_cmd, Executor::execute_readonly),
             "declare" | "typeset" => self.execute_declare_command(&builtin_cmd),
-            "local" => {
-                self.exit_code = self.execute_local(&builtin_cmd)?;
-                Ok(())
-            }
-            "unset" => {
-                self.exit_code = self.execute_unset(&builtin_cmd)?;
-                Ok(())
-            }
-            "pushd" => {
-                self.exit_code = self.execute_stack_builtin(
-                    &builtin_cmd,
-                    crate::builtins::pushd::StackBuiltin::Pushd,
-                )?;
-                Ok(())
-            }
-            "popd" => {
-                self.exit_code = self.execute_stack_builtin(
-                    &builtin_cmd,
-                    crate::builtins::pushd::StackBuiltin::Popd,
-                )?;
-                Ok(())
-            }
-            "dirs" => {
-                self.exit_code = self.execute_stack_builtin(
-                    &builtin_cmd,
-                    crate::builtins::pushd::StackBuiltin::Dirs,
-                )?;
-                Ok(())
-            }
+            "local" => self.execute_status_builtin(&builtin_cmd, Executor::execute_local),
+            "unset" => self.execute_status_builtin(&builtin_cmd, Executor::execute_unset),
+            "pushd" => self.execute_stack_builtin_status(
+                &builtin_cmd,
+                crate::builtins::pushd::StackBuiltin::Pushd,
+            ),
+            "popd" => self.execute_stack_builtin_status(
+                &builtin_cmd,
+                crate::builtins::pushd::StackBuiltin::Popd,
+            ),
+            "dirs" => self.execute_stack_builtin_status(
+                &builtin_cmd,
+                crate::builtins::pushd::StackBuiltin::Dirs,
+            ),
             "set" => self.execute_set_command(&builtin_cmd),
             "getopts" => {
-                self.exit_code = self.execute_getopts_command(&builtin_cmd)?;
-                Ok(())
+                self.execute_status_builtin(&builtin_cmd, Executor::execute_getopts_command)
             }
-            "shopt" => {
-                self.exit_code = self.execute_shopt(&builtin_cmd)?;
-                Ok(())
-            }
-            "enable" => {
-                self.exit_code = self.execute_enable(&builtin_cmd)?;
-                Ok(())
-            }
+            "shopt" => self.execute_status_builtin(&builtin_cmd, Executor::execute_shopt),
+            "enable" => self.execute_status_builtin(&builtin_cmd, Executor::execute_enable),
             "exec" => {
                 self.builtin_wrapper_depth += 1;
                 let result = self.execute_exec_command(&builtin_cmd);
@@ -269,8 +196,7 @@ impl Executor {
             "logout" => {
                 // rubash#2397: inner roll, as at the "exit" arm above.
                 self.note_builtin_dispatch(crate::shell::BuiltinDispatchClass::Logout);
-                self.exit_code = self.execute_logout(&builtin_cmd)?;
-                Ok(())
+                self.execute_status_builtin(&builtin_cmd, Executor::execute_logout)
             }
             "eval" => self.execute_eval(&builtin_cmd),
             "command" => {
@@ -293,10 +219,7 @@ impl Executor {
             "return" => self.execute_return(&builtin_cmd),
             "break" => self.execute_loop_control(&builtin_cmd, LoopControlKind::Break),
             "continue" => self.execute_loop_control(&builtin_cmd, LoopControlKind::Continue),
-            "kill" => {
-                self.exit_code = self.execute_kill(&builtin_cmd)?;
-                Ok(())
-            }
+            "kill" => self.execute_status_builtin(&builtin_cmd, Executor::execute_kill),
             "let" => {
                 self.apply_no_output_builtin_redirects(&builtin_cmd)?;
                 self.exit_code = self.with_compound_output_redirects(&builtin_cmd, |executor| {
@@ -304,119 +227,56 @@ impl Executor {
                 })?;
                 Ok(())
             }
-            "umask" => {
-                self.exit_code = self.execute_umask(&builtin_cmd)?;
-                Ok(())
-            }
-            "ulimit" => {
-                self.exit_code = self.execute_ulimit(&builtin_cmd)?;
-                Ok(())
-            }
-            "read" => {
-                self.exit_code = self.execute_read(&builtin_cmd);
-                Ok(())
-            }
+            "umask" => self.execute_status_builtin(&builtin_cmd, Executor::execute_umask),
+            "ulimit" => self.execute_status_builtin(&builtin_cmd, Executor::execute_ulimit),
+            "read" => self.execute_read_builtin(&builtin_cmd),
             "mapfile" | "readarray" => {
                 // Redirect preflight like the `let` arm above (GNU
                 // execute_builtin applies redirections before the builtin;
                 // rubash#324: `< missing` must report and return 1 with
                 // the array untouched, before option validation).
-                self.apply_no_output_builtin_redirects(&builtin_cmd)?;
-                self.exit_code = self.execute_mapfile(&builtin_cmd);
-                Ok(())
+                self.execute_mapfile_builtin(&builtin_cmd)
             }
-            "times" => {
-                self.exit_code = self.execute_times(&builtin_cmd)?;
-                Ok(())
-            }
-            "caller" => {
-                self.exit_code = self.execute_caller(&builtin_cmd)?;
-                Ok(())
-            }
+            "times" => self.execute_status_builtin(&builtin_cmd, Executor::execute_times),
+            "caller" => self.execute_status_builtin(&builtin_cmd, Executor::execute_caller),
             "jobs" => {
                 // rubash#2397: inner roll, as at the "exit" arm above.
                 self.note_builtin_dispatch(crate::shell::BuiltinDispatchClass::Jobs);
-                self.exit_code = self.execute_jobs(&builtin_cmd)?;
-                Ok(())
+                self.execute_status_builtin(&builtin_cmd, Executor::execute_jobs)
             }
-            "disown" => {
-                self.exit_code = self.execute_disown(&builtin_cmd)?;
-                Ok(())
-            }
-            "wait" => {
-                self.exit_code = self.execute_wait(&builtin_cmd)?;
-                Ok(())
-            }
-            "fg" => {
-                self.exit_code = self
-                    .execute_fg_bg(&builtin_cmd, crate::builtins::fg_bg::JobControlBuiltin::Fg)?;
-                Ok(())
-            }
-            "bg" => {
-                self.exit_code = self
-                    .execute_fg_bg(&builtin_cmd, crate::builtins::fg_bg::JobControlBuiltin::Bg)?;
-                Ok(())
-            }
-            "suspend" => {
-                self.exit_code = self.execute_suspend(&builtin_cmd)?;
-                Ok(())
-            }
-            "history" => {
-                self.exit_code = self.execute_history(&builtin_cmd)?;
-                Ok(())
-            }
-            "bind" => {
-                self.exit_code = self.execute_bind(&builtin_cmd)?;
-                Ok(())
-            }
-            "fc" => {
-                self.exit_code = self.execute_fc(&builtin_cmd)?;
-                Ok(())
-            }
-            "complete" => {
-                self.exit_code = self.execute_completion_builtin(
-                    &builtin_cmd,
-                    crate::builtins::complete::CompletionBuiltin::Complete,
-                )?;
-                Ok(())
-            }
-            "compgen" => {
-                self.exit_code = self.execute_completion_builtin(
-                    &builtin_cmd,
-                    crate::builtins::complete::CompletionBuiltin::Compgen,
-                )?;
-                Ok(())
-            }
-            "compopt" => {
-                self.exit_code = self.execute_completion_builtin(
-                    &builtin_cmd,
-                    crate::builtins::complete::CompletionBuiltin::Compopt,
-                )?;
-                Ok(())
-            }
+            "disown" => self.execute_status_builtin(&builtin_cmd, Executor::execute_disown),
+            "wait" => self.execute_status_builtin(&builtin_cmd, Executor::execute_wait),
+            "fg" => self.execute_job_control_builtin(
+                &builtin_cmd,
+                crate::builtins::fg_bg::JobControlBuiltin::Fg,
+            ),
+            "bg" => self.execute_job_control_builtin(
+                &builtin_cmd,
+                crate::builtins::fg_bg::JobControlBuiltin::Bg,
+            ),
+            "suspend" => self.execute_status_builtin(&builtin_cmd, Executor::execute_suspend),
+            "history" => self.execute_status_builtin(&builtin_cmd, Executor::execute_history),
+            "bind" => self.execute_status_builtin(&builtin_cmd, Executor::execute_bind),
+            "fc" => self.execute_status_builtin(&builtin_cmd, Executor::execute_fc),
+            "complete" => self.execute_completion_builtin_status(
+                &builtin_cmd,
+                crate::builtins::complete::CompletionBuiltin::Complete,
+            ),
+            "compgen" => self.execute_completion_builtin_status(
+                &builtin_cmd,
+                crate::builtins::complete::CompletionBuiltin::Compgen,
+            ),
+            "compopt" => self.execute_completion_builtin_status(
+                &builtin_cmd,
+                crate::builtins::complete::CompletionBuiltin::Compopt,
+            ),
             // No "time" arm (rubash#1369): `time` is a reserved word,
             // not a shell builtin, so `builtin time ...` takes the
             // default arm's `builtin: time: not a shell builtin`, rc=1.
-            "trap" => {
-                self.exit_code = self.execute_trap(&builtin_cmd)?;
-                Ok(())
-            }
-            "type" => {
-                self.exit_code = self.execute_type_redirected(&builtin_cmd)?;
-                Ok(())
-            }
-            "test" => {
-                self.apply_no_output_builtin_redirects(&builtin_cmd)?;
-                self.exit_code =
-                    self.execute_test_words(&builtin_cmd.words[1..], false, &builtin_cmd)?;
-                Ok(())
-            }
-            "[" => {
-                self.apply_no_output_builtin_redirects(&builtin_cmd)?;
-                self.exit_code =
-                    self.execute_test_words(&builtin_cmd.words[1..], true, &builtin_cmd)?;
-                Ok(())
-            }
+            "trap" => self.execute_status_builtin(&builtin_cmd, Executor::execute_trap),
+            "type" => self.execute_status_builtin(&builtin_cmd, Executor::execute_type_redirected),
+            "test" => self.execute_test_builtin(&builtin_cmd, false),
+            "[" => self.execute_test_builtin(&builtin_cmd, true),
             "shift" => self.execute_shift_command(&builtin_cmd),
             _ => {
                 // rubash#2126: no dispatch — undo the note above.

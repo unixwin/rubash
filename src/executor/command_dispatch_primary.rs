@@ -42,20 +42,13 @@ impl Executor {
                 if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "echo") {
                     self.execute_external(cmd)
                 } else {
-                    self.execute_echo(cmd)?;
-                    Ok(())
+                    self.execute_echo(cmd)
                 }
             }
             Some(PrimarySlot::Eval) => self.execute_eval(cmd),
-            Some(PrimarySlot::Enable) => {
-                self.exit_code = self.execute_enable(cmd)?;
-                Ok(())
-            }
+            Some(PrimarySlot::Enable) => self.execute_status_builtin(cmd, Executor::execute_enable),
             Some(PrimarySlot::Exec) => self.execute_exec_command(cmd),
-            Some(PrimarySlot::Logout) => {
-                self.exit_code = self.execute_logout(cmd)?;
-                Ok(())
-            }
+            Some(PrimarySlot::Logout) => self.execute_status_builtin(cmd, Executor::execute_logout),
             Some(PrimarySlot::Return) => self.execute_return(cmd),
             Some(PrimarySlot::Break) => self.execute_loop_control(cmd, LoopControlKind::Break),
             Some(PrimarySlot::Continue) => {
@@ -65,8 +58,7 @@ impl Executor {
                 if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "pwd") {
                     self.execute_external(cmd)
                 } else {
-                    self.exit_code = self.execute_pwd(cmd)?;
-                    Ok(())
+                    self.execute_status_builtin(cmd, Executor::execute_pwd)
                 }
             }
             Some(PrimarySlot::Source) => self.execute_source_command(cmd),
@@ -74,87 +66,54 @@ impl Executor {
                 if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "printf") {
                     self.execute_external(cmd)
                 } else {
-                    self.exit_code = self.execute_printf(cmd)?;
-                    Ok(())
+                    self.execute_status_builtin(cmd, Executor::execute_printf)
                 }
             }
             Some(PrimarySlot::Command) => self.execute_command_builtin_command(cmd)?,
             Some(PrimarySlot::Builtin) => self.execute_builtin_direct_command(cmd),
-            Some(PrimarySlot::Cd) => {
-                self.exit_code = self.execute_cd(cmd)?;
-                Ok(())
-            }
+            Some(PrimarySlot::Cd) => self.execute_status_builtin(cmd, Executor::execute_cd),
             Some(PrimarySlot::Pushd) => {
-                self.exit_code =
-                    self.execute_stack_builtin(cmd, crate::builtins::pushd::StackBuiltin::Pushd)?;
-                Ok(())
+                self.execute_stack_builtin_status(cmd, crate::builtins::pushd::StackBuiltin::Pushd)
             }
             Some(PrimarySlot::Popd) => {
-                self.exit_code =
-                    self.execute_stack_builtin(cmd, crate::builtins::pushd::StackBuiltin::Popd)?;
-                Ok(())
+                self.execute_stack_builtin_status(cmd, crate::builtins::pushd::StackBuiltin::Popd)
             }
             Some(PrimarySlot::Dirs) => {
-                self.exit_code =
-                    self.execute_stack_builtin(cmd, crate::builtins::pushd::StackBuiltin::Dirs)?;
-                Ok(())
+                self.execute_stack_builtin_status(cmd, crate::builtins::pushd::StackBuiltin::Dirs)
             }
-            Some(PrimarySlot::Alias) => {
-                self.exit_code = self.execute_alias(cmd)?;
-                Ok(())
-            }
+            Some(PrimarySlot::Alias) => self.execute_status_builtin(cmd, Executor::execute_alias),
             Some(PrimarySlot::Declare) => self.execute_declare_command(cmd),
-            Some(PrimarySlot::Local) => {
-                self.exit_code = self.execute_local(cmd)?;
-                Ok(())
-            }
+            Some(PrimarySlot::Local) => self.execute_status_builtin(cmd, Executor::execute_local),
             Some(PrimarySlot::Unalias) => {
-                self.exit_code = self.execute_unalias(cmd)?;
-                Ok(())
+                self.execute_status_builtin(cmd, Executor::execute_unalias)
             }
-            Some(PrimarySlot::Export) => {
-                self.exit_code = self.execute_export(cmd)?;
-                Ok(())
-            }
+            Some(PrimarySlot::Export) => self.execute_status_builtin(cmd, Executor::execute_export),
             Some(PrimarySlot::Readonly) => {
-                self.exit_code = self.execute_readonly(cmd)?;
-                Ok(())
+                self.execute_status_builtin(cmd, Executor::execute_readonly)
             }
-            Some(PrimarySlot::Colon) => {
-                let redirect_failed = self.apply_no_output_builtin_redirects_with_status(cmd)?;
-                self.exit_code = if redirect_failed {
-                    1
-                } else {
-                    crate::builtins::colon::colon()
-                };
-                Ok(())
-            }
+            Some(PrimarySlot::Colon) => self
+                .execute_constant_no_output_builtin_with_redirect_status(
+                    cmd,
+                    crate::builtins::colon::colon,
+                ),
             Some(PrimarySlot::True) => {
                 if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "true") {
                     self.execute_external(cmd)
                 } else {
-                    let redirect_failed =
-                        self.apply_no_output_builtin_redirects_with_status(cmd)?;
-                    self.exit_code = if redirect_failed {
-                        1
-                    } else {
-                        crate::builtins::colon::true_builtin()
-                    };
-                    Ok(())
+                    self.execute_constant_no_output_builtin_with_redirect_status(
+                        cmd,
+                        crate::builtins::colon::true_builtin,
+                    )
                 }
             }
             Some(PrimarySlot::False) => {
                 if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "false") {
                     self.execute_external(cmd)
                 } else {
-                    let redirect_failed =
-                        self.apply_no_output_builtin_redirects_with_status(cmd)?;
-                    self.exit_code = if redirect_failed {
-                        1
-                    } else {
-                        crate::builtins::colon::false_builtin()
-                    };
-                    Ok(())
+                    self.execute_constant_no_output_builtin_with_redirect_status(
+                        cmd,
+                        crate::builtins::colon::false_builtin,
+                    )
                 }
             }
             Some(PrimarySlot::Sleep) => {
@@ -320,29 +279,18 @@ impl Executor {
             }
             Some(PrimarySlot::Set) => self.execute_set_command(cmd),
             Some(PrimarySlot::Getopts) => {
-                self.exit_code = self.execute_getopts_command(cmd)?;
-                Ok(())
+                self.execute_status_builtin(cmd, Executor::execute_getopts_command)
             }
-            Some(PrimarySlot::Shopt) => {
-                self.exit_code = self.execute_shopt(cmd)?;
-                Ok(())
-            }
+            Some(PrimarySlot::Shopt) => self.execute_status_builtin(cmd, Executor::execute_shopt),
             Some(PrimarySlot::Hash) => {
                 if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "hash") {
                     self.execute_external(cmd)
                 } else {
-                    self.exit_code = self.execute_hash(cmd)?;
-                    Ok(())
+                    self.execute_status_builtin(cmd, Executor::execute_hash)
                 }
             }
-            Some(PrimarySlot::Help) => {
-                self.exit_code = self.execute_help(cmd)?;
-                Ok(())
-            }
-            Some(PrimarySlot::Kill) => {
-                self.exit_code = self.execute_kill(cmd)?;
-                Ok(())
-            }
+            Some(PrimarySlot::Help) => self.execute_status_builtin(cmd, Executor::execute_help),
+            Some(PrimarySlot::Kill) => self.execute_status_builtin(cmd, Executor::execute_kill),
             None => return Ok(None),
         };
         Ok(Some(result))
