@@ -1089,22 +1089,50 @@ impl Executor {
 
             // rubash#4195: in a protecting walk (protect_rhs_data) over
             // a lexer-cooked word outside heredoc text, a surviving raw
-            // `\` can only be quoted-span DATA — the lexer already
-            // resolved every live source escape into its carrier
-            // (\$ -> DATA_DOLLAR, \\ -> DATA_BACKSLASH, \" ->
-            // DATA_DQUOTE), so resolving the pair as escape syntax here
-            // eats the backslash AND kills the live syntax byte after
-            // it (`'\'$(pwd)'` expanded its substitution away). Skip
-            // this arm in that mode: the ch != '$' fall-through below
-            // emits the ASSIGN_EXPANSION_BACKSLASH carrier (the
-            // rubash#2999 arm) and the next byte is then processed as
-            // the live syntax it is. Only the cooked-word entries set
-            // cooked_word: the no-restore entry walks a decoded
-            // ${...} operator half — RAW body text whose \" and \$
-            // pairs are genuine escapes this arm must resolve — and
-            // heredoc bodies are raw text too (CBSHDOC escapes), so
-            // both keep this arm.
-            if ch == '\\' && !(cooked_word && protect_rhs_data && !heredoc) {
+            // `\` before a live expansion introducer is quoted-span
+            // DATA — the lexer already resolved every live source
+            // escape into its carrier (\$ -> DATA_DOLLAR, \\ ->
+            // DATA_BACKSLASH, \" -> DATA_DQUOTE), so a raw pair that
+            // reaches this arm with `$` or a backquote after it is the
+            // remnant of a '...' span whose delimiters the lexer
+            // stripped (`'\'$(pwd)'` cooked to `\$(pwd)`): resolving
+            // the pair as escape syntax here eats the backslash AND
+            // kills the live syntax byte after it (the substitution
+            // expanded away). Skip this arm for those pairs only: the
+            // ch != '$' fall-through below emits the
+            // ASSIGN_EXPANSION_BACKSLASH carrier (the rubash#2999 arm)
+            // and the next byte is then processed as the live syntax
+            // it is.
+            //
+            // rubash#4201: the skip must NOT cover the other pairs.
+            // Two raw-text channels reach the same cooked-word entries
+            // with genuine escape pairs the arm must resolve: a comsub
+            // body's re-lexed word carries its double-quoted spans in
+            // escaped form (`"\"q\""` arrives as `\"\\\"q\\\"` — the
+            // \" and \\ pairs are the encoding's escapes, and skipping
+            // them turned `0"q"` into `0\q\`), and an assignment value
+            // spliced in DoubleQuoted context keeps a source-level \`
+            // escape (the backquote is DATA there, never a group
+            // opener). So: `$` pairs skip in any context (the F5/F7/F8
+            // remnants), backquote pairs skip only in Unquoted context
+            // (the F6 remnant — a backquote group the span preceded),
+            // and every other pair resolves through the arm exactly as
+            // before. Only the cooked-word entries set cooked_word:
+            // the no-restore entry walks a decoded ${...} operator
+            // half — RAW body text whose \" and \$ pairs are genuine
+            // escapes this arm must resolve — and heredoc bodies are
+            // raw text too (CBSHDOC escapes), so both keep this arm.
+            let span_data_pair = cooked_word
+                && protect_rhs_data
+                && !heredoc
+                && match chars.peek().copied() {
+                    Some('$') => true,
+                    Some('`') => {
+                        matches!(context, SubstitutionQuoteContext::Unquoted)
+                    }
+                    _ => false,
+                };
+            if ch == '\\' && !span_data_pair {
                 if let Some(&next) = chars.peek() {
                     // rubash#2210: inside a double-quoted span a backslash
                     // is special only before the CBSDQUOTE set ($ ` " \
@@ -1140,6 +1168,34 @@ impl Executor {
                             chars.next();
                             if in_dquote_span {
                                 output.push(crate::executor::markers::DATA_BACKSLASH);
+                            } else if protect_rhs_data && !heredoc {
+                                // rubash#2999: in a protecting walk over a
+                                // lexer-cooked word a `\\` pair is literal
+                                // single-quote data — the lexer already
+                                // resolved every live `\\` escape into
+                                // DATA_BACKSLASH, so collapsing the pair
+                                // here eats one literal backslash (GNU
+                                // subst.c:11882-11886: a single-quoted
+                                // span reaches add_quoted_string
+                                // CTLESC-protected, never re-scanned as
+                                // escape syntax). Carry both backslashes
+                                // so the trailing unescape pass cannot
+                                // eat them; mut_inner restores the carrier
+                                // after that pass. Heredoc text is raw:
+                                // `\\` there is live escape syntax
+                                // collapsing to one `\`, keep it.
+                                //
+                                // rubash#4201: this branch was deleted by
+                                // the first #4195 round on the theory that
+                                // the cooked-word gate subsumed it; that
+                                // held only while the gate skipped EVERY
+                                // pair. The gate now skips only the
+                                // expansion-introducer pairs, so `\\`
+                                // reaches this arm again and the branch
+                                // is load-bearing once more (`'a\\b'$(x)`
+                                // lost a backslash without it).
+                                output.push(crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH);
+                                output.push(crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH);
                             } else {
                                 output.push('\\');
                             }
