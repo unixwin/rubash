@@ -847,7 +847,7 @@ fn collect_pattern_procsub(tokens: &[Token], index: usize) -> Option<(String, us
     }
     let mut depth = 0usize;
     let mut end = None;
-    for (offset, token) in tokens[index + 1..].iter().enumerate() {
+    for (offset, _token) in tokens[index + 1..].iter().enumerate() {
         if is_keyword(tokens, index + 1 + offset, "(") {
             depth += 1;
         } else if is_keyword(tokens, index + 1 + offset, ")") {

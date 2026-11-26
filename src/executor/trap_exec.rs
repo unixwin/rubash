@@ -2193,7 +2193,7 @@ impl Executor {
                 self.exit_code = code;
                 Ok(code)
             }
-            Err(error) if parse_error_raised && !parser_error_errexited => {
+            Err(_error) if parse_error_raised && !parser_error_errexited => {
                 self.exit_code = exit_status;
                 Ok(exit_status)
             }
@@ -3467,7 +3467,9 @@ impl Executor {
 
     fn observe_signals_while_blocked_ex(
         &mut self,
-        #[cfg_attr(not(unix), allow(unused_mut))] mut record_sigint: Option<&mut bool>,
+        #[cfg_attr(not(unix), allow(unused_mut, unused_variables))] mut record_sigint: Option<
+            &mut bool,
+        >,
     ) -> Result<(), ExecuteError> {
         // rubash#3401: the command-substitution conduit is exempt from
         // the flat-layer guard below — a clone whose drain permit is

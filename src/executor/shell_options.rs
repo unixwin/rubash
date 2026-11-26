@@ -1905,6 +1905,7 @@ impl Executor {
             // bind, and symbolic write endpoints (FullDevice,
             // ProcContentWrite, PipeChannel) carry no kernel handle of
             // the referent — those keep the literal-stat fallback.
+            #[cfg_attr(not(unix), allow(unused_variables))]
             let stat_handle: Option<crate::fd::HANDLE> = match &entry.read {
                 Some(FdReadEndpoint::File(file)) => Some(file.handle),
                 Some(FdReadEndpoint::CoprocStdout { fd, .. }) => Some(fd.handle),
@@ -1919,6 +1920,7 @@ impl Executor {
                     _ => None,
                 },
             };
+            #[cfg_attr(not(unix), allow(unused_variables))]
             let is_procsub_pipe = matches!(
                 &entry.read,
                 Some(FdReadEndpoint::File(file)) if procsub_pipe(&file.path, file.handle)
@@ -2502,7 +2504,7 @@ impl Executor {
     /// stands in, as it did before spellings were recorded.
     fn transport_spelling_path(
         spelling: &[u8],
-        normalized: &std::path::Path,
+        #[cfg_attr(unix, allow(unused_variables))] normalized: &std::path::Path,
     ) -> std::path::PathBuf {
         #[cfg(unix)]
         {

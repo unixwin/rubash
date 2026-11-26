@@ -35,7 +35,7 @@ pub(super) struct DeclareOptions {
 }
 
 pub(super) fn apply_declare_attrs(
-    command_name: &str,
+    _command_name: &str,
     names: &[&str],
     variables: &mut crate::shell::var_table::VarTable,
     options: DeclareOptions,
@@ -44,7 +44,7 @@ pub(super) fn apply_declare_attrs(
     preexisting_vars: &std::collections::HashSet<String>,
     in_function: bool,
     diag: &mut crate::executor::builtin_diag::Diag<'_>,
-    prolog: &crate::executor::builtin_diag::PrologParts,
+    _prolog: &crate::executor::builtin_diag::PrologParts,
 ) -> io::Result<i32> {
     // GNU declare.def:1031-1034 delete_var: names deleted by a failed
     // created-var assignment must not be resurrected by attribute marking.

@@ -55,7 +55,7 @@ impl LocaleFunnelRecord {
 }
 
 pub(super) fn assign_declare_names(
-    command_name: &str,
+    _command_name: &str,
     names: &[&str],
     variables: &mut crate::shell::var_table::VarTable,
     frame_locals: &[String],

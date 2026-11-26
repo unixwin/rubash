@@ -5,7 +5,6 @@
 // Legacy cleanup pending: these warnings exist on master and are tracked
 // for removal. Suppress them at crate level so downstream CI stays clean
 // while the fixes are rolled out incrementally.
-#![allow(unused_variables)]
 #![allow(dead_code)]
 
 #[cfg(feature = "alloc-counter")]

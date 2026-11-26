@@ -802,7 +802,7 @@ impl Executor {
             }
             return Some(
                 storage
-                    .map(|value| {
+                    .map(|_value| {
                         if is_array {
                             self.array_length(array_name)
                         } else {

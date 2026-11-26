@@ -2670,7 +2670,7 @@ impl Executor {
             .and_then(|line| line.parse::<usize>().ok())
             .filter(|line| *line > 0)
             .unwrap_or(1);
-        let (alias_spliced, comsub_marks, nested_comsubs) =
+        let (alias_spliced, comsub_marks, _nested_comsubs) =
             self.comsub_body_alias_splice_extracted_marked(source);
         // GNU's parse_and_execute reads the backtick body as a LINE — the
         // body is newline-terminated at its parse (subst.c string_locale),
@@ -3418,7 +3418,7 @@ impl Executor {
         // `exec 2>/dev/null` inside the function must not silence the
         // caller's stderr after the substitution returns.
         let saved_fd_table = self.fd_table.saved_table();
-        let saved_fd1 = self.fd_table.entries.insert(
+        let _saved_fd1 = self.fd_table.entries.insert(
             1,
             crate::executor::fd_table::FdEntry {
                 read: None,
@@ -4514,7 +4514,7 @@ fn command_has_simple_substitution_shape(command: &CommandNode) -> bool {
 }
 
 fn command_substitution_uses_specialized_path(
-    executor: &Executor,
+    _executor: &Executor,
     source: &str,
     words: &[String],
 ) -> bool {

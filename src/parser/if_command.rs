@@ -19,7 +19,7 @@ pub(super) fn parse_if_command(
     // condition is parsed by the shared command loop stopped at `then'
     // (the old model re-walked the region once in find_if_then and again
     // in the slice parse — the depth-amplified double walk).
-    let condition = match run_inline_section(tokens, state, start + 1, SectionStop::IfCondition) {
+    let _condition = match run_inline_section(tokens, state, start + 1, SectionStop::IfCondition) {
         SectionOutcome::Ended {
             body,
             index: then_index,

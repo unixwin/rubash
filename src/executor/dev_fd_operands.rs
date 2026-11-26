@@ -865,7 +865,7 @@ impl Executor {
         &self,
         fd: u32,
         m: &mut DevOperandMaterialization,
-        consumer_program: Option<&Path>,
+        #[cfg_attr(not(windows), allow(unused_variables))] consumer_program: Option<&Path>,
     ) -> Option<String> {
         let entry = self.fd_table.entries.get(&fd).filter(|e| !e.closed)?;
         if let Some(read) = &entry.read {

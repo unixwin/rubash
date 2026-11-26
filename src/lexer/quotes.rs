@@ -3487,7 +3487,7 @@ fn copy_braced_parameter_with_ansi_c(
 mod probe_tests {
     #[test]
     fn probe_escaped_quote_value() {
-        let out = super::remove_shell_quotes("a[\\\" \\\"]=15");
+        let _out = super::remove_shell_quotes("a[\\\" \\\"]=15");
     }
 }
 

@@ -422,7 +422,7 @@ impl ShellInvocation {
             // __RUBASH_POSIX_MODE sync) live in set::set_shell_option.
             executor.set_shell_option(name, *enabled);
         }
-        if let Some(recreate) = self.list_shell_options {
+        if let Some(_recreate) = self.list_shell_options {
             // GNU shell.c:933-938: `-o`/`+o` with no operand printed the
             // set -o table during option parsing (options.c
             // print_all_shell_options) and parsing continued. The shell
@@ -443,7 +443,7 @@ impl ShellInvocation {
                 executor.mark_bash_argv_initialized();
             }
         }
-        if let Some(recreate) = self.list_shopt_options {
+        if let Some(_recreate) = self.list_shopt_options {
             // rubash#780: the `-o` sibling. The `-O`/`+O` pairs parsed
             // before the argument-less request are applied just above, so
             // the table renders their live state exactly as GNU's

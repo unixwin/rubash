@@ -349,7 +349,7 @@ impl ConditionalArithParser<'_> {
     /// (arrayfunc.c:1462-1470).
     pub(super) fn parse_assoc_subscript(
         &mut self,
-        name: &str,
+        _name: &str,
         for_assignment: bool,
     ) -> Option<ParsedAssocSubscript> {
         let start = self.pos;
