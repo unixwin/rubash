@@ -701,7 +701,7 @@ pub fn find_user_command(name: &str, env_vars: &HashMap<String, String>) -> Opti
         // on to the PATH walk with the entry kept (rubash#3359). The
         // PATH-scan memo for the name is stale evidence then too.
         if let Some(result) = mirror.get(name).cloned() {
-            if let Some(path) = &result {
+            if let Some(_path) = &result {
                 // GNU hashcmd.c:146-191 phash_search's CHKDOT/RELPATH
                 // arm (rubash#3551): `./NAME` (or `./<stored>`) wins
                 // while executable, and a `.`-leading stored path
@@ -1267,12 +1267,11 @@ fn memoized_miss_still_absent(
         })
 }
 
-#[cfg_attr(unix, allow(unused_variables))]
 fn find_user_command_uncached(
     name: &str,
     env_vars: &HashMap<String, String>,
-    fingerprint: &str,
-    name_had_transport: bool,
+    #[cfg_attr(unix, allow(unused_variables))] fingerprint: &str,
+    #[cfg_attr(not(unix), allow(unused_variables))] name_had_transport: bool,
 ) -> Option<PathBuf> {
     if has_path_separator(name) {
         // `/bin/bash` / `/usr/bin/bash` normally resolve to the literal
@@ -1525,6 +1524,7 @@ pub fn find_user_command_as_written(
 ) -> Option<String> {
     // Folded like find_user_command (rubash#3076): the recorded join
     // names the raw file, never the stored pair.
+    #[cfg_attr(not(unix), allow(unused_variables))]
     let name_had_transport = crate::executor::markers::contains_decodable_transport(name);
     let folded_name = crate::executor::substitution_metadata::fold_literal_char_escapes(name);
     let name = folded_name.as_str();
@@ -1579,9 +1579,9 @@ pub(crate) fn exec_name_for_program(
 /// form. Non-unix keeps the existing rendering (the #2302/#2317
 /// status quo for Windows display forms).
 pub(crate) fn recorded_resolution_spelling(
-    name: &str,
+    #[cfg_attr(not(unix), allow(unused_variables))] name: &str,
     program: &Path,
-    env_vars: &HashMap<String, String>,
+    #[cfg_attr(not(unix), allow(unused_variables))] env_vars: &HashMap<String, String>,
 ) -> String {
     #[cfg(unix)]
     {
@@ -2251,6 +2251,8 @@ pub fn external_command_for_named_program_with_exec_name(
         .iter()
         .enumerate()
         .map(|(position, arg)| {
+            #[cfg(not(windows))]
+            let _ = position;
             // unixwin/niubash#164: a virtual-system-root operand (/usr/bin,
             // /etc/..., /tmp, /home/...) exists only in the shell's root
             // map and NO non-shell child resolves it, so it translates

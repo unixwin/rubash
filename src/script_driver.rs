@@ -1891,7 +1891,7 @@ fn fnbody_residuals_advance(
 /// (stdin_source_has_unclosed_function_delimited_body's tail): the peeled
 /// `name ()` form or the `function NAME` keyword form. `delimiter` is a
 /// CHAR index into the pending mirror; `pending` carries the same text.
-fn fnbody_signature_before(chars: &[char], delimiter: usize, pending: &str) -> bool {
+fn fnbody_signature_before(_chars: &[char], delimiter: usize, pending: &str) -> bool {
     let byte = pending
         .char_indices()
         .nth(delimiter)
@@ -7479,6 +7479,8 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
             }
             Ok(_) => {}
             Err(err) => {
+                #[cfg(not(unix))]
+                let _ = &err;
                 // rubash#2233: a read ERROR on the interactive
                 // terminal (the hangup shape: the master closed and
                 // the blocked read wakes with EIO) reaches the reader
@@ -8939,6 +8941,8 @@ pub fn run_stdin_script(executor: &mut Executor) -> i32 {
             Ok(0) => break,
             Ok(_) => {}
             Err(err) => {
+                #[cfg(not(unix))]
+                let _ = &err;
                 // rubash#2233: a read ERROR is not EOF in the script
                 // reader. GNU's parser input layer (parse.y
                 // shell_getc, READERR arm, FATAL_READERROR) reports

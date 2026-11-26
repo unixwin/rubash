@@ -231,7 +231,7 @@ pub(super) fn push_command_word(cmd: &mut CommandNode, token: &Token) {
     let WordScans {
         extglob_patterns,
         pathname_patterns,
-        process_substitutions,
+        process_substitutions: _,
     } = &scans;
     cmd.extglob_patterns
         .extend(extglob_patterns.iter().cloned().map(|mut p| {

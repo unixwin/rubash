@@ -3083,7 +3083,7 @@ impl FdTable {
         delimiter: char,
         char_limit: Option<usize>,
         exact: bool,
-        escape_aware: bool,
+        _escape_aware: bool,
         raw: bool,
     ) -> Option<Vec<u8>> {
         let Ok(origin) = crate::fd::file_position(file.handle) else {

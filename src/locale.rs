@@ -1070,7 +1070,7 @@ fn reset_locale_vars_mirror(env_vars: &crate::shell::var_table::VarTable) {
 /// string of an array binding; rubash#3065).
 pub fn locale_assignment_warning(
     var: &str,
-    env_vars: &crate::shell::var_table::VarTable,
+    #[cfg_attr(not(unix), allow(unused_variables))] env_vars: &crate::shell::var_table::VarTable,
 ) -> Option<String> {
     if !is_locale_family_name(var) {
         return None;

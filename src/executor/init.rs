@@ -1300,6 +1300,7 @@ impl Executor {
         // FD_DELIVERY_AT_STAMPED_KEY) — consumed here with the other
         // transport keys so it never surfaces as a shell variable or
         // rides the process-env mirror into children.
+        #[cfg_attr(not(unix), allow(unused_variables))]
         let fd_delivery_at_stamped =
             env_vars.remove(FD_DELIVERY_AT_STAMPED_KEY).as_deref() == Some("1");
         mirror_env_remove(FD_DELIVERY_AT_STAMPED_KEY);
@@ -1343,7 +1344,7 @@ impl Executor {
                 }
                 mirror_env_remove(key);
                 return false;
-            } else if let Some(num) = key.strip_prefix("__RUBASH_FD_WPATH_") {
+            } else if let Some(_num) = key.strip_prefix("__RUBASH_FD_WPATH_") {
                 mirror_env_remove(key);
                 return false;
             } else {

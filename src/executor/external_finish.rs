@@ -933,7 +933,7 @@ impl Executor {
         // `exit code: 1`), and a child's successful in-process `exec`
         // leaked exec_replaced into the parent's trap adjudication.
         // Both latches start clear in the fresh child.
-        let saved_exit_trap_ran = self.exit_trap_ran.replace(false);
+        let _saved_exit_trap_ran = self.exit_trap_ran.replace(false);
         let saved_exec_replaced = std::mem::replace(&mut self.exec_replaced, false);
 
         // The fd table is a process boundary too: a child's persistent
