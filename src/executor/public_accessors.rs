@@ -1681,7 +1681,7 @@ impl Executor {
     }
 
     pub fn set_external_file_builtins_enabled(&mut self, enabled: bool) {
-        self.external_file_builtins_enabled = enabled;
+        self.external_command_backend = ExternalCommandBackend::from_emulation_enabled(enabled);
     }
 
     /// Configure the native directory that backs the shell-visible `/` root.

@@ -1518,7 +1518,7 @@ impl Executor {
             return Ok(());
         }
 
-        if self.handle_external_file_builtins(cmd)? {
+        if self.try_execute_via_external_backend(cmd)? {
             self.note_emulated_foreground_wait();
             return Ok(());
         }

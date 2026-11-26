@@ -1868,7 +1868,7 @@ impl Executor {
             pending_own_binding_folds: Vec::new(),
             #[cfg(windows)]
             elevation_handler: None,
-            external_file_builtins_enabled: true,
+            external_command_backend: ExternalCommandBackend::EmulatedInProcess,
             process_env_snapshot,
             saved_thread_locale,
             env_write_journal,

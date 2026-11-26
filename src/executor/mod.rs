@@ -90,6 +90,8 @@ mod expand_braced_replacement;
 mod expand_braced_special;
 mod expand_word;
 mod export_builtin;
+mod external_backend;
+pub(crate) use external_backend::ExternalCommandBackend;
 mod external_file_builtins;
 mod external_finish;
 mod external_inner;
@@ -2642,7 +2644,7 @@ pub struct Executor {
     pending_own_binding_folds: Vec<external_setup::OwnBindingFold>,
     #[cfg(windows)]
     elevation_handler: Option<ElevationHandler>,
-    external_file_builtins_enabled: bool,
+    external_command_backend: ExternalCommandBackend,
     process_env_snapshot: HashMap<String, String>,
     /// The thread-locale table this executor found at construction. Drop
     /// restores exactly this state, so same-thread fork copies neither erase

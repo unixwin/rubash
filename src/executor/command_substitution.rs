@@ -2547,7 +2547,7 @@ impl Executor {
             pending_own_binding_folds: Vec::new(),
             #[cfg(windows)]
             elevation_handler: None,
-            external_file_builtins_enabled: self.external_file_builtins_enabled,
+            external_command_backend: self.external_command_backend,
             // GNU subst.c:7143 command_substitute forks: the child's process
             // environment is the parent's CURRENT exported env at fork time,
             // and nothing the child does (or its exit) can alter the parent's
