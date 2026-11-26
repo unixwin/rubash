@@ -1375,9 +1375,9 @@ impl Executor {
         // (rubash#3543). When a raw record is active the citation is
         // rebuilt from the raw word instead, so no cooked record is
         // installed (rubash#4029).
-        let _diag_word = (!pending_diagnostic_raw_active())
-            .then(|| PendingDiagnosticWordGuard::new(word, false));
-        Some(self.expand_plain_assignment_word(name, value))
+        with_pending_diagnostic_word_if(!pending_diagnostic_raw_active(), word, false, || {
+            Some(self.expand_plain_assignment_word(name, value))
+        })
     }
 
     fn expand_plain_assignment_word(&self, name: &str, value: &str) -> String {
@@ -1730,7 +1730,7 @@ thread_local! {
     static PENDING_DIAGNOSTIC_WORD: std::cell::Cell<Option<(*const u8, usize, bool)>> =
         const { std::cell::Cell::new(None) };
     /// The raw source word of the enclosing expansion level, recorded by
-    /// [`PendingDiagnosticRawGuard`]: the citation for a fragment is
+    /// `PendingDiagnosticRawGuard`: the citation for a fragment is
     /// rebuilt from it by `bad_substitution_diagnostic_word_from_raw`, so
     /// quote delimiters and backslashes survive into the diagnostic
     /// (rubash#4029). The bool is the outer-double-quoted state at the
@@ -1747,7 +1747,7 @@ thread_local! {
 /// (if any) is restored, so the frame's record can never leak past the
 /// fragment.
 ///
-/// The record is install-if-absent, like [`PendingDiagnosticWordGuard`]:
+/// The record is install-if-absent, like `PendingDiagnosticWordGuard`:
 /// an outer record belongs to a word the caller is already expanding
 /// (rubash#3441: the assignment split in `expand_word` expands the RHS
 /// as a fresh word, so without this the `${` arm would re-root the
@@ -1763,6 +1763,27 @@ pub(in crate::executor) fn with_pending_diagnostic_word<T>(
 ) -> T {
     let _guard = PendingDiagnosticWordGuard::new(word, runtime_text);
     f()
+}
+
+/// Run `f` with `word` recorded only when `install` is true. This is the
+/// closure-scoped form of the conditional diagnostic-record installation used
+/// where a raw diagnostic record already owns the citation; it keeps the guard
+/// unavailable to callers while preserving the no-op path exactly.
+///
+/// There is intentionally no separate rendered-word helper: the historical
+/// `new` and `new_rendered` constructors had identical install semantics. A
+/// word rebuilt from the raw source is passed through this same helper.
+pub(in crate::executor) fn with_pending_diagnostic_word_if<T>(
+    install: bool,
+    word: &str,
+    runtime_text: bool,
+    f: impl FnOnce() -> T,
+) -> T {
+    if install {
+        with_pending_diagnostic_word(word, runtime_text, f)
+    } else {
+        f()
+    }
 }
 
 // Names the current command is declaring as associative arrays
@@ -1882,24 +1903,36 @@ pub(in crate::executor) fn pending_diagnostic_raw_active() -> bool {
 /// expansion level, restoring the previous record on drop. Unlike
 /// `PendingDiagnosticWordGuard`, an inner raw guard overrides any outer one
 /// (e.g. expanding an operator RHS word `${v:-...}` replaces the outer word).
-pub(in crate::executor) struct PendingDiagnosticRawGuard {
+///
+/// The guard is private and is never returned from its closure-scoped helpers:
+/// the lifetime parameter ties the raw pointer in the thread-local slot to the
+/// borrowed source text, while the helper scope makes it impossible for safe
+/// callers to forget the guard or let it outlive that text.
+struct PendingDiagnosticRawGuard<'a> {
     previous: Option<(*const u8, usize, bool)>,
+    _referent: std::marker::PhantomData<&'a str>,
 }
 
-impl PendingDiagnosticRawGuard {
-    pub(in crate::executor) fn new(raw: &str, outer_double_quoted: bool) -> Self {
+impl<'a> PendingDiagnosticRawGuard<'a> {
+    fn new(raw: &'a str, outer_double_quoted: bool) -> Self {
         let previous = PENDING_DIAGNOSTIC_RAW
             .with(|slot| slot.replace(Some((raw.as_ptr(), raw.len(), outer_double_quoted))));
-        Self { previous }
+        Self {
+            previous,
+            _referent: std::marker::PhantomData,
+        }
     }
 
-    pub(in crate::executor) fn suppressed() -> Self {
+    fn suppressed() -> Self {
         let previous = PENDING_DIAGNOSTIC_RAW.with(|slot| slot.replace(None));
-        Self { previous }
+        Self {
+            previous,
+            _referent: std::marker::PhantomData,
+        }
     }
 }
 
-impl Drop for PendingDiagnosticRawGuard {
+impl Drop for PendingDiagnosticRawGuard<'_> {
     fn drop(&mut self) {
         PENDING_DIAGNOSTIC_RAW.with(|slot| slot.set(self.previous));
     }
@@ -1929,31 +1962,22 @@ pub(in crate::executor) fn without_pending_diagnostic_raw<T>(f: impl FnOnce() ->
 /// was expanding). A nested fragment still keeps its own word: the outer
 /// fragment's gate evaluation consumes the record (take) before any nested
 /// operator word expands, so the slot is empty again by then.
-pub(in crate::executor) struct PendingDiagnosticWordGuard {
+///
+/// The guard is private and is never returned from its closure-scoped helpers:
+/// the lifetime parameter ties the raw pointer in the thread-local slot to the
+/// borrowed source text, while the helper scope makes it impossible for safe
+/// callers to forget the guard or let it outlive that text.
+struct PendingDiagnosticWordGuard<'a> {
     previous: Option<(*const u8, usize, bool)>,
+    _referent: std::marker::PhantomData<&'a str>,
 }
 
-impl PendingDiagnosticWordGuard {
+impl<'a> PendingDiagnosticWordGuard<'a> {
     /// `runtime_text` marks a word GNU expands without parse_comsub —
     /// a here-document body (redir.c:348 heredoc_expand -> expand_string)
     /// or a prompt string (parse.y:6689 expand_prompt_string) — whose
     /// `$(` spans the diagnostic cites raw (rubash#3543).
-    pub(in crate::executor) fn new(word: &str, runtime_text: bool) -> Self {
-        Self::install(word, runtime_text)
-    }
-
-    /// Record a word already rebuilt from the raw source text by
-    /// `bad_substitution_diagnostic_word_from_raw` (rubash#4029): the
-    /// citation keeps the raw word's quote delimiters and backslashes.
-    /// Display still runs through `bad_substitution_display`, so a parser
-    /// word's comsub spans print canonicalized (rubash#3543) and runtime
-    /// text stays raw — the `runtime_text` flag means the same here as
-    /// in [`PendingDiagnosticWordGuard::new`].
-    pub(in crate::executor) fn new_rendered(word: &str, runtime_text: bool) -> Self {
-        Self::install(word, runtime_text)
-    }
-
-    fn install(word: &str, runtime_text: bool) -> Self {
+    fn new(word: &'a str, runtime_text: bool) -> Self {
         let previous = PENDING_DIAGNOSTIC_WORD.with(|slot| {
             let previous = slot.get();
             if previous.is_none() {
@@ -1961,13 +1985,154 @@ impl PendingDiagnosticWordGuard {
             }
             previous
         });
-        Self { previous }
+        Self {
+            previous,
+            _referent: std::marker::PhantomData,
+        }
     }
 }
 
-impl Drop for PendingDiagnosticWordGuard {
+impl Drop for PendingDiagnosticWordGuard<'_> {
     fn drop(&mut self) {
         PENDING_DIAGNOSTIC_WORD.with(|slot| slot.set(self.previous));
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_guard_tests {
+    use super::{
+        take_pending_diagnostic_word, with_pending_diagnostic_raw, with_pending_diagnostic_word,
+        without_pending_diagnostic_raw, PENDING_DIAGNOSTIC_RAW, PENDING_DIAGNOSTIC_WORD,
+    };
+
+    fn pending_word_snapshot() -> Option<(String, bool)> {
+        PENDING_DIAGNOSTIC_WORD.with(|slot| {
+            slot.get().map(|(ptr, len, runtime_text)| {
+                let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
+                (std::str::from_utf8(bytes).unwrap().to_owned(), runtime_text)
+            })
+        })
+    }
+
+    fn pending_raw_snapshot() -> Option<(String, bool)> {
+        PENDING_DIAGNOSTIC_RAW.with(|slot| {
+            slot.get().map(|(ptr, len, outer_double_quoted)| {
+                let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
+                (
+                    std::str::from_utf8(bytes).unwrap().to_owned(),
+                    outer_double_quoted,
+                )
+            })
+        })
+    }
+
+    #[test]
+    fn nested_word_scopes_restore_on_return_and_unwind() {
+        let outer = String::from("outer${bad}");
+        let inner = String::from("inner${bad}");
+
+        with_pending_diagnostic_word(&outer, false, || {
+            assert_eq!(
+                pending_word_snapshot(),
+                Some((outer.clone(), false)),
+                "outer word is installed"
+            );
+            with_pending_diagnostic_word(&inner, true, || {
+                assert_eq!(
+                    pending_word_snapshot(),
+                    Some((outer.clone(), false)),
+                    "word installation is install-if-absent"
+                );
+            });
+            assert_eq!(
+                pending_word_snapshot(),
+                Some((outer.clone(), false)),
+                "the inert nested guard restores the outer record"
+            );
+
+            assert_eq!(
+                take_pending_diagnostic_word(),
+                Some((outer.clone(), false)),
+                "consume the outer one-shot record"
+            );
+            with_pending_diagnostic_word(&inner, true, || {
+                assert_eq!(
+                    pending_word_snapshot(),
+                    Some((inner.clone(), true)),
+                    "inner word installs once the outer record was consumed"
+                );
+            });
+            assert_eq!(
+                pending_word_snapshot(),
+                None,
+                "the active nested guard restores the empty slot"
+            );
+        });
+        assert_eq!(pending_word_snapshot(), None);
+
+        let unwound = std::panic::catch_unwind(|| {
+            with_pending_diagnostic_word(&outer, false, || {
+                assert_eq!(take_pending_diagnostic_word(), Some((outer.clone(), false)));
+                with_pending_diagnostic_word(&inner, true, || {
+                    panic!("forced diagnostic-guard unwind");
+                });
+            });
+        });
+        assert!(unwound.is_err());
+        assert_eq!(
+            pending_word_snapshot(),
+            None,
+            "unwinding restores the thread-local word slot"
+        );
+    }
+
+    #[test]
+    fn nested_raw_scopes_restore_on_return_and_unwind() {
+        let outer = String::from("outer raw ${bad}");
+        let inner = String::from("inner raw ${bad}");
+
+        with_pending_diagnostic_raw(&outer, false, || {
+            assert_eq!(
+                pending_raw_snapshot(),
+                Some((outer.clone(), false)),
+                "outer raw word is installed"
+            );
+            with_pending_diagnostic_raw(&inner, true, || {
+                assert_eq!(
+                    pending_raw_snapshot(),
+                    Some((inner.clone(), true)),
+                    "raw installation overrides the outer record"
+                );
+            });
+            assert_eq!(
+                pending_raw_snapshot(),
+                Some((outer.clone(), false)),
+                "the nested raw guard restores the outer record"
+            );
+            without_pending_diagnostic_raw(|| {
+                assert_eq!(pending_raw_snapshot(), None);
+            });
+            assert_eq!(
+                pending_raw_snapshot(),
+                Some((outer.clone(), false)),
+                "suppression restores the outer record"
+            );
+        });
+        assert_eq!(pending_raw_snapshot(), None);
+
+        let unwound = std::panic::catch_unwind(|| {
+            with_pending_diagnostic_raw(&outer, false, || {
+                with_pending_diagnostic_raw(&inner, true, || {
+                    panic!("forced diagnostic-guard unwind");
+                });
+            });
+        });
+        assert!(unwound.is_err());
+        assert_eq!(
+            pending_raw_snapshot(),
+            None,
+            "unwinding restores the thread-local raw slot"
+        );
     }
 }
 

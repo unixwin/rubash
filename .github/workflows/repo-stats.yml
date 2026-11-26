@@ -24,6 +24,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: master
+          fetch-depth: 0
 
       - name: Regenerate docs/repo-stats.md
         env:
@@ -34,7 +35,7 @@ jobs:
           head_sha=$(git rev-parse --short HEAD)
           head_date=$(git log -1 --format=%cs)
           rs_files=$(git ls-files '*.rs' | wc -l)
-          rs_loc=$(git ls-files '*.rs' | xargs wc -l | tail -1 | awk '{print $1}')
+          rs_loc=$(git ls-files -z '*.rs' | python3 -c 'import sys; print(sum(open(path, "rb").read().count(b"\n") for path in sys.stdin.buffer.read().split(b"\0") if path))')
           test_files=$(git ls-files '*.rs' | grep -cE '(^|/)tests?/|_tests?\.rs$|(^|/)tests?\.rs$' || true)
           open_issues=$(gh issue list --state open --limit 1000 --json number --jq 'length')
           release=$(gh release view --json tagName --jq .tagName 2>/dev/null || echo "none")
