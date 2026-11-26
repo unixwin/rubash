@@ -162,7 +162,7 @@ impl Executor {
             // outer parser word's raw record must not name citations
             // inside it.
             let expanded = crate::executor::expand_word::without_pending_diagnostic_raw(|| {
-                self.expand_embedded_parameters_mut_with_context(
+                self.expand_embedded_parameters_mut_prompt(
                     &decoded,
                     SubstitutionQuoteContext::DoubleQuoted,
                 )

@@ -113,6 +113,7 @@ impl Executor {
             false,
             false,
             true,
+            true,
         )
     }
 
@@ -131,7 +132,26 @@ impl Executor {
         // heredoc expansion (redir.c:374), so it walks in order; every
         // other context keeps the pre-scan walk.
         self.expand_embedded_parameters_mut_inner(
-            word, context, heredoc, false, false, true, true, heredoc, false, false,
+            word, context, heredoc, false, false, true, true, heredoc, false, false, true,
+        )
+    }
+
+    /// Prompt-render walk (expand_prompt_string_mut): the input is
+    /// decode_prompt_string's output — synthetic text whose backslash
+    /// pairs are the decoder's own quoting (a non-root `\$` is emitted
+    /// backslash-quoted so this pass keeps the dollar literal,
+    /// parse.y:6586-6592), NOT lexer-cooked word text. The rubash#4195
+    /// cooked-word gate therefore stays off for this entry: a raw `\`
+    /// here is escape syntax the general `\` arm must resolve, exactly
+    /// like the operator-half entry below.
+    pub(in crate::executor) fn expand_embedded_parameters_mut_prompt(
+        &mut self,
+        word: &str,
+        context: SubstitutionQuoteContext,
+    ) -> String {
+        let heredoc = matches!(context, SubstitutionQuoteContext::HereDocument);
+        self.expand_embedded_parameters_mut_inner(
+            word, context, heredoc, false, false, true, true, heredoc, false, false, false,
         )
     }
 
@@ -155,7 +175,7 @@ impl Executor {
     ) -> String {
         let heredoc = matches!(context, SubstitutionQuoteContext::HereDocument);
         self.expand_embedded_parameters_mut_inner(
-            word, context, heredoc, false, false, true, false, heredoc, false, true,
+            word, context, heredoc, false, false, true, false, heredoc, false, true, false,
         )
     }
 
@@ -179,6 +199,7 @@ impl Executor {
             false,
             false,
             true,
+            false,
             false,
             false,
             false,
@@ -237,6 +258,7 @@ impl Executor {
             false,
             false,
             true,
+            false,
             false,
         )
     }
@@ -325,6 +347,7 @@ impl Executor {
                 false,
                 false,
                 true,
+                false,
                 false,
                 false,
             ));
@@ -496,6 +519,7 @@ impl Executor {
         in_order: bool,
         protect_expansion_results: bool,
         defer_data_backslash_restore: bool,
+        cooked_word: bool,
     ) -> String {
         // rubash#2676: heredoc bodies (and here-string words) expand in
         // GNU's single left-to-right pass (redir.c:374 heredoc_expand ->
@@ -530,6 +554,7 @@ impl Executor {
             protect_rhs_data,
             in_order,
             protect_expansion_results,
+            cooked_word,
         );
         let expanded = if word.contains("$(") || word.contains('`') {
             if preserve_quotes || matches!(context, SubstitutionQuoteContext::HereDocument) {
@@ -639,6 +664,7 @@ impl Executor {
         protect_rhs_data: bool,
         in_order: bool,
         protect_expansion_results: bool,
+        cooked_word: bool,
     ) -> String {
         // GNU subst.c:11862 `add_quoted_string:` -> quote_string
         // (subst.c:4773): a parameter-expansion result merged into the word
@@ -1061,7 +1087,24 @@ impl Executor {
                 continue;
             }
 
-            if ch == '\\' {
+            // rubash#4195: in a protecting walk (protect_rhs_data) over
+            // a lexer-cooked word outside heredoc text, a surviving raw
+            // `\` can only be quoted-span DATA — the lexer already
+            // resolved every live source escape into its carrier
+            // (\$ -> DATA_DOLLAR, \\ -> DATA_BACKSLASH, \" ->
+            // DATA_DQUOTE), so resolving the pair as escape syntax here
+            // eats the backslash AND kills the live syntax byte after
+            // it (`'\'$(pwd)'` expanded its substitution away). Skip
+            // this arm in that mode: the ch != '$' fall-through below
+            // emits the ASSIGN_EXPANSION_BACKSLASH carrier (the
+            // rubash#2999 arm) and the next byte is then processed as
+            // the live syntax it is. Only the cooked-word entries set
+            // cooked_word: the no-restore entry walks a decoded
+            // ${...} operator half — RAW body text whose \" and \$
+            // pairs are genuine escapes this arm must resolve — and
+            // heredoc bodies are raw text too (CBSHDOC escapes), so
+            // both keep this arm.
+            if ch == '\\' && !(cooked_word && protect_rhs_data && !heredoc) {
                 if let Some(&next) = chars.peek() {
                     // rubash#2210: inside a double-quoted span a backslash
                     // is special only before the CBSDQUOTE set ($ ` " \
@@ -1097,24 +1140,6 @@ impl Executor {
                             chars.next();
                             if in_dquote_span {
                                 output.push(crate::executor::markers::DATA_BACKSLASH);
-                            } else if protect_rhs_data && !heredoc {
-                                // rubash#2999: in a protecting walk over a
-                                // lexer-cooked word a `\\` pair is literal
-                                // single-quote data — the lexer already
-                                // resolved every live `\\` escape into
-                                // DATA_BACKSLASH, so collapsing the pair
-                                // here eats one literal backslash (GNU
-                                // subst.c:11882-11886: a single-quoted
-                                // span reaches add_quoted_string
-                                // CTLESC-protected, never re-scanned as
-                                // escape syntax). Carry both backslashes
-                                // so the trailing unescape pass cannot
-                                // eat them; mut_inner restores the carrier
-                                // after that pass. Heredoc text is raw:
-                                // `\\` there is live escape syntax
-                                // collapsing to one `\`, keep it.
-                                output.push(crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH);
-                                output.push(crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH);
                             } else {
                                 output.push('\\');
                             }
