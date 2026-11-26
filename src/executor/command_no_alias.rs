@@ -61,11 +61,8 @@ impl Executor {
         // a merged stream, and a fatal prologue aborts the dispatch
         // with no help at all) and carries the SPECIAL-row marking,
         // exactly as at the funnel and `builtin` gates.
-        if let Some(row) = super::builtin_table::builtin_table_row(word) {
-            if super::builtin_opt::help_opt_requested(row, &cmd.words[1..]) {
-                self.apply_builtin_help(cmd, row)?;
-                return Ok(());
-            }
+        if self.builtin_help_gate(cmd, word)? {
+            return Ok(());
         }
 
         // GNU Bash has no `sudo` builtin (issue #759 item 4): `command
@@ -89,44 +86,17 @@ impl Executor {
                 // do_redirections). `command : <&8` with a closed fd 8
                 // fails "8: Bad file descriptor" like every other builtin
                 // (modernish BUG_SCLOSEDFD probe).
-                self.apply_no_output_builtin_redirects(cmd)?;
-                self.exit_code = crate::builtins::colon::colon();
-                Ok(())
+                self.execute_constant_no_output_builtin(cmd, crate::builtins::colon::colon)
             }
             Some(CmdPrimarySlot::True) => {
-                if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "true") {
-                    return self.execute_external(cmd);
-                }
-                self.apply_no_output_builtin_redirects(cmd)?;
-                self.exit_code = crate::builtins::colon::true_builtin();
-                Ok(())
+                self.execute_constant_no_output_builtin(cmd, crate::builtins::colon::true_builtin)
             }
             Some(CmdPrimarySlot::False) => {
-                if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "false") {
-                    return self.execute_external(cmd);
-                }
-                self.apply_no_output_builtin_redirects(cmd)?;
-                self.exit_code = crate::builtins::colon::false_builtin();
-                Ok(())
+                self.execute_constant_no_output_builtin(cmd, crate::builtins::colon::false_builtin)
             }
-            Some(CmdPrimarySlot::Echo) => {
-                if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "echo") {
-                    return self.execute_external(cmd);
-                }
-                self.execute_echo(cmd)?;
-                Ok(())
-            }
-            Some(CmdPrimarySlot::Cd) => {
-                self.exit_code = self.execute_cd(cmd)?;
-                Ok(())
-            }
-            Some(CmdPrimarySlot::Pwd) => {
-                if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "pwd") {
-                    return self.execute_external(cmd);
-                }
-                self.exit_code = self.execute_pwd(cmd)?;
-                Ok(())
-            }
+            Some(CmdPrimarySlot::Echo) => self.execute_echo(cmd),
+            Some(CmdPrimarySlot::Cd) => self.execute_status_builtin(cmd, Executor::execute_cd),
+            Some(CmdPrimarySlot::Pwd) => self.execute_status_builtin(cmd, Executor::execute_pwd),
             Some(CmdPrimarySlot::Exec) => self.execute_exec_command(cmd),
             // builtins/command.def execute_builtin -> execute_cmd.c: `command`
             // suppresses only functions and aliases; `exit` stays a builtin
@@ -140,22 +110,18 @@ impl Executor {
             Some(CmdPrimarySlot::Logout) => {
                 // rubash#2397: inner roll, as at the Exit arm above.
                 self.note_builtin_dispatch(crate::shell::BuiltinDispatchClass::Logout);
-                self.exit_code = self.execute_logout(cmd)?;
-                Ok(())
+                self.execute_status_builtin(cmd, Executor::execute_logout)
             }
             Some(CmdPrimarySlot::Eval) => self.execute_eval(cmd),
             Some(CmdPrimarySlot::Set) => self.execute_set_command(cmd),
             Some(CmdPrimarySlot::Getopts) => {
-                self.exit_code = self.execute_getopts_command(cmd)?;
-                Ok(())
+                self.execute_status_builtin(cmd, Executor::execute_getopts_command)
             }
             Some(CmdPrimarySlot::Shopt) => {
-                self.exit_code = self.execute_shopt(cmd)?;
-                Ok(())
+                self.execute_status_builtin(cmd, Executor::execute_shopt)
             }
             Some(CmdPrimarySlot::Enable) => {
-                self.exit_code = self.execute_enable(cmd)?;
-                Ok(())
+                self.execute_status_builtin(cmd, Executor::execute_enable)
             }
             Some(CmdPrimarySlot::Source) => self.execute_source_from_command_builtin(cmd),
             Some(CmdPrimarySlot::Return) => self.execute_return(cmd),
@@ -166,67 +132,39 @@ impl Executor {
             Some(CmdPrimarySlot::Command) => self.execute_command_builtin_without_aliases(cmd),
             Some(CmdPrimarySlot::Builtin) => self.execute_builtin_direct_command(cmd),
             Some(CmdPrimarySlot::Printf) => {
-                if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "printf") {
-                    return self.execute_external(cmd);
-                }
-                self.exit_code = self.execute_printf(cmd)?;
-                Ok(())
+                self.execute_status_builtin(cmd, Executor::execute_printf)
             }
-            Some(CmdPrimarySlot::Hash) => {
-                if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "hash") {
-                    return self.execute_external(cmd);
-                }
-                self.exit_code = self.execute_hash(cmd)?;
-                Ok(())
-            }
-            Some(CmdPrimarySlot::Help) => {
-                self.exit_code = self.execute_help(cmd)?;
-                Ok(())
-            }
+            Some(CmdPrimarySlot::Hash) => self.execute_status_builtin(cmd, Executor::execute_hash),
+            Some(CmdPrimarySlot::Help) => self.execute_status_builtin(cmd, Executor::execute_help),
             Some(CmdPrimarySlot::Alias) => {
-                self.exit_code = self.execute_alias(cmd)?;
-                Ok(())
+                self.execute_status_builtin(cmd, Executor::execute_alias)
             }
             Some(CmdPrimarySlot::Unalias) => {
-                self.exit_code = self.execute_unalias(cmd)?;
-                Ok(())
+                self.execute_status_builtin(cmd, Executor::execute_unalias)
             }
             Some(CmdPrimarySlot::Export) => {
-                self.exit_code = self.execute_export(cmd)?;
-                Ok(())
+                self.execute_status_builtin(cmd, Executor::execute_export)
             }
             Some(CmdPrimarySlot::Readonly) => {
-                self.exit_code = self.execute_readonly(cmd)?;
-                Ok(())
+                self.execute_status_builtin(cmd, Executor::execute_readonly)
             }
             Some(CmdPrimarySlot::Declare) => self.execute_declare_command(cmd),
             Some(CmdPrimarySlot::Local) => {
-                self.exit_code = self.execute_local(cmd)?;
-                Ok(())
+                self.execute_status_builtin(cmd, Executor::execute_local)
             }
             Some(CmdPrimarySlot::Unset) => {
-                self.exit_code = self.execute_unset(cmd)?;
-                Ok(())
+                self.execute_status_builtin(cmd, Executor::execute_unset)
             }
             Some(CmdPrimarySlot::Pushd) => {
-                self.exit_code =
-                    self.execute_stack_builtin(cmd, crate::builtins::pushd::StackBuiltin::Pushd)?;
-                Ok(())
+                self.execute_stack_builtin_status(cmd, crate::builtins::pushd::StackBuiltin::Pushd)
             }
             Some(CmdPrimarySlot::Popd) => {
-                self.exit_code =
-                    self.execute_stack_builtin(cmd, crate::builtins::pushd::StackBuiltin::Popd)?;
-                Ok(())
+                self.execute_stack_builtin_status(cmd, crate::builtins::pushd::StackBuiltin::Popd)
             }
             Some(CmdPrimarySlot::Dirs) => {
-                self.exit_code =
-                    self.execute_stack_builtin(cmd, crate::builtins::pushd::StackBuiltin::Dirs)?;
-                Ok(())
+                self.execute_stack_builtin_status(cmd, crate::builtins::pushd::StackBuiltin::Dirs)
             }
-            Some(CmdPrimarySlot::Kill) => {
-                self.exit_code = self.execute_kill(cmd)?;
-                Ok(())
-            }
+            Some(CmdPrimarySlot::Kill) => self.execute_status_builtin(cmd, Executor::execute_kill),
             Some(CmdPrimarySlot::Let) => {
                 self.apply_no_output_builtin_redirects(cmd)?;
                 self.exit_code = self.execute_let(&cmd.words[1..]);
@@ -238,33 +176,17 @@ impl Executor {
             // to the ordinary PATH lookup — `command time true` is
             // `time: command not found`, rc=127.
             Some(CmdPrimarySlot::Umask) => {
-                if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "umask") {
-                    return self.execute_external(cmd);
-                }
-                self.exit_code = self.execute_umask(cmd)?;
-                Ok(())
+                self.execute_status_builtin(cmd, Executor::execute_umask)
             }
             Some(CmdPrimarySlot::Ulimit) => {
-                self.exit_code = self.execute_ulimit(cmd)?;
-                Ok(())
+                self.execute_status_builtin(cmd, Executor::execute_ulimit)
             }
-            Some(CmdPrimarySlot::Read) => {
-                if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "read") {
-                    return self.execute_external(cmd);
-                }
-                self.exit_code = self.execute_read(cmd);
-                Ok(())
-            }
+            Some(CmdPrimarySlot::Read) => self.execute_read_builtin(cmd),
             Some(CmdPrimarySlot::Mapfile) => {
-                if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, &cmd.words[0]) {
-                    return self.execute_external(cmd);
-                }
                 // Redirect preflight (GNU execute_builtin applies the
                 // redirections before mapfile runs; rubash#324: `< missing`
                 // reports and returns 1 with the array untouched).
-                self.apply_no_output_builtin_redirects(cmd)?;
-                self.exit_code = self.execute_mapfile(cmd);
-                Ok(())
+                self.execute_mapfile_builtin(cmd)
             }
             Some(CmdPrimarySlot::Shift) => self.execute_shift_command(cmd),
             _ => self.execute_command_without_aliases_late_builtin(cmd, word),

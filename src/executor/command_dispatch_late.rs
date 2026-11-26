@@ -242,24 +242,16 @@ impl Executor {
                 if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "umask") {
                     self.execute_external(cmd)
                 } else {
-                    self.exit_code = self.execute_umask(cmd)?;
-                    Ok(())
+                    self.execute_status_builtin(cmd, Executor::execute_umask)
                 }
             }
-            Some(LateSlot::Ulimit) => {
-                self.exit_code = self.execute_ulimit(cmd)?;
-                Ok(())
-            }
-            Some(LateSlot::Unset) => {
-                self.exit_code = self.execute_unset(cmd)?;
-                Ok(())
-            }
+            Some(LateSlot::Ulimit) => self.execute_status_builtin(cmd, Executor::execute_ulimit),
+            Some(LateSlot::Unset) => self.execute_status_builtin(cmd, Executor::execute_unset),
             Some(LateSlot::Read) => {
                 if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "read") {
                     self.execute_external(cmd)
                 } else {
-                    self.exit_code = self.execute_read(cmd);
-                    Ok(())
+                    self.execute_read_builtin(cmd)
                 }
             }
             Some(LateSlot::Mapfile) => {
@@ -272,87 +264,42 @@ impl Executor {
                     // file or directory' and returns 1 without executing
                     // mapfile, so the array is left untouched and option/
                     // identifier validation never happens (rubash#324).
-                    self.apply_no_output_builtin_redirects(cmd)?;
-                    self.exit_code = self.execute_mapfile(cmd);
-                    Ok(())
+                    self.execute_mapfile_builtin(cmd)
                 }
             }
             Some(LateSlot::Shift) => self.execute_shift_command(cmd),
-            Some(LateSlot::Times) => {
-                self.exit_code = self.execute_times(cmd)?;
-                Ok(())
-            }
-            Some(LateSlot::Caller) => {
-                self.exit_code = self.execute_caller(cmd)?;
-                Ok(())
-            }
-            Some(LateSlot::Jobs) => {
-                self.exit_code = self.execute_jobs(cmd)?;
-                Ok(())
-            }
-            Some(LateSlot::Disown) => {
-                self.exit_code = self.execute_disown(cmd)?;
-                Ok(())
-            }
-            Some(LateSlot::Wait) => {
-                self.exit_code = self.execute_wait(cmd)?;
-                Ok(())
-            }
+            Some(LateSlot::Times) => self.execute_status_builtin(cmd, Executor::execute_times),
+            Some(LateSlot::Caller) => self.execute_status_builtin(cmd, Executor::execute_caller),
+            Some(LateSlot::Jobs) => self.execute_status_builtin(cmd, Executor::execute_jobs),
+            Some(LateSlot::Disown) => self.execute_status_builtin(cmd, Executor::execute_disown),
+            Some(LateSlot::Wait) => self.execute_status_builtin(cmd, Executor::execute_wait),
             Some(LateSlot::Fg) => {
-                self.exit_code =
-                    self.execute_fg_bg(cmd, crate::builtins::fg_bg::JobControlBuiltin::Fg)?;
-                Ok(())
+                self.execute_job_control_builtin(cmd, crate::builtins::fg_bg::JobControlBuiltin::Fg)
             }
             Some(LateSlot::Bg) => {
-                self.exit_code =
-                    self.execute_fg_bg(cmd, crate::builtins::fg_bg::JobControlBuiltin::Bg)?;
-                Ok(())
+                self.execute_job_control_builtin(cmd, crate::builtins::fg_bg::JobControlBuiltin::Bg)
             }
-            Some(LateSlot::Suspend) => {
-                self.exit_code = self.execute_suspend(cmd)?;
-                Ok(())
-            }
-            Some(LateSlot::History) => {
-                self.exit_code = self.execute_history(cmd)?;
-                Ok(())
-            }
-            Some(LateSlot::Bind) => {
-                self.exit_code = self.execute_bind(cmd)?;
-                Ok(())
-            }
-            Some(LateSlot::Fc) => {
-                self.exit_code = self.execute_fc(cmd)?;
-                Ok(())
-            }
-            Some(LateSlot::Complete) => {
-                self.exit_code = self.execute_completion_builtin(
-                    cmd,
-                    crate::builtins::complete::CompletionBuiltin::Complete,
-                )?;
-                Ok(())
-            }
-            Some(LateSlot::Compgen) => {
-                self.exit_code = self.execute_completion_builtin(
-                    cmd,
-                    crate::builtins::complete::CompletionBuiltin::Compgen,
-                )?;
-                Ok(())
-            }
-            Some(LateSlot::Compopt) => {
-                self.exit_code = self.execute_completion_builtin(
-                    cmd,
-                    crate::builtins::complete::CompletionBuiltin::Compopt,
-                )?;
-                Ok(())
-            }
+            Some(LateSlot::Suspend) => self.execute_status_builtin(cmd, Executor::execute_suspend),
+            Some(LateSlot::History) => self.execute_status_builtin(cmd, Executor::execute_history),
+            Some(LateSlot::Bind) => self.execute_status_builtin(cmd, Executor::execute_bind),
+            Some(LateSlot::Fc) => self.execute_status_builtin(cmd, Executor::execute_fc),
+            Some(LateSlot::Complete) => self.execute_completion_builtin_status(
+                cmd,
+                crate::builtins::complete::CompletionBuiltin::Complete,
+            ),
+            Some(LateSlot::Compgen) => self.execute_completion_builtin_status(
+                cmd,
+                crate::builtins::complete::CompletionBuiltin::Compgen,
+            ),
+            Some(LateSlot::Compopt) => self.execute_completion_builtin_status(
+                cmd,
+                crate::builtins::complete::CompletionBuiltin::Compopt,
+            ),
             Some(LateSlot::Time) => {
                 self.execute_time_command_node(cmd)?;
                 Ok(())
             }
-            Some(LateSlot::Trap) => {
-                self.exit_code = self.execute_trap(cmd)?;
-                Ok(())
-            }
+            Some(LateSlot::Trap) => self.execute_status_builtin(cmd, Executor::execute_trap),
             Some(LateSlot::Type) => {
                 // niubash #108: route every invocation through the buffered
                 // path. Command substitution (`$(type -t ls)`) swaps in
@@ -361,8 +308,7 @@ impl Executor {
                 // redirects leaked the description to the process stdout.
                 // `execute_type_with_io` also handles the disabled-builtin
                 // state (`enable -n type`) internally.
-                self.exit_code = self.execute_type_redirected(cmd)?;
-                Ok(())
+                self.execute_status_builtin(cmd, Executor::execute_type_redirected)
             }
             Some(LateSlot::Test) => {
                 if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "test") {
@@ -376,18 +322,14 @@ impl Executor {
                     // fd-1 target existed only once the buffered writer
                     // emitted, so the fd-fact sync's own-redirect
                     // overlay stated a file that was not there yet.
-                    self.apply_no_output_builtin_redirects(cmd)?;
-                    self.exit_code = self.execute_test_words(&cmd.words[1..], false, cmd)?;
-                    Ok(())
+                    self.execute_test_builtin(cmd, false)
                 }
             }
             Some(LateSlot::TestBracket) => {
                 if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "[") {
                     self.execute_external(cmd)
                 } else {
-                    self.apply_no_output_builtin_redirects(cmd)?;
-                    self.exit_code = self.execute_test_words(&cmd.words[1..], true, cmd)?;
-                    Ok(())
+                    self.execute_test_builtin(cmd, true)
                 }
             }
             Some(LateSlot::Conditional) => {
@@ -505,35 +447,23 @@ impl Executor {
                 // The fast paths emulate external commands: when the
                 // name does not resolve (PATH unset, rubash#1126; or a
                 // set PATH without it, rubash#1545) they must not run.
-                if !self.emulated_external_stands_down("dirname") {
-                    if let Some(status) = self.try_execute_dirname_fast_path(cmd) {
-                        // rubash#2736: an answered fast path records
-                        // the PATH resolution, as GNU's locate does.
-                        super::execution_misc::record_fastpath_command_resolution(
-                            &mut self.shell_state.env_vars,
-                            "dirname",
-                        );
-                        self.exit_code = status;
-                        return Ok(());
-                    }
-                }
-                self.execute_external(cmd)
+                self.execute_fastpath_or_external(
+                    cmd,
+                    "dirname",
+                    Executor::try_execute_dirname_fast_path,
+                    |env_vars, name| {
+                        super::execution_misc::record_fastpath_command_resolution(env_vars, name)
+                    },
+                )
             }
-            Some(LateSlot::Basename) => {
-                if !self.emulated_external_stands_down("basename") {
-                    if let Some(status) = self.try_execute_basename_fast_path(cmd) {
-                        // rubash#2736: an answered fast path records
-                        // the PATH resolution, as GNU's locate does.
-                        super::execution_misc::record_fastpath_command_resolution(
-                            &mut self.shell_state.env_vars,
-                            "basename",
-                        );
-                        self.exit_code = status;
-                        return Ok(());
-                    }
-                }
-                self.execute_external(cmd)
-            }
+            Some(LateSlot::Basename) => self.execute_fastpath_or_external(
+                cmd,
+                "basename",
+                Executor::try_execute_basename_fast_path,
+                |env_vars, name| {
+                    super::execution_misc::record_fastpath_command_resolution(env_vars, name)
+                },
+            ),
             // Bash posix-mode notes (item 19): in POSIX mode a function whose
             // name contains a slash is never executed — the word falls
             // through to the PATH search (`a/b` -> command not found, 127),
@@ -553,26 +483,10 @@ impl Executor {
                 // The stand-down decision is the registry row's
                 // two-axis policy (ScriptYield/FailClosed, #2104),
                 // not a per-name check.
-                if self.registered_stand_down("uname") {
-                    return self.execute_external(cmd);
-                }
-                self.exit_code = self.execute_identity_tool(cmd, "uname");
-                Ok(())
+                self.execute_identity_tool_or_external(cmd, "uname")
             }
-            Some(LateSlot::Arch) => {
-                if self.registered_stand_down("arch") {
-                    return self.execute_external(cmd);
-                }
-                self.exit_code = self.execute_identity_tool(cmd, "arch");
-                Ok(())
-            }
-            Some(LateSlot::Stty) => {
-                if self.emulated_external_stands_down("stty") {
-                    return self.execute_external(cmd);
-                }
-                self.exit_code = self.execute_console_mode_tool(cmd);
-                Ok(())
-            }
+            Some(LateSlot::Arch) => self.execute_identity_tool_or_external(cmd, "arch"),
+            Some(LateSlot::Stty) => self.execute_console_mode_tool_or_external(cmd),
             _ => self.execute_external(cmd),
         }
     }
