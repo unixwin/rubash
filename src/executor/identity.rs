@@ -332,22 +332,10 @@ pub fn operating_system() -> String {
 /// processes (returns the compatibility manifest version).
 #[cfg(windows)]
 fn windows_version() -> String {
-    #[repr(C)]
-    #[allow(non_snake_case)]
-    struct OSVERSIONINFOW {
-        dwOSVersionInfoSize: u32,
-        dwMajorVersion: u32,
-        dwMinorVersion: u32,
-        dwBuildNumber: u32,
-        dwPlatformId: u32,
-        szCSDVersion: [u16; 128],
-    }
+    use windows_sys::Wdk::System::SystemServices::RtlGetVersion;
+    use windows_sys::Win32::System::SystemInformation::OSVERSIONINFOW;
 
-    extern "system" {
-        fn RtlGetVersion(version_information: *mut OSVERSIONINFOW) -> i32;
-    }
-
-    let mut info: OSVERSIONINFOW = unsafe { std::mem::zeroed() };
+    let mut info = OSVERSIONINFOW::default();
     info.dwOSVersionInfoSize = std::mem::size_of::<OSVERSIONINFOW>() as u32;
     let status = unsafe { RtlGetVersion(&mut info) };
     if status == 0 {

@@ -87,6 +87,17 @@
 //! through TIOCSWINSZ (GNU coreutils stty behavior).
 
 use crate::builtins::uname::IdentityToolOutput;
+#[cfg(windows)]
+use crate::win32_ffi::sys_handle;
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::CreateFileW;
+#[cfg(windows)]
+use windows_sys::Win32::System::Console::{
+    GetConsoleMode, GetConsoleScreenBufferInfo, SetConsoleMode, SetConsoleScreenBufferSize,
+    SetConsoleWindowInfo, CONSOLE_SCREEN_BUFFER_INFO, COORD, SMALL_RECT,
+};
 
 #[cfg(windows)]
 const ENABLE_PROCESSED_INPUT: u32 = 0x0001;
@@ -425,11 +436,7 @@ fn stty_windows(invocation: &Invocation) -> IdentityToolOutput {
 
 #[cfg(windows)]
 fn set_console_mode_bits(handle: isize, mask: u32, set: bool) -> Result<(), ()> {
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn GetConsoleMode(h: isize, mode: *mut u32) -> i32;
-        fn SetConsoleMode(h: isize, mode: u32) -> i32;
-    }
+    let handle = sys_handle(handle);
     let mut mode: u32 = 0;
     if unsafe { GetConsoleMode(handle, &mut mode) } == 0 {
         return Err(());
@@ -443,12 +450,8 @@ fn set_console_mode_bits(handle: isize, mask: u32, set: bool) -> Result<(), ()> 
 
 #[cfg(windows)]
 fn get_console_mode(handle: isize) -> Result<u32, ()> {
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn GetConsoleMode(h: isize, mode: *mut u32) -> i32;
-    }
     let mut mode: u32 = 0;
-    if unsafe { GetConsoleMode(handle, &mut mode) } == 0 {
+    if unsafe { GetConsoleMode(sys_handle(handle), &mut mode) } == 0 {
         return Err(());
     }
     Ok(mode)
@@ -516,53 +519,10 @@ werase = ^W; lnext = ^V; discard = ^O;\n",
     Ok(())
 }
 
-#[cfg(windows)]
-#[repr(C)]
-struct Coord {
-    x: u16,
-    y: u16,
-}
-
-#[cfg(windows)]
-#[repr(C)]
-struct SmallRect {
-    left: u16,
-    top: u16,
-    right: u16,
-    bottom: u16,
-}
-
-#[cfg(windows)]
-#[repr(C)]
-struct ConsoleScreenBufferInfo {
-    size: Coord,
-    #[allow(dead_code)]
-    cursor_position: Coord,
-    #[allow(dead_code)]
-    attributes: u16,
-    window: SmallRect,
-    #[allow(dead_code)]
-    maximum_window_size: Coord,
-}
-
 /// Open CONOUT$ and return the screen-buffer info, shared by the geometry
 /// query and the window-size setting.
 #[cfg(windows)]
-fn console_screen_buffer_info() -> Result<ConsoleScreenBufferInfo, ()> {
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn CreateFileW(
-            name: *const u16,
-            access: u32,
-            share: u32,
-            sa: *const core::ffi::c_void,
-            disposition: u32,
-            flags: u32,
-            template: isize,
-        ) -> isize;
-        fn GetConsoleScreenBufferInfo(h: isize, info: *mut ConsoleScreenBufferInfo) -> i32;
-        fn CloseHandle(h: isize) -> i32;
-    }
+fn console_screen_buffer_info() -> Result<CONSOLE_SCREEN_BUFFER_INFO, ()> {
     const GENERIC_READ: u32 = 0x8000_0000;
     const GENERIC_WRITE: u32 = 0x4000_0000;
     const FILE_SHARE_READ: u32 = 0x1;
@@ -577,13 +537,13 @@ fn console_screen_buffer_info() -> Result<ConsoleScreenBufferInfo, ()> {
             std::ptr::null(),
             OPEN_EXISTING,
             0,
-            0,
+            std::ptr::null_mut(),
         )
     };
-    if console_out == -1 || console_out == 0 {
+    if console_out.is_null() || console_out == INVALID_HANDLE_VALUE {
         return Err(());
     }
-    let mut info = unsafe { std::mem::zeroed::<ConsoleScreenBufferInfo>() };
+    let mut info = CONSOLE_SCREEN_BUFFER_INFO::default();
     let ok = unsafe { GetConsoleScreenBufferInfo(console_out, &mut info) };
     unsafe {
         CloseHandle(console_out);
@@ -603,8 +563,8 @@ fn console_screen_buffer_info() -> Result<ConsoleScreenBufferInfo, ()> {
 #[cfg(windows)]
 fn console_window_rows_cols() -> Result<(u32, u32), ()> {
     let info = console_screen_buffer_info()?;
-    let rows = info.window.bottom as u32 - info.window.top as u32 + 1;
-    let cols = info.window.right as u32 - info.window.left as u32 + 1;
+    let rows = info.srWindow.Bottom as u16 as u32 - info.srWindow.Top as u16 as u32 + 1;
+    let cols = info.srWindow.Right as u16 as u32 - info.srWindow.Left as u16 as u32 + 1;
     Ok((rows, cols))
 }
 
@@ -615,22 +575,6 @@ fn console_window_rows_cols() -> Result<(u32, u32), ()> {
 /// a later `stty size` reads the window and reflects the setting.
 #[cfg(windows)]
 fn console_resize(rows: Option<u32>, cols: Option<u32>) -> Result<(), ()> {
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn CreateFileW(
-            name: *const u16,
-            access: u32,
-            share: u32,
-            sa: *const core::ffi::c_void,
-            disposition: u32,
-            flags: u32,
-            template: isize,
-        ) -> isize;
-        fn GetConsoleScreenBufferInfo(h: isize, info: *mut ConsoleScreenBufferInfo) -> i32;
-        fn SetConsoleScreenBufferSize(h: isize, size: Coord) -> i32;
-        fn SetConsoleWindowInfo(h: isize, absolute: i32, window: *const SmallRect) -> i32;
-        fn CloseHandle(h: isize) -> i32;
-    }
     const GENERIC_READ: u32 = 0x8000_0000;
     const GENERIC_WRITE: u32 = 0x4000_0000;
     const FILE_SHARE_READ: u32 = 0x1;
@@ -645,40 +589,49 @@ fn console_resize(rows: Option<u32>, cols: Option<u32>) -> Result<(), ()> {
             std::ptr::null(),
             OPEN_EXISTING,
             0,
-            0,
+            std::ptr::null_mut(),
         )
     };
-    if console_out == -1 || console_out == 0 {
+    if console_out.is_null() || console_out == INVALID_HANDLE_VALUE {
         return Err(());
     }
-    let mut info = unsafe { std::mem::zeroed::<ConsoleScreenBufferInfo>() };
+    let mut info = CONSOLE_SCREEN_BUFFER_INFO::default();
     if unsafe { GetConsoleScreenBufferInfo(console_out, &mut info) } == 0 {
         unsafe {
             CloseHandle(console_out);
         }
         return Err(());
     }
-    let cur_rows = info.window.bottom as u32 - info.window.top as u32 + 1;
-    let cur_cols = info.window.right as u32 - info.window.left as u32 + 1;
+    let cur_rows = info.srWindow.Bottom as u16 as u32 - info.srWindow.Top as u16 as u32 + 1;
+    let cur_cols = info.srWindow.Right as u16 as u32 - info.srWindow.Left as u16 as u32 + 1;
     let new_rows = rows.unwrap_or(cur_rows).min(u16::MAX as u32);
     let new_cols = cols.unwrap_or(cur_cols).min(u16::MAX as u32);
     // Grow the buffer around the requested window; never shrink it (the
     // cursor must stay inside).
-    let buf_x = info.size.x.max(new_cols as u16);
-    let buf_y = info.size.y.max(new_rows as u16);
-    if buf_x != info.size.x || buf_y != info.size.y {
-        if unsafe { SetConsoleScreenBufferSize(console_out, Coord { x: buf_x, y: buf_y }) } == 0 {
+    let buf_x = (info.dwSize.X as u16).max(new_cols as u16);
+    let buf_y = (info.dwSize.Y as u16).max(new_rows as u16);
+    if buf_x != (info.dwSize.X as u16) || buf_y != (info.dwSize.Y as u16) {
+        if unsafe {
+            SetConsoleScreenBufferSize(
+                console_out,
+                COORD {
+                    X: buf_x as i16,
+                    Y: buf_y as i16,
+                },
+            )
+        } == 0
+        {
             unsafe {
                 CloseHandle(console_out);
             }
             return Err(());
         }
     }
-    let window = SmallRect {
-        left: 0,
-        top: 0,
-        right: new_cols.min(buf_x as u32).saturating_sub(1) as u16,
-        bottom: new_rows.min(buf_y as u32).saturating_sub(1) as u16,
+    let window = SMALL_RECT {
+        Left: 0,
+        Top: 0,
+        Right: new_cols.min(buf_x as u32).saturating_sub(1) as u16 as i16,
+        Bottom: new_rows.min(buf_y as u32).saturating_sub(1) as u16 as i16,
     };
     let ok = unsafe { SetConsoleWindowInfo(console_out, 1, &window) };
     unsafe {

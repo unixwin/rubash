@@ -9,47 +9,34 @@
 #![cfg(windows)]
 
 use std::collections::HashMap;
-use std::ffi::c_void;
 use std::os::windows::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+use windows_sys::Win32::Foundation::{CloseHandle, HWND, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GetClassNameW, GetWindowThreadProcessId, IsWindowVisible,
+};
 
 const DETACHED_PROCESS: u32 = 0x0000_0008;
 const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 const TH32CS_SNAPPROCESS: u32 = 0x0000_0002;
 
-type Hwnd = *mut c_void;
+type Hwnd = HWND;
 
-#[link(name = "user32")]
-extern "system" {
-    fn EnumWindows(cb: extern "system" fn(Hwnd, isize) -> i32, lparam: isize) -> i32;
-    fn GetClassNameW(hwnd: Hwnd, buf: *mut u16, len: i32) -> i32;
-    fn IsWindowVisible(hwnd: Hwnd) -> i32;
-    fn GetWindowThreadProcessId(hwnd: Hwnd, pid: *mut u32) -> u32;
-    fn CreateToolhelp32Snapshot(flags: u32, pid: u32) -> *mut c_void;
-    fn Process32FirstW(snap: *mut c_void, pe: *mut ProcessEntry) -> i32;
-    fn Process32NextW(snap: *mut c_void, pe: *mut ProcessEntry) -> i32;
-    fn CloseHandle(h: *mut c_void) -> i32;
-}
-
-#[repr(C)]
-struct ProcessEntry {
-    size: u32,
-    usage: u32,
-    pid: u32,
-    default_heap: usize,
-    module_id: u32,
-    threads: u32,
-    ppid: u32,
-    pri_class_base: i32,
-    flags: u32,
-    exe_file: [u16; 260],
+fn process_entry() -> PROCESSENTRY32W {
+    PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..PROCESSENTRY32W::default()
+    }
 }
 
 fn visible_console_window_owners() -> Vec<u32> {
     use std::sync::Mutex;
     static OWNERS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
-    extern "system" fn collect(hwnd: Hwnd, _lparam: isize) -> i32 {
+    unsafe extern "system" fn collect(hwnd: Hwnd, _lparam: isize) -> i32 {
         let mut cls = [0u16; 64];
         unsafe {
             if GetClassNameW(hwnd, cls.as_mut_ptr(), cls.len() as i32) == 0 {
@@ -67,7 +54,7 @@ fn visible_console_window_owners() -> Vec<u32> {
     }
     OWNERS.lock().unwrap().clear();
     unsafe {
-        EnumWindows(collect, 0);
+        EnumWindows(Some(collect), 0);
     }
     std::mem::take(&mut *OWNERS.lock().unwrap())
 }
@@ -76,24 +63,13 @@ fn process_tree() -> HashMap<u32, u32> {
     let mut map = HashMap::new();
     unsafe {
         let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-        if snap.is_null() || snap == -1isize as *mut c_void {
+        if snap.is_null() || snap == INVALID_HANDLE_VALUE {
             return map;
         }
-        let mut pe = ProcessEntry {
-            size: std::mem::size_of::<ProcessEntry>() as u32,
-            usage: 0,
-            pid: 0,
-            default_heap: 0,
-            module_id: 0,
-            threads: 0,
-            ppid: 0,
-            pri_class_base: 0,
-            flags: 0,
-            exe_file: [0; 260],
-        };
+        let mut pe = process_entry();
         if Process32FirstW(snap, &mut pe) != 0 {
             loop {
-                map.insert(pe.pid, pe.ppid);
+                map.insert(pe.th32ProcessID, pe.th32ParentProcessID);
                 if Process32NextW(snap, &mut pe) == 0 {
                     break;
                 }
@@ -123,30 +99,19 @@ fn process_entries() -> Vec<(u32, u32, String)> {
     let mut out = Vec::new();
     unsafe {
         let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-        if snap.is_null() || snap == -1isize as *mut c_void {
+        if snap.is_null() || snap == INVALID_HANDLE_VALUE {
             return out;
         }
-        let mut pe = ProcessEntry {
-            size: std::mem::size_of::<ProcessEntry>() as u32,
-            usage: 0,
-            pid: 0,
-            default_heap: 0,
-            module_id: 0,
-            threads: 0,
-            ppid: 0,
-            pri_class_base: 0,
-            flags: 0,
-            exe_file: [0; 260],
-        };
+        let mut pe = process_entry();
         if Process32FirstW(snap, &mut pe) != 0 {
             loop {
                 let len = pe
-                    .exe_file
+                    .szExeFile
                     .iter()
                     .position(|&c| c == 0)
-                    .unwrap_or(pe.exe_file.len());
-                let name = String::from_utf16_lossy(&pe.exe_file[..len]).to_ascii_lowercase();
-                out.push((pe.pid, pe.ppid, name));
+                    .unwrap_or(pe.szExeFile.len());
+                let name = String::from_utf16_lossy(&pe.szExeFile[..len]).to_ascii_lowercase();
+                out.push((pe.th32ProcessID, pe.th32ParentProcessID, name));
                 if Process32NextW(snap, &mut pe) == 0 {
                     break;
                 }

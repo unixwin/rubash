@@ -21,6 +21,11 @@
 //! see a normal line-discipline console, exactly like readline's
 //! save_tty_state/unix:tty restoration (bind.c prepare_terminal).
 
+#[cfg(windows)]
+use windows_sys::Win32::System::Console::{
+    GetConsoleMode, ReadConsoleInputW, SetConsoleMode, INPUT_RECORD as WIN_INPUT_RECORD,
+};
+
 /// Turn one console key event into the character stream the edit
 /// dispatcher consumes. Pure and platform-independent so the mapping is
 /// unit-testable off-Windows.
@@ -263,7 +268,14 @@ impl RawConsole {
                 },
             };
             let mut read = 0u32;
-            let ok = unsafe { ReadConsoleInputW(self.handle, &mut record, 1, &mut read) };
+            let ok = unsafe {
+                ReadConsoleInputW(
+                    self.handle,
+                    &mut record as *mut INPUT_RECORD as *mut WIN_INPUT_RECORD,
+                    1,
+                    &mut read,
+                )
+            };
             if ok == 0 {
                 let err = std::io::Error::last_os_error();
                 if err.raw_os_error() == Some(6 /* ERROR_INVALID_HANDLE */) {
@@ -342,9 +354,6 @@ const ENABLE_WINDOW_INPUT: u32 = 0x0008;
 const KEY_EVENT: u16 = 0x0001;
 
 #[cfg(windows)]
-type HANDLE = *mut std::ffi::c_void;
-
-#[cfg(windows)]
 #[repr(C)]
 struct KEY_EVENT_RECORD {
     key_down: i32,
@@ -364,18 +373,6 @@ struct KEY_EVENT_RECORD {
 struct INPUT_RECORD {
     event_type: u16,
     key: KEY_EVENT_RECORD,
-}
-
-#[cfg(windows)]
-extern "system" {
-    fn GetConsoleMode(hConsoleInput: HANDLE, mode: *mut u32) -> i32;
-    fn SetConsoleMode(hConsoleInput: HANDLE, mode: u32) -> i32;
-    fn ReadConsoleInputW(
-        hConsoleInput: HANDLE,
-        record: *mut INPUT_RECORD,
-        length: u32,
-        read: *mut u32,
-    ) -> i32;
 }
 
 #[cfg(test)]

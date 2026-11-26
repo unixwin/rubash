@@ -236,6 +236,8 @@ fn windows_slash_drive_to_native(path: &std::path::Path) -> std::path::PathBuf {
 
 #[cfg(windows)]
 fn windows_long_path(path: &std::path::Path) -> std::path::PathBuf {
+    use windows_sys::Win32::Storage::FileSystem::GetLongPathNameW;
+
     let wide = path
         .as_os_str()
         .encode_wide()
@@ -261,12 +263,6 @@ fn windows_display_path(path: &std::path::Path) -> String {
         return rest.to_string();
     }
     display
-}
-
-#[cfg(windows)]
-#[link(name = "kernel32")]
-extern "system" {
-    fn GetLongPathNameW(short_path: *const u16, long_path: *mut u16, buffer_length: u32) -> u32;
 }
 
 /// An admitted `cat` heredoc/here-string comsub body: the parsed AST

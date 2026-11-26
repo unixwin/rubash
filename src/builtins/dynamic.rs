@@ -695,13 +695,9 @@ fn dl_error() -> String {
 }
 
 #[cfg(windows)]
-#[link(name = "kernel32")]
-extern "system" {
-    fn LoadLibraryA(name: *const u8) -> *mut c_void;
-    fn GetProcAddress(module: *mut c_void, name: *const u8) -> *mut c_void;
-    fn FreeLibrary(module: *mut c_void) -> i32;
-    fn GetLastError() -> u32;
-}
+use windows_sys::Win32::Foundation::{FreeLibrary, GetLastError};
+#[cfg(windows)]
+use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
 
 #[cfg(windows)]
 fn dlopen(path: &Path) -> *mut c_void {
@@ -717,7 +713,10 @@ fn dlsym(handle: *mut c_void, symbol: &str) -> *mut c_void {
     let Ok(symbol) = CString::new(symbol) else {
         return std::ptr::null_mut();
     };
-    unsafe { GetProcAddress(handle, symbol.as_ptr() as *const u8) }
+    unsafe {
+        GetProcAddress(handle, symbol.as_ptr() as *const u8)
+            .map_or(std::ptr::null_mut(), |proc| proc as usize as *mut c_void)
+    }
 }
 
 #[cfg(windows)]

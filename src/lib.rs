@@ -10,7 +10,6 @@
 #![allow(unused_mut)]
 #![allow(dead_code)]
 #![allow(unreachable_patterns)]
-#![allow(clashing_extern_declarations)]
 
 #[cfg(feature = "alloc-counter")]
 pub mod alloc_counter;
@@ -40,6 +39,8 @@ pub mod special_paths;
 pub(crate) mod stack_growth;
 pub mod token_str;
 pub mod usage;
+#[cfg(windows)]
+pub(crate) mod win32_ffi;
 pub(crate) mod winuxcmd_fifo;
 
 // The DAP frontend entry points (1.5.0 debugger design section

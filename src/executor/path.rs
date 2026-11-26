@@ -2477,9 +2477,8 @@ fn arm_child_signal_reset(command: &mut Command) {
 pub(crate) fn suppress_orphan_console(command: &mut Command) {
     #[cfg(windows)]
     {
-        extern "system" {
-            fn GetConsoleCP() -> u32;
-        }
+        use windows_sys::Win32::System::Console::GetConsoleCP;
+
         // CREATE_NO_WINDOW = 0x08000000 (WinBase.h)
         if unsafe { GetConsoleCP() } == 0 && !try_alloc_hidden_console() {
             command.creation_flags(0x0800_0000);
@@ -2491,9 +2490,8 @@ pub(crate) fn suppress_orphan_console(command: &mut Command) {
 
 #[cfg(windows)]
 pub(crate) fn orphan_console_creation_flags() -> u32 {
-    extern "system" {
-        fn GetConsoleCP() -> u32;
-    }
+    use windows_sys::Win32::System::Console::GetConsoleCP;
+
     if unsafe { GetConsoleCP() } == 0 && !try_alloc_hidden_console() {
         0x0800_0000
     } else {
@@ -2509,13 +2507,9 @@ unsafe fn preserve_std_handles<F: FnOnce() -> bool>(f: F) -> bool {
     const STD_ERROR_HANDLE: u32 = (-12i32) as u32;
     const INVALID_HANDLE_VALUE: Handle = (-1isize) as Handle;
 
-    extern "system" {
-        fn GetStdHandle(n_std_handle: u32) -> Handle;
-        fn SetStdHandle(n_std_handle: u32, h_handle: Handle) -> i32;
-        fn GetFileType(h_file: Handle) -> u32;
-        fn GetLastError() -> u32;
-        fn SetLastError(dw_err_code: u32);
-    }
+    use windows_sys::Win32::Foundation::{GetLastError, SetLastError};
+    use windows_sys::Win32::Storage::FileSystem::GetFileType;
+    use windows_sys::Win32::System::Console::{GetStdHandle, SetStdHandle};
 
     unsafe fn live_std_handle(id: u32) -> Option<Handle> {
         let h = GetStdHandle(id);
@@ -2561,14 +2555,8 @@ fn try_alloc_hidden_console() -> bool {
     type AllocConsoleWithOptionsFn =
         unsafe extern "system" fn(*const AllocConsoleOptions, *mut i32) -> i32;
 
-    extern "system" {
-        fn GetModuleHandleA(module_name: *const u8) -> *mut core::ffi::c_void;
-        fn GetProcAddress(
-            module: *mut core::ffi::c_void,
-            proc_name: *const u8,
-        ) -> *mut core::ffi::c_void;
-        fn GetConsoleCP() -> u32;
-    }
+    use windows_sys::Win32::System::Console::GetConsoleCP;
+    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
 
     const ALLOC_CONSOLE_MODE_NO_WINDOW: i32 = 2;
 
@@ -2577,10 +2565,9 @@ fn try_alloc_hidden_console() -> bool {
         if module.is_null() {
             return false;
         }
-        let proc = GetProcAddress(module, b"AllocConsoleWithOptions\0".as_ptr());
-        if proc.is_null() {
+        let Some(proc) = GetProcAddress(module, b"AllocConsoleWithOptions\0".as_ptr()) else {
             return false;
-        }
+        };
         let func: AllocConsoleWithOptionsFn = core::mem::transmute(proc);
         preserve_std_handles(|| {
             let options = AllocConsoleOptions {
@@ -2601,12 +2588,9 @@ fn try_alloc_hidden_console() -> bool {
 pub(crate) fn adopt_orphan_console(child_pid: u32) {
     #[cfg(windows)]
     unsafe {
-        extern "system" {
-            fn GetConsoleCP() -> u32;
-            fn AttachConsole(dw_process_id: u32) -> i32;
-            fn GetLastError() -> u32;
-            fn SwitchToThread() -> i32;
-        }
+        use windows_sys::Win32::Foundation::GetLastError;
+        use windows_sys::Win32::System::Console::{AttachConsole, GetConsoleCP};
+        use windows_sys::Win32::System::Threading::SwitchToThread;
 
         if GetConsoleCP() != 0 {
             return;

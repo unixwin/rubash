@@ -22,6 +22,7 @@
 
 #![allow(non_snake_case, non_camel_case_types)]
 
+use crate::win32_ffi::{local_handle, sys_handle};
 use std::ffi::c_void;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
@@ -47,66 +48,6 @@ const FILE_BEGIN: DWORD = 0;
 pub const HANDLE_FLAG_INHERIT: DWORD = 0x0000_0001;
 const DUPLICATE_SAME_ACCESS: DWORD = 0x0000_0002;
 
-#[link(name = "kernel32")]
-extern "system" {
-    fn GetCurrentProcess() -> HANDLE;
-    fn CreateFileW(
-        name: *const u16,
-        access: DWORD,
-        share: DWORD,
-        sa: *const c_void,
-        disposition: DWORD,
-        flags: DWORD,
-        template: HANDLE,
-    ) -> HANDLE;
-    fn CreatePipe(
-        hRead: *mut HANDLE,
-        hWrite: *mut HANDLE,
-        sa: *const SECURITY_ATTRIBUTES,
-        size: DWORD,
-    ) -> BOOL;
-    fn DuplicateHandle(
-        hSrcProc: HANDLE,
-        hSrc: HANDLE,
-        hDstProc: HANDLE,
-        lpTarget: *mut HANDLE,
-        access: DWORD,
-        inherit: BOOL,
-        options: DWORD,
-    ) -> BOOL;
-    fn CloseHandle(h: HANDLE) -> BOOL;
-    fn ReadFile(
-        h: HANDLE,
-        buf: *mut u8,
-        n: DWORD,
-        read: *mut DWORD,
-        overlapped: *mut c_void,
-    ) -> BOOL;
-    fn WriteFile(
-        h: HANDLE,
-        buf: *const u8,
-        n: DWORD,
-        written: *mut DWORD,
-        overlapped: *mut c_void,
-    ) -> BOOL;
-    fn SetFilePointer(h: HANDLE, dist: i32, dist_high: *mut i32, method: DWORD) -> DWORD;
-    fn SetHandleInformation(h: HANDLE, mask: DWORD, flags: DWORD) -> BOOL;
-    fn GetHandleInformation(h: HANDLE, flags: *mut DWORD) -> BOOL;
-    fn GetFileType(h: HANDLE) -> DWORD;
-    fn GetFinalPathNameByHandleW(h: HANDLE, buf: *mut u16, len: DWORD, flags: DWORD) -> DWORD;
-    fn GetFileInformationByHandle(h: HANDLE, info: *mut BY_HANDLE_FILE_INFORMATION) -> BOOL;
-    fn GetConsoleMode(h: HANDLE, mode: *mut DWORD) -> BOOL;
-    fn WaitForSingleObject(h: HANDLE, ms: DWORD) -> DWORD;
-    fn PeekNamedPipe(
-        h: HANDLE,
-        buf: *mut u8,
-        buflen: DWORD,
-        bytes_read: *mut DWORD,
-        avail: *mut DWORD,
-        left: *mut DWORD,
-    ) -> BOOL;
-}
-
 const FILE_FLAG_BACKUP_SEMANTICS: DWORD = 0x0200_0000;
 const FILE_ATTRIBUTE_DIRECTORY: DWORD = 0x0000_0010;
 
@@ -130,6 +71,353 @@ pub struct SECURITY_ATTRIBUTES {
     pub nLength: DWORD,
     pub lpSecurityDescriptor: *mut c_void,
     pub bInheritHandle: BOOL,
+}
+
+#[repr(C)]
+struct WsaFdSet {
+    fd_count: u32,
+    fd_array: [usize; 64],
+}
+
+#[repr(C)]
+struct WsaTimeval {
+    tv_sec: i32,
+    tv_usec: i32,
+}
+
+type SysHandle = windows_sys::Win32::Foundation::HANDLE;
+type SysSecurityAttributes = windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+
+#[inline]
+unsafe fn sys_security_attributes(
+    attrs: *const SECURITY_ATTRIBUTES,
+) -> *const SysSecurityAttributes {
+    attrs as *const SysSecurityAttributes
+}
+
+#[inline]
+unsafe fn GetCurrentProcess() -> HANDLE {
+    local_handle(windows_sys::Win32::System::Threading::GetCurrentProcess())
+}
+
+#[inline]
+unsafe fn CreateFileW(
+    name: *const u16,
+    access: DWORD,
+    share: DWORD,
+    sa: *const c_void,
+    disposition: DWORD,
+    flags: DWORD,
+    template: HANDLE,
+) -> HANDLE {
+    local_handle(windows_sys::Win32::Storage::FileSystem::CreateFileW(
+        name,
+        access,
+        share,
+        sa as *const SysSecurityAttributes,
+        disposition,
+        flags,
+        sys_handle(template),
+    ))
+}
+
+#[inline]
+unsafe fn CreatePipe(
+    hRead: *mut HANDLE,
+    hWrite: *mut HANDLE,
+    sa: *const SECURITY_ATTRIBUTES,
+    size: DWORD,
+) -> BOOL {
+    let mut sys_read: SysHandle = std::ptr::null_mut();
+    let mut sys_write: SysHandle = std::ptr::null_mut();
+    let ok = windows_sys::Win32::System::Pipes::CreatePipe(
+        &mut sys_read,
+        &mut sys_write,
+        sys_security_attributes(sa),
+        size,
+    );
+    if ok != 0 {
+        *hRead = local_handle(sys_read);
+        *hWrite = local_handle(sys_write);
+    }
+    ok
+}
+
+#[inline]
+unsafe fn DuplicateHandle(
+    hSrcProc: HANDLE,
+    hSrc: HANDLE,
+    hDstProc: HANDLE,
+    lpTarget: *mut HANDLE,
+    access: DWORD,
+    inherit: BOOL,
+    options: DWORD,
+) -> BOOL {
+    let mut sys_target: SysHandle = std::ptr::null_mut();
+    let ok = windows_sys::Win32::Foundation::DuplicateHandle(
+        sys_handle(hSrcProc),
+        sys_handle(hSrc),
+        sys_handle(hDstProc),
+        &mut sys_target,
+        access,
+        inherit,
+        options,
+    );
+    if ok != 0 {
+        *lpTarget = local_handle(sys_target);
+    }
+    ok
+}
+
+#[inline]
+unsafe fn CloseHandle(h: HANDLE) -> BOOL {
+    windows_sys::Win32::Foundation::CloseHandle(sys_handle(h))
+}
+
+#[inline]
+unsafe fn ReadFile(
+    h: HANDLE,
+    buf: *mut u8,
+    n: DWORD,
+    read: *mut DWORD,
+    overlapped: *mut c_void,
+) -> BOOL {
+    windows_sys::Win32::Storage::FileSystem::ReadFile(
+        sys_handle(h),
+        buf,
+        n,
+        read,
+        overlapped as *mut windows_sys::Win32::System::IO::OVERLAPPED,
+    )
+}
+
+#[inline]
+unsafe fn WriteFile(
+    h: HANDLE,
+    buf: *const u8,
+    n: DWORD,
+    written: *mut DWORD,
+    overlapped: *mut c_void,
+) -> BOOL {
+    windows_sys::Win32::Storage::FileSystem::WriteFile(
+        sys_handle(h),
+        buf,
+        n,
+        written,
+        overlapped as *mut windows_sys::Win32::System::IO::OVERLAPPED,
+    )
+}
+
+#[inline]
+unsafe fn SetFilePointer(h: HANDLE, dist: i32, dist_high: *mut i32, method: DWORD) -> DWORD {
+    windows_sys::Win32::Storage::FileSystem::SetFilePointer(sys_handle(h), dist, dist_high, method)
+}
+
+#[inline]
+unsafe fn SetHandleInformation(h: HANDLE, mask: DWORD, flags: DWORD) -> BOOL {
+    windows_sys::Win32::Foundation::SetHandleInformation(sys_handle(h), mask, flags)
+}
+
+#[inline]
+unsafe fn GetHandleInformation(h: HANDLE, flags: *mut DWORD) -> BOOL {
+    windows_sys::Win32::Foundation::GetHandleInformation(sys_handle(h), flags)
+}
+
+#[inline]
+unsafe fn GetFileType(h: HANDLE) -> DWORD {
+    windows_sys::Win32::Storage::FileSystem::GetFileType(sys_handle(h))
+}
+
+#[inline]
+unsafe fn GetFinalPathNameByHandleW(h: HANDLE, buf: *mut u16, len: DWORD, flags: DWORD) -> DWORD {
+    windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW(
+        sys_handle(h),
+        buf,
+        len,
+        flags,
+    )
+}
+
+#[inline]
+unsafe fn GetFileInformationByHandle(h: HANDLE, info: *mut BY_HANDLE_FILE_INFORMATION) -> BOOL {
+    windows_sys::Win32::Storage::FileSystem::GetFileInformationByHandle(
+        sys_handle(h),
+        info as *mut windows_sys::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION,
+    )
+}
+
+#[inline]
+unsafe fn GetConsoleMode(h: HANDLE, mode: *mut DWORD) -> BOOL {
+    windows_sys::Win32::System::Console::GetConsoleMode(sys_handle(h), mode)
+}
+
+#[inline]
+unsafe fn SetConsoleMode(h: HANDLE, mode: DWORD) -> BOOL {
+    windows_sys::Win32::System::Console::SetConsoleMode(sys_handle(h), mode)
+}
+
+#[inline]
+unsafe fn WaitForSingleObject(h: HANDLE, ms: DWORD) -> DWORD {
+    windows_sys::Win32::System::Threading::WaitForSingleObject(sys_handle(h), ms)
+}
+
+#[inline]
+unsafe fn PeekNamedPipe(
+    h: HANDLE,
+    buf: *mut u8,
+    buflen: DWORD,
+    bytes_read: *mut DWORD,
+    avail: *mut DWORD,
+    left: *mut DWORD,
+) -> BOOL {
+    windows_sys::Win32::System::Pipes::PeekNamedPipe(
+        sys_handle(h),
+        buf as *mut c_void,
+        buflen,
+        bytes_read,
+        avail,
+        left,
+    )
+}
+
+#[inline]
+unsafe fn GetNamedPipeInfo(
+    h: HANDLE,
+    flags: *mut DWORD,
+    in_size: *mut DWORD,
+    out_size: *mut DWORD,
+    instances: *mut DWORD,
+) -> BOOL {
+    windows_sys::Win32::System::Pipes::GetNamedPipeInfo(
+        sys_handle(h),
+        flags,
+        out_size,
+        in_size,
+        instances,
+    )
+}
+
+#[inline]
+unsafe fn PeekConsoleInputW(
+    h: HANDLE,
+    record: *mut InputRecord,
+    length: DWORD,
+    read: *mut DWORD,
+) -> BOOL {
+    windows_sys::Win32::System::Console::PeekConsoleInputW(
+        sys_handle(h),
+        record as *mut windows_sys::Win32::System::Console::INPUT_RECORD,
+        length,
+        read,
+    )
+}
+
+#[inline]
+unsafe fn select(
+    nfds: i32,
+    readfds: *mut WsaFdSet,
+    writefds: *mut WsaFdSet,
+    exceptfds: *mut WsaFdSet,
+    timeout: *const WsaTimeval,
+) -> i32 {
+    windows_sys::Win32::Networking::WinSock::select(
+        nfds,
+        readfds as *mut windows_sys::Win32::Networking::WinSock::FD_SET,
+        writefds as *mut windows_sys::Win32::Networking::WinSock::FD_SET,
+        exceptfds as *mut windows_sys::Win32::Networking::WinSock::FD_SET,
+        timeout as *const windows_sys::Win32::Networking::WinSock::TIMEVAL,
+    )
+}
+
+#[inline]
+unsafe fn GetStdHandle(n: DWORD) -> HANDLE {
+    local_handle(windows_sys::Win32::System::Console::GetStdHandle(n))
+}
+
+#[inline]
+unsafe fn NtQueryInformationFile(
+    file_handle: HANDLE,
+    io_status_block: *mut [usize; 2],
+    file_information: *mut i64,
+    length: u32,
+    file_information_class: u32,
+) -> i32 {
+    windows_sys::Wdk::Storage::FileSystem::NtQueryInformationFile(
+        sys_handle(file_handle),
+        io_status_block as *mut windows_sys::Win32::System::IO::IO_STATUS_BLOCK,
+        file_information as *mut c_void,
+        length,
+        file_information_class as i32,
+    )
+}
+
+#[inline]
+unsafe fn CreateProcessW(
+    app: *const u16,
+    cmd: *mut u16,
+    pa: *const c_void,
+    ta: *const c_void,
+    inherit: BOOL,
+    flags: DWORD,
+    env: *const c_void,
+    dir: *const u16,
+    si: *const STARTUPINFOW,
+    pi: *mut PROCESS_INFORMATION,
+) -> BOOL {
+    windows_sys::Win32::System::Threading::CreateProcessW(
+        app,
+        cmd,
+        pa as *const SysSecurityAttributes,
+        ta as *const SysSecurityAttributes,
+        inherit,
+        flags,
+        env,
+        dir,
+        si as *const windows_sys::Win32::System::Threading::STARTUPINFOW,
+        pi as *mut windows_sys::Win32::System::Threading::PROCESS_INFORMATION,
+    )
+}
+
+#[inline]
+unsafe fn InitializeProcThreadAttributeList(
+    list: *mut c_void,
+    count: DWORD,
+    flags: DWORD,
+    size: *mut usize,
+) -> BOOL {
+    windows_sys::Win32::System::Threading::InitializeProcThreadAttributeList(
+        list, count, flags, size,
+    )
+}
+
+#[inline]
+unsafe fn UpdateProcThreadAttribute(
+    list: *mut c_void,
+    flags: DWORD,
+    attr: usize,
+    value: *mut c_void,
+    size: usize,
+    prev: *mut c_void,
+    ret_size: *mut usize,
+) -> BOOL {
+    windows_sys::Win32::System::Threading::UpdateProcThreadAttribute(
+        list, flags, attr, value, size, prev, ret_size,
+    )
+}
+
+#[inline]
+unsafe fn DeleteProcThreadAttributeList(list: *mut c_void) {
+    windows_sys::Win32::System::Threading::DeleteProcThreadAttributeList(list)
+}
+
+#[inline]
+unsafe fn GetExitCodeProcess(h: HANDLE, code: *mut DWORD) -> BOOL {
+    windows_sys::Win32::System::Threading::GetExitCodeProcess(sys_handle(h), code)
+}
+
+#[inline]
+unsafe fn TerminateProcess(h: HANDLE, code: DWORD) -> BOOL {
+    windows_sys::Win32::System::Threading::TerminateProcess(sys_handle(h), code)
 }
 
 fn to_wide(s: &str) -> Vec<u16> {
@@ -534,15 +822,6 @@ pub fn open_file_read(path: &std::path::Path) -> std::io::Result<HANDLE> {
 fn install_bytes_read_pipe(content: &[u8]) -> std::io::Result<HANDLE> {
     // Local extern (matches this file's declaration style; windows-sys types
     // differ from the local HANDLE/SECURITY_ATTRIBUTES aliases).
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn CreatePipe(
-            read: *mut HANDLE,
-            write: *mut HANDLE,
-            attrs: *const SECURITY_ATTRIBUTES,
-            size: DWORD,
-        ) -> BOOL;
-    }
     let sa = SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as DWORD,
         lpSecurityDescriptor: std::ptr::null_mut(),
@@ -696,17 +975,6 @@ pub fn complementary_write_file(_h: HANDLE) -> Option<std::fs::File> {
     None
 }
 
-#[link(name = "kernel32")]
-extern "system" {
-    fn GetNamedPipeInfo(
-        h: HANDLE,
-        flags: *mut DWORD,
-        in_size: *mut DWORD,
-        out_size: *mut DWORD,
-        instances: *mut DWORD,
-    ) -> BOOL;
-}
-
 /// The handle is a winsock SOCKET: netopen adoption stores the connected
 /// `/dev/tcp|udp` endpoint as the fd's raw handle (rubash#1026), and a
 /// SOCKET reports FILE_TYPE_PIPE too. Discriminator: GetNamedPipeInfo
@@ -839,9 +1107,6 @@ impl ConsoleOnecharGuard {
 
 impl Drop for ConsoleOnecharGuard {
     fn drop(&mut self) {
-        extern "system" {
-            fn SetConsoleMode(h: HANDLE, mode: DWORD) -> BOOL;
-        }
         unsafe {
             SetConsoleMode(self.handle, self.saved_mode);
         }
@@ -852,9 +1117,6 @@ impl Drop for ConsoleOnecharGuard {
 /// `ttfd_noecho` shape (`read -s` without -n/-d): the line discipline still
 /// assembles lines, it just does not paint the typed characters.
 pub fn enter_console_noecho_mode(h: HANDLE) -> Option<ConsoleOnecharGuard> {
-    extern "system" {
-        fn SetConsoleMode(h: HANDLE, mode: DWORD) -> BOOL;
-    }
     if !is_console_handle(h) {
         return None;
     }
@@ -876,9 +1138,6 @@ pub fn enter_console_noecho_mode(h: HANDLE) -> Option<ConsoleOnecharGuard> {
 /// Enter per-character console read mode. Returns `None` (and changes
 /// nothing) when `h` is not a console handle.
 pub fn enter_console_onechar_mode(h: HANDLE) -> Option<ConsoleOnecharGuard> {
-    extern "system" {
-        fn SetConsoleMode(h: HANDLE, mode: DWORD) -> BOOL;
-    }
     if !is_console_handle(h) {
         return None;
     }
@@ -910,9 +1169,6 @@ pub fn wait_child_slice(
     timeout: std::time::Duration,
 ) -> std::io::Result<Option<std::process::ExitStatus>> {
     use std::os::windows::io::AsRawHandle;
-    extern "system" {
-        fn WaitForSingleObject(h: HANDLE, ms: DWORD) -> DWORD;
-    }
     const WAIT_OBJECT_0: DWORD = 0;
     const WAIT_TIMEOUT: DWORD = 0x102;
     let ms = timeout.as_millis().min(DWORD::MAX as u128) as DWORD;
@@ -980,14 +1236,6 @@ pub fn wait_readable(h: HANDLE, timeout: std::time::Duration) -> ReadWait {
     match unsafe { GetFileType(h) } {
         FILE_TYPE_CHAR => {
             if is_console_handle(h) {
-                extern "system" {
-                    fn PeekConsoleInputW(
-                        h: HANDLE,
-                        record: *mut InputRecord,
-                        length: DWORD,
-                        read: *mut DWORD,
-                    ) -> BOOL;
-                }
                 /// Batch depth of one readiness poll. A keystroke's
                 /// press/release pair plus the window/focus noise between
                 /// two readers is far below this; peek is non-consuming, so
@@ -1070,28 +1318,8 @@ pub fn wait_readable(h: HANDLE, timeout: std::time::Duration) -> ReadWait {
 /// forever. SOCKET_ERROR (winsock uninitialized, closed handle) degrades
 /// to Ready — the same fallback shape as the pipe branch's failed peek.
 fn wait_socket_readable(h: HANDLE, timeout: std::time::Duration) -> ReadWait {
-    #[repr(C)]
-    struct WsaFdSet {
-        fd_count: u32,
-        fd_array: [usize; WSA_FD_SET_SIZE],
-    }
-    #[repr(C)]
-    struct WsaTimeval {
-        tv_sec: i32,
-        tv_usec: i32,
-    }
     const WSA_FD_SET_SIZE: usize = 64;
     const SOCKET_ERROR: i32 = -1;
-    #[link(name = "ws2_32")]
-    extern "system" {
-        fn select(
-            nfds: i32,
-            readfds: *mut WsaFdSet,
-            writefds: *mut WsaFdSet,
-            exceptfds: *mut WsaFdSet,
-            timeout: *const WsaTimeval,
-        ) -> i32;
-    }
     // nfds is ignored on Windows; the set carries the descriptor.
     let mut readfds = WsaFdSet {
         fd_count: 1,
@@ -1272,15 +1500,6 @@ pub fn file_position(h: HANDLE) -> std::io::Result<u64> {
 /// command_substitute's capture pipe read blocks until all async children
 /// that inherited fd 1 are gone).
 pub fn create_capture_pipe() -> std::io::Result<(HANDLE, HANDLE)> {
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn CreatePipe(
-            read: *mut HANDLE,
-            write: *mut HANDLE,
-            attrs: *const SECURITY_ATTRIBUTES,
-            size: DWORD,
-        ) -> BOOL;
-    }
     let sa = SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as DWORD,
         lpSecurityDescriptor: std::ptr::null_mut(),
@@ -1381,9 +1600,6 @@ pub fn process_std_handle(fd: u32) -> HANDLE {
     const STD_INPUT_HANDLE: DWORD = 0xFFFF_FFF6;
     const STD_OUTPUT_HANDLE: DWORD = 0xFFFF_FFF5;
     const STD_ERROR_HANDLE: DWORD = 0xFFFF_FFF4;
-    extern "system" {
-        fn GetStdHandle(n: DWORD) -> HANDLE;
-    }
     let n = match fd {
         0 => STD_INPUT_HANDLE,
         1 => STD_OUTPUT_HANDLE,
@@ -1466,16 +1682,6 @@ pub fn fd_stat_parts(h: HANDLE) -> Option<(u64, u64, i64, i64)> {
         return Some((dev, ino, sec, nsec));
     }
 
-    #[link(name = "ntdll")]
-    extern "system" {
-        fn NtQueryInformationFile(
-            file_handle: HANDLE,
-            io_status_block: *mut [usize; 2],
-            file_information: *mut i64,
-            length: u32,
-            file_information_class: u32,
-        ) -> i32;
-    }
     const FILE_INTERNAL_INFORMATION: u32 = 6;
     let mut iosb = [0usize; 2];
     let mut index_number: i64 = 0;
@@ -1584,38 +1790,6 @@ struct PROCESS_INFORMATION {
     hThread: HANDLE,
     dwProcessId: DWORD,
     dwThreadId: DWORD,
-}
-
-#[link(name = "kernel32")]
-extern "system" {
-    fn CreateProcessW(
-        app: *const u16,
-        cmd: *mut u16,
-        pa: *const c_void,
-        ta: *const c_void,
-        inherit: BOOL,
-        flags: DWORD,
-        env: *const c_void,
-        dir: *const u16,
-        si: *const STARTUPINFOW,
-        pi: *mut PROCESS_INFORMATION,
-    ) -> BOOL;
-    fn InitializeProcThreadAttributeList(
-        list: *mut c_void,
-        count: DWORD,
-        flags: DWORD,
-        size: *mut usize,
-    ) -> BOOL;
-    fn UpdateProcThreadAttribute(
-        list: *mut c_void,
-        flags: DWORD,
-        attr: usize,
-        value: *mut c_void,
-        size: usize,
-        prev: *mut c_void,
-        ret_size: *mut usize,
-    ) -> BOOL;
-    fn DeleteProcThreadAttributeList(list: *mut c_void);
 }
 
 /// Everything needed to spawn a child whose inherited handles are exactly
@@ -1881,10 +2055,6 @@ impl SpawnedChild {
     ) -> std::io::Result<Option<std::process::ExitStatus>> {
         use std::os::windows::io::AsRawHandle;
         use std::os::windows::process::ExitStatusExt;
-        extern "system" {
-            fn WaitForSingleObject(h: HANDLE, ms: DWORD) -> DWORD;
-            fn GetExitCodeProcess(h: HANDLE, code: *mut DWORD) -> BOOL;
-        }
         const WAIT_OBJECT_0: DWORD = 0;
         const WAIT_TIMEOUT: DWORD = 0x102;
         let raw = process.as_raw_handle() as HANDLE;
@@ -1928,9 +2098,6 @@ impl SpawnedChild {
             SpawnedChildInner::Std(child) => child.kill(),
             SpawnedChildInner::Whitelisted { process, .. } => {
                 use std::os::windows::io::AsRawHandle;
-                extern "system" {
-                    fn TerminateProcess(h: HANDLE, code: DWORD) -> BOOL;
-                }
                 let raw = process.as_raw_handle() as HANDLE;
                 if unsafe { TerminateProcess(raw, 1) } == 0 {
                     return Err(std::io::Error::last_os_error());

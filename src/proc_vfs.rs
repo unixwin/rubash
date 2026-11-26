@@ -401,41 +401,17 @@ fn own_parent_pid() -> u32 {
 #[cfg(windows)]
 fn nt_own_parent_pid() -> Option<u32> {
     use std::ffi::c_void;
+    use windows_sys::Wdk::System::Threading::{NtQueryInformationProcess, ProcessBasicInformation};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, PROCESS_BASIC_INFORMATION};
 
-    // Field layout mirrors the PROCESS_BASIC_INFORMATION the executor's
-    // $PPID path already relies on (support_names.rs): the two-word
-    // affinity slot also covers BasePriority, so UniqueProcessId and
-    // InheritedFromUniqueProcessId land at their true offsets.
-    #[repr(C)]
-    #[allow(non_snake_case)]
-    struct ProcessBasicInformation {
-        ExitStatus: *mut c_void,
-        PebBaseAddress: *mut c_void,
-        AffinityMask: [*mut c_void; 2],
-        UniqueProcessId: usize,
-        InheritedFromUniqueProcessId: usize,
-    }
-
-    extern "system" {
-        fn GetCurrentProcess() -> *mut c_void;
-        fn NtQueryInformationProcess(
-            process: *mut c_void,
-            process_information_class: u32,
-            process_information: *mut c_void,
-            process_information_length: u32,
-            return_length: *mut u32,
-        ) -> i32;
-    }
-
-    const PROCESS_BASIC_INFORMATION: u32 = 0;
-    let mut info = unsafe { std::mem::zeroed::<ProcessBasicInformation>() };
+    let mut info = PROCESS_BASIC_INFORMATION::default();
     let mut returned = 0u32;
     let status = unsafe {
         NtQueryInformationProcess(
             GetCurrentProcess(),
-            PROCESS_BASIC_INFORMATION,
+            ProcessBasicInformation,
             &mut info as *mut _ as *mut c_void,
-            std::mem::size_of::<ProcessBasicInformation>() as u32,
+            std::mem::size_of::<PROCESS_BASIC_INFORMATION>() as u32,
             &mut returned,
         )
     };
@@ -499,9 +475,8 @@ fn self_cmdline() -> Vec<u8> {
 /// The current process's raw command line (UTF-16 units, no NUL).
 #[cfg(windows)]
 fn own_command_line() -> Option<Vec<u16>> {
-    extern "system" {
-        fn GetCommandLineW() -> *const u16;
-    }
+    use windows_sys::Win32::System::Environment::GetCommandLineW;
+
     let ptr = unsafe { GetCommandLineW() };
     if ptr.is_null() {
         return None;
@@ -542,10 +517,10 @@ fn environ_block_to_bytes(units: &[u16]) -> Vec<u8> {
 /// per the §4.2 budget), transcoded to the procfs shape.
 #[cfg(windows)]
 fn self_environ() -> Vec<u8> {
-    extern "system" {
-        fn GetEnvironmentStringsW() -> *const u16;
-        fn FreeEnvironmentStringsW(env: *const u16) -> i32;
-    }
+    use windows_sys::Win32::System::Environment::{
+        FreeEnvironmentStringsW, GetEnvironmentStringsW,
+    };
+
     let ptr = unsafe { GetEnvironmentStringsW() };
     if ptr.is_null() {
         return Vec::new();
@@ -721,18 +696,10 @@ pub fn proc_link_target(
 /// (QueryFullProcessImageNameW). None for dead or protected pids.
 #[cfg(windows)]
 fn process_image_path(pid: u32) -> Option<String> {
-    use std::ffi::c_void;
     use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
-
-    extern "system" {
-        fn QueryFullProcessImageNameW(
-            process: *mut c_void,
-            flags: u32,
-            exe_name: *mut u16,
-            size: *mut u32,
-        ) -> i32;
-    }
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
 
     let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
     if handle.is_null() {
@@ -934,27 +901,12 @@ const PARAMS_ENV_OFFSET: usize = 0x48;
 #[cfg(windows)]
 fn peb_strings(pid: u32) -> Option<PebStrings> {
     use std::ffi::c_void;
+    use windows_sys::Wdk::System::Threading::NtQueryInformationProcess;
     use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
     use windows_sys::Win32::System::Threading::{
         OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
     };
-
-    extern "system" {
-        fn NtQueryInformationProcess(
-            process: *mut c_void,
-            process_information_class: u32,
-            process_information: *mut c_void,
-            process_information_length: u32,
-            return_length: *mut u32,
-        ) -> i32;
-        fn ReadProcessMemory(
-            process: *mut c_void,
-            base_address: *const c_void,
-            buffer: *mut c_void,
-            size: usize,
-            bytes_read: *mut usize,
-        ) -> i32;
-    }
 
     // Same PROCESS_BASIC_INFORMATION layout as nt_own_parent_pid.
     #[repr(C)]
@@ -1106,17 +1058,8 @@ fn peb_strings(pid: u32) -> Option<PebStrings> {
 fn command_line_to_argv_bytes(command_line: &[u16]) -> Vec<u8> {
     use std::ffi::c_void;
 
-    // CommandLineToArgvW lives in shell32, outside the default link
-    // set — the #[link] attribute follows the tree's kernel32
-    // precedent (src/builtins/stty.rs).
-    #[link(name = "shell32")]
-    extern "system" {
-        fn CommandLineToArgvW(cmd_line: *const u16, num_args: *mut i32) -> *mut *mut u16;
-    }
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn LocalFree(mem: *mut c_void) -> *mut c_void;
-    }
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::UI::Shell::CommandLineToArgvW;
 
     if command_line.is_empty() {
         return Vec::new();
@@ -1264,18 +1207,9 @@ fn system_start_100ns() -> u64 {
 #[cfg(windows)]
 fn facts_for_handle(handle: windows_sys::Win32::Foundation::HANDLE) -> Option<ProcessFacts> {
     use std::ffi::c_void;
+    use windows_sys::Wdk::System::Threading::{NtQueryInformationProcess, ProcessVmCounters};
     use windows_sys::Win32::Foundation::FILETIME;
     use windows_sys::Win32::System::Threading::GetProcessTimes;
-
-    extern "system" {
-        fn NtQueryInformationProcess(
-            process: *mut c_void,
-            process_information_class: u32,
-            process_information: *mut c_void,
-            process_information_length: u32,
-            return_length: *mut u32,
-        ) -> i32;
-    }
 
     #[repr(C)]
     #[derive(Default)]
@@ -1293,7 +1227,6 @@ fn facts_for_handle(handle: windows_sys::Win32::Foundation::HANDLE) -> Option<Pr
         peak_pagefile_usage: usize,
     }
 
-    const PROCESS_VM_COUNTERS: u32 = 3;
     let zero_ft = FILETIME {
         dwLowDateTime: 0,
         dwHighDateTime: 0,
@@ -1316,7 +1249,7 @@ fn facts_for_handle(handle: windows_sys::Win32::Foundation::HANDLE) -> Option<Pr
     let status = unsafe {
         NtQueryInformationProcess(
             handle,
-            PROCESS_VM_COUNTERS,
+            ProcessVmCounters,
             &mut vm as *mut _ as *mut c_void,
             std::mem::size_of::<VmCounters>() as u32,
             &mut returned,
