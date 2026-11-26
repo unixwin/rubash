@@ -10,7 +10,7 @@
 
 [![CI](https://github.com/unixwin/rubash/actions/workflows/ci.yml/badge.svg)](https://github.com/unixwin/rubash/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/unixwin/rubash)](https://github.com/unixwin/rubash/releases)
-[![Rust Version](https://img.shields.io/badge/rust-1.70+-blue)](https://www.rust-lang.org)
+[![Rust Version](https://img.shields.io/badge/rust-1.91+-blue)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Net code size](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/unixwin/rubash/master/docs/code-size-badge.json)](docs/code-size.md)
 [![Stars](https://img.shields.io/github/stars/unixwin/rubash)](https://github.com/unixwin/rubash/stargazers)

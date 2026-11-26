@@ -10,7 +10,7 @@
 
 [![CI](https://github.com/unixwin/rubash/actions/workflows/ci.yml/badge.svg)](https://github.com/unixwin/rubash/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/unixwin/rubash)](https://github.com/unixwin/rubash/releases)
-[![Rust Version](https://img.shields.io/badge/rust-1.70+-blue)](https://www.rust-lang.org)
+[![Rust Version](https://img.shields.io/badge/rust-1.91+-blue)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 Rubash 是用 Rust 对 GNU Bash 语义的从零重实现——词法分析器、解析器、展开引擎、执行器、内建命令——以**可嵌入的无头引擎**形态交付。目标是与 GNU Bash 5.3.x 逐字节兼容（vendored 上游树已到 Bash-5.3 patch 20 层级，#957），原生运行在 Windows、Linux 与 macOS 上。
