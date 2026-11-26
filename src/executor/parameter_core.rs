@@ -293,17 +293,17 @@ impl Executor {
                 // record is active the citation is rebuilt from the raw
                 // word instead, so no cooked record is installed
                 // (rubash#4029).
-                let _diag_word = (!crate::executor::expand_word::pending_diagnostic_raw_active())
-                    .then(|| {
-                        crate::executor::expand_word::PendingDiagnosticWordGuard::new(
-                            word,
-                            matches!(context, SubstitutionQuoteContext::HereDocument),
+                crate::executor::expand_word::with_pending_diagnostic_word_if(
+                    !crate::executor::expand_word::pending_diagnostic_raw_active(),
+                    word,
+                    matches!(context, SubstitutionQuoteContext::HereDocument),
+                    || {
+                        crate::executor::assignment_expansion::restore_sq_content_markers(
+                            self.expand_embedded_parameters_mut(&hoisted)
+                                .replace(DQ_DATA, "\"")
+                                .replace(SQ_DATA, "'"),
                         )
-                    });
-                crate::executor::assignment_expansion::restore_sq_content_markers(
-                    self.expand_embedded_parameters_mut(&hoisted)
-                        .replace(DQ_DATA, "\"")
-                        .replace(SQ_DATA, "'"),
+                    },
                 )
             };
             // A compound `( ... )` RHS already took its per-element tilde

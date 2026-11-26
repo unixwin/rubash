@@ -14,6 +14,21 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  rustfmt:
+    name: Rustfmt check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check Rust formatting
+        run: python3 scripts/check-rustfmt.py
+
   rust:
     name: Rust tests
     runs-on: ubuntu-latest

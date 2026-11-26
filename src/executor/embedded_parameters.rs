@@ -1113,33 +1113,30 @@ impl Executor {
                                 crate::executor::expand_word::diagnostic_word_for_fragment(
                                     this_frag,
                                 );
-                            let _diag_word = match raw_diag.as_deref() {
-                                Some(diag) => {
-                                    crate::executor::expand_word::PendingDiagnosticWordGuard::new_rendered(
-                                        diag,
-                                        double_quoted || heredoc,
-                                    )
-                                }
-                                None => {
-                                    crate::executor::expand_word::PendingDiagnosticWordGuard::new(
-                                        word,
-                                        double_quoted || heredoc,
-                                    )
-                                }
-                            };
-                            let value =
-                                crate::executor::expand_word::with_extquote_name_quoted_context(
-                                    true,
-                                    || self.expand_word(&format!("${{{body}}}")),
-                                );
-                            if preserve_quotes {
-                                push_preserved_expansion_output(&mut output, &value, in_double);
-                            } else {
-                                output.push_str(&protect_result_backslashes(
-                                    &value,
-                                    protect_results || protect_data,
-                                ));
-                            }
+                            let diag_word = raw_diag.as_deref().unwrap_or(word);
+                            crate::executor::expand_word::with_pending_diagnostic_word(
+                                diag_word,
+                                double_quoted || heredoc,
+                                || {
+                                    let value =
+                                        crate::executor::expand_word::with_extquote_name_quoted_context(
+                                            true,
+                                            || self.expand_word(&format!("${{{body}}}")),
+                                        );
+                                    if preserve_quotes {
+                                        push_preserved_expansion_output(
+                                            &mut output,
+                                            &value,
+                                            in_double,
+                                        );
+                                    } else {
+                                        output.push_str(&protect_result_backslashes(
+                                            &value,
+                                            protect_results || protect_data,
+                                        ));
+                                    }
+                                },
+                            );
                             continue;
                         }
                     }
@@ -1345,18 +1342,7 @@ impl Executor {
                     // rebuilt from it instead (rubash#4029).
                     let raw_diag =
                         crate::executor::expand_word::diagnostic_word_for_fragment(this_frag);
-                    let _diag_word = match raw_diag.as_deref() {
-                        Some(diag) => {
-                            crate::executor::expand_word::PendingDiagnosticWordGuard::new_rendered(
-                                diag,
-                                double_quoted || heredoc,
-                            )
-                        }
-                        None => crate::executor::expand_word::PendingDiagnosticWordGuard::new(
-                            word,
-                            double_quoted || heredoc,
-                        ),
-                    };
+                    let diag_word = raw_diag.as_deref().unwrap_or(word);
                     // GNU subst.c:9777 parameter_brace_expand receives the
                     // word's `quoted` flags: inside a double-quoted span
                     // (or a here-document body, expanded under the same
@@ -1372,47 +1358,58 @@ impl Executor {
                     // routes the fragment through the quoted whole-word
                     // expander, the &self port of the same context.
                     let site_quoted = in_double || double_quoted || heredoc || fragment_site_quoted;
-                    let value = crate::executor::expand_word::with_extquote_name_quoted_context(
-                        site_quoted,
+                    let break_walk = crate::executor::expand_word::with_pending_diagnostic_word(
+                        diag_word,
+                        double_quoted || heredoc,
                         || {
-                            // Only a synthetic that IS one whole
-                            // `${...}` fragment takes the quoted
-                            // entry — expand_quoted_parameter_word
-                            // delegates non-spanning forms back to
-                            // the embedded walk, which would
-                            // re-dispatch the same fragment. A
-                            // word carrying an assignment fragment
-                            // is excluded: the rubash#1169
-                            // freeze/apply machinery keys on the
-                            // master's route, and a quoted-entry
-                            // render bypasses the frozen-fragment
-                            // consult, so an earlier fragment
-                            // would read the post-assignment value
-                            // (issue3045's case-subject freeze).
-                            if site_quoted
-                                && crate::executor::parameter_ops::braced_parameter_spans_whole_word(
-                                    synthetic.as_str(),
-                                )
-                                && !crate::executor::parameter_words::word_has_assignment_fragment(
-                                    word,
-                                )
-                            {
-                                self.expand_quoted_parameter_word(synthetic.as_str())
-                            } else {
-                                self.expand_word(synthetic.as_str())
+                            let value =
+                                crate::executor::expand_word::with_extquote_name_quoted_context(
+                                    site_quoted,
+                                    || {
+                                        // Only a synthetic that IS one whole
+                                        // `${...}` fragment takes the quoted
+                                        // entry — expand_quoted_parameter_word
+                                        // delegates non-spanning forms back to
+                                        // the embedded walk, which would
+                                        // re-dispatch the same fragment. A
+                                        // word carrying an assignment fragment
+                                        // is excluded: the rubash#1169
+                                        // freeze/apply machinery keys on the
+                                        // master's route, and a quoted-entry
+                                        // render bypasses the frozen-fragment
+                                        // consult, so an earlier fragment
+                                        // would read the post-assignment value
+                                        // (issue3045's case-subject freeze).
+                                        if site_quoted
+                                            && crate::executor::parameter_ops::braced_parameter_spans_whole_word(
+                                                synthetic.as_str(),
+                                            )
+                                            && !crate::executor::parameter_words::word_has_assignment_fragment(
+                                                word,
+                                            )
+                                        {
+                                            self.expand_quoted_parameter_word(synthetic.as_str())
+                                        } else {
+                                            self.expand_word(synthetic.as_str())
+                                        }
+                                    },
+                                );
+                            if self.shell_state.parameter_bad_substitution.get() {
+                                return true;
                             }
+                            if preserve_quotes {
+                                push_preserved_expansion_output(&mut output, &value, in_double);
+                            } else {
+                                output.push_str(&protect_result_backslashes(
+                                    &value,
+                                    protect_results || protect_data,
+                                ));
+                            }
+                            false
                         },
                     );
-                    if self.shell_state.parameter_bad_substitution.get() {
+                    if break_walk {
                         break;
-                    }
-                    if preserve_quotes {
-                        push_preserved_expansion_output(&mut output, &value, in_double);
-                    } else {
-                        output.push_str(&protect_result_backslashes(
-                            &value,
-                            protect_results || protect_data,
-                        ));
                     }
                 }
                 Some('(') => {

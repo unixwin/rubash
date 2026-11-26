@@ -1576,55 +1576,59 @@ impl Executor {
                     // quote delimiters and backslashes (rubash#4029).
                     let raw_diag =
                         crate::executor::expand_word::diagnostic_word_for_fragment(this_frag);
-                    let _diag_word = match raw_diag.as_deref() {
-                        Some(diag) => {
-                            crate::executor::expand_word::PendingDiagnosticWordGuard::new_rendered(
-                                diag,
-                                matches!(context, SubstitutionQuoteContext::HereDocument),
-                            )
-                        }
-                        None => crate::executor::expand_word::PendingDiagnosticWordGuard::new(
-                            word,
-                            matches!(context, SubstitutionQuoteContext::HereDocument),
-                        ),
-                    };
-                    // GNU param_expand resolves one `${}` expansion once:
-                    // memoize array-element fetches for this fragment so a
-                    // subscript's side effects run once (AEPV_MEMO).
-                    let _memo_frame = crate::executor::expand_braced_indices::AepvMemoFrame::new();
-                    // Record this fragment's site (word pointer + `$`
-                    // offset) so layered re-checks of the same `${}`
-                    // dedup subscript side effects (SUB_RES_XPASS). When
-                    // the walked word IS the `${}` fragment being
-                    // evaluated (a `${name}` body re-walked inside the
-                    // enclosing fragment's site), it inherits that site
-                    // instead of re-keying on the synthetic string.
-                    let whole_braced = crate::executor::expand_braced_indices::sub_site_active()
+                    let diag_word = raw_diag.as_deref().unwrap_or(word);
+                    enum BracedFragmentControl {
+                        Continue,
+                        Break,
+                        Done,
+                    }
+                    let control = crate::executor::expand_word::with_pending_diagnostic_word(
+                        diag_word,
+                        matches!(context, SubstitutionQuoteContext::HereDocument),
+                        || {
+                            // GNU param_expand resolves one `${}` expansion once:
+                            // memoize array-element fetches for this fragment so a
+                            // subscript's side effects run once (AEPV_MEMO).
+                            let _memo_frame =
+                                crate::executor::expand_braced_indices::AepvMemoFrame::new();
+                            // Record this fragment's site (word pointer + `$`
+                            // offset) so layered re-checks of the same `${}`
+                            // dedup subscript side effects (SUB_RES_XPASS). When
+                            // the walked word IS the `${}` fragment being
+                            // evaluated (a `${name}` body re-walked inside the
+                            // enclosing fragment's site), it inherits that site
+                            // instead of re-keying on the synthetic string.
+                            let whole_braced = crate::executor::expand_braced_indices::sub_site_active()
                         && crate::executor::parameter_ops::braced_parameter_spans_whole_word(word);
-                    let _site_guard = (!whole_braced).then(|| {
-                        crate::executor::expand_braced_indices::SubSiteGuard::new(this_frag)
-                    });
-                    // rubash#2676: in an in-order (heredoc) walk, this
-                    // fragment's `$` offset in the word — the in-order
-                    // assignment application below derives its quote
-                    // state from the word prefix ending here. `chars`
-                    // still starts at the `{`, so the `$` sits one byte
-                    // before the remaining suffix.
-                    let frag_start = in_order.then(|| {
-                        let suffix: String = chars.clone().collect();
-                        word.len() - suffix.len() - 1
-                    });
-                    if let Some(value) = self.expand_current_shell_braced_substitution(&mut chars) {
-                        let value = protect_rhs_value(
-                            &value,
-                            protect_rhs_data || protect_expansion_results,
-                        );
-                        if expansion_ws_marked(alternate, preserve_quotes, in_double) {
-                            output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
-                        } else {
-                            output.push_str(&value);
-                        }
-                    } else if self.posix_mode_enabled()
+                            let _site_guard = (!whole_braced).then(|| {
+                                crate::executor::expand_braced_indices::SubSiteGuard::new(this_frag)
+                            });
+                            // rubash#2676: in an in-order (heredoc) walk, this
+                            // fragment's `$` offset in the word — the in-order
+                            // assignment application below derives its quote
+                            // state from the word prefix ending here. `chars`
+                            // still starts at the `{`, so the `$` sits one byte
+                            // before the remaining suffix.
+                            let frag_start = in_order.then(|| {
+                                let suffix: String = chars.clone().collect();
+                                word.len() - suffix.len() - 1
+                            });
+                            if let Some(value) =
+                                self.expand_current_shell_braced_substitution(&mut chars)
+                            {
+                                let value = protect_rhs_value(
+                                    &value,
+                                    protect_rhs_data || protect_expansion_results,
+                                );
+                                if expansion_ws_marked(alternate, preserve_quotes, in_double) {
+                                    output.push_str(&mark_expansion_whitespace(
+                                        &value,
+                                        preserve_quotes,
+                                    ));
+                                } else {
+                                    output.push_str(&value);
+                                }
+                            } else if self.posix_mode_enabled()
                         // rubash#1109 item 2: the Interp 221 literal-quote
                         // rule applies only above compat 42 — at <= 42 a
                         // single quote inside ${...} quotes again, even in
@@ -1650,162 +1654,183 @@ impl Executor {
                                         remainder.chars().nth(close + 1)
                                             == Some(crate::executor::markers::DATA_SQUOTE)
                                     })
-                            })
-                    {
-                        let remainder: String = chars.clone().collect();
-                        if let Some(close) =
-                            matching_parameter_brace_in_context(&remainder, true, true)
-                        {
-                            let consumed = word.len() - remainder.len();
-                            let name = remainder[..close].to_string();
-                            chars = word[consumed + close + 1..].chars().peekable();
-                            if let Some(start) = frag_start {
-                                self.apply_fragment_assignment_in_order(&name, word, start);
-                            }
-                            let fragment_context = if (fragment_site_quoted || in_double)
-                                && matches!(context, SubstitutionQuoteContext::Unquoted)
-                            {
-                                SubstitutionQuoteContext::DoubleQuoted
+                            }) {
+                                let remainder: String = chars.clone().collect();
+                                if let Some(close) =
+                                    matching_parameter_brace_in_context(&remainder, true, true)
+                                {
+                                    let consumed = word.len() - remainder.len();
+                                    let name = remainder[..close].to_string();
+                                    chars = word[consumed + close + 1..].chars().peekable();
+                                    if let Some(start) = frag_start {
+                                        self.apply_fragment_assignment_in_order(&name, word, start);
+                                    }
+                                    let fragment_context = if (fragment_site_quoted || in_double)
+                                        && matches!(context, SubstitutionQuoteContext::Unquoted)
+                                    {
+                                        SubstitutionQuoteContext::DoubleQuoted
+                                    } else {
+                                        context
+                                    };
+                                    let value = self.expand_with_parameter_env(
+                                        saved_parameter_state,
+                                        |executor| {
+                                            executor.expand_word_mut_with_context(
+                                                &format!("${{{name}}}"),
+                                                fragment_context,
+                                            )
+                                        },
+                                    );
+                                    if self.shell_state.parameter_bad_substitution.get()
+                                        || self.no_closing_brace_failure.get()
+                                    {
+                                        return BracedFragmentControl::Break;
+                                    }
+                                    let value = protect_rhs_value(
+                                        &value,
+                                        protect_rhs_data || protect_expansion_results,
+                                    );
+                                    if expansion_ws_marked(alternate, preserve_quotes, in_double) {
+                                        output.push_str(&mark_expansion_whitespace(
+                                            &value,
+                                            preserve_quotes,
+                                        ));
+                                    } else {
+                                        output.push_str(&value);
+                                    }
+                                } else {
+                                    let (name, terminated) =
+                                        collect_braced_parameter_body(&mut chars);
+                                    if self.no_closing_brace_verdict(
+                                        &name,
+                                        terminated,
+                                        matches!(
+                                            context,
+                                            SubstitutionQuoteContext::DoubleQuoted
+                                                | SubstitutionQuoteContext::HereDocument
+                                        ) || in_double,
+                                        &format!("\"{word}\""),
+                                    ) {
+                                        return BracedFragmentControl::Continue;
+                                    }
+                                    if let Some(start) = frag_start {
+                                        self.apply_fragment_assignment_in_order(&name, word, start);
+                                    }
+                                    let fragment_context = if (fragment_site_quoted || in_double)
+                                        && matches!(context, SubstitutionQuoteContext::Unquoted)
+                                    {
+                                        SubstitutionQuoteContext::DoubleQuoted
+                                    } else {
+                                        context
+                                    };
+                                    let value = self.expand_with_parameter_env(
+                                        saved_parameter_state,
+                                        |executor| {
+                                            executor.expand_word_mut_with_context(
+                                                &format!("${{{name}}}"),
+                                                fragment_context,
+                                            )
+                                        },
+                                    );
+                                    if self.shell_state.parameter_bad_substitution.get()
+                                        || self.no_closing_brace_failure.get()
+                                    {
+                                        return BracedFragmentControl::Break;
+                                    }
+                                    let value = protect_rhs_value(
+                                        &value,
+                                        protect_rhs_data || protect_expansion_results,
+                                    );
+                                    if expansion_ws_marked(alternate, preserve_quotes, in_double) {
+                                        output.push_str(&mark_expansion_whitespace(
+                                            &value,
+                                            preserve_quotes,
+                                        ));
+                                    } else {
+                                        output.push_str(&value);
+                                    }
+                                }
                             } else {
-                                context
-                            };
-                            let value =
-                                self.expand_with_parameter_env(saved_parameter_state, |executor| {
-                                    executor.expand_word_mut_with_context(
-                                        &format!("${{{name}}}"),
-                                        fragment_context,
-                                    )
-                                });
-                            if self.shell_state.parameter_bad_substitution.get()
-                                || self.no_closing_brace_failure.get()
-                            {
-                                break;
-                            }
-                            let value = protect_rhs_value(
-                                &value,
-                                protect_rhs_data || protect_expansion_results,
-                            );
-                            if expansion_ws_marked(alternate, preserve_quotes, in_double) {
-                                output
-                                    .push_str(&mark_expansion_whitespace(&value, preserve_quotes));
-                            } else {
-                                output.push_str(&value);
-                            }
-                        } else {
-                            let (name, terminated) = collect_braced_parameter_body(&mut chars);
-                            if self.no_closing_brace_verdict(
-                                &name,
-                                terminated,
-                                matches!(
-                                    context,
-                                    SubstitutionQuoteContext::DoubleQuoted
-                                        | SubstitutionQuoteContext::HereDocument
-                                ) || in_double,
-                                &format!("\"{word}\""),
-                            ) {
-                                continue;
-                            }
-                            if let Some(start) = frag_start {
-                                self.apply_fragment_assignment_in_order(&name, word, start);
-                            }
-                            let fragment_context = if (fragment_site_quoted || in_double)
-                                && matches!(context, SubstitutionQuoteContext::Unquoted)
-                            {
-                                SubstitutionQuoteContext::DoubleQuoted
-                            } else {
-                                context
-                            };
-                            let value =
-                                self.expand_with_parameter_env(saved_parameter_state, |executor| {
-                                    executor.expand_word_mut_with_context(
-                                        &format!("${{{name}}}"),
-                                        fragment_context,
-                                    )
-                                });
-                            if self.shell_state.parameter_bad_substitution.get()
-                                || self.no_closing_brace_failure.get()
-                            {
-                                break;
-                            }
-                            let value = protect_rhs_value(
-                                &value,
-                                protect_rhs_data || protect_expansion_results,
-                            );
-                            if expansion_ws_marked(alternate, preserve_quotes, in_double) {
-                                output
-                                    .push_str(&mark_expansion_whitespace(&value, preserve_quotes));
-                            } else {
-                                output.push_str(&value);
-                            }
-                        }
-                    } else {
-                        let (name, terminated) = collect_braced_parameter_body(&mut chars);
-                        if self.no_closing_brace_verdict(
-                            &name,
-                            terminated,
-                            matches!(
-                                context,
-                                SubstitutionQuoteContext::DoubleQuoted
-                                    | SubstitutionQuoteContext::HereDocument
-                            ) || in_double,
-                            &format!("\"{word}\""),
-                        ) {
-                            continue;
-                        }
-                        if let Some(start) = frag_start {
-                            self.apply_fragment_assignment_in_order(&name, word, start);
-                        }
-                        // rubash#3581: a `${}` fragment inside a `"..."`
-                        // span (walker's own in_double, or the lexer's
-                        // QUOTED_EXPANSION_SITE marker) is double-quoted
-                        // context for the fragment dispatch — without it a
-                        // quoted `"${a[*]#...}"` would read the removal
-                        // gate's silent branch as if unquoted.
-                        let fragment_context = if (fragment_site_quoted || in_double)
-                            && matches!(context, SubstitutionQuoteContext::Unquoted)
-                        {
-                            SubstitutionQuoteContext::DoubleQuoted
-                        } else {
-                            context
-                        };
-                        let value =
-                            self.expand_with_parameter_env(saved_parameter_state, |executor| {
-                                // Propagate the outer quote context so a
-                                // double-quoted "${v:-~}" keeps its quoted
-                                // default-word semantics (no tilde expansion).
-                                // rubash#281: resolve the fragment without
-                                // re-entering the whole pipeline (GNU
-                                // subst.c:11229 expand_word_internal is a
-                                // single pass; its `${` arm runs
-                                // parameter_brace_expand inline).
-                                // GNU param_expand passes `quoted` down to
-                                // parameter_brace_expand_word
-                                // (subst.c:7840-7860): when this fragment
-                                // sits inside a double-quoted region the
-                                // alternate expands under Q_DOUBLE_QUOTES,
-                                // which is also what keeps an unquoted-
-                                // looking `<(`/`>(` inside it literal
-                                // (subst.c:11369 — the procsub cases skip
-                                // double-quoted text, `"${v:-<( )}"`).
-                                executor.expand_braced_parameter_fragment_in_word(
+                                let (name, terminated) = collect_braced_parameter_body(&mut chars);
+                                if self.no_closing_brace_verdict(
                                     &name,
-                                    fragment_context,
-                                )
-                            });
-                        if self.shell_state.parameter_bad_substitution.get()
-                            || self.no_closing_brace_failure.get()
-                        {
-                            break;
-                        }
-                        let value = protect_rhs_value(
-                            &value,
-                            protect_rhs_data || protect_expansion_results,
-                        );
-                        if expansion_ws_marked(alternate, preserve_quotes, in_double) {
-                            output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
-                        } else {
-                            output.push_str(&value);
-                        }
+                                    terminated,
+                                    matches!(
+                                        context,
+                                        SubstitutionQuoteContext::DoubleQuoted
+                                            | SubstitutionQuoteContext::HereDocument
+                                    ) || in_double,
+                                    &format!("\"{word}\""),
+                                ) {
+                                    return BracedFragmentControl::Continue;
+                                }
+                                if let Some(start) = frag_start {
+                                    self.apply_fragment_assignment_in_order(&name, word, start);
+                                }
+                                // rubash#3581: a `${}` fragment inside a `"..."`
+                                // span (walker's own in_double, or the lexer's
+                                // QUOTED_EXPANSION_SITE marker) is double-quoted
+                                // context for the fragment dispatch — without it a
+                                // quoted `"${a[*]#...}"` would read the removal
+                                // gate's silent branch as if unquoted.
+                                let fragment_context = if (fragment_site_quoted || in_double)
+                                    && matches!(context, SubstitutionQuoteContext::Unquoted)
+                                {
+                                    SubstitutionQuoteContext::DoubleQuoted
+                                } else {
+                                    context
+                                };
+                                let value = self.expand_with_parameter_env(
+                                    saved_parameter_state,
+                                    |executor| {
+                                        // Propagate the outer quote context so a
+                                        // double-quoted "${v:-~}" keeps its quoted
+                                        // default-word semantics (no tilde expansion).
+                                        // rubash#281: resolve the fragment without
+                                        // re-entering the whole pipeline (GNU
+                                        // subst.c:11229 expand_word_internal is a
+                                        // single pass; its `${` arm runs
+                                        // parameter_brace_expand inline).
+                                        // GNU param_expand passes `quoted` down to
+                                        // parameter_brace_expand_word
+                                        // (subst.c:7840-7860): when this fragment
+                                        // sits inside a double-quoted region the
+                                        // alternate expands under Q_DOUBLE_QUOTES,
+                                        // which is also what keeps an unquoted-
+                                        // looking `<(`/`>(` inside it literal
+                                        // (subst.c:11369 — the procsub cases skip
+                                        // double-quoted text, `"${v:-<( )}"`).
+                                        executor.expand_braced_parameter_fragment_in_word(
+                                            &name,
+                                            fragment_context,
+                                        )
+                                    },
+                                );
+                                if self.shell_state.parameter_bad_substitution.get()
+                                    || self.no_closing_brace_failure.get()
+                                {
+                                    return BracedFragmentControl::Break;
+                                }
+                                let value = protect_rhs_value(
+                                    &value,
+                                    protect_rhs_data || protect_expansion_results,
+                                );
+                                if expansion_ws_marked(alternate, preserve_quotes, in_double) {
+                                    output.push_str(&mark_expansion_whitespace(
+                                        &value,
+                                        preserve_quotes,
+                                    ));
+                                } else {
+                                    output.push_str(&value);
+                                }
+                            }
+                            BracedFragmentControl::Done
+                        },
+                    );
+                    match control {
+                        BracedFragmentControl::Continue => continue,
+                        BracedFragmentControl::Break => break,
+                        BracedFragmentControl::Done => {}
                     }
                 }
                 Some('(') => {
