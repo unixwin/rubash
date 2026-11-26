@@ -1688,7 +1688,7 @@ impl Executor {
             return Ok(self.dead_member_stage_result(String::new(), diagnostic, 127));
         };
 
-        let mut args: Vec<String> = args
+        let args: Vec<String> = args
             .into_iter()
             // The spawned child receives visible argv text; the lexer's C0
             // data carriers (\x1a for a quoted backtick) would reach the

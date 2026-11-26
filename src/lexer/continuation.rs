@@ -4447,7 +4447,6 @@ fn skip_parenthesized_unit_corrected_ex(chars: &[char], open: usize) -> Option<(
                     }
                     index += 1;
                 }
-                token_boundary = false;
             }
             '\'' => single = true,
             '"' => double = true,

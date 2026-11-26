@@ -3652,7 +3652,7 @@ pub(super) fn decode_locale_quote_spans(raw: &str) -> String {
     let mut in_single = false;
     // Copy the whole UTF-8 character at `i` (ASCII delimiters are
     // single-byte; every other byte belongs to a multibyte sequence).
-    let mut push_char = |out: &mut String, i: &mut usize| {
+    let push_char = |out: &mut String, i: &mut usize| {
         let ch = raw[*i..].chars().next().unwrap_or('\0');
         out.push(ch);
         *i += ch.len_utf8();

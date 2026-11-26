@@ -1205,7 +1205,7 @@ impl GroupScanFeeder {
         if counted {
             self.line_number += 1;
         }
-        let mut raw_line = body_line;
+        let raw_line = body_line;
         let (found, found_with_warning) = {
             let awaiting = &mut self.awaiting_bodies[0];
             let mut comparable = if awaiting.delimiter.strip_tabs {

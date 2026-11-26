@@ -2174,8 +2174,7 @@ impl Executor {
                         }
                         crate::parser::RedirectKind::Output
                         | crate::parser::RedirectKind::ClobberOutput
-                        | crate::parser::RedirectKind::CombinedOutput
-                        | crate::parser::RedirectKind::CombinedAppend => {
+                        | crate::parser::RedirectKind::CombinedOutput => {
                             crate::executor::shell_options::probe_output_redirect(
                                 self,
                                 Some(redirect),

@@ -67,7 +67,7 @@ pub(in crate::executor) fn indexed_array_entries(value: &str) -> BTreeMap<usize,
 pub(in crate::executor) fn indexed_array_entries_cached(
     value: &str,
 ) -> std::sync::Arc<BTreeMap<usize, String>> {
-    let mut cache = indexed_parse_cache()
+    let cache = indexed_parse_cache()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     if let Some(hit) = cache.get(value) {

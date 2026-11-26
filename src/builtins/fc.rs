@@ -456,7 +456,6 @@ where
         }
         histbeg = beg.max(0) as usize;
         histend = end.max(0) as usize;
-        last_hist = last;
     }
 
     // fc.def: an inverted range swaps and forces reverse order.

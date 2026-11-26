@@ -1561,7 +1561,7 @@ pub(crate) fn read_next_source_group(
                         continue;
                     }
                 }
-                let mut spec_scanner = alias_scan.as_ref().expect("scanner").clone();
+                let spec_scanner = alias_scan.as_ref().expect("scanner").clone();
                 let spec_delta = spec_scanner.finish();
                 if park_shadow
                     .as_ref()
@@ -1592,7 +1592,7 @@ pub(crate) fn read_next_source_group(
                 // verdict on the shadow (feeding its buffered
                 // partial piece as the final line) instead of
                 // re-feeding the whole tail into fresh clones.
-                let mut spec_scanner = alias_scan.as_ref().expect("scanner").clone();
+                let spec_scanner = alias_scan.as_ref().expect("scanner").clone();
                 let spec_delta = spec_scanner.finish();
                 if let Some(mut shadow) = park_shadow.take() {
                     if shadow.base_pending_len == expanded_pending.len()

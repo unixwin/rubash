@@ -928,7 +928,6 @@ fn collect_positional(args: &[String], out: &mut Vec<String>) {
     let mut index = 0;
     while let Some(arg) = args.get(index) {
         if arg == "--" {
-            index += 1;
             break;
         }
         if arg.starts_with('-') && arg != "-" {

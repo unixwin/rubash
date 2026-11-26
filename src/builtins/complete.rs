@@ -1097,12 +1097,10 @@ fn completion_segment_bounds(line: &str, cursor: usize) -> (usize, usize) {
                     Some(&(_, '(')) => {
                         stack.push(CompletionFrame::DollarParen);
                         idx += 1;
-                        prev_char = '(';
                     }
                     Some(&(_, '{')) => {
                         stack.push(CompletionFrame::DollarBrace);
                         idx += 1;
-                        prev_char = '{';
                     }
                     _ => {}
                 }

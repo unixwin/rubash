@@ -485,7 +485,6 @@ fn brackmatch(pat: &[char], test: char, flags: u32) -> Brack {
     loop {
         let mut cstart = c;
         let mut cend = c;
-        let mut forcecoll = false;
         let mut isrange = false;
 
         // [=x=] POSIX.2 equivalence class (sm_loop.c:431-457).
@@ -543,7 +542,6 @@ fn brackmatch(pat: &[char], test: char, flags: u32) -> Brack {
                 cstart = collsym(&pat[p..p + close - 1]).unwrap_or('\u{FF}');
                 cend = cstart;
                 p += close + 1;
-                forcecoll = true;
             }
         }
 
@@ -590,7 +588,6 @@ fn brackmatch(pat: &[char], test: char, flags: u32) -> Brack {
                     p += 1;
                     cend = collsym(&pat[p..p + close - 1]).unwrap_or('\u{FF}');
                     p += close + 1;
-                    forcecoll = true;
                 }
             }
             cend = fold(cend, flags);

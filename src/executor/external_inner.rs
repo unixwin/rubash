@@ -3625,16 +3625,15 @@ impl Executor {
                     continue;
                 }
             }
-            let mut take =
-                |endpoint: Option<&Rc<crate::executor::fd_table::FileFd>>,
-                 pins: &mut Vec<(std::os::unix::io::RawFd, u32)>| {
-                    if let Some(file) = endpoint {
-                        let pin = (file.handle, *fd);
-                        if !pins.contains(&pin) {
-                            pins.push(pin);
-                        }
+            let take = |endpoint: Option<&Rc<crate::executor::fd_table::FileFd>>,
+                        pins: &mut Vec<(std::os::unix::io::RawFd, u32)>| {
+                if let Some(file) = endpoint {
+                    let pin = (file.handle, *fd);
+                    if !pins.contains(&pin) {
+                        pins.push(pin);
                     }
-                };
+                }
+            };
             take(
                 entry.read.as_ref().and_then(|read| match read {
                     crate::executor::fd_table::FdReadEndpoint::File(file) => Some(file),
@@ -3978,29 +3977,28 @@ impl Executor {
             if self.fd_is_walk_save_slot(*fd) {
                 continue;
             }
-            let mut pass =
-                |endpoint: Option<&Rc<crate::executor::fd_table::FileFd>>,
-                 write: bool,
-                 process: &mut Command,
-                 dups: &mut Vec<crate::fd::HANDLE>,
-                 carriers: &mut Vec<(crate::fd::HANDLE, u32)>| {
-                    let Some(file) = endpoint else {
-                        return;
-                    };
-                    let Ok(dup) = crate::fd::duplicate_handle_inheritable(file.handle) else {
-                        return;
-                    };
-                    process.env(
-                        format!("__RUBASH_FD_{}HANDLE_{fd}", if write { "W" } else { "" }),
-                        format!("{dup:#x}"),
-                    );
-                    process.env(
-                        format!("__RUBASH_FD_{}PATH_{fd}", if write { "W" } else { "" }),
-                        file.path.to_string_lossy().into_owned(),
-                    );
-                    dups.push(dup);
-                    carriers.push((dup, *fd));
+            let pass = |endpoint: Option<&Rc<crate::executor::fd_table::FileFd>>,
+                        write: bool,
+                        process: &mut Command,
+                        dups: &mut Vec<crate::fd::HANDLE>,
+                        carriers: &mut Vec<(crate::fd::HANDLE, u32)>| {
+                let Some(file) = endpoint else {
+                    return;
                 };
+                let Ok(dup) = crate::fd::duplicate_handle_inheritable(file.handle) else {
+                    return;
+                };
+                process.env(
+                    format!("__RUBASH_FD_{}HANDLE_{fd}", if write { "W" } else { "" }),
+                    format!("{dup:#x}"),
+                );
+                process.env(
+                    format!("__RUBASH_FD_{}PATH_{fd}", if write { "W" } else { "" }),
+                    file.path.to_string_lossy().into_owned(),
+                );
+                dups.push(dup);
+                carriers.push((dup, *fd));
+            };
             pass(
                 entry.read.as_ref().and_then(|read| match read {
                     crate::executor::fd_table::FdReadEndpoint::File(file) => Some(file),

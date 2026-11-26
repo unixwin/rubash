@@ -360,7 +360,7 @@ fn scan_float_subject(value: &str) -> Option<FloatSubject> {
     let leading = value.len() - skip_leading_space(value).len();
     let body = &value[leading..];
     let bytes = body.as_bytes();
-    let mut offset = if matches!(bytes.first(), Some(b'-') | Some(b'+')) {
+    let offset = if matches!(bytes.first(), Some(b'-') | Some(b'+')) {
         1
     } else {
         0

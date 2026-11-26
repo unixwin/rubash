@@ -6,10 +6,7 @@
 // for removal. Suppress them at crate level so downstream CI stays clean
 // while the fixes are rolled out incrementally.
 #![allow(unused_variables)]
-#![allow(unused_assignments)]
-#![allow(unused_mut)]
 #![allow(dead_code)]
-#![allow(unreachable_patterns)]
 
 #[cfg(feature = "alloc-counter")]
 pub mod alloc_counter;

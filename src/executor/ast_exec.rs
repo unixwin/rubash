@@ -764,9 +764,6 @@ impl Executor {
                     while index + 1 < commands.len() && !commands[index + 1].subshell_end {
                         index += 1;
                     }
-                    if index + 1 < commands.len() {
-                        index += 1;
-                    }
                     if let Some(saved_state) = subshell_state.take() {
                         self.restore_flat_subshell(saved_state);
                         if let Some(saved) = subshell_fd_table.take() {
@@ -795,9 +792,6 @@ impl Executor {
             if self.host_cancel_requested() {
                 if let Some(saved_state) = subshell_state.take() {
                     while index + 1 < commands.len() && !commands[index + 1].subshell_end {
-                        index += 1;
-                    }
-                    if index + 1 < commands.len() {
                         index += 1;
                     }
                     self.restore_flat_subshell(saved_state);

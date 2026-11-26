@@ -2750,7 +2750,7 @@ mod kernel_signals {
             let prev = FATAL_PREV_HANDLER[index].load(Ordering::Relaxed) as usize;
             match prev {
                 libc::SIG_IGN => return,
-                libc::SIG_DFL | 0 => {
+                libc::SIG_DFL => {
                     set_kernel_handler(sig, libc::SIG_DFL);
                     unsafe { libc::raise(sig) };
                     return;
@@ -3313,7 +3313,7 @@ fn managed_trap_keys() -> &'static [(i32, String, String)] {
     static KEYS: std::sync::OnceLock<Vec<(i32, String, String)>> = std::sync::OnceLock::new();
     KEYS.get_or_init(|| {
         let mut keys: Vec<(i32, String, String)> = Vec::new();
-        let mut push = |keys: &mut Vec<(i32, String, String)>, sig: i32, short: &str| {
+        let push = |keys: &mut Vec<(i32, String, String)>, sig: i32, short: &str| {
             keys.push((sig, short.to_string(), format!("__RUBASH_TRAP_SIG{short}")));
         };
         push(&mut keys, libc::SIGHUP as i32, "HUP");
@@ -3953,7 +3953,7 @@ pub fn new_background_wrapper_nonce() -> String {
         ^ counter.wrapping_mul(0xBF58_476D_1CE4_E5B9)
         ^ anchor.rotate_left(17);
     // SplitMix64 finalizer (Steele et al.), two draws for 128 bits.
-    let mut draw = |z: &mut u64| {
+    let draw = |z: &mut u64| {
         *z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut v = *z;
         v = (v ^ (v >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);

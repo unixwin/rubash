@@ -1680,6 +1680,7 @@ pub fn standard_path(_env_vars: &HashMap<String, String>) -> String {
         if configured_shell_root(_env_vars).is_some() {
             return "/usr/local/bin:/usr/bin:/bin".to_string();
         }
+        #[cfg_attr(not(windows), allow(unused_mut))]
         let mut dirs = vec![
             PathBuf::from(r"C:\Windows\System32"),
             PathBuf::from(r"C:\Windows"),

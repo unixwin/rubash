@@ -390,7 +390,7 @@ pub(super) fn parse_function_command_with_diagnostic(
                 token.heredoc_end_line = token.heredoc_end_line.map(|line| line + base - 1);
             }
         }
-        let mut body = parse_function_body(&body_tokens, diagnostic_text, source_line_offset);
+        let body = parse_function_body(&body_tokens, diagnostic_text, source_line_offset);
         crate::lexer::set_parse_extended_glob(saved_extglob);
         // Alias-introduced compound openers (e.g. `alias forever='while
         // :;'`) expand in GNU's reader, before the body parse — this token
@@ -470,7 +470,7 @@ pub(super) fn parse_function_command_with_diagnostic(
         // GNU parse.y:6890-6901: `name() (` reaching EOF unclosed reports
         // "unexpected end of file from `(' command on line N" — do not let
         // the `?` fall back to a `(`-unexpected simple command.
-        let Some((mut body, close_i)) =
+        let Some((body, close_i)) =
             parse_parenthesized_function_body(tokens, i, diagnostic_text, source_line_offset)
         else {
             let command = unclosed_paren_eof_node(
@@ -504,7 +504,7 @@ pub(super) fn parse_function_command_with_diagnostic(
         return Some(finish_function_command(command, tokens, close_i + 1));
     }
 
-    if let Some((mut body, body_end)) =
+    if let Some((body, body_end)) =
         parse_function_command_sequence_body(tokens, i, diagnostic_text, source_line_offset)
     {
         let mut command = CommandNode::new();

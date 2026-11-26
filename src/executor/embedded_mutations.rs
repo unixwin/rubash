@@ -333,7 +333,7 @@ impl Executor {
         let mut output = String::new();
         let mut index = 0usize;
 
-        let mut expand_segment = |executor: &mut Self, segment: &str, sink: &mut String| {
+        let expand_segment = |executor: &mut Self, segment: &str, sink: &mut String| {
             // rubash#2676: a here-string word expands at the same
             // do_redirections point as a heredoc body (redir.c:373
             // heredoc_expand, r_reading_string), in the same single

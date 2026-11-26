@@ -1054,7 +1054,7 @@ pub(super) fn propagate_subtree_parse_error(command: &mut CommandNode) {
     // must report it there, not at the compound's own opening line
     // (`while :; do case x in\nesac) ...` names the `esac)' line,
     // rubash#390 q3).
-    let mut error_line = None;
+    let error_line;
     let markers: Vec<(String, String)> = match subtree_parse_error_node(command) {
         Some(inner) => {
             error_line = inner.line;

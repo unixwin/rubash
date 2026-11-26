@@ -708,7 +708,7 @@ fn push_double_quoted_replacement_char(marked: &mut String, chars: &[char], inde
             marked.push(crate::executor::markers::DATA_DQUOTE);
             index + 1
         }
-        '\'' | crate::executor::markers::DATA_SQUOTE => {
+        '\'' => {
             // Quote data inside a double-quoted replacement span: protect it
             // from the expander, which drops a bare quote as a span
             // delimiter (GNU keeps dquoted ' as literal data).

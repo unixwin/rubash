@@ -1819,7 +1819,7 @@ pub(in crate::executor) fn read_stdin_until(
     let mut decoder = StdinCharDecoder::new();
     let mut units = 0usize;
     // GNU read.def escape state for the -n/-N budget (rubash#1328).
-    let mut escaped = false;
+    let escaped = false;
     let mut eof = false;
     let mut timed_out = false;
     let mut interrupted = false;
@@ -2037,7 +2037,7 @@ fn find_unescaped_read_delimiter<'a>(
 }
 
 pub(in crate::executor) fn trim_read_input(
-    mut input: String,
+    input: String,
     delimiter: char,
     word_first_byte: Option<u8>,
     char_limit: Option<usize>,

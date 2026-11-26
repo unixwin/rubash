@@ -1347,7 +1347,6 @@ fn copy_dollar_paren_body_raw_cursor<'a>(out: &mut String, rest: &'a str) -> &'a
                 idx += copy_ansi_c_single_quoted_raw_cursor(out, &rest[idx..]);
                 word.clear();
                 word_boundary = false;
-                token_boundary = false;
             }
             '$' if rest.as_bytes().get(idx) == Some(&b'(') => {
                 if rest.as_bytes().get(idx + 1) == Some(&b'(')
@@ -1391,26 +1390,22 @@ fn copy_dollar_paren_body_raw_cursor<'a>(out: &mut String, rest: &'a str) -> &'a
                         prev_sig = Some('(');
                     }
                 }
-                token_boundary = false;
             }
             '\'' => {
                 idx += copy_single_quoted_raw_cursor(out, &rest[idx..]);
                 word.clear();
                 word_boundary = false;
-                token_boundary = false;
             }
             '"' => {
                 idx += copy_double_quoted_raw_cursor(out, &rest[idx..]);
                 word.clear();
                 word_boundary = false;
-                token_boundary = false;
             }
             '`' => {
                 let rem = copy_backtick_body_cursor(out, &rest[idx..], true);
                 idx = rest.len() - rem.len();
                 word.clear();
                 word_boundary = false;
-                token_boundary = false;
             }
             '<' if rest.as_bytes().get(idx) == Some(&b'<')
                 && rest.as_bytes().get(idx + 1) != Some(&b'<') =>
@@ -1432,7 +1427,6 @@ fn copy_dollar_paren_body_raw_cursor<'a>(out: &mut String, rest: &'a str) -> &'a
                 if nested_case_subst > 0 {
                     nested_case_subst += 1;
                 }
-                token_boundary = true;
             }
             ')' if case_depth == 0 || nested_case_subst > 0 => {
                 // Plain subtraction like the original: an unbalanced `)`
@@ -1445,7 +1439,6 @@ fn copy_dollar_paren_body_raw_cursor<'a>(out: &mut String, rest: &'a str) -> &'a
                 if depth == 0 {
                     return &rest[idx..];
                 }
-                token_boundary = true;
             }
             _ => {}
         }
@@ -3086,7 +3079,6 @@ fn copy_dollar_paren_body_raw(
                 copy_ansi_c_single_quoted_raw(out, chars);
                 word.clear();
                 word_boundary = false;
-                token_boundary = false;
             }
             '$' if chars.peek() == Some(&'(') => {
                 // `$((` arithmetic expansion — see the cursor form's arm.
@@ -3131,25 +3123,21 @@ fn copy_dollar_paren_body_raw(
                         prev_sig = Some('(');
                     }
                 }
-                token_boundary = false;
             }
             '\'' => {
                 copy_single_quoted_raw(out, chars);
                 word.clear();
                 word_boundary = false;
-                token_boundary = false;
             }
             '"' => {
                 copy_double_quoted_raw(out, chars);
                 word.clear();
                 word_boundary = false;
-                token_boundary = false;
             }
             '`' => {
                 copy_backtick_raw(out, chars);
                 word.clear();
                 word_boundary = false;
-                token_boundary = false;
             }
             '<' if chars.peek() == Some(&'<') => {
                 // `<<`/`<<-` here-document — see the cursor form's arm.
@@ -3172,7 +3160,6 @@ fn copy_dollar_paren_body_raw(
                 if nested_case_subst > 0 {
                     nested_case_subst += 1;
                 }
-                token_boundary = true;
             }
             ')' if case_depth == 0 || nested_case_subst > 0 => {
                 depth = depth.saturating_sub(1);
@@ -3182,7 +3169,6 @@ fn copy_dollar_paren_body_raw(
                 if depth == 0 {
                     break;
                 }
-                token_boundary = true;
             }
             _ => {}
         }

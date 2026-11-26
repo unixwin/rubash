@@ -205,7 +205,6 @@ pub(super) fn parse_popd_operand<'a>(
             no_cd = true;
             index += 1;
         } else if arg == "--" {
-            index += 1;
             break;
         } else if arg.starts_with('+') || arg.starts_with('-') {
             // pushd.def:344-352: `direction = word[0]` (assigned in

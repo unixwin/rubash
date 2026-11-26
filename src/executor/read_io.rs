@@ -2680,7 +2680,7 @@ impl Executor {
         let mut units = 0usize;
         // GNU read.def escape state for the -n/-N budget (see the counting
         // below): true when the previous unit was an unquoted backslash.
-        let mut escaped = false;
+        let escaped = false;
         let mut eof = false;
         let mut delimiter_found = false;
         // rubash#1300: an escaped unit is never the delimiter.

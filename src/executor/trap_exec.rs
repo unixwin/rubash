@@ -942,6 +942,7 @@ impl Executor {
         // walk, so this is its only open. Routing through
         // create_redirect_output instead would re-run the noclobber
         // O_EXCL create the probe already consumed.
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut anchor_file: Option<std::rc::Rc<FileFd>> = None;
         #[cfg(unix)]
         {
@@ -3466,7 +3467,7 @@ impl Executor {
 
     fn observe_signals_while_blocked_ex(
         &mut self,
-        mut record_sigint: Option<&mut bool>,
+        #[cfg_attr(not(unix), allow(unused_mut))] mut record_sigint: Option<&mut bool>,
     ) -> Result<(), ExecuteError> {
         // rubash#3401: the command-substitution conduit is exempt from
         // the flat-layer guard below — a clone whose drain permit is
@@ -4337,7 +4338,7 @@ impl Executor {
         // every re-parse in the loop below (same shape as the
         // EXIT-trap site): the bare parse() re-serialized the echo line.
         let action_source: std::rc::Rc<str> = action.as_str().into();
-        let mut result: Result<(), ExecuteError> = Ok(());
+        let mut result: Result<(), ExecuteError>;
         // rubash#2828: bounded content-keyed parse cache — pending CHLD
         // notifications re-fire the same action text; the first firing
         // parses, the rest reuse.
