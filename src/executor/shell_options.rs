@@ -5835,27 +5835,16 @@ fn trace_stdio_write(
 
 #[cfg(windows)]
 mod windows_raw_stdio {
-    use std::ffi::c_void;
     use std::io;
     use std::ptr;
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Storage::FileSystem::WriteFile;
+    use windows_sys::Win32::System::Console::{GetStdHandle, SetConsoleOutputCP};
 
     const CP_UTF8: u32 = 65001;
     const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
     const STD_ERROR_HANDLE: u32 = -12i32 as u32;
-    const INVALID_HANDLE_VALUE: *mut c_void = -1isize as *mut c_void;
     const WRITE_CHUNK_SIZE: usize = 1024 * 1024;
-
-    extern "system" {
-        fn GetStdHandle(nStdHandle: u32) -> *mut c_void;
-        fn SetConsoleOutputCP(wCodePageID: u32) -> i32;
-        fn WriteFile(
-            hFile: *mut c_void,
-            lpBuffer: *const c_void,
-            nNumberOfBytesToWrite: u32,
-            lpNumberOfBytesWritten: *mut u32,
-            lpOverlapped: *mut c_void,
-        ) -> i32;
-    }
 
     pub(super) fn write_stdout(output: &[u8]) -> io::Result<()> {
         write_handle(STD_OUTPUT_HANDLE, output)

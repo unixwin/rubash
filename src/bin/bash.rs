@@ -87,9 +87,7 @@ fn suppress_child_console_window(command: &mut Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        extern "system" {
-            fn GetConsoleCP() -> u32;
-        }
+        use windows_sys::Win32::System::Console::GetConsoleCP;
         // DETACHED_PROCESS = 0x00000008, CREATE_NO_WINDOW = 0x08000000
         // (WinBase.h). Gated on `GetConsoleCP() == 0` (run after
         // `release_orphan_console`): when the shim inherited a real terminal,
@@ -160,16 +158,10 @@ fn interactive_launch_wanted() -> bool {
 /// inherit it for free.
 #[cfg(windows)]
 fn release_orphan_console() {
-    extern "system" {
-        fn GetConsoleCP() -> u32;
-        fn GetConsoleWindow() -> *mut core::ffi::c_void;
-        fn GetConsoleProcessList(list: *mut u32, count: u32) -> u32;
-        fn FreeConsole() -> i32;
-    }
-    #[link(name = "user32")]
-    extern "system" {
-        fn IsWindowVisible(hwnd: *mut core::ffi::c_void) -> i32;
-    }
+    use windows_sys::Win32::System::Console::{
+        FreeConsole, GetConsoleCP, GetConsoleProcessList, GetConsoleWindow,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible;
     unsafe {
         if GetConsoleCP() == 0 {
             return;

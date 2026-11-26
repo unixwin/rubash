@@ -1289,18 +1289,8 @@ pub(crate) fn take_adjudicated_signal_death() -> Option<i32> {
 #[cfg(windows)]
 mod signal_hint {
     use std::sync::OnceLock;
-    use windows_sys::Win32::Foundation::HANDLE;
-
-    extern "system" {
-        fn CreateEventW(
-            attributes: *const core::ffi::c_void,
-            manual_reset: i32,
-            initial_state: i32,
-            name: *const u16,
-        ) -> HANDLE;
-        fn WaitForSingleObject(handle: HANDLE, milliseconds: u32) -> u32;
-        fn CloseHandle(handle: HANDLE) -> i32;
-    }
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 
     const EVENT_NAME_PREFIX: &str = "Local
 ubash-signal-hint-";
@@ -1370,10 +1360,8 @@ ubash-signal-hint-";
     /// open the target's event and pulse it. Failures are ignored — the
     /// mailbox entry itself is the source of truth.
     pub fn signal_target(pid: u32) {
-        extern "system" {
-            fn OpenEventW(desired_access: u32, inherit: i32, name: *const u16) -> HANDLE;
-            fn SetEvent(handle: HANDLE) -> i32;
-        }
+        use windows_sys::Win32::System::Threading::{OpenEventW, SetEvent};
+
         const EVENT_MODIFY_STATE: u32 = 0x0002;
         let handle = unsafe { OpenEventW(EVENT_MODIFY_STATE, 0, event_name(pid).as_ptr()) };
         if handle.is_null() {

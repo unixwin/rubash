@@ -242,11 +242,16 @@ mod imp {
     #![allow(non_snake_case)]
 
     use super::{winuxcmd_fifo_pipe_name, FIFO_MARKER};
-    use crate::fd::{BOOL, DWORD, HANDLE};
+    use crate::fd::{DWORD, HANDLE};
+    use crate::win32_ffi::{local_handle, sys_handle};
     use std::ffi::c_void;
     use std::io;
     use std::os::windows::ffi::OsStrExt;
     use std::path::Path;
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError};
+    use windows_sys::Win32::Storage::FileSystem::{CreateFileW, SetFileAttributesW};
+    use windows_sys::Win32::System::Pipes::{ConnectNamedPipe, CreateNamedPipeW, WaitNamedPipeW};
+    use windows_sys::Win32::System::Threading::Sleep;
 
     const INVALID_HANDLE_VALUE: HANDLE = -1;
     const GENERIC_WRITE: DWORD = 0x4000_0000;
@@ -262,35 +267,6 @@ mod imp {
     const PIPE_UNLIMITED_INSTANCES: DWORD = 255;
     const ERROR_FILE_NOT_FOUND: DWORD = 2;
     const ERROR_PIPE_BUSY: DWORD = 231;
-
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn CreateNamedPipeW(
-            name: *const u16,
-            open_mode: DWORD,
-            pipe_mode: DWORD,
-            max_instances: DWORD,
-            out_buffer: DWORD,
-            in_buffer: DWORD,
-            timeout: DWORD,
-            sa: *const c_void,
-        ) -> HANDLE;
-        fn ConnectNamedPipe(h: HANDLE, overlapped: *mut c_void) -> BOOL;
-        fn CreateFileW(
-            name: *const u16,
-            access: DWORD,
-            share: DWORD,
-            sa: *const c_void,
-            disposition: DWORD,
-            flags: DWORD,
-            template: HANDLE,
-        ) -> HANDLE;
-        fn WaitNamedPipeW(name: *const u16, timeout: DWORD) -> BOOL;
-        fn SetFileAttributesW(name: *const u16, attrs: DWORD) -> BOOL;
-        fn GetLastError() -> DWORD;
-        fn CloseHandle(h: HANDLE) -> BOOL;
-        fn Sleep(ms: DWORD);
-    }
 
     fn wide_z(text: &str) -> Vec<u16> {
         text.encode_utf16().chain(std::iter::once(0)).collect()
@@ -384,7 +360,7 @@ mod imp {
         let (sender, receiver) = std::sync::mpsc::channel::<ConnectMsg>();
         std::thread::spawn(move || {
             let handle = unsafe {
-                CreateNamedPipeW(
+                local_handle(CreateNamedPipeW(
                     wide.as_ptr(),
                     PIPE_ACCESS_INBOUND,
                     PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
@@ -393,17 +369,17 @@ mod imp {
                     64 * 1024,
                     0,
                     std::ptr::null(),
-                )
+                ))
             };
             if handle == INVALID_HANDLE_VALUE {
                 let _ = sender.send(ConnectMsg::CreateFailed(io::Error::last_os_error()));
                 return;
             }
             if sender.send(ConnectMsg::Created(handle)).is_err() {
-                unsafe { CloseHandle(handle) };
+                unsafe { CloseHandle(sys_handle(handle)) };
                 return;
             }
-            let ok = unsafe { ConnectNamedPipe(handle, std::ptr::null_mut()) };
+            let ok = unsafe { ConnectNamedPipe(sys_handle(handle), std::ptr::null_mut()) };
             let result = if ok != 0 {
                 Ok(())
             } else {
@@ -437,7 +413,7 @@ mod imp {
                     return Ok(unsafe { std::fs::File::from_raw_handle(handle as *mut c_void) });
                 }
                 Ok(ConnectMsg::Connected(Err(error))) => {
-                    unsafe { CloseHandle(handle) };
+                    unsafe { CloseHandle(sys_handle(handle)) };
                     return Err(error);
                 }
                 Ok(ConnectMsg::Created(_)) | Ok(ConnectMsg::CreateFailed(_)) => {
@@ -448,7 +424,7 @@ mod imp {
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     if interrupted() {
-                        unsafe { CloseHandle(handle) };
+                        unsafe { CloseHandle(sys_handle(handle)) };
                         // Give the connect call a bounded grace period
                         // to unwind against the closed handle; the
                         // error is already decided either way.
@@ -457,7 +433,7 @@ mod imp {
                     }
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    unsafe { CloseHandle(handle) };
+                    unsafe { CloseHandle(sys_handle(handle)) };
                     return Err(io::Error::new(
                         io::ErrorKind::Other,
                         "fifo connect thread exited",
@@ -478,15 +454,15 @@ mod imp {
                 return Err(interrupted_error());
             }
             let handle = unsafe {
-                CreateFileW(
+                local_handle(CreateFileW(
                     wide.as_ptr(),
                     GENERIC_WRITE,
                     0,
                     std::ptr::null(),
                     OPEN_EXISTING,
                     FILE_ATTRIBUTE_NORMAL,
-                    0,
-                )
+                    std::ptr::null_mut(),
+                ))
             };
             if handle != INVALID_HANDLE_VALUE {
                 use std::os::windows::io::FromRawHandle;

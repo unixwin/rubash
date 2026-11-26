@@ -4274,33 +4274,14 @@ fn cp_set_modified_now(target: &CpNode) {
     // node and its joined path is the name CreateFileW opens.
     let target_buf = target.eff_path();
     let target = target_buf.as_path();
-    use std::ffi::c_void;
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{CreateFileW, SetFileTime};
 
     const FILE_WRITE_ATTRIBUTES: u32 = 0x100;
     const FILE_SHARE_READ: u32 = 1;
     const FILE_SHARE_WRITE: u32 = 2;
     const OPEN_EXISTING: u32 = 3;
     const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
-    const INVALID_HANDLE_VALUE: usize = usize::MAX;
-
-    extern "system" {
-        fn CreateFileW(
-            lpFileName: *const u16,
-            dwDesiredAccess: u32,
-            dwShareMode: u32,
-            lpSecurityAttributes: *mut c_void,
-            dwCreationDisposition: u32,
-            dwFlagsAndAttributes: u32,
-            hTemplateFile: usize,
-        ) -> usize;
-        fn SetFileTime(
-            hFile: usize,
-            lpCreationTime: *const c_void,
-            lpLastAccessTime: *const c_void,
-            lpLastWriteTime: *const c_void,
-        ) -> i32;
-        fn CloseHandle(hObject: usize) -> i32;
-    }
 
     // FILETIME counts 100-nanosecond intervals since 1601-01-01 in UTC,
     // while SystemTime is anchored at 1970-01-01. The 11644473600-second
@@ -4314,24 +4295,22 @@ fn cp_set_modified_now(target: &CpNode) {
     let mut wide: Vec<u16> = target.to_string_lossy().encode_utf16().collect();
     wide.push(0);
 
-    let last_write: i64 = ticks as i64;
+    let last_write = FILETIME {
+        dwLowDateTime: ticks as u32,
+        dwHighDateTime: (ticks >> 32) as u32,
+    };
     unsafe {
         let handle = CreateFileW(
             wide.as_ptr(),
             FILE_WRITE_ATTRIBUTES,
             FILE_SHARE_READ | FILE_SHARE_WRITE,
-            std::ptr::null_mut(),
+            std::ptr::null(),
             OPEN_EXISTING,
             FILE_ATTRIBUTE_NORMAL,
-            0,
+            std::ptr::null_mut(),
         );
         if handle != INVALID_HANDLE_VALUE {
-            SetFileTime(
-                handle,
-                std::ptr::null(),
-                std::ptr::null(),
-                &last_write as *const i64 as *const c_void,
-            );
+            SetFileTime(handle, std::ptr::null(), std::ptr::null(), &last_write);
             CloseHandle(handle);
         }
     }

@@ -6925,10 +6925,9 @@ impl Executor {
     ) {
         use std::os::windows::io::AsRawHandle as _;
         fn wait_process_exit(h: crate::fd::HANDLE) {
-            extern "system" {
-                fn WaitForSingleObject(h: crate::fd::HANDLE, ms: u32) -> u32;
-            }
-            unsafe { WaitForSingleObject(h, u32::MAX) };
+            use windows_sys::Win32::System::Threading::WaitForSingleObject;
+
+            unsafe { WaitForSingleObject(crate::win32_ffi::sys_handle(h), u32::MAX) };
         }
         let raw = child.as_raw_handle() as crate::fd::HANDLE;
         let Ok(watch) = crate::fd::duplicate_handle(raw) else {

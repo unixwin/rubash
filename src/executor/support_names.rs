@@ -234,41 +234,17 @@ fn windows_parent_process_id() -> Option<u32> {
 #[cfg(windows)]
 fn nt_parent_process_id() -> Option<u32> {
     use std::ffi::c_void;
+    use windows_sys::Wdk::System::Threading::{NtQueryInformationProcess, ProcessBasicInformation};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, PROCESS_BASIC_INFORMATION};
 
-    #[repr(C)]
-    #[allow(non_snake_case)]
-    struct ProcessBasicInformation {
-        ExitStatus: *mut c_void,
-        PebBaseAddress: *mut c_void,
-        AffinityMask: [*mut c_void; 2],
-        UniqueProcessId: usize,
-        InheritedFromUniqueProcessId: usize,
-    }
-
-    extern "system" {
-        fn GetCurrentProcess() -> *mut c_void;
-        fn NtQueryInformationProcess(
-            process: *mut c_void,
-            process_information_class: u32,
-            process_information: *mut c_void,
-            process_information_length: u32,
-            return_length: *mut u32,
-        ) -> i32;
-    }
-
-    const PROCESS_BASIC_INFORMATION: u32 = 0;
-    let (mut info, mut returned) = unsafe {
-        (
-            std::mem::zeroed::<ProcessBasicInformation>(),
-            std::mem::zeroed::<u32>(),
-        )
-    };
+    let mut info = PROCESS_BASIC_INFORMATION::default();
+    let mut returned = 0u32;
     let status = unsafe {
         NtQueryInformationProcess(
             GetCurrentProcess(),
-            PROCESS_BASIC_INFORMATION,
+            ProcessBasicInformation,
             &mut info as *mut _ as *mut c_void,
-            std::mem::size_of::<ProcessBasicInformation>() as u32,
+            std::mem::size_of::<PROCESS_BASIC_INFORMATION>() as u32,
             &mut returned,
         )
     };
@@ -282,31 +258,11 @@ fn nt_parent_process_id() -> Option<u32> {
 
 #[cfg(windows)]
 fn snapshot_parent_process_id() -> Option<u32> {
-    use std::ffi::c_void;
-
-    const TH32CS_SNAPPROCESS: u32 = 0x0000_0002;
-    const INVALID_HANDLE_VALUE: *mut c_void = -1isize as *mut c_void;
-
-    #[repr(C)]
-    struct PROCESSENTRY32W {
-        dw_size: u32,
-        cnt_usage: u32,
-        th32_process_id: u32,
-        th32_default_heap_id: usize,
-        th32_module_id: u32,
-        cnt_threads: u32,
-        th32_parent_process_id: u32,
-        pc_pri_class_base: i32,
-        dw_flags: u32,
-        sz_exe_file: [u16; 260],
-    }
-
-    extern "system" {
-        fn CreateToolhelp32Snapshot(dw_flags: u32, th32_process_id: u32) -> *mut c_void;
-        fn Process32FirstW(snapshot: *mut c_void, entry: *mut PROCESSENTRY32W) -> i32;
-        fn Process32NextW(snapshot: *mut c_void, entry: *mut PROCESSENTRY32W) -> i32;
-        fn CloseHandle(object: *mut c_void) -> i32;
-    }
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
 
     let current = std::process::id();
     unsafe {
@@ -314,13 +270,13 @@ fn snapshot_parent_process_id() -> Option<u32> {
         if snapshot == INVALID_HANDLE_VALUE {
             return None;
         }
-        let mut entry: PROCESSENTRY32W = std::mem::zeroed();
-        entry.dw_size = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut entry = PROCESSENTRY32W::default();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
         let mut parent = None;
         if Process32FirstW(snapshot, &mut entry) != 0 {
             loop {
-                if entry.th32_process_id == current {
-                    parent = Some(entry.th32_parent_process_id);
+                if entry.th32ProcessID == current {
+                    parent = Some(entry.th32ParentProcessID);
                     break;
                 }
                 if Process32NextW(snapshot, &mut entry) == 0 {

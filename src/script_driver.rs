@@ -6082,48 +6082,16 @@ fn run_source_impl_inner_body(
 /// TIOCGWINSZ semantics, not the (usually wider) buffer dwSize.
 #[cfg(windows)]
 fn windows_console_size_of(handle: *mut std::ffi::c_void) -> Option<(i32, i32)> {
-    #[repr(C)]
-    #[derive(Default, Clone, Copy)]
-    struct Coord {
-        x: i16,
-        y: i16,
-    }
-    #[repr(C)]
-    #[derive(Default, Clone, Copy)]
-    struct SmallRect {
-        left: i16,
-        top: i16,
-        right: i16,
-        bottom: i16,
-    }
-    #[repr(C)]
-    #[derive(Default, Clone, Copy)]
-    struct ConsoleScreenBufferInfo {
-        dw_size: Coord,
-        dw_cursor_position: Coord,
-        w_attributes: u16,
-        sr_window: SmallRect,
-        dw_maximum_window_size: Coord,
-    }
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn GetConsoleScreenBufferInfo(
-            console_output: *mut std::ffi::c_void,
-            console_screen_buffer_info: *mut ConsoleScreenBufferInfo,
-        ) -> i32;
-    }
-    let mut info = ConsoleScreenBufferInfo::default();
+    use windows_sys::Win32::System::Console::{
+        GetConsoleScreenBufferInfo, CONSOLE_SCREEN_BUFFER_INFO,
+    };
+
+    let mut info = CONSOLE_SCREEN_BUFFER_INFO::default();
     if unsafe { GetConsoleScreenBufferInfo(handle, &mut info) } == 0 {
         return None;
     }
-    let SmallRect {
-        left,
-        top,
-        right,
-        bottom,
-    } = info.sr_window;
-    let rows = i32::from(bottom) - i32::from(top) + 1;
-    let cols = i32::from(right) - i32::from(left) + 1;
+    let rows = i32::from(info.srWindow.Bottom) - i32::from(info.srWindow.Top) + 1;
+    let cols = i32::from(info.srWindow.Right) - i32::from(info.srWindow.Left) + 1;
     Some((rows, cols))
 }
 
@@ -6148,10 +6116,8 @@ pub(crate) fn process_console_size() -> Option<(i32, i32)> {
             return Some(size);
         }
     }
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn GetStdHandle(n_std_handle: u32) -> *mut std::ffi::c_void;
-    }
+    use windows_sys::Win32::System::Console::GetStdHandle;
+
     // STD_INPUT_HANDLE / STD_OUTPUT_HANDLE / STD_ERROR_HANDLE
     for std_handle in [-10i32 as u32, -11i32 as u32, -12i32 as u32] {
         let handle = unsafe { GetStdHandle(std_handle) };
