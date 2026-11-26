@@ -26,6 +26,7 @@ use crate::win32_ffi::{local_handle, sys_handle};
 use std::ffi::c_void;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
+use windows_sys::Win32::Networking::WinSock::closesocket;
 
 pub type HANDLE = isize; // isize so FdEntry/FdTable are Send+Sync
 pub type BOOL = i32;
@@ -479,7 +480,7 @@ impl FdTable {
         }
         self.grow_to(slot);
         if let Some(old) = self.slots[slot].take() {
-            unsafe { CloseHandle(old.handle) };
+            let _ = close_os_handle(old.handle);
         }
         self.slots[slot] = Some(FdEntry {
             handle,
@@ -618,8 +619,8 @@ impl FdTable {
     pub fn close(&mut self, slot: usize) -> Result<(), String> {
         match self.slots.get_mut(slot).and_then(|s| s.take()) {
             Some(entry) => {
-                if unsafe { CloseHandle(entry.handle) } == 0 {
-                    return Err(format!("close {slot}: CloseHandle failed"));
+                if !close_os_handle(entry.handle) {
+                    return Err(format!("close {slot}: close_os_handle failed"));
                 }
                 Ok(())
             }
@@ -935,10 +936,19 @@ pub fn duplicate_handle(h: HANDLE) -> std::io::Result<HANDLE> {
     Ok(target)
 }
 
-pub fn close_handle(h: HANDLE) {
-    unsafe {
-        CloseHandle(h);
+/// Close a generic OS handle owned by the fd table, dispatching Winsock
+/// `SOCKET` handles to `closesocket()` so Winsock's user-space socket table
+/// entry is freed rather than leaked behind `CloseHandle()`.
+fn close_os_handle(h: HANDLE) -> bool {
+    if is_socket_handle(h) {
+        unsafe { closesocket(h as usize) == 0 }
+    } else {
+        unsafe { CloseHandle(h) != 0 }
     }
+}
+
+pub fn close_handle(h: HANDLE) {
+    let _ = close_os_handle(h);
 }
 
 /// Result of a bounded readability wait on an OS handle.
@@ -1004,8 +1014,9 @@ pub fn is_socket_handle(h: HANDLE) -> bool {
 
 /// Run one byte-I/O operation on a socket HANDLE through std's socket API.
 /// `TcpStream::from_raw_socket` is only a recv/send carrier for the raw
-/// handle — the fd table owns the close (close_handle), so the stream is
-/// `ManuallyDrop` and never closesocket'd. recv/send work on an overlapped
+/// handle — the fd table owns the close (`close_handle` / `FdTable`
+/// dispatches socket handles to `closesocket`), so this temporary wrapper
+/// is `ManuallyDrop` and does not close the socket on return. recv/send work on an overlapped
 /// socket regardless of the overlap flag (that is how every std::net
 /// endpoint does its I/O), which is exactly what ReadFile/WriteFile cannot
 /// do (rubash#1976). A connected UDP endpoint sends the same way; its
@@ -2266,6 +2277,38 @@ mod tests {
         t.mark_inheritable(3).unwrap();
         assert!(t.entry(3).unwrap().is_inheritable());
         assert_eq!(t.inheritable_handles(), vec![t.query(3).unwrap()]);
+    }
+
+    #[test]
+    fn closesocket_used_for_socket_handles() {
+        use std::net::{TcpListener, TcpStream};
+        use std::os::windows::io::IntoRawSocket;
+        use windows_sys::Win32::Networking::WinSock::{WSAGetLastError, SOCKET_ERROR, WSAENOTSOCK};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Case 1: FdTable::close dispatches socket handles to closesocket.
+        let client1 = TcpStream::connect(addr).unwrap();
+        let _accepted1 = listener.accept().unwrap();
+        let h1 = client1.into_raw_socket() as HANDLE;
+        assert!(is_socket_handle(h1));
+
+        let mut table = FdTable::new();
+        table.install(3, h1).unwrap();
+        assert_eq!(table.close(3), Ok(()));
+        assert_eq!(unsafe { closesocket(h1 as usize) }, SOCKET_ERROR);
+        assert_eq!(unsafe { WSAGetLastError() }, WSAENOTSOCK);
+
+        // Case 2: close_handle dispatches socket handles to closesocket.
+        let client2 = TcpStream::connect(addr).unwrap();
+        let _accepted2 = listener.accept().unwrap();
+        let h2 = client2.into_raw_socket() as HANDLE;
+        assert!(is_socket_handle(h2));
+
+        close_handle(h2);
+        assert_eq!(unsafe { closesocket(h2 as usize) }, SOCKET_ERROR);
+        assert_eq!(unsafe { WSAGetLastError() }, WSAENOTSOCK);
     }
 }
 
