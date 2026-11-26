@@ -515,9 +515,6 @@ fn emit_arith_locale_bind(
 /// Categories surfaced by GNU Bash's arithmetic evaluator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ArithmeticErrorCategory {
-    EmptyArraySubscript,
-    DivisionByZero,
-    InvalidLiteral,
     NonVariableAssignment,
     EvaluatorFailure,
     /// GNU expr.c:484-485: `curtok != 0` after `EXP_LOWEST()` — trailing
@@ -2623,7 +2620,6 @@ pub(in crate::executor) fn trailing_input_token(
         dynamic_values: None,
         cells: None,
         error_category: None,
-        no_expand: false,
         // Probe-only parse: no evaluation, no empty-subscript verdict.
         expanded_entry: false,
         error: None,
@@ -2678,7 +2674,6 @@ fn indexed_noexpand_error_token(resolved: &str) -> String {
         dynamic_values: None,
         cells: None,
         error_category: None,
-        no_expand: true,
         // Probe-only parse: no evaluation, no empty-subscript verdict.
         expanded_entry: false,
         error: None,
@@ -4682,7 +4677,6 @@ fn eval_mutable_arith_result(
         dynamic_values,
         cells,
         error_category: None,
-        no_expand,
         expanded_entry,
         error: None,
         last_tok_start: 0,
@@ -4794,18 +4788,6 @@ fn checked_arithmetic_pow(base: i128, exponent: i128) -> Option<i128> {
     let mut value = 1i128;
     for _ in 0..exponent {
         value = bash_arith(value * base);
-    }
-    Some(value)
-}
-
-fn parse_arithmetic_digits(digits: &[u8], base: u32) -> Option<i128> {
-    let mut value = 0i128;
-    for digit in std::str::from_utf8(digits).ok()?.chars() {
-        let digit = arithmetic_digit_value(digit, base)?;
-        if digit >= base {
-            return None;
-        }
-        value = bash_arith(value * i128::from(base) + i128::from(digit));
     }
     Some(value)
 }

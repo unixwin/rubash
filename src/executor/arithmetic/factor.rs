@@ -168,14 +168,6 @@ fn parse_number_with<B: ArithBackend + ?Sized>(b: &mut B) -> Option<B::Val> {
 }
 
 impl ConditionalArithParser<'_> {
-    fn fail_operand_position(&mut self) -> Option<i128> {
-        fail_operand_position_with(self)
-    }
-
-    pub(super) fn parse_factor(&mut self) -> Option<i128> {
-        parse_factor_with(self)
-    }
-
     /// GNU expr.c:1344-1404 readtok STR + 1077-1118 exp0: the
     /// `name`/`name[subscript]` token is read with its lvalue context (the
     /// evaluated subscript index is kept in `curlval`), then the following

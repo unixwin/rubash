@@ -98,28 +98,6 @@ pub(in crate::executor) fn command_has_redirect(cmd: &CommandNode) -> bool {
         || !cmd.redirects.is_empty()
 }
 
-pub(in crate::executor) fn function_definition_command_uses_source_text(
-    command: &CommandNode,
-) -> bool {
-    command.words.is_empty()
-        || command.pipeline_command.is_some()
-        || command.and_or_list.is_some()
-        || command.time_command.is_some()
-        || command.background_command.is_some()
-        || command.inverted_command.is_some()
-        || command.arithmetic_command.is_some()
-        || command.for_command.is_some()
-        || command.if_command.is_some()
-        || command.loop_command.is_some()
-        || command.conditional_command.is_some()
-        || command.subshell_command.is_some()
-        || command.case_command.is_some()
-        || command.select_command.is_some()
-        || command.brace_group.is_some()
-        || command.coproc_command.is_some()
-        || command.function_command.is_some()
-}
-
 pub(in crate::executor) fn fd_stdin_key(fd: u32) -> String {
     format!("{FD_STDIN_PREFIX}{fd}")
 }

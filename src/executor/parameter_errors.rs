@@ -135,22 +135,6 @@ fn parameter_reference_len(body: &str) -> usize {
     index
 }
 
-/// Byte index of the next `${` in `text` that starts a parameter expansion
-/// of the word itself, skipping spans whose contents belong to another
-/// expansion layer (GNU subst.c: string_extract_double_quoted copies a
-/// backtick body verbatim; extract_command_subst and
-/// extract_dollar_brace_string own their spans):
-///   * single-quoted spans and ANSI-C $'...' strings (data)
-///   * backtick bodies and $(...) bodies (separate command sources)
-///   * the lexer's legacy C0 data markers (0x11 glob, 0x14 backslash,
-///     0x17 single quote, 0x18 double quote, 0x1a backtick, 0x1f dollar)
-/// Inside double quotes `${` stays a real expansion start and a single
-/// quote is literal data (parse.y skip_double_quoted), matching GNU
-/// word expansion; heredoc bodies keep the raw scan instead.
-fn next_quoted_parameter_expansion_start(text: &str) -> Option<usize> {
-    next_quoted_parameter_expansion_start_in_context(text, false)
-}
-
 fn next_quoted_parameter_expansion_start_in_context(
     text: &str,
     mut in_double: bool,
@@ -1647,13 +1631,6 @@ impl Executor {
         // here, while `\\$name` (collapsed `\` + real `$name`) still does.
         let prepared = super::command_input_scope::prepare_unquoted_heredoc_expansion(body);
         self.parameter_expansion_error_in_word_context(&prepared, false)
-    }
-
-    pub(in crate::executor) fn parameter_expansion_error_in_word(
-        &self,
-        word: &str,
-    ) -> Option<(String, String, i32)> {
-        self.parameter_expansion_error_in_word_with_raw(word, None)
     }
 
     pub(in crate::executor) fn parameter_expansion_error_in_word_with_raw(

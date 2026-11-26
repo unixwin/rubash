@@ -351,6 +351,7 @@ pub fn passwd_home_for_user(user: &str, env_vars: &HashMap<String, String>) -> O
 /// field is index 5. Comment and empty lines are skipped. A matching entry
 /// wins even with an empty home field, mirroring getpwnam handing back
 /// whatever pw_dir holds.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn passwd_home_from_content(content: &str, user: &str) -> Option<String> {
     content
         .lines()

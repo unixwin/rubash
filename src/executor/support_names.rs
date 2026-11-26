@@ -811,6 +811,7 @@ fn split_gnu_path(path: &str) -> Vec<String> {
     entries
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(in crate::executor) fn split_windows_shell_path(path: &str) -> Vec<String> {
     let mut entries = Vec::new();
     let bytes = path.as_bytes();
@@ -833,6 +834,7 @@ pub(in crate::executor) fn split_windows_shell_path(path: &str) -> Vec<String> {
     entries
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn push_path_entry(entries: &mut Vec<String>, path: &str, start: usize, end: usize) {
     if start < end {
         entries.push(path[start..end].to_string());

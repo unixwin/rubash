@@ -1012,9 +1012,6 @@ pub(super) struct IndexedAppendOutcome {
     /// `None` when the write was a pure append, which `appended` fully
     /// describes and the caller can apply without ever building the map.
     pub entries: Option<BTreeMap<usize, String>>,
-    /// Max index BEFORE this write (`None` for an empty array) — GNU
-    /// `array_max_index(a)` at arrayfunc.c:743.
-    pub old_max: Option<usize>,
     /// Every element strictly above `old_max`, ascending — exactly what a
     /// canonical mirror must grow by.
     pub appended: Vec<(usize, String)>,
@@ -1497,7 +1494,6 @@ pub(super) fn append_array_value(
         }
         return Ok(IndexedAppendOutcome {
             entries: Some(entries),
-            old_max,
             appended: Vec::new(),
             appended_only: false,
             bad_subscript,
@@ -1515,7 +1511,6 @@ pub(super) fn append_array_value(
     };
     Ok(IndexedAppendOutcome {
         entries,
-        old_max,
         appended,
         appended_only,
         bad_subscript,

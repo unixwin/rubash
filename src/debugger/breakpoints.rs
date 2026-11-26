@@ -245,6 +245,7 @@ impl Breakpoint {
 
     /// The command list's `silent` rule (5.5): a first line of
     /// `silent` suppresses the stop banner for this entry.
+    #[cfg(test)]
     pub fn commands_are_silent(&self) -> bool {
         self.commands
             .first()
@@ -434,6 +435,7 @@ impl BreakpointTable {
     }
 
     /// Number of entries currently in the table.
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -512,6 +514,7 @@ impl BreakpointTable {
     }
 
     /// Set the remaining ignore count (`ignore id n`, 5.5).
+    #[cfg(test)]
     pub fn set_ignore(&mut self, id: BreakpointId, count: u32) -> bool {
         let Some(entry) = self.entries.get_mut(&id) else {
             return false;
@@ -530,6 +533,7 @@ impl BreakpointTable {
     }
 
     /// Replace the command list (5.5).
+    #[cfg(test)]
     pub fn set_commands(&mut self, id: BreakpointId, commands: Vec<String>) -> bool {
         let Some(entry) = self.entries.get_mut(&id) else {
             return false;

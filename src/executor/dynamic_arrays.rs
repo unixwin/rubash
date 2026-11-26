@@ -10,7 +10,6 @@ pub(crate) struct ArithDynamicContext {
     bashpid: u32,
     subshell_depth: usize,
     histcmd: usize,
-    function_depth: usize,
     funcname_top: Option<String>,
     debug_trap_command: Option<String>,
     pipestatus_first: i32,
@@ -1423,7 +1422,6 @@ impl Executor {
             bashpid: self.bashpid_value(),
             subshell_depth: self.shell_state.subshell_depth.get(),
             histcmd: self.histcmd_value(),
-            function_depth: self.shell_state.function_depth,
             funcname_top: (self.shell_state.function_depth > 0).then(|| {
                 self.shell_state
                     .function_name_stack
@@ -1903,31 +1901,6 @@ impl Executor {
             self.dynamic_stack_array_values(&resolved)
                 .and_then(|values| values.into_iter().next()),
         )
-    }
-
-    /// Indexed element read of a dynamic stack array,
-    /// `${BASH_LINENO[$i]}` shape. Dense-subscript semantics mirror
-    /// `resolve_indexed_array_subscript` + `array_value_at` over the
-    /// rendered storage (the six views are contiguous 0..n renders, so
-    /// max_index+1 == len): a non-negative index passes through, a
-    /// negative index counts back from the end, out-of-range and
-    /// unresolvable-subscript reads return None — callers keep their own
-    /// diagnostic posture (the element-value path reports "bad array
-    /// subscript", the braced-operator paths stay silent, exactly as their
-    /// storage-string counterparts do).
-    pub(in crate::executor) fn dynamic_stack_array_element(
-        &self,
-        name: &str,
-        index: i128,
-    ) -> Option<String> {
-        // PIPESTATUS is the one dynamic array whose elements are NOT
-        // a contiguous 0..n render (rubash#1364 R3): subscripts name
-        // sparse indices and resolve against the maximum index.
-        if self.resolved_variable_name(name).as_deref() == Some("PIPESTATUS") {
-            return self.pipestatus_element(index);
-        }
-        let values = self.dynamic_stack_array_values(name)?;
-        dense_view_element(&values, index)
     }
 
     /// `${name[@]}` / `${name[*]}` joined read of a dynamic stack array —

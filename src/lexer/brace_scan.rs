@@ -34,6 +34,7 @@ pub(super) fn tokens_open_unclosed_brace_group(line_tokens: &[Token]) -> bool {
     })
 }
 
+#[cfg(test)]
 pub(super) fn has_unclosed_brace_group(input: &str) -> bool {
     let trimmed = input.trim_start();
     let has_group = trimmed.starts_with('{')
@@ -270,6 +271,7 @@ pub(crate) fn param_residuals_advance(
     None
 }
 
+#[cfg(test)]
 pub(super) fn has_unclosed_parameter_expansion(input: &str) -> bool {
     let chars = input.chars().collect::<Vec<_>>();
     let mut state = ParamScanState::default();
@@ -287,6 +289,7 @@ pub(super) fn opens_function_body_after_previous_signature(input: &str, output: 
         .is_some_and(|token| token.kind == TokenKind::Keyword && token.value == ")")
 }
 
+#[cfg(test)]
 pub(super) fn unquoted_brace_group_depth(input: &str) -> usize {
     let chars = input.chars().collect::<Vec<_>>();
     let mut index = 0usize;
@@ -398,6 +401,7 @@ pub(super) fn unquoted_brace_group_depth(input: &str) -> usize {
     depth
 }
 
+#[cfg(test)]
 fn update_brace_group_case_depth(
     chars: &[char],
     index: usize,
@@ -435,6 +439,7 @@ fn update_brace_group_case_depth(
     *word_boundary = reserved_word_allows_next || brace_group_separator_allows_reserved_word(ch);
 }
 
+#[cfg(test)]
 fn update_brace_group_reserved_word_depth(
     chars: &[char],
     index: usize,
@@ -462,6 +467,7 @@ fn update_brace_group_reserved_word_depth(
     }
 }
 
+#[cfg(test)]
 fn case_pattern_starts_with_esac_chars(chars: &[char], delimiter_index: usize) -> bool {
     if !matches!(chars.get(delimiter_index), Some(')' | '|')) {
         return false;
@@ -514,6 +520,7 @@ fn case_pattern_starts_with_esac_chars(chars: &[char], delimiter_index: usize) -
     word == "esac" && word_boundary
 }
 
+#[cfg(test)]
 fn brace_group_reserved_word_allows_next(word: &str) -> bool {
     matches!(
         word,
@@ -532,10 +539,12 @@ fn brace_group_reserved_word_allows_next(word: &str) -> bool {
     )
 }
 
+#[cfg(test)]
 fn brace_group_separator_allows_reserved_word(ch: char) -> bool {
     matches!(ch, ';' | '&' | '|' | '(' | ')' | '{' | '\n')
 }
 
+#[cfg(test)]
 pub(super) fn skip_braced_parameter_in_chars(chars: &[char], index: usize) -> usize {
     // rubash#281: zero-copy scan (rubash#185 API) — the String copy below
     // re-collected the whole remaining buffer per `${`. `index` sits just

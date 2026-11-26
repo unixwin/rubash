@@ -95,6 +95,7 @@ impl Drop for GateTestSpan {
 struct Wired {
     executor: Executor,
     stops: Rc<RefCell<Vec<StopRecord>>>,
+    #[allow(dead_code)]
     events: Rc<RefCell<Vec<DebugEvent>>>,
 }
 

@@ -598,17 +598,14 @@ pub(super) enum SectionOutcome {
         index: usize,
     },
     /// Input ran out before any closer (the scanner's None-by-EOF).
-    Eof { body: Vec<CommandNode> },
+    Eof,
     /// The loop broke on a parse error before the closer; the body's last
     /// command carries the error node (the scanner still knew the real
     /// boundary — callers recover it with the cold scanner when needed).
     Errored { body: Vec<CommandNode> },
     /// `then` arrived where a body was expected (parse_if_section's
     /// return-None abort).
-    AbortedThen {
-        body: Vec<CommandNode>,
-        index: usize,
-    },
+    AbortedThen,
 }
 
 /// Parse one compound-body section inline in the caller's parse state
@@ -701,10 +698,10 @@ pub(super) fn run_inline_section(
     state.section_token_start = saved_start;
 
     if at_eof {
-        return SectionOutcome::Eof { body };
+        return SectionOutcome::Eof;
     }
     if aborted_then {
-        return SectionOutcome::AbortedThen { body, index: i };
+        return SectionOutcome::AbortedThen;
     }
     if ended {
         return SectionOutcome::Ended { body, index: i };
@@ -4039,156 +4036,12 @@ pub(super) fn parse_time_prefixed_compound_command(
     Some((timed, next_i))
 }
 
-pub(super) fn parse_time_prefixed_shell_command(
-    tokens: &[Token],
-    start: usize,
-) -> Option<(CommandNode, usize)> {
-    if !time_prefixed_shell_command_allows_simple_pipeline(tokens, start) {
-        return None;
-    }
-
-    let end = time_prefixed_shell_command_end(tokens, start + 1);
-
-    let mut commands = parse(&tokens[start..end]).commands;
-    if commands.len() != 1 {
-        return None;
-    }
-
-    Some((commands.remove(0), end))
-}
-
 /// The 1-based `line` of `text`, verbatim. Token positions are line
 /// numbers (parse.y `line_number`), so diagnostic line echo is a line
 /// lookup, not a byte-offset slice (rubash#204).
 pub(super) fn source_line_by_number(text: &str, line: usize) -> Option<String> {
     let line = line.checked_sub(1)?;
     text.lines().nth(line).map(str::to_string)
-}
-
-fn time_prefixed_shell_command_end(tokens: &[Token], mut index: usize) -> usize {
-    let mut stack = Vec::new();
-    let mut paren_depth = 0usize;
-    let mut brace_depth = 0usize;
-
-    while let Some(token) = tokens.get(index) {
-        if stack.is_empty()
-            && paren_depth == 0
-            && brace_depth == 0
-            && token.kind == TokenKind::Semicolon
-            && previous_significant_token_is_pipe(tokens, index)
-        {
-            index += 1;
-            continue;
-        }
-
-        if stack.is_empty()
-            && paren_depth == 0
-            && brace_depth == 0
-            && matches!(
-                token.kind,
-                TokenKind::Semicolon | TokenKind::And | TokenKind::Or | TokenKind::Background
-            )
-        {
-            break;
-        }
-
-        update_compound_boundary_stack(tokens, index, &mut stack);
-        if stack.last().copied() != Some("esac") && command_boundary_keyword_allowed(tokens, index)
-        {
-            if is_keyword(tokens, index, "(") {
-                paren_depth += 1;
-            } else if is_keyword(tokens, index, ")") {
-                paren_depth = paren_depth.saturating_sub(1);
-            } else if is_keyword(tokens, index, "{") {
-                brace_depth += 1;
-            } else if is_keyword(tokens, index, "}") {
-                brace_depth = brace_depth.saturating_sub(1);
-            }
-        }
-
-        index += 1;
-    }
-
-    index
-}
-
-fn previous_significant_token_is_pipe(tokens: &[Token], index: usize) -> bool {
-    let mut previous = index;
-    while let Some(next) = previous.checked_sub(1) {
-        previous = next;
-        let token = &tokens[previous];
-        if token.kind == TokenKind::Semicolon {
-            continue;
-        }
-        return matches!(token.kind, TokenKind::Pipe | TokenKind::PipeErr);
-    }
-    false
-}
-
-pub(super) fn time_prefixed_shell_command_allows_simple_pipeline(
-    tokens: &[Token],
-    start: usize,
-) -> bool {
-    if !is_keyword(tokens, start, "time") {
-        return false;
-    }
-
-    // rubash#1548: skip only the operands GNU's lexer would have
-    // claimed (scan_time_prefix_tokens) — a quoted '-p' already IS the
-    // timed command's head word.
-    let index = scan_time_prefix_tokens(tokens, start).next;
-
-    let Some(token) = tokens.get(index) else {
-        return true;
-    };
-    if matches!(
-        token.kind,
-        TokenKind::Semicolon | TokenKind::And | TokenKind::Or | TokenKind::Background
-    ) {
-        return true;
-    }
-
-    !time_prefixed_shell_command_starts_with_compound(tokens, index)
-}
-
-fn time_prefixed_shell_command_starts_with_compound(tokens: &[Token], index: usize) -> bool {
-    if parse_function_command(tokens, index).is_some() {
-        return true;
-    }
-
-    // rubash#3557: quoted head words (`'for'`, `'[['`, `'((x))'`) are data,
-    // not compound openers — require the unquoted spelling (raw == value).
-    if tokens.get(index).is_some_and(|token| {
-        token.raw == token.value
-            && (matches!(
-                token.value.as_str(),
-                "for" | "case" | "select" | "coproc" | "if" | "while" | "until" | "[[" | "function"
-            ) || token.value.starts_with("(("))
-    }) {
-        return true;
-    }
-
-    if is_keyword(tokens, index, "{") || is_keyword(tokens, index, "(") {
-        return true;
-    }
-
-    if tokens.get(index).is_some_and(|token| {
-        token.kind == TokenKind::Keyword
-            && token.value.starts_with('{')
-            && token.value.ends_with('}')
-    }) {
-        return true;
-    }
-
-    tokens.get(index).is_some_and(|token| {
-        token.kind == TokenKind::Word
-            && tokens
-                .get(index + 1)
-                .is_some_and(|next| super::is_unquoted_operator(next, "("))
-            && tokens
-                .get(index + 2)
-                .is_some_and(|next| super::is_unquoted_operator(next, ")"))
-    })
 }
 
 #[cfg(test)]

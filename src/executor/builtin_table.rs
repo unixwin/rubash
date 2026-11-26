@@ -64,9 +64,9 @@
 //! `BUILTIN_NAMES`, `SPECIAL_BUILTINS` and the five dispatch tables
 //! stay in place until Phase 6 retires them.
 
-use super::command_registry::{
-    CmdLateSlot, CmdPrimarySlot, Introspection, LateSlot, PipelineSlot, PrimarySlot,
-};
+use super::command_registry::Introspection;
+#[cfg(test)]
+use super::command_registry::{CmdLateSlot, CmdPrimarySlot, LateSlot, PipelineSlot, PrimarySlot};
 use std::ops::BitOr;
 
 /// One canonical processor identity: the distinct dispatch arm a
@@ -140,6 +140,7 @@ impl HandlerSlot {
     /// The primary-dispatch arm for this handler, if the name is a
     /// primary claim (`PRIMARY_DISPATCH`, minus the `sleep`
     /// fast-path entry which is not a builtin row).
+    #[cfg(test)]
     pub(crate) fn primary_slot(self) -> Option<PrimarySlot> {
         Some(match self {
             HandlerSlot::Alias => PrimarySlot::Alias,
@@ -182,6 +183,7 @@ impl HandlerSlot {
     /// The late-dispatch arm for this handler, if the name is a late
     /// claim (`LATE_DISPATCH`, minus the non-builtin entries `((`,
     /// `[[`, `arch`, `basename`, `dirname`, `stty`, `time`, `uname`).
+    #[cfg(test)]
     pub(crate) fn late_slot(self) -> Option<LateSlot> {
         Some(match self {
             HandlerSlot::Bg => LateSlot::Bg,
@@ -216,6 +218,7 @@ impl HandlerSlot {
     /// The `command`-prefix primary arm for this handler, if the
     /// name is a `CMD_PRIMARY_DISPATCH` claim (all 43 entries are
     /// builtin rows).
+    #[cfg(test)]
     pub(crate) fn cmd_primary_slot(self) -> Option<CmdPrimarySlot> {
         Some(match self {
             HandlerSlot::Alias => CmdPrimarySlot::Alias,
@@ -265,6 +268,7 @@ impl HandlerSlot {
     /// The `command`-prefix late arm for this handler, if the name
     /// is a `CMD_LATE_DISPATCH` claim (minus the non-builtin
     /// entries `arch`, `basename`, `dirname`, `stty`, `uname`).
+    #[cfg(test)]
     pub(crate) fn cmd_late_slot(self) -> Option<CmdLateSlot> {
         Some(match self {
             HandlerSlot::Bg => CmdLateSlot::Bg,
@@ -294,6 +298,7 @@ impl HandlerSlot {
     /// stage's `TrueColon` arm; the seven tool names (`cat`, `grep`,
     /// `head`, `sed`, `tput`, `tr`, `wc`) are not builtin rows and
     /// stay in the stage table.
+    #[cfg(test)]
     pub(crate) fn pipeline_slot(self) -> Option<PipelineSlot> {
         Some(match self {
             HandlerSlot::Colon => PipelineSlot::TrueColon,
@@ -537,6 +542,7 @@ pub(crate) fn is_table_special_builtin_name(name: &str) -> bool {
 
 /// The POSIX special builtins, projected from the table
 /// (`flags & SPECIAL`), in table order.
+#[cfg(test)]
 pub(crate) fn table_special_builtin_names() -> Vec<&'static str> {
     BUILTIN_TABLE
         .iter()
@@ -550,6 +556,7 @@ pub(crate) fn table_special_builtin_names() -> Vec<&'static str> {
 /// table-derived form of `PRIMARY_DISPATCH` minus its two
 /// non-builtin entries (the `sleep` fast path and the `env`
 /// emulated-external claim, rubash#3951).
+#[cfg(test)]
 pub(crate) fn primary_projection() -> Vec<(&'static str, PrimarySlot)> {
     let mut out: Vec<(&'static str, PrimarySlot)> = BUILTIN_TABLE
         .iter()
@@ -562,6 +569,7 @@ pub(crate) fn primary_projection() -> Vec<(&'static str, PrimarySlot)> {
 /// The late-dispatch projection: the table-derived form of
 /// `LATE_DISPATCH` minus its eight non-builtin entries (`((`,
 /// `[[`, `arch`, `basename`, `dirname`, `stty`, `time`, `uname`).
+#[cfg(test)]
 pub(crate) fn late_projection() -> Vec<(&'static str, LateSlot)> {
     let mut out: Vec<(&'static str, LateSlot)> = BUILTIN_TABLE
         .iter()
@@ -573,6 +581,7 @@ pub(crate) fn late_projection() -> Vec<(&'static str, LateSlot)> {
 
 /// The `command`-prefix primary projection: the table-derived form
 /// of `CMD_PRIMARY_DISPATCH` (all 43 entries are builtin rows).
+#[cfg(test)]
 pub(crate) fn cmd_primary_projection() -> Vec<(&'static str, CmdPrimarySlot)> {
     let mut out: Vec<(&'static str, CmdPrimarySlot)> = BUILTIN_TABLE
         .iter()
@@ -585,6 +594,7 @@ pub(crate) fn cmd_primary_projection() -> Vec<(&'static str, CmdPrimarySlot)> {
 /// The `command`-prefix late projection: the table-derived form of
 /// `CMD_LATE_DISPATCH` minus its five non-builtin entries (`arch`,
 /// `basename`, `dirname`, `stty`, `uname`).
+#[cfg(test)]
 pub(crate) fn cmd_late_projection() -> Vec<(&'static str, CmdLateSlot)> {
     let mut out: Vec<(&'static str, CmdLateSlot)> = BUILTIN_TABLE
         .iter()
@@ -597,6 +607,7 @@ pub(crate) fn cmd_late_projection() -> Vec<(&'static str, CmdLateSlot)> {
 /// The pipeline-stage projection: the table-derived form of
 /// `PIPELINE_STAGE` minus its seven tool entries (`cat`, `grep`,
 /// `head`, `sed`, `tput`, `tr`, `wc`).
+#[cfg(test)]
 pub(crate) fn pipeline_projection() -> Vec<(&'static str, PipelineSlot)> {
     let mut out: Vec<(&'static str, PipelineSlot)> = BUILTIN_TABLE
         .iter()

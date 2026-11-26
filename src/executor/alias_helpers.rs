@@ -644,9 +644,7 @@ enum BreAtom {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum BreQuantifier {
     One,
-    ZeroOrOne,
     ZeroOrMore,
-    OneOrMore,
 }
 
 #[derive(Clone, Debug)]
@@ -970,9 +968,7 @@ fn bre_match_pieces(
         _ => {
             let (min, max) = match piece.quantifier {
                 BreQuantifier::One => (1, 1),
-                BreQuantifier::ZeroOrOne => (0, 1),
                 BreQuantifier::ZeroOrMore => (0, usize::MAX),
-                BreQuantifier::OneOrMore => (1, usize::MAX),
             };
             bre_match_repetitions(piece, rest, text, pos, captures, 0, min, max)
         }

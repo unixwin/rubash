@@ -15,10 +15,6 @@ pub(super) use words::{
     parse_array_tokens, split_indexed_tagged_token, split_storage_words, unquote_storage_value,
 };
 
-pub(super) fn parse_single_element_array(value: &str) -> Option<&str> {
-    value.strip_prefix('(')?.strip_suffix(')')
-}
-
 /// GNU arrayfunc.c:710-743 `assign_compound_array_list` seeds a compound
 /// append from the target's live ARRAY object (`a = array_cell (var)` at
 /// :710, `last_ind = array_max_index (a) + 1` at :743), so `name+=(...)`

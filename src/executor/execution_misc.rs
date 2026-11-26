@@ -599,17 +599,6 @@ pub(in crate::executor) fn preexpanded_stdin_body(body: &str) -> Option<&str> {
     body.strip_prefix(PREEXPANDED_STDIN_BODY)
 }
 
-/// Returns the pre-expanded text from a StdinBody typed carrier.
-pub(in crate::executor) fn stdin_body_carrier_to_text(
-    carrier: &Option<crate::parser::StdinBody>,
-) -> Option<String> {
-    match carrier {
-        Some(crate::parser::StdinBody::Preexpanded(text)) => Some(text.clone()),
-        Some(crate::parser::StdinBody::NeedsExpansion(_)) => None,
-        None => None,
-    }
-}
-
 /// Inverse of parser encode_stdin_body_enq: once stdin text leaves the
 /// heredoc/here-string transport fields, a raw-byte marker pair for 0x05
 /// decodes back to the literal ENQ char — the canonical in-value

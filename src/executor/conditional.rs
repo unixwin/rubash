@@ -1800,10 +1800,6 @@ impl Executor {
         output
     }
 
-    pub(super) fn conditional_numeric_binary(&mut self, left: &str, op: &str, right: &str) -> bool {
-        self.conditional_numeric_binary_status(left, op, right) == 0
-    }
-
     pub(super) fn conditional_numeric_binary_status(
         &mut self,
         left: &str,

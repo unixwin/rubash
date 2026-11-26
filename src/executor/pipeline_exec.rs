@@ -10124,36 +10124,6 @@ fn trap_stage_installs_exit(command: &CommandNode) -> bool {
     })
 }
 
-pub(in crate::executor) fn head_line_count(args: &[String]) -> Option<usize> {
-    let mut index = 0;
-    while let Some(arg) = args.get(index) {
-        if arg == "--" {
-            break;
-        }
-        if arg == "-" || !arg.starts_with('-') {
-            break;
-        }
-        if arg == "-n" {
-            return args
-                .get(index + 1)
-                .and_then(|value| value.parse::<usize>().ok());
-        }
-        if let Some(value) = arg.strip_prefix("--lines=") {
-            return value.parse::<usize>().ok();
-        }
-        if let Some(value) = arg.strip_prefix("-n") {
-            return value.parse::<usize>().ok();
-        }
-        if let Some(value) = arg.strip_prefix('-') {
-            if value.chars().all(|ch| ch.is_ascii_digit()) {
-                return value.parse::<usize>().ok();
-            }
-        }
-        index += 1;
-    }
-    None
-}
-
 /// Line selection for the inline `head` arms. GNU `head -n -N` prints all but
 /// the last N lines, which a plain `usize` cannot represent, so the count
 /// carries its sign.

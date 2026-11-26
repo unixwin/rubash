@@ -1418,13 +1418,6 @@ impl Executor {
             // backslash before `"`) out of the walker for compound
             // assignments so they survive as literal element text.
             let compound_paren_value = value.starts_with('(') && value.ends_with(')');
-            const DATA_BACKTICK: &'static str = crate::executor::markers::ASSIGN_DATA_BACKTICK_STR;
-            const DATA_ESCAPED_DQUOTE: &'static str =
-                crate::executor::markers::ASSIGN_ESCAPED_DQUOTE_STR;
-            const DATA_ESCAPED_SQUOTE: &'static str =
-                crate::executor::markers::ASSIGN_ESCAPED_SQUOTE_STR;
-            const DATA_ESCAPED_BACKSLASH: &'static str =
-                crate::executor::markers::ASSIGN_ESCAPED_BACKSLASH_STR;
             // In preserve mode the walker emits escape pairs verbatim with
             // quote-context awareness, so hoisting `\X` here is both
             // redundant and wrong: a context-blind `.replace("\\'", ..)`

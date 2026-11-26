@@ -114,6 +114,8 @@ pub struct DynamicCellState {
 /// (inherit) instead of failing the spawn on a deleted directory.
 #[derive(Debug, Clone)]
 pub(crate) struct CwdAnchor {
+    // Unix-only consumer: external_inner compares the anchor path with cwd.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) path: PathBuf,
     #[cfg(unix)]
     pub(crate) dir: std::sync::Arc<std::fs::File>,
@@ -992,12 +994,6 @@ pub(crate) struct InteriorSnapshot {
     /// limits at exit. Twin of `process_umask` above; the `( )`
     /// boundary's version rides `fork_saved_process_rlimits`.
     process_rlimits: Option<Vec<(char, u64, u64)>>,
-}
-
-impl InteriorSnapshot {
-    pub(crate) fn subshell_depth(&self) -> usize {
-        self.subshell_depth
-    }
 }
 
 impl ShellState {

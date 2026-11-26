@@ -52,10 +52,12 @@ use std::io;
 use std::path::Path;
 
 /// The on-disk marker bytes (WinuxCmd `kFifoMarker`).
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) const FIFO_MARKER: &[u8] = b"!<fifo>";
 
 /// True when `path` names a WinuxCmd FIFO marker file. Always false
 /// off Windows.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn path_is_winuxcmd_fifo(path: &Path) -> bool {
     #[cfg(windows)]
     {
@@ -118,6 +120,7 @@ pub(crate) fn winuxcmd_fifo_pipe_name(path: &Path) -> String {
 /// protocol is unit-testable on any platform: fold `/` to `\`,
 /// lowercase ASCII A-Z, FNV-1a 64 over each UTF-16 unit's low then
 /// high byte, format as 16 lowercase hex digits.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn pipe_name_from_canonical(canonical: &str) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325; // FNV-1a offset basis
     for unit in canonical.encode_utf16() {

@@ -545,6 +545,7 @@ pub(crate) fn fold_literal_char_escapes(text: &str) -> String {
 /// single byte. Names that never carried transport skip the fold
 /// entirely, so a pure-UTF-8 name never reaches this conversion
 /// (guarded by the transport flag at each call site).
+#[cfg(unix)]
 pub(crate) fn folded_name_to_path_bytes(text: &str) -> Vec<u8> {
     let mut output = Vec::with_capacity(text.len());
     for ch in text.chars() {
@@ -1072,23 +1073,6 @@ pub(in crate::executor) fn split_expanded_fragments(
 
 /// The byte a live CTLESC marker occupies inside source-text fragments.
 const CTLESC_MARKER_BYTE: u8 = crate::executor::markers::CTLESC as u8;
-
-/// Record the absolute positions a fragment's live CTLESC marker bytes will
-/// occupy when appended to an accumulator of length `base_len`.
-fn record_ctlesc_markers(
-    fragment: &ExpandedFragment,
-    base_len: usize,
-    marker_positions: &mut Vec<usize>,
-) {
-    if !fragment.ctlesc_markers {
-        return;
-    }
-    for (offset, byte) in fragment.bytes.iter().enumerate() {
-        if *byte == CTLESC_MARKER_BYTE {
-            marker_positions.push(base_len + offset);
-        }
-    }
-}
 
 /// Record the absolute positions of every live carrier-family byte of a
 /// SOURCE-TEXT fragment appended at `base_len`.

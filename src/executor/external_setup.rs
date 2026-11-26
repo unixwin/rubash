@@ -4653,22 +4653,6 @@ impl Executor {
         fd
     }
 
-    /// rubash#1952: the streaming registration behind a word-form
-    /// input process substitution — spawn the body as a child shell
-    /// on a real pipe (GNU subst.c:6362 process_substitute) and bind
-    /// the pipe read end at the word fd, so the consumer starts on
-    /// the body's first bytes instead of after its exit. The fd is
-    /// command-scoped exactly like the collected form's (see
-    /// process_substitution_fd_word). Returns None when the spawn
-    /// could not be set up; the caller then collects synchronously.
-    fn register_process_substitution_child(
-        &mut self,
-        source: &str,
-        line: Option<usize>,
-    ) -> Option<u32> {
-        self.register_process_substitution_child_with_plan(source, line, None)
-    }
-
     /// rubash#4189: register with the producer's entry-time spawn
     /// plan (see procsub_producer_stdio_disposition in trap_exec.rs).
     fn register_process_substitution_child_with_plan(

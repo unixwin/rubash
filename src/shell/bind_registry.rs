@@ -416,6 +416,7 @@ impl BindRegistry {
     /// The removal is recorded for every keymap whose default table
     /// binds the sequence, so defaults stay removed too (rubash#2337).
     /// Returns true when an entry was removed.
+    #[cfg(test)]
     pub fn unbind_keyseq(&mut self, keyseq: &str) -> bool {
         // unbind_keyseq (bind.def:391) translates the argument with
         // rl_translate_keyseq before looking the slot up, so any
@@ -465,6 +466,7 @@ impl BindRegistry {
     /// sequences are recorded as removed in every keymap
     /// (rubash#2337 — GNU mutates the maps themselves).
     /// Returns how many session entries went away.
+    #[cfg(test)]
     pub fn unbind_function(&mut self, name: &str) -> usize {
         let before = self.entries.len();
         self.entries.retain(
@@ -1024,6 +1026,7 @@ pub(crate) fn canonical_keyseq(written: &str) -> String {
 /// since rubash#2386 `None` resolves to the CURRENT keymap, the
 /// all-keymaps unbind sweeps must name this table to record their
 /// tombstones against the map they actually checked).
+#[cfg(test)]
 const KEYMAP_TABLE_SELECTORS: [Option<&str>; 5] = [
     Some("emacs-standard"),
     Some("emacs-meta"),

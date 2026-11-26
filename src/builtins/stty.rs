@@ -162,6 +162,8 @@ enum Setting {
     Rows(Option<String>),
     Cols(Option<String>),
     /// Bare decimal operand naming a gnulib speed-table baud.
+    // Unix-only consumer: set_baud_unix applies the rate through termios.
+    #[cfg_attr(not(unix), allow(dead_code))]
     Baud(u32),
     /// No checking rule admits this token; reported verbatim by the
     /// checking pass (stty.c:1274).

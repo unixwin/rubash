@@ -136,10 +136,6 @@ fn ifs_whitespace_logical(ch: char, ifs: &[char]) -> bool {
     ch.is_whitespace() && ifs.contains(&ch)
 }
 
-fn ifs_whitespace(ch: char, ifs: &str) -> bool {
-    ifs_whitespace_logical(ch, &logical_chars(ifs))
-}
-
 /// Trim trailing IFS whitespace, comparing decoded logical characters.
 fn trim_trailing_ifs_ws<'a>(text: &'a str, ifs: &[char]) -> &'a str {
     let units = logical_units(text);

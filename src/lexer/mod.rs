@@ -558,7 +558,6 @@ impl ParamScanCheckpoint {
 
 #[derive(Clone)]
 pub(crate) struct GroupScanFeeder {
-    initial_posix: bool,
     input_origin: InputOrigin,
     in_comsub: bool,
     output: Vec<Token>,
@@ -795,7 +794,6 @@ impl GroupScanFeeder {
     ) -> Self {
         let open_snapshot = (Vec::new(), None, false);
         Self {
-            initial_posix,
             input_origin,
             in_comsub,
             output: Vec::new(),

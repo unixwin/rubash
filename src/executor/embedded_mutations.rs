@@ -4763,41 +4763,6 @@ fn command_substitution_contains_heredoc(source: &str) -> bool {
 
     false
 }
-
-pub(in crate::executor) fn update_command_substitution_case_depth(
-    ch: char,
-    single: bool,
-    double: bool,
-    word: &mut String,
-    case_depth: &mut usize,
-    word_boundary: &mut bool,
-    current_word_boundary: &mut bool,
-    rest: &str,
-    case_in_stage: &mut u8,
-) {
-    // Legacy 9-argument form: the pattern-region state cannot persist across
-    // per-character calls through a scratch local, so this wrapper keeps the
-    // pre-#380 semantics (no PST_CASEPAT port). The lexer/continuation.rs
-    // caller is captain-exclusive and stays on this form; every scanner that
-    // owns its loop state uses update_command_substitution_case_depth_region.
-    let mut scratch_region = false;
-    update_command_substitution_case_depth_region(
-        ch,
-        single,
-        double,
-        word,
-        case_depth,
-        word_boundary,
-        current_word_boundary,
-        rest,
-        case_in_stage,
-        &mut scratch_region,
-        // The scratch region never arms, so the `esac` previous-token
-        // witness is never consulted on this legacy path.
-        None,
-    );
-}
-
 /// GNU parse.y:3177-3186 CHECK_FOR_RESERVED_WORD + parser.h:29 PST_CASEPAT
 /// port (rubash#380): inside a case pattern list, a reserved-word-looking
 /// word is a PATTERN, not the keyword — `$(case y in (b|case) echo x;; esac)`
@@ -4947,84 +4912,6 @@ pub(in crate::executor) fn update_command_substitution_case_depth_region(
 fn command_substitution_separator_allows_reserved_word(ch: char) -> bool {
     matches!(ch, ';' | '&' | '|' | '(' | ')' | '\n')
 }
-
-fn case_pattern_starts_with_esac_rest(delimiter: char, rest: &str) -> bool {
-    if !matches!(delimiter, ')' | '|') {
-        return false;
-    }
-
-    let chars = std::iter::once(delimiter)
-        .chain(rest.chars())
-        .collect::<Vec<_>>();
-    let mut close = 0usize;
-    while close < chars.len() {
-        match chars[close] {
-            ')' => break,
-            ';' | '\n' => return false,
-            _ => close += 1,
-        }
-    }
-    if chars.get(close) != Some(&')') {
-        return false;
-    }
-
-    let mut scan = close + 1;
-    let mut word = String::new();
-    let mut word_boundary = true;
-    while scan < chars.len() {
-        let ch = chars[scan];
-        if ch == ';' && chars.get(scan + 1) == Some(&';') {
-            return true;
-        }
-        if ch == '_' || ch.is_ascii_alphanumeric() {
-            word.push(ch);
-            scan += 1;
-            continue;
-        }
-        if word == "esac" && word_boundary {
-            return true;
-        }
-        if ch == ')' {
-            return false;
-        }
-        if word.is_empty() {
-            if command_substitution_separator_allows_reserved_word(ch) {
-                word_boundary = true;
-            } else if !ch.is_whitespace() {
-                word_boundary = false;
-            }
-            scan += 1;
-            continue;
-        }
-        let reserved_word_allows_next =
-            word_boundary && command_substitution_reserved_word_allows_next(&word);
-        word.clear();
-        word_boundary =
-            reserved_word_allows_next || command_substitution_separator_allows_reserved_word(ch);
-        scan += 1;
-    }
-
-    word == "esac" && word_boundary
-}
-
-fn command_substitution_reserved_word_allows_next(word: &str) -> bool {
-    matches!(
-        word,
-        "for"
-            | "select"
-            | "while"
-            | "until"
-            | "then"
-            | "do"
-            | "else"
-            | "elif"
-            | "in"
-            | "fi"
-            | "done"
-            | "esac"
-    )
-}
-
 #[cfg(test)]
 mod case_pattern_region_tests {
     use super::update_command_substitution_case_depth_region;

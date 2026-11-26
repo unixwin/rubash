@@ -47,6 +47,7 @@ impl SourceLocation {
 /// not admission tiers — the two stop granularities of the design
 /// (line, function entry) sit on top of this substrate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum SeamKind {
     /// A plain command at the main seam.
     SimpleCommand,
@@ -86,6 +87,7 @@ pub enum SeamKind {
 
 /// Why the session stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum StopReason {
     /// The entry stop: before the first command (design section 14
     /// Q1 ruling — both frontends stop there).
@@ -145,6 +147,7 @@ impl StopInfo {
 
 /// How a returning frame got to its return site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum ReturnRoute {
     /// The body ran and completed (or returned) normally.
     Completed,
@@ -214,6 +217,7 @@ pub struct ExceptionSite {
 /// frames are snapshot frames: the banner vocabulary names them so
 /// nobody mistakes them for the live frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum SynthesizedFrameKind {
     /// A `( ... )` subshell frame.
     Subshell,
@@ -223,6 +227,7 @@ pub enum SynthesizedFrameKind {
 
 /// The output stream an output event belongs to (DE-10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum OutputStream {
     /// The debuggee's standard output.
     Stdout,
@@ -239,6 +244,7 @@ pub enum OutputStream {
 /// also available programmatically via [`DebugEvent::catalogue_id`]
 /// for transcripts and fixture attribution.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum DebugEvent {
     /// DE-01: the session is established. The entry stop follows as
     /// a [`DebugEvent::Stopped`] with [`StopReason::Entry`].
@@ -307,6 +313,7 @@ pub enum DebugEvent {
 
 impl DebugEvent {
     /// The WP-1 catalogue id of this event ("DE-01" ..= "DE-12").
+    #[cfg(test)]
     pub fn catalogue_id(&self) -> &'static str {
         match self {
             DebugEvent::SessionStarted => "DE-01",

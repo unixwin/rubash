@@ -2998,12 +2998,6 @@ impl Executor {
         false
     }
 
-    /// Non-unix: no hangup delivery exists to poll for.
-    #[cfg(not(unix))]
-    pub(crate) fn poll_untrapped_hangup(&mut self) -> bool {
-        false
-    }
-
     /// rubash#2233: the settled variant for callers that KNOW the
     /// terminal is dead (the slave read returned EOF with POLLHUP on
     /// the fd, or EIO): the kernel delivered SIGHUP at the same
@@ -3038,12 +3032,6 @@ impl Executor {
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-    }
-
-    /// Non-unix: no hangup delivery exists to poll for.
-    #[cfg(not(unix))]
-    pub(crate) fn poll_untrapped_hangup_settled(&mut self, _budget: std::time::Duration) -> bool {
-        false
     }
 
     pub(crate) fn run_pending_signal_traps(&mut self) -> Result<(), ExecuteError> {
@@ -11273,20 +11261,6 @@ impl Executor {
         let limit = self.open_files_limit();
         self.fd_table.allocate_dynamic_with_limit(limit)
     }
-
-    /// rubash#2282: allocate a dynamic fd counting `avoid` — the owning
-    /// command's own numbered redirect slots — as occupied, the same
-    /// caliber the spawn-delivery helper (fd_var_delivery_fd) already
-    /// uses when it computes the child's descriptor for a {var} entry.
-    pub(in crate::executor) fn allocate_dynamic_fd_avoiding(
-        &mut self,
-        avoid: &std::collections::HashSet<u32>,
-    ) -> Option<u32> {
-        let limit = self.open_files_limit();
-        self.fd_table
-            .allocate_dynamic_with_limit_avoiding(limit, avoid)
-    }
-
     /// GNU redir.c:940-946 (REDIR_VARASSIGN): a failed
     /// `fcntl(fd, F_DUPFD, SHELL_FD_BASE)` reports
     /// `sys_error("redirection error: cannot duplicate fd")` carrying the

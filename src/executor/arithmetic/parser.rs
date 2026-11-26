@@ -174,7 +174,6 @@ pub(super) struct ConditionalArithParser<'a> {
     /// and keep the mirror leg byte-for-byte.
     pub(super) cells: Option<&'a crate::shell::VariableStore>,
     pub(super) error_category: Option<super::ArithmeticErrorCategory>,
-    pub(super) no_expand: bool,
     /// Whether the expression text reaching this parser was already
     /// expand_arith_string'd by its entry (GNU `(( ))`, `$(( ))` and
     /// `[[ ]]` arithcomp run expand_arith_string before evalexp, while

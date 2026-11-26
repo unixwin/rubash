@@ -66,18 +66,6 @@ pub(crate) fn format_array_for_output(value: &str) -> String {
     format_array_value(value)
 }
 
-/// Create an associative array from a compound assignment value
-/// (arrayfunc.c:630 assign_assoc_from_kvlist). Used by `readonly -A` and
-/// `export` when they need to create an associative array from a kvpair
-/// compound assignment like `( one 1 two 2 three 3 )`.
-pub(crate) fn create_assoc_from_compound(value: &str) -> String {
-    storage::append_assoc_value(
-        "()",
-        value,
-        false,
-        &crate::shell::var_table::VarTable::default(),
-    )
-}
 const EXPORTED_VARS: &str = "__RUBASH_EXPORTED_VARS";
 const READONLY_VARS: &str = "__RUBASH_READONLY_VARS";
 const ARRAY_VARS: &str = "__RUBASH_ARRAY_VARS";

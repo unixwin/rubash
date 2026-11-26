@@ -519,17 +519,6 @@ pub(crate) fn phash_search(env_vars: &HashMap<String, String>, name: &str) -> Op
     hashed_path(env_vars, name)
 }
 
-/// GNU hashcmd.c:146-191, the HASH_RELPATH half of phash_search applied
-/// to one stored pathname (no CHKDOT verdict, no name to fall back on):
-/// kept for callers that hold only a spelling (`hash -t`'s display face
-/// and the executable probes). [`phash_search_serve`] is the full arm.
-pub(crate) fn phash_search_spelling(
-    path: &str,
-    env_vars: &HashMap<String, String>,
-) -> Option<String> {
-    phash_search_serve("", path, false, env_vars)
-}
-
 /// GNU hashcmd.c:146-191 — the CHKDOT/RELPATH arm of phash_search, shared
 /// by [`hashed_path`] (exec/type resolution) and `hash -t`. When the
 /// entry carries HASH_CHKDOT (a `.` PATH element preceded the recorded

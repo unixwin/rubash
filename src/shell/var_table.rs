@@ -303,6 +303,7 @@ impl VarTable {
     }
 
     /// Drop all per-name state for `name` (typed cell destroyed).
+    #[cfg(test)]
     pub(crate) fn untrack_cell(&mut self, name: &str) {
         self.tracked.remove(name);
         self.stale.remove(name);
@@ -313,6 +314,7 @@ impl VarTable {
     /// Record that the typed cell was (re)synced with the mirror: clears
     /// the stale mark and pins the synced epoch to the current mirror
     /// epoch. No-op for untracked names.
+    #[cfg(test)]
     pub(crate) fn mark_cell_synced(&mut self, name: &str) {
         if !self.tracked.contains(name) {
             return;

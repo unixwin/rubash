@@ -582,6 +582,7 @@ pub(crate) const INITIAL_PATH_KEY: &str = "__RUBASH_INITIAL_PATH";
 /// boundary (contains_key guard), so subshell/command-substitution
 /// executors inherit the process's original reference value; if the
 /// startup boundary never ran (embedded library use), the fixture stays.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn path_is_user_owned(env_vars: &HashMap<String, String>) -> bool {
     let initial = env_vars.get(INITIAL_PATH_KEY);
     match (env_vars.get("PATH"), initial) {
@@ -2017,6 +2018,7 @@ pub(in crate::executor) fn program_dir_hosts_posix_runtime(program: &Path) -> bo
 }
 
 #[cfg(not(windows))]
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(in crate::executor) fn program_dir_hosts_posix_runtime(_program: &Path) -> bool {
     false
 }
@@ -2940,6 +2942,7 @@ fn mask_all_positionals(args: &[String], masked: &mut std::collections::HashSet<
     }
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn short_option_char(opts: &[&str]) -> Option<char> {
     opts.iter().find_map(|opt| {
         let bytes = opt.as_bytes();
@@ -3412,6 +3415,7 @@ pub(crate) fn shell_path_process_entries(
 /// shell form splits and rejoins unchanged, so the in-process
 /// `${THIS_SH} ./x.sub` child path that re-imports a normalized PATH keeps
 /// it stable.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn process_path_to_shell(path: &str) -> String {
     if !cfg!(windows) {
         return path.to_string();
@@ -3426,6 +3430,7 @@ pub(crate) fn process_path_to_shell(path: &str) -> String {
 /// Rewrite one PATH entry from Windows drive spelling to shell spelling:
 /// `C:\Windows` / `C:/Windows` -> `/c/Windows`. Non-drive entries (shell
 /// paths, UNC paths, relative entries) pass through unchanged.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn windows_drive_entry_to_shell(entry: &str) -> String {
     let bytes = entry.as_bytes();
     if bytes.len() >= 3
@@ -3690,6 +3695,7 @@ fn external_argument_path(arg: &str, env_vars: &HashMap<String, String>) -> Stri
 /// `external_command_for_named_program`: shell-wrapped scripts, namespace
 /// bridges (`wsl`/`ssh`/etc.), and POSIX-aware WinuxCmd applets stay in the
 /// POSIX namespace, while native Windows executables receive converted paths.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(in crate::executor) fn external_child_uses_native_env(
     program: &Path,
     env_vars: &HashMap<String, String>,
@@ -3717,6 +3723,7 @@ pub(in crate::executor) fn external_child_uses_native_env(
     }
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn env_var_excluded_by_rubash_conv_excl(name: &str, env_vars: &HashMap<String, String>) -> bool {
     let Some(excl) = env_vars
         .iter()
@@ -3746,6 +3753,7 @@ fn env_var_excluded_by_rubash_conv_excl(name: &str, env_vars: &HashMap<String, S
 /// `__RUBASH_ENV_CONV_EXCL` and keeping contract-verbatim variables (`PWD`,
 /// `OLDPWD`, `PATH`, `TMPDIR`, `__RUBASH_*`), URLs, and non-path values
 /// untouched.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(in crate::executor) fn external_env_value(
     name: &str,
     value: &str,
@@ -4493,6 +4501,7 @@ pub(crate) fn has_path_separator(name: &str) -> bool {
     }
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn is_standard_unix_bash_path(name: &str) -> bool {
     matches!(
         name.replace('\\', "/").as_str(),
@@ -5003,16 +5012,6 @@ pub(in crate::executor) fn windows_shm_dir() -> Option<PathBuf> {
     Some(PathBuf::from(base).join("dev").join("shm"))
 }
 
-/// Best-effort creation of the /var/tmp backing directory at shell startup.
-/// Open() callers never mkdir, so without this every /var/tmp open fails.
-/// The backing directory lives below the per-user temp base even when a
-/// shell root is configured, so this also works for read-only install roots.
-pub(in crate::executor) fn ensure_var_tmp_dir(_env_vars: &HashMap<String, String>) {
-    if let Some(dir) = windows_var_tmp_dir() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-}
-
 fn configured_shell_root(env_vars: &HashMap<String, String>) -> Option<PathBuf> {
     // Walk the chain and take the first NON-EMPTY value: an empty entry must
     // not shadow later names (a host exporting an empty __RUBASH_SHELL_ROOT
@@ -5133,6 +5132,7 @@ pub(crate) fn windows_posix_tools_dir(env_vars: &HashMap<String, String>) -> Opt
 /// natively. Deliberately NOT routed through `shell_path_to_windows`,
 /// whose logical `/bin` mapping consults `windows_posix_tools_dir` and
 /// would recurse into this probe.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn shell_drive_entry_to_windows(entry: &str) -> PathBuf {
     let bytes = entry.as_bytes();
     if bytes.len() >= 3 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() && bytes[2] == b'/' {

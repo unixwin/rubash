@@ -103,15 +103,6 @@ fn parse_limit_cell(cell: &str) -> (u64, u64) {
     )
 }
 
-/// Drop every emulated limit cell — called at an in-process region's
-/// boundary restore where the region's env view is not wholesale
-/// replaced. Idempotent: removing absent keys is a no-op.
-pub(crate) fn clear_emulated_cells(env_vars: &mut VarTable) {
-    for spec in LIMITS {
-        env_vars.remove(&key(spec.option));
-    }
-}
-
 /// Snapshot the `__RUBASH_ULIMIT_*` cell subset of an env — paired with
 /// emulated_cells_restore at an in-process region's bracket
 /// (pipeline_exec.rs, command_substitution.rs) where the region shares

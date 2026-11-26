@@ -115,11 +115,6 @@ impl SessionDriver {
         &mut self.session
     }
 
-    /// Whether the entry stop still waits for its first serve.
-    pub fn entry_stop_pending(&self) -> bool {
-        self.entry_stop_pending
-    }
-
     /// Consume the entry-stop serve: true exactly once, at the
     /// first funnel arrival after installation.
     pub fn take_entry_stop_pending(&mut self) -> bool {

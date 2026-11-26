@@ -359,12 +359,6 @@ impl Executor {
         pairs
     }
 
-    pub(in crate::executor) fn apply_exported_functions_to_child(&self, process: &mut Command) {
-        for (name, value) in self.exported_function_env_pairs() {
-            process.env(name, value);
-        }
-    }
-
     /// The child-environment composition as ordered pairs — the data
     /// form of [`Executor::apply_child_environment`], sharing this
     /// one body: the spawn path applies these pairs to its

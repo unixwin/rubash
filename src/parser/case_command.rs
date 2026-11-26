@@ -633,22 +633,6 @@ pub(super) fn parse_case_command(
     Some(finish_compound_command(command, tokens, i + 1))
 }
 
-fn raw_token_span(tokens: &[Token], start: usize, end: usize) -> String {
-    let slice = &tokens[start..=end];
-    let mut parts = Vec::with_capacity(slice.len() * 2);
-    for (idx, token) in slice.iter().enumerate() {
-        if idx > 0 {
-            let previous = &slice[idx - 1];
-            let previous_end = previous.column + previous.raw.len();
-            if token.column > previous_end {
-                parts.push(" ".repeat(token.column - previous_end));
-            }
-        }
-        parts.push(token.raw.clone());
-    }
-    parts.concat()
-}
-
 /// Index just past the `esac` that closes the case command starting at
 /// `start`, counting nested `case`/`esac` keyword pairs. Falls back to
 /// the end of input when no closing `esac` exists (genuinely unterminated
@@ -677,11 +661,6 @@ fn case_command_end_index(tokens: &[Token], start: usize) -> usize {
 pub(super) fn case_parse_error_message(_tokens: &[Token], _start: usize) -> &'static str {
     "unexpected token `esac'"
 }
-
-fn is_case_clause_terminator_token(token: &Token) -> bool {
-    token.kind == TokenKind::Word && matches!(token.raw.as_str(), ";;" | ";&" | ";;&")
-}
-
 /// Physical input line of `tokens[index]` for a pattern-position error echo,
 /// reconstructed from same-line token raws. Synthetic line-break separators
 /// carry no source text and are skipped (GNU y.error echoes the line as

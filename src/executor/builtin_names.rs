@@ -39,6 +39,7 @@ pub(in crate::executor) fn is_shell_keyword(word: &str) -> bool {
 /// GNU has no `env` builtin, so it is an emulated external command
 /// (docs/builtins.md §3), not a builtin — its in-process
 /// implementation answers the simple-command face only.
+#[cfg(test)]
 const BUILTIN_NAMES: &[&str] = &[
     ".",
     ":",

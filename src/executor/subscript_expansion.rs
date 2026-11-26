@@ -807,45 +807,6 @@ impl Executor {
         }
     }
 
-    /// GNU declare.def:429 (`assoc_noexpand = array_expand_once &&
-    /// wflags & W_ASSIGNMENT`): only an operand whose raw token carried
-    /// W_ASSIGNMENT — an unquoted assignment-shaped word — gets ASS_NOEXPAND
-    /// verbatim treatment. A quoted or otherwise non-assignment operand's
-    /// subscript is re-expanded unconditionally
-    /// (expand_arith_string / expand_subscript_string run in both modes).
-    pub(in crate::executor) fn rewrite_assignment_builtin_operand(
-        &mut self,
-        operand: &str,
-        w_assignment: bool,
-    ) -> Result<String, ()> {
-        self.rewrite_operand_subscript(
-            operand,
-            if w_assignment {
-                OperandSubscriptMode::ExpandedOnce
-            } else {
-                OperandSubscriptMode::AlwaysExpand
-            },
-        )
-    }
-
-    fn rewrite_operand_subscript(
-        &mut self,
-        operand: &str,
-        mode: OperandSubscriptMode,
-    ) -> Result<String, ()> {
-        self.rewrite_operand_subscript_typed(
-            operand,
-            mode,
-            None,
-            crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "array_expand_once"),
-            false,
-            // Element stores (declare/read family) always encode assoc
-            // `@`/`*` literally — the AV_ATSTARKEYS/compat split is
-            // `-v`-only.
-            true,
-        )
-    }
-
     /// `assoc` overrides the variable-type probe: GNU decide indexed-vs-
     /// associative from the variable the builtin will actually bind, which
     /// for a function-scope `declare name[sub]=v` is the fresh LOCAL
@@ -2215,28 +2176,6 @@ pub(crate) fn mark_expanded_once_data_squotes(text: &str) -> String {
             continue;
         }
         out.push(if ch == '\'' { LITERAL_SINGLE_QUOTE } else { ch });
-    }
-    out
-}
-
-/// Same once-expanded-data invariant for `"` bytes: a `"` surviving in a
-/// word-expanded operand is expansion output (GNU's CTLESC'd data), never a
-/// quote delimiter — `unset -v dict["$k"]` with k=`"` removes key `"` while
-/// the literal 'dict["]' operand fails valid_array_reference
-/// (assoc9.sub del loop). Mark with the \x18 data carrier so
-/// expand_subscript_string's walker emits it as a literal `"`.
-pub(crate) fn mark_expanded_once_data_dquotes(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\\' {
-            out.push(ch);
-            if let Some(next) = chars.next() {
-                out.push(next);
-            }
-            continue;
-        }
-        out.push(if ch == '"' { LITERAL_DOUBLE_QUOTE } else { ch });
     }
     out
 }

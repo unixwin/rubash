@@ -591,12 +591,6 @@ fn push_literal_pattern_char(output: &mut String, ch: char) {
     }
 }
 
-fn push_quoted_pattern_str(output: &mut String, value: &str) {
-    for ch in value.chars() {
-        push_quoted_pattern_char(output, ch);
-    }
-}
-
 /// Mask `"..."` spans of a pattern word into `slots` before the shared
 /// quote decoder runs. GNU subst.c expands substitutions inside a quoted
 /// pattern span with quoting live, so the OUTPUT chars are quoted (CTLESC)

@@ -2,11 +2,6 @@
 //!
 //! This crate provides a complete implementation of a POSIX-compatible shell.
 
-// Legacy cleanup pending: these warnings exist on master and are tracked
-// for removal. Suppress them at crate level so downstream CI stays clean
-// while the fixes are rolled out incrementally.
-#![allow(dead_code)]
-
 #[cfg(feature = "alloc-counter")]
 pub mod alloc_counter;
 pub mod api;

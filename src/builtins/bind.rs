@@ -22,9 +22,6 @@
 
 use std::io::{self, Write};
 
-const EXECUTION_SUCCESS: i32 = 0;
-const EX_USAGE: i32 = 2;
-
 /// The readline function names, in GNU's funmap order — the order
 /// `bind -l` lists them (rl_list_funmap_names) and the dumpers iterate
 /// them. The table is readline's funmap.c `funmap[]` (153 entries) plus

@@ -6,127 +6,53 @@ use crate::executor::mark_env_name;
 #[derive(Clone, Copy)]
 struct ShellOption {
     name: &'static str,
-    default_enabled: bool,
 }
 
 const SHELL_OPTIONS: &[ShellOption] = &[
-    ShellOption {
-        name: "allexport",
-        default_enabled: false,
-    },
+    ShellOption { name: "allexport" },
     ShellOption {
         name: "braceexpand",
-        default_enabled: true,
     },
     ShellOption {
         name: "emacs",
         // Non-interactive Bash starts with both readline editing modes off.
         // The executor uses this same state for `bash -c`/script execution.
-        default_enabled: false,
     },
-    ShellOption {
-        name: "errexit",
-        default_enabled: false,
-    },
-    ShellOption {
-        name: "errtrace",
-        default_enabled: false,
-    },
-    ShellOption {
-        name: "functrace",
-        default_enabled: false,
-    },
-    ShellOption {
-        name: "hashall",
-        default_enabled: true,
-    },
-    ShellOption {
-        name: "histexpand",
-        default_enabled: false,
-    },
+    ShellOption { name: "errexit" },
+    ShellOption { name: "errtrace" },
+    ShellOption { name: "functrace" },
+    ShellOption { name: "hashall" },
+    ShellOption { name: "histexpand" },
     ShellOption {
         name: "history",
         // History is an interactive-shell feature and is off for scripts.
-        default_enabled: false,
     },
     // GNU builtins/set.def:194-237 (o_options): `igncr` is a Cygwin-only
     // option and does not exist upstream.
-    ShellOption {
-        name: "ignoreeof",
-        default_enabled: false,
-    },
+    ShellOption { name: "ignoreeof" },
     ShellOption {
         name: "interactive-comments",
-        default_enabled: true,
     },
-    ShellOption {
-        name: "keyword",
-        default_enabled: false,
-    },
-    ShellOption {
-        name: "monitor",
-        default_enabled: false,
-    },
-    ShellOption {
-        name: "noclobber",
-        default_enabled: false,
-    },
-    ShellOption {
-        name: "noexec",
-        default_enabled: false,
-    },
-    ShellOption {
-        name: "noglob",
-        default_enabled: false,
-    },
-    ShellOption {
-        name: "nolog",
-        default_enabled: false,
-    },
-    ShellOption {
-        name: "notify",
-        default_enabled: false,
-    },
-    ShellOption {
-        name: "nounset",
-        default_enabled: false,
-    },
-    ShellOption {
-        name: "onecmd",
-        default_enabled: false,
-    },
-    ShellOption {
-        name: "physical",
-        default_enabled: false,
-    },
-    ShellOption {
-        name: "pipefail",
-        default_enabled: false,
-    },
-    ShellOption {
-        name: "posix",
-        default_enabled: false,
-    },
-    ShellOption {
-        name: "privileged",
-        default_enabled: false,
-    },
+    ShellOption { name: "keyword" },
+    ShellOption { name: "monitor" },
+    ShellOption { name: "noclobber" },
+    ShellOption { name: "noexec" },
+    ShellOption { name: "noglob" },
+    ShellOption { name: "nolog" },
+    ShellOption { name: "notify" },
+    ShellOption { name: "nounset" },
+    ShellOption { name: "onecmd" },
+    ShellOption { name: "physical" },
+    ShellOption { name: "pipefail" },
+    ShellOption { name: "posix" },
+    ShellOption { name: "privileged" },
     // GNU builtins/set.def:194-237 (o_options): `restricted` is not a
     // `set -o` option upstream — restriction is a separate shell flag set
     // by `set -r`/`bash -r` (flags.c change_flag) and never appears in the
     // o_options enumeration or SHELLOPTS.
-    ShellOption {
-        name: "verbose",
-        default_enabled: false,
-    },
-    ShellOption {
-        name: "vi",
-        default_enabled: false,
-    },
-    ShellOption {
-        name: "xtrace",
-        default_enabled: false,
-    },
+    ShellOption { name: "verbose" },
+    ShellOption { name: "vi" },
+    ShellOption { name: "xtrace" },
 ];
 
 // GNU prints `set -o` listings with MINUS_O_FORMAT "%-15s\t%s\n"

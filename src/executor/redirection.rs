@@ -2160,31 +2160,6 @@ impl Executor {
         self.command_output_redirect_fails_impl(cmd, false)
     }
 
-    /// Pipeline-stage twin of
-    /// [`Self::command_output_redirect_fails_with_preopened`]:
-    /// GNU binds the element's fd 1 to the stage pipe BEFORE its
-    /// do_redirections run (execute_cmd.c execute_pipeline; the dup2
-    /// order redir.c:1169-1170), so a `/dev/fd/1` / `/dev/stdout`
-    /// spelling inside an element names the PIPE, never the shell's
-    /// ambient stdout. The stage routing walks
-    /// (pipeline_stage_stdio_targets, route_pipeline_stage_streams)
-    /// model that binding with defer_stdout_writes; the preflight
-    /// must judge by the same binding — resolving the spelling
-    /// against the ambient process stdout refused a redirect GNU
-    /// allows whenever the shell's own stdout is a regular file
-    /// (rubash#2359). Numbered-fd spellings keep the ambient
-    /// judgment: their bindings are the shell's in both contexts,
-    /// and their verdicts ride the stage's serve/plan faces exactly
-    /// like the routing walks' defer leaves them.
-    pub(in crate::executor) fn pipeline_stage_output_redirect_fails(
-        &mut self,
-        cmd: &CommandNode,
-    ) -> Result<bool, ExecuteError> {
-        Ok(self
-            .pipeline_stage_output_redirect_fails_with_preopened(cmd)?
-            .0)
-    }
-
     /// rubash#3875: the stage gate's preopened map rides along, like
     /// the plain funnel's gate — the stage's spawn delivery and the
     /// routing walks bind these descriptions instead of re-opening

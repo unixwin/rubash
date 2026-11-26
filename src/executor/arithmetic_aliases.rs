@@ -213,18 +213,6 @@ impl Executor {
         }
     }
 
-    pub(in crate::executor) fn report_arithmetic_division_by_zero_raw(
-        &self,
-        display: &str,
-        token: &str,
-    ) {
-        self.raise_evalerror_abort();
-        self.arith_diag(&format!(
-            "{}((: {display}: division by 0 (error token is \"{token}\")\n",
-            self.error_prefix()
-        ));
-    }
-
     pub(in crate::executor) fn report_let_arithmetic_error(&self, expression: &str) {
         // GNU expr.c:1190-1216 expr_streval: the nounset trap already
         // reported the unbound variable and jumped out — no evalerror

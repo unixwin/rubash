@@ -364,10 +364,6 @@ pub(super) fn single_shell_quote(value: &str) -> String {
     quoted
 }
 
-pub(super) fn shell_quote(value: &str) -> String {
-    shell_quote_form(value, false)
-}
-
 /// The glibc `iswprint` verdict under a UTF-8 locale (LC_ALL=C.utf8,
 /// measured with a probe program against the locale's actual print
 /// class): a C1 control (U+0080..=U+009F) is NOT printable, and neither

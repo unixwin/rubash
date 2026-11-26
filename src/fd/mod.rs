@@ -10,6 +10,7 @@
 //! Consumers import `crate::fd::*` unchanged on both platforms.
 
 #[cfg(windows)]
+#[allow(dead_code)] // Refs #4206: clean after #4216 merges
 pub(crate) mod windows_impl;
 
 #[cfg(windows)]
