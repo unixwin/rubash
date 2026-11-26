@@ -107,11 +107,11 @@ src/executor/command_words.rs | L3 | contains:ANSI_C_IFS_GUARD | presence gate o
 src/executor/command_words.rs | L3 | contains:COMPOUND_ASSIGNMENT_MARKER | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
 src/executor/command_words.rs | L3 | contains:IFS_GLUE | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
 src/executor/command_words.rs | L3 | replace:COMPOUND_ASSIGNMENT_MARKER | strips a sentinel/prefix this subsystem itself inserted into the text; the stripped text is not raw user input
-src/executor/compound_exec.rs | L1 | \\u\{0*E000\} | Unicode private-use block bounds (U+E000..=U+F8FF) in a char-class test, not a marker reference
-src/executor/compound_exec.rs | L1 | \\u\{0*E317\} | test data: expected values / probe inputs spelled with marker literals in test code
-src/executor/compound_exec.rs | L2 | \\u\{0*11\} | test data: expected values / probe inputs spelled with marker literals in test code
-src/executor/compound_exec.rs | L2 | \\u\{0*17\} | test data: expected values / probe inputs spelled with marker literals in test code
-src/executor/compound_exec.rs | L2 | \\u\{0*18\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/executor/compound_exec/case.rs | L1 | \\u\{0*E000\} | Unicode private-use block bounds (U+E000..=U+F8FF) in a char-class test, not a marker reference
+src/executor/compound_exec/case.rs | L1 | \\u\{0*E317\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/executor/compound_exec/case.rs | L2 | \\u\{0*11\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/executor/compound_exec/case.rs | L2 | \\u\{0*17\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/executor/compound_exec/case.rs | L2 | \\u\{0*18\} | test data: expected values / probe inputs spelled with marker literals in test code
 src/executor/conditional.rs | L2 | \\u\{0*14\} | test data: expected values / probe inputs spelled with marker literals in test code
 src/executor/conditional.rs | L3 | replace:DATA_BACKSLASH | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
 src/executor/conditional/pattern.rs | L1 | \\u\{0*E000\} | test data: expected values / probe inputs spelled with marker literals in test code
