@@ -1438,49 +1438,39 @@ impl Executor {
         self.report_conditional_error(&format!("invalid regular expression `{pattern}': {reason}"));
     }
 
-    fn compile_conditional_regex(
-        &self,
-        pattern: &str,
-    ) -> Result<CompiledConditionalRegex, regex::Error> {
-        // perf (rubash#1119): compilation is a pure function of the
-        // expanded pattern text, the nocasematch flag and the locale
-        // granularity (rubash#1061 byte mode) — the decode, POSIX
-        // bracket translation, class-name validation and the regex
-        // build are all deterministic in those inputs — but a full
-        // regex-crate build costs tens of microseconds where glibc
-        // regcomp costs a few, so a `[[ =~ ]]` in a loop paid it every
-        // iteration (233ms vs GNU 42ms for 2000 matches). Cache the
-        // last few compiled programs per thread (the executor is
-        // single-threaded per shell) and hand out clones. Failures
-        // cache as None: the error payload is never inspected (the
-        // diagnostic path re-derives its reason from the pattern
-        // text), so a stand-in error is returned for a known-invalid
-        // pattern.
+    fn compile_conditional_regex(&self, pattern: &str) -> ConditionalRegexCompileResult {
+        // perf (rubash#1119/#4211): compilation is a pure function of
+        // the expanded pattern text, the nocasematch flag and the
+        // locale granularity (rubash#1061 byte mode) — the decode,
+        // POSIX bracket translation, class-name validation and the
+        // regex build are all deterministic in those inputs — but a
+        // full regex-crate build costs tens of microseconds where
+        // glibc regcomp costs a few, so a `[[ =~ ]]` in a loop paid it
+        // every iteration (233ms vs GNU 42ms for 2000 matches). GNU
+        // execute_cmd.c:4096 unconditionally reaches lib/sh/shmatch.c
+        // sh_regmatch, whose regcomp inputs are only the expanded
+        // pattern and REG_ICASE. Key audit: compat31 has already
+        // selected the caller-side RHS quoting mode
+        // (execute_cmd.c:4054-4068), so any semantic difference is
+        // part of `pattern` itself; posix mode is not an sh_regmatch
+        // input; and the locale reaches this pipeline only through the
+        // byte-mode verdict. The (pattern, byte_mode, nocasematch) key
+        // is therefore complete. Hits clone only the Rc handle — never
+        // the compiled regex program.
         let case_insensitive =
             crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "nocasematch");
         let byte_mode = conditional_regex_byte_mode();
-        if let Some(cached) = conditional_regex_cache_lookup(pattern, case_insensitive, byte_mode) {
-            return match cached {
-                Some(regex) => Ok((*regex).clone()),
-                None => Err(regex::Regex::new("(").unwrap_err()),
-            };
+        if let Some(cached) = conditional_regex_cache_lookup(pattern, byte_mode, case_insensitive) {
+            return cached;
         }
-        match self.compile_conditional_regex_uncached(pattern, case_insensitive, byte_mode) {
-            Ok(regex) => {
-                let regex = std::rc::Rc::new(regex);
-                conditional_regex_cache_store(
-                    pattern,
-                    case_insensitive,
-                    byte_mode,
-                    Some(regex.clone()),
-                );
-                Ok((*regex).clone())
-            }
-            Err(error) => {
-                conditional_regex_cache_store(pattern, case_insensitive, byte_mode, None);
-                Err(error)
-            }
-        }
+        let compiled = self
+            .compile_conditional_regex_uncached(pattern, case_insensitive, byte_mode)
+            .map(std::rc::Rc::new);
+        conditional_regex_cache_store(
+            ConditionalRegexCacheKey::new(pattern, byte_mode, case_insensitive),
+            compiled.clone(),
+        );
+        compiled
     }
 
     fn compile_conditional_regex_uncached(
@@ -1488,7 +1478,7 @@ impl Executor {
         pattern: &str,
         case_insensitive: bool,
         byte_mode: bool,
-    ) -> Result<CompiledConditionalRegex, regex::Error> {
+    ) -> Result<CompiledConditionalRegex, ConditionalRegexCompileError> {
         // The comsub payload spelling is transport text, not regex syntax:
         // decode it to the carried byte so `[[ $v =~ a$(printf '\001')c ]]`
         // compiles the pattern GNU's cond_expand_word produced — the raw
@@ -1525,7 +1515,7 @@ impl Executor {
             || posix_ere_has_dangling_quantifier(&pattern)
             || posix_ere_has_empty_min_interval(&pattern)
         {
-            return Err(regex::Regex::new("(").unwrap_err());
+            return Err(ConditionalRegexCompileError);
         }
         // POSIX ERE quantifier spellings the regex crate reads
         // differently (nested `?`, empty-minimum intervals): rewrite
@@ -1553,12 +1543,14 @@ impl Executor {
                 .unicode(false)
                 .build()
                 .map(CompiledConditionalRegex::Bytes)
+                .map_err(|_| ConditionalRegexCompileError)
         } else {
             regex::RegexBuilder::new(&pattern)
                 .case_insensitive(case_insensitive)
                 .dot_matches_new_line(true)
                 .build()
                 .map(CompiledConditionalRegex::Text)
+                .map_err(|_| ConditionalRegexCompileError)
         }
     }
 
@@ -2014,55 +2006,88 @@ fn cond_arith_decimal_literal(raw: &str) -> Option<i128> {
     raw.parse::<i64>().ok().map(|value| value as i128)
 }
 
-thread_local! {
-    /// Compiled-program cache for `[[ =~ ]]` (rubash#1119): the last few
-    /// (pattern, nocasematch, byte-mode) -> program mappings, most
-    /// recent last. `None` records a pattern that failed to compile.
-    /// Bounded so a script generating unbounded distinct patterns
-    /// cannot grow it.
-    static CONDITIONAL_REGEX_CACHE: std::cell::RefCell<
-        Vec<(String, bool, bool, Option<std::rc::Rc<CompiledConditionalRegex>>)>,
-    > = const { std::cell::RefCell::new(Vec::new()) };
+type ConditionalRegexCompileResult =
+    Result<std::rc::Rc<CompiledConditionalRegex>, ConditionalRegexCompileError>;
+
+/// Lightweight failure marker for `[[ =~ ]]` compilation. Callers only
+/// branch on success/failure: the user-facing regerror text is derived
+/// syntactically from the pattern in regexp_error_reason, so no regex
+/// crate error object (and no fabricated regex-crate failure) is
+/// needed here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ConditionalRegexCompileError;
+
+impl std::fmt::Display for ConditionalRegexCompileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("invalid conditional regular expression")
+    }
 }
 
-const CONDITIONAL_REGEX_CACHE_CAP: usize = 16;
+impl std::error::Error for ConditionalRegexCompileError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConditionalRegexCacheKey {
+    raw_pattern: String,
+    byte_mode: bool,
+    case_insensitive: bool,
+}
+
+impl ConditionalRegexCacheKey {
+    fn new(pattern: &str, byte_mode: bool, case_insensitive: bool) -> Self {
+        Self {
+            raw_pattern: pattern.to_string(),
+            byte_mode,
+            case_insensitive,
+        }
+    }
+}
+
+struct ConditionalRegexCacheEntry {
+    key: ConditionalRegexCacheKey,
+    result: ConditionalRegexCompileResult,
+}
+
+thread_local! {
+    /// Bounded move-to-front cache of `[[ =~ ]]` compile results. The
+    /// vec stays small enough that linear scans are cheaper than a map
+    /// while insertion order provides simple LRU behavior: lookups move
+    /// their entry to the front and insertion truncates the tail.
+    static CONDITIONAL_REGEX_CACHE: std::cell::RefCell<Vec<ConditionalRegexCacheEntry>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+const CONDITIONAL_REGEX_CACHE_CAP: usize = 64;
 
 fn conditional_regex_cache_lookup(
     pattern: &str,
-    case_insensitive: bool,
     byte_mode: bool,
-) -> Option<Option<std::rc::Rc<CompiledConditionalRegex>>> {
+    case_insensitive: bool,
+) -> Option<ConditionalRegexCompileResult> {
     CONDITIONAL_REGEX_CACHE.with(|cache| {
-        let cache = cache.borrow();
-        cache
-            .iter()
-            .rev()
-            .find(|(cached_pattern, cached_ci, cached_bm, _)| {
-                cached_ci == &case_insensitive
-                    && cached_bm == &byte_mode
-                    && cached_pattern == pattern
-            })
-            .map(|(_, _, _, compiled)| compiled.clone())
+        let mut cache = cache.borrow_mut();
+        let position = cache.iter().position(|entry| {
+            entry.key.byte_mode == byte_mode
+                && entry.key.case_insensitive == case_insensitive
+                && entry.key.raw_pattern == pattern
+        })?;
+        let entry = cache.remove(position);
+        let result = entry.result.clone();
+        cache.insert(0, entry);
+        Some(result)
     })
 }
 
 fn conditional_regex_cache_store(
-    pattern: &str,
-    case_insensitive: bool,
-    byte_mode: bool,
-    compiled: Option<std::rc::Rc<CompiledConditionalRegex>>,
+    key: ConditionalRegexCacheKey,
+    result: ConditionalRegexCompileResult,
 ) {
     CONDITIONAL_REGEX_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
-        cache.retain(|(cached_pattern, cached_ci, cached_bm, _)| {
-            !(cached_ci == &case_insensitive
-                && cached_bm == &byte_mode
-                && cached_pattern == pattern)
-        });
-        cache.push((pattern.to_string(), case_insensitive, byte_mode, compiled));
-        if cache.len() > CONDITIONAL_REGEX_CACHE_CAP {
-            cache.remove(0);
+        if let Some(position) = cache.iter().position(|entry| entry.key == key) {
+            cache.remove(position);
         }
+        cache.insert(0, ConditionalRegexCacheEntry { key, result });
+        cache.truncate(CONDITIONAL_REGEX_CACHE_CAP);
     });
 }
 
@@ -2305,7 +2330,6 @@ fn quote_marked_chars_for_regexp(marked: &[(char, bool)]) -> String {
 /// what glibc regexec yields) carries its stray bytes as U+E000
 /// raw-byte marker pairs, which the normal output boundaries decode
 /// back to the original bytes.
-#[derive(Clone)]
 enum CompiledConditionalRegex {
     Text(regex::Regex),
     Bytes(regex::bytes::Regex),
@@ -3339,62 +3363,150 @@ mod conditional_pattern_tests {
 #[cfg(test)]
 mod conditional_regex_cache_tests {
     use super::*;
+    use std::rc::Rc;
+
+    fn clear_cache() {
+        CONDITIONAL_REGEX_CACHE.with(|cache| cache.borrow_mut().clear());
+    }
+
+    fn test_key(
+        pattern: &str,
+        case_insensitive: bool,
+        byte_mode: bool,
+    ) -> ConditionalRegexCacheKey {
+        ConditionalRegexCacheKey::new(pattern, byte_mode, case_insensitive)
+    }
+
+    fn test_lookup(
+        pattern: &str,
+        case_insensitive: bool,
+        byte_mode: bool,
+    ) -> Option<ConditionalRegexCompileResult> {
+        conditional_regex_cache_lookup(pattern, byte_mode, case_insensitive)
+    }
 
     #[test]
-    fn cache_stays_bounded_under_distinct_pattern_flood() {
+    fn cache_hit_returns_same_rc_for_identical_inputs() {
+        clear_cache();
         let executor = Executor::new();
-        for i in 0..100 {
-            let pat = format!("^item_{i}_([0-9]+)$");
-            let compiled = executor
-                .compile_conditional_regex(&pat)
-                .expect("valid pattern should compile");
-            let subject = format!("item_{i}_42");
-            assert!(compiled.captures(&subject, subject.as_bytes()).is_some());
-        }
-        // Also flood invalid patterns to verify failure entries obey the cap.
-        for i in 0..50 {
-            let pat = format!("^invalid_{i}_[");
-            assert!(executor.compile_conditional_regex(&pat).is_err());
-        }
-        let len = CONDITIONAL_REGEX_CACHE.with(|cache| cache.borrow().len());
+        let pattern = "^(abc)([0-9]+)$";
+
+        let first = executor
+            .compile_conditional_regex(pattern)
+            .expect("valid pattern should compile");
+        let second = executor
+            .compile_conditional_regex(pattern)
+            .expect("cached pattern should compile");
+
         assert!(
-            len <= CONDITIONAL_REGEX_CACHE_CAP,
-            "cache len {len} exceeded cap {CONDITIONAL_REGEX_CACHE_CAP}"
+            Rc::ptr_eq(&first, &second),
+            "cache hit must hand out the same Rc instead of cloning the compiled regex"
         );
     }
 
     #[test]
     fn cache_separates_case_insensitive_and_byte_mode_keys() {
+        clear_cache();
         let executor = Executor::new();
-        let pat = "^(abc)$";
+        let pattern = "^(abc)$";
 
-        let cs_text = executor
-            .compile_conditional_regex_uncached(pat, false, false)
-            .expect("compile case-sensitive text");
-        let ci_text = executor
-            .compile_conditional_regex_uncached(pat, true, false)
-            .expect("compile case-insensitive text");
-        let cs_bytes = executor
-            .compile_conditional_regex_uncached(pat, false, true)
-            .expect("compile case-sensitive bytes");
+        let cs_text = Rc::new(
+            executor
+                .compile_conditional_regex_uncached(pattern, false, false)
+                .expect("compile case-sensitive text"),
+        );
+        let ci_text = Rc::new(
+            executor
+                .compile_conditional_regex_uncached(pattern, true, false)
+                .expect("compile case-insensitive text"),
+        );
+        let cs_bytes = Rc::new(
+            executor
+                .compile_conditional_regex_uncached(pattern, false, true)
+                .expect("compile case-sensitive bytes"),
+        );
 
-        conditional_regex_cache_store(pat, false, false, Some(std::rc::Rc::new(cs_text)));
-        conditional_regex_cache_store(pat, true, false, Some(std::rc::Rc::new(ci_text)));
-        conditional_regex_cache_store(pat, false, true, Some(std::rc::Rc::new(cs_bytes)));
+        conditional_regex_cache_store(test_key(pattern, false, false), Ok(cs_text.clone()));
+        conditional_regex_cache_store(test_key(pattern, true, false), Ok(ci_text.clone()));
+        conditional_regex_cache_store(test_key(pattern, false, true), Ok(cs_bytes.clone()));
 
-        let hit_cs_text = conditional_regex_cache_lookup(pat, false, false)
-            .flatten()
-            .expect("hit cs text");
-        let hit_ci_text = conditional_regex_cache_lookup(pat, true, false)
-            .flatten()
-            .expect("hit ci text");
-        let hit_cs_bytes = conditional_regex_cache_lookup(pat, false, true)
-            .flatten()
-            .expect("hit cs bytes");
+        let hit_cs_text = test_lookup(pattern, false, false)
+            .expect("case-sensitive text entry")
+            .expect("stored case-sensitive text compile");
+        let hit_ci_text = test_lookup(pattern, true, false)
+            .expect("case-insensitive text entry")
+            .expect("stored case-insensitive text compile");
+        let hit_cs_bytes = test_lookup(pattern, false, true)
+            .expect("case-sensitive byte entry")
+            .expect("stored case-sensitive byte compile");
 
+        assert!(Rc::ptr_eq(&hit_cs_text, &cs_text));
+        assert!(Rc::ptr_eq(&hit_ci_text, &ci_text));
+        assert!(Rc::ptr_eq(&hit_cs_bytes, &cs_bytes));
         assert!(hit_cs_text.captures("ABC", b"ABC").is_none());
         assert!(hit_ci_text.captures("ABC", b"ABC").is_some());
-        assert!(matches!(*hit_cs_bytes, CompiledConditionalRegex::Bytes(_)));
-        assert!(matches!(*hit_cs_text, CompiledConditionalRegex::Text(_)));
+        assert!(matches!(&*hit_cs_bytes, CompiledConditionalRegex::Bytes(_)));
+        assert!(matches!(&*hit_cs_text, CompiledConditionalRegex::Text(_)));
+    }
+
+    #[test]
+    fn cache_evicts_least_recently_used_entry_at_capacity() {
+        clear_cache();
+        let executor = Executor::new();
+        let compiled = Rc::new(
+            executor
+                .compile_conditional_regex_uncached("^a$", false, false)
+                .expect("compile cache-fill pattern"),
+        );
+        let key = |index: usize| test_key(&format!("^p{index}$"), false, false);
+
+        for index in 0..CONDITIONAL_REGEX_CACHE_CAP {
+            conditional_regex_cache_store(key(index), Ok(compiled.clone()));
+        }
+        assert_eq!(
+            CONDITIONAL_REGEX_CACHE.with(|cache| cache.borrow().len()),
+            CONDITIONAL_REGEX_CACHE_CAP
+        );
+
+        // Refresh entry 0, then insert one more entry. Entry 1 is now the
+        // least-recently-used tail and must be the one evicted.
+        assert!(test_lookup("^p0$", false, false).is_some());
+        conditional_regex_cache_store(key(CONDITIONAL_REGEX_CACHE_CAP), Ok(compiled));
+
+        assert_eq!(
+            CONDITIONAL_REGEX_CACHE.with(|cache| cache.borrow().len()),
+            CONDITIONAL_REGEX_CACHE_CAP
+        );
+        assert!(test_lookup("^p0$", false, false).is_some());
+        assert!(test_lookup("^p1$", false, false).is_none());
+        assert!(test_lookup(&format!("^p{CONDITIONAL_REGEX_CACHE_CAP}$"), false, false).is_some());
+    }
+
+    #[test]
+    fn invalid_patterns_fail_with_lightweight_error_and_are_cached() {
+        clear_cache();
+        let executor = Executor::new();
+        let case_insensitive =
+            crate::builtins::shopt::option_enabled(&executor.shell_state.env_vars, "nocasematch");
+        let byte_mode = conditional_regex_byte_mode();
+
+        for pattern in ["[[:invalid:]]", "*abc", "a{,2}", "("] {
+            let first = executor.compile_conditional_regex(pattern);
+            assert!(
+                matches!(first, Err(ConditionalRegexCompileError)),
+                "pattern {pattern:?} should fail with the lightweight error type"
+            );
+            let cached = test_lookup(pattern, case_insensitive, byte_mode)
+                .expect("failure should be cached");
+            assert!(
+                matches!(cached, Err(ConditionalRegexCompileError)),
+                "cached failure for {pattern:?} should use the lightweight error type"
+            );
+            let second = executor.compile_conditional_regex(pattern);
+            assert!(
+                matches!(second, Err(ConditionalRegexCompileError)),
+                "cache hit for {pattern:?} should fail cleanly"
+            );
+        }
     }
 }
