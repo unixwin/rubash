@@ -113,6 +113,7 @@ impl Executor {
             false,
             false,
             true,
+            true,
         )
     }
 
@@ -131,7 +132,26 @@ impl Executor {
         // heredoc expansion (redir.c:374), so it walks in order; every
         // other context keeps the pre-scan walk.
         self.expand_embedded_parameters_mut_inner(
-            word, context, heredoc, false, false, true, true, heredoc, false, false,
+            word, context, heredoc, false, false, true, true, heredoc, false, false, true,
+        )
+    }
+
+    /// Prompt-render walk (expand_prompt_string_mut): the input is
+    /// decode_prompt_string's output — synthetic text whose backslash
+    /// pairs are the decoder's own quoting (a non-root `\$` is emitted
+    /// backslash-quoted so this pass keeps the dollar literal,
+    /// parse.y:6586-6592), NOT lexer-cooked word text. The rubash#4195
+    /// cooked-word gate therefore stays off for this entry: a raw `\`
+    /// here is escape syntax the general `\` arm must resolve, exactly
+    /// like the operator-half entry below.
+    pub(in crate::executor) fn expand_embedded_parameters_mut_prompt(
+        &mut self,
+        word: &str,
+        context: SubstitutionQuoteContext,
+    ) -> String {
+        let heredoc = matches!(context, SubstitutionQuoteContext::HereDocument);
+        self.expand_embedded_parameters_mut_inner(
+            word, context, heredoc, false, false, true, true, heredoc, false, false, false,
         )
     }
 
@@ -155,7 +175,7 @@ impl Executor {
     ) -> String {
         let heredoc = matches!(context, SubstitutionQuoteContext::HereDocument);
         self.expand_embedded_parameters_mut_inner(
-            word, context, heredoc, false, false, true, false, heredoc, false, true,
+            word, context, heredoc, false, false, true, false, heredoc, false, true, false,
         )
     }
 
@@ -179,6 +199,7 @@ impl Executor {
             false,
             false,
             true,
+            false,
             false,
             false,
             false,
@@ -237,6 +258,7 @@ impl Executor {
             false,
             false,
             true,
+            false,
             false,
         )
     }
@@ -325,6 +347,7 @@ impl Executor {
                 false,
                 false,
                 true,
+                false,
                 false,
                 false,
             ));
@@ -496,6 +519,7 @@ impl Executor {
         in_order: bool,
         protect_expansion_results: bool,
         defer_data_backslash_restore: bool,
+        cooked_word: bool,
     ) -> String {
         // rubash#2676: heredoc bodies (and here-string words) expand in
         // GNU's single left-to-right pass (redir.c:374 heredoc_expand ->
@@ -530,6 +554,7 @@ impl Executor {
             protect_rhs_data,
             in_order,
             protect_expansion_results,
+            cooked_word,
         );
         let expanded = if word.contains("$(") || word.contains('`') {
             if preserve_quotes || matches!(context, SubstitutionQuoteContext::HereDocument) {
@@ -639,6 +664,7 @@ impl Executor {
         protect_rhs_data: bool,
         in_order: bool,
         protect_expansion_results: bool,
+        cooked_word: bool,
     ) -> String {
         // GNU subst.c:11862 `add_quoted_string:` -> quote_string
         // (subst.c:4773): a parameter-expansion result merged into the word
@@ -1061,7 +1087,52 @@ impl Executor {
                 continue;
             }
 
-            if ch == '\\' {
+            // rubash#4195: in a protecting walk (protect_rhs_data) over
+            // a lexer-cooked word outside heredoc text, a surviving raw
+            // `\` before a live expansion introducer is quoted-span
+            // DATA — the lexer already resolved every live source
+            // escape into its carrier (\$ -> DATA_DOLLAR, \\ ->
+            // DATA_BACKSLASH, \" -> DATA_DQUOTE), so a raw pair that
+            // reaches this arm with `$` or a backquote after it is the
+            // remnant of a '...' span whose delimiters the lexer
+            // stripped (`'\'$(pwd)'` cooked to `\$(pwd)`): resolving
+            // the pair as escape syntax here eats the backslash AND
+            // kills the live syntax byte after it (the substitution
+            // expanded away). Skip this arm for those pairs only: the
+            // ch != '$' fall-through below emits the
+            // ASSIGN_EXPANSION_BACKSLASH carrier (the rubash#2999 arm)
+            // and the next byte is then processed as the live syntax
+            // it is.
+            //
+            // rubash#4201: the skip must NOT cover the other pairs.
+            // Two raw-text channels reach the same cooked-word entries
+            // with genuine escape pairs the arm must resolve: a comsub
+            // body's re-lexed word carries its double-quoted spans in
+            // escaped form (`"\"q\""` arrives as `\"\\\"q\\\"` — the
+            // \" and \\ pairs are the encoding's escapes, and skipping
+            // them turned `0"q"` into `0\q\`), and an assignment value
+            // spliced in DoubleQuoted context keeps a source-level \`
+            // escape (the backquote is DATA there, never a group
+            // opener). So: `$` pairs skip in any context (the F5/F7/F8
+            // remnants), backquote pairs skip only in Unquoted context
+            // (the F6 remnant — a backquote group the span preceded),
+            // and every other pair resolves through the arm exactly as
+            // before. Only the cooked-word entries set cooked_word:
+            // the no-restore entry walks a decoded ${...} operator
+            // half — RAW body text whose \" and \$ pairs are genuine
+            // escapes this arm must resolve — and heredoc bodies are
+            // raw text too (CBSHDOC escapes), so both keep this arm.
+            let span_data_pair = cooked_word
+                && protect_rhs_data
+                && !heredoc
+                && match chars.peek().copied() {
+                    Some('$') => true,
+                    Some('`') => {
+                        matches!(context, SubstitutionQuoteContext::Unquoted)
+                    }
+                    _ => false,
+                };
+            if ch == '\\' && !span_data_pair {
                 if let Some(&next) = chars.peek() {
                     // rubash#2210: inside a double-quoted span a backslash
                     // is special only before the CBSDQUOTE set ($ ` " \
@@ -1113,6 +1184,16 @@ impl Executor {
                                 // after that pass. Heredoc text is raw:
                                 // `\\` there is live escape syntax
                                 // collapsing to one `\`, keep it.
+                                //
+                                // rubash#4201: this branch was deleted by
+                                // the first #4195 round on the theory that
+                                // the cooked-word gate subsumed it; that
+                                // held only while the gate skipped EVERY
+                                // pair. The gate now skips only the
+                                // expansion-introducer pairs, so `\\`
+                                // reaches this arm again and the branch
+                                // is load-bearing once more (`'a\\b'$(x)`
+                                // lost a backslash without it).
                                 output.push(crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH);
                                 output.push(crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH);
                             } else {

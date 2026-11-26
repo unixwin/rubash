@@ -1383,17 +1383,27 @@ pub(super) fn append_array_value(
         // unquote_storage_value pass re-read the data backslashes as
         // escape syntax and ate them (`symbols+=$REPLY'⚡'` with
         // REPLY='\[\e[33m\]' stored `[e[33m]⚡`, rubash#288).
+        // rubash#4195: a partially quoted element's quote removal is
+        // the ONE dequote pass GNU performs (arrayfunc.c:610) — the
+        // composition dequote_compound_element_rhs owns for [sub]=
+        // elements (the rubash#288 fix for this same shape). The old
+        // composition ran unquote_stored_element_value on top of the
+        // remove_shell_quotes output: the dequote walk already
+        // resolved every live escape, so each surviving `\` is
+        // quoted-span data, and the second pass re-read it as escape
+        // syntax and ate it (`a=('\''x)` stored `x`, not `\x`).
+        let dequote_only = !scalar_append
+            && partially_quoted
+            && !(token.starts_with("$'") && token.ends_with('\''))
+            && !token.starts_with(STORAGE_WORD_PREFIX);
         let token = if scalar_append {
             token
-        } else if partially_quoted
-            && !(token.starts_with("$'") && token.ends_with('\''))
-            && !token.starts_with(STORAGE_WORD_PREFIX)
-        {
-            restore_quote_carriers(&remove_shell_quotes(&token))
+        } else if dequote_only {
+            dequote_compound_element_rhs(&token)
         } else {
             token
         };
-        let token = if scalar_append {
+        let token = if scalar_append || dequote_only {
             token
         } else {
             // A whole-token `$'...'` here is the compound walker's own

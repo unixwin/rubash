@@ -335,28 +335,20 @@ fn find_first_valid_brace(text: &str) -> Option<(usize, usize, i32)> {
             i = skip_data_quote_carrier(bytes, i, carrier);
             continue;
         }
-        // Skip single-quoted strings
+        // Skip quoted strings. One shared quote-state rule (GNU
+        // braces.c brace_gobbler pass_next): a backslash escapes the
+        // next byte in unquoted, double-quote and backquote state
+        // ONLY — inside single quotes it is plain data, so the next
+        // `'` always closes the span. The old single-quote skip below
+        // consumed the byte after a `\` inside '...', swallowing the
+        // closing quote of `'\'` and running the span away
+        // (rubash#4195).
         if bytes[i] == b'\'' {
-            i += 1;
-            while i < bytes.len() && bytes[i] != b'\'' {
-                if bytes[i] == b'\\' {
-                    i += 1;
-                }
-                i += 1;
-            }
-            i += 1;
+            i = skip_plain_single_quoted(bytes, i);
             continue;
         }
-        // Skip double-quoted strings
         if bytes[i] == b'"' {
-            i += 1;
-            while i < bytes.len() && bytes[i] != b'"' {
-                if bytes[i] == b'\\' {
-                    i += 1;
-                }
-                i += 1;
-            }
-            i += 1;
+            i = skip_plain_double_quoted(bytes, i);
             continue;
         }
         // GNU bash runs brace expansion on the word itself; the text of a
@@ -454,6 +446,14 @@ fn find_first_valid_brace(text: &str) -> Option<(usize, usize, i32)> {
                 continue;
             }
             if j_single || j_double {
+                // Same pass_next asymmetry as the top-level scan: in
+                // double-quote state a backslash escapes the next byte
+                // (so `\"` is data, never the closer — rubash#4195
+                // `{"\"",b}`), in single-quote state it is data itself
+                // and the following `'` still closes the span.
+                if j_double && bytes[j] == b'\\' {
+                    j += 1;
+                }
                 j += 1;
                 continue;
             }
@@ -469,6 +469,15 @@ fn find_first_valid_brace(text: &str) -> Option<(usize, usize, i32)> {
                 }
                 c if is_dollar_or_carrier(c) && j + 1 < bytes.len() && bytes[j + 1] == b'(' => {
                     j = skip_dollar_paren_body(bytes, j);
+                    continue;
+                }
+                b'$' if j + 1 < bytes.len() && bytes[j + 1] == b'\'' => {
+                    // $'...' ANSI-C unit, same as the top-level scan
+                    // and split_brace_commas: without this arm the
+                    // unit's quotes toggled j_single one by one and its
+                    // comma was read in the wrong state (rubash#4195:
+                    // the `{$'\'',b}` group was lost).
+                    j = skip_single_quoted(bytes, j + 1);
                     continue;
                 }
                 b'<' | b'>' if j + 1 < bytes.len() && bytes[j + 1] == b'(' => {
@@ -619,6 +628,8 @@ fn skip_dollar_paren_body(bytes: &[u8], start: usize) -> usize {
 }
 
 /// Index just past the closing single quote starting at `start`.
+/// This is the `$'...'` ANSI-C unit skip: backslash escapes ARE real
+/// there, so `\x` advances two bytes.
 fn skip_single_quoted(bytes: &[u8], start: usize) -> usize {
     let mut i = start + 1;
     while i < bytes.len() {
@@ -627,6 +638,42 @@ fn skip_single_quoted(bytes: &[u8], start: usize) -> usize {
             continue;
         }
         if bytes[i] == b'\'' {
+            return i + 1;
+        }
+        i += 1;
+    }
+    bytes.len()
+}
+
+/// Index just past the closing quote of the plain `'...'` span opening
+/// at `start` (bytes[start] == '\''). Unlike the `$'...'` unit above, a
+/// backslash inside a plain single-quoted span has NO escaping power
+/// (GNU braces.c brace_gobbler pass_next applies only in unquoted,
+/// double-quote and backquote state), so the span ends at the next `'`
+/// byte-for-byte (rubash#4195).
+fn skip_plain_single_quoted(bytes: &[u8], start: usize) -> usize {
+    let mut i = start + 1;
+    while i < bytes.len() && bytes[i] != b'\'' {
+        i += 1;
+    }
+    if i < bytes.len() {
+        i + 1
+    } else {
+        bytes.len()
+    }
+}
+
+/// Index just past the closing quote of the `"..."` span opening at
+/// `start` (bytes[start] == '"'). Inside double quotes a backslash DOES
+/// set pass_next, so `\"` is data and never the closer.
+fn skip_plain_double_quoted(bytes: &[u8], start: usize) -> usize {
+    let mut i = start + 1;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'"' {
             return i + 1;
         }
         i += 1;
@@ -826,7 +873,11 @@ fn split_brace_commas(s: &str) -> Vec<&str> {
             continue;
         }
         match bytes[i] {
-            b'\\' => {
+            // A backslash sets the escape state only outside single
+            // quotes (GNU pass_next); inside '...' it is data, so the
+            // closing quote of an amble like `'\'` still toggles the
+            // state shut (rubash#4195).
+            b'\\' if !single => {
                 escaped = true;
                 i += 1;
                 continue;
@@ -1043,6 +1094,38 @@ mod tests {
     #[test]
     fn test_comma_brace() {
         assert_eq!(expand_braces("{a,b,c}"), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn single_quoted_backslash_does_not_swallow_closing_quote() {
+        // rubash#4195 (GNU braces.c pass_next: no escaping inside
+        // single quotes). `'\'` is a complete quoted span; a brace
+        // group inside it never expands (C1 shape)...
+        assert_eq!(expand_braces("'\\'\"x\"'{a,b}'"), vec!["'\\'\"x\"'{a,b}'"]);
+        // ...and a group right after the span expands normally (C3).
+        assert_eq!(expand_braces("'\\'{a,b}"), vec!["'\\'a", "'\\'b"]);
+    }
+
+    #[test]
+    fn brace_amble_single_quoted_backslash_splits() {
+        // rubash#4195 C4: the amble `'\'` ends at its closing quote, so
+        // the comma after it is a real separator.
+        assert_eq!(expand_braces("{'\\',b}"), vec!["'\\'", "b"]);
+    }
+
+    #[test]
+    fn brace_amble_double_quoted_backslash_quote_is_data() {
+        // rubash#4195 C5: inside "..." a backslash escapes the quote,
+        // so the group is {"\"", b}, not {"\ + " ,b} garbage.
+        assert_eq!(expand_braces("{\"\\\"\",b}"), vec!["\"\\\"\"", "b"]);
+    }
+
+    #[test]
+    fn brace_amble_ansi_c_unit_comma_does_not_split() {
+        // rubash#4195 F10: `$'...'` is one unit in the group scan; its
+        // comma-free content must not toggle quote state, and the
+        // separator after the unit splits.
+        assert_eq!(expand_braces("{$'\\'',b}"), vec!["$'\\''", "b"]);
     }
 
     #[test]
