@@ -8761,7 +8761,7 @@ impl Executor {
                 // the real PATH program. Spotted downstream by
                 // SpookyWaste/dsh-bash-native patch 0003 — the pipeline
                 // faces never read the flag.
-                if !self.external_file_builtins_enabled {
+                if !self.emulated_external_backend_active() {
                     return self.execute_external_pipeline_stage(
                         command,
                         input,
@@ -8999,7 +8999,7 @@ impl Executor {
                 // that turned the layer off still got the bridge on
                 // the one shape the recheck cannot see (hash-resolved
                 // but missed by the PATH walk).
-                if !self.external_file_builtins_enabled {
+                if !self.emulated_external_backend_active() {
                     return self.execute_external_pipeline_stage(
                         command,
                         input,
@@ -9259,7 +9259,7 @@ impl Executor {
                 // the simple-command tput face sits behind the flag in
                 // handle_external_file_builtins, so the stage arm must
                 // not answer when the host turned the layer off.
-                if !self.external_file_builtins_enabled {
+                if !self.emulated_external_backend_active() {
                     return self.execute_external_pipeline_stage(
                         command,
                         input,

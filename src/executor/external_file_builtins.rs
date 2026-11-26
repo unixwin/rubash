@@ -10,7 +10,7 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<bool, ExecuteError> {
-        if !self.external_file_builtins_enabled {
+        if !self.emulated_external_backend_active() {
             return Ok(false);
         }
         let name = cmd.words[0].as_str();
