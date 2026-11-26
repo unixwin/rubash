@@ -1555,7 +1555,10 @@ impl Executor {
                 // entry of this command's list — never settle it.
                 && !crate::executor::support_names::is_injected_group_redirect(redirect)
             {
-                if let Err(error) = self.open_net_redirect(&target) {
+                if let Err(error) = self
+                    .connect_net_stream(&target)
+                    .map_err(|e| crate::posix_errors::path_error(&target, e))
+                {
                     let text = crate::posix_errors::message(&error);
                     return self
                         .reject_redirect_at(cmd, index, &text)
@@ -1608,7 +1611,10 @@ impl Executor {
                 // compound apply; settling one connects a second time.
                 && !crate::executor::support_names::is_injected_group_redirect(redirect)
             {
-                if let Err(error) = self.open_net_redirect(&target) {
+                if let Err(error) = self
+                    .connect_net_stream(&target)
+                    .map_err(|e| crate::posix_errors::path_error(&target, e))
+                {
                     let text = crate::posix_errors::message(&error);
                     return self
                         .reject_redirect_at(cmd, index, &text)
@@ -5129,7 +5135,9 @@ impl OutputFdState {
                         }
                         return Ok(());
                     }
-                    let _pairing = executor.open_net_redirect(&path)?;
+                    let _pairing = executor
+                        .connect_net_stream(&path)
+                        .map_err(|e| crate::posix_errors::path_error(&path, e))?;
                     return Ok(());
                 }
                 let resolved = executor
