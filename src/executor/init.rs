@@ -455,6 +455,7 @@ impl Executor {
     }
 
     fn new_inner(process_exit: bool) -> Self {
+        let saved_thread_locale = crate::locale::snapshot_synced_thread_locale();
         // rubash#1557: snapshot the process-inherited descriptor set
         // (fd >= 3) before anything in this constructor can open or
         // close a descriptor of our own (the signal-mailbox thread, env
@@ -1869,6 +1870,7 @@ impl Executor {
             elevation_handler: None,
             external_file_builtins_enabled: true,
             process_env_snapshot,
+            saved_thread_locale,
             env_write_journal,
             history_provider: None,
             provider_stamp_ledger: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),

@@ -380,6 +380,9 @@ pub(crate) fn set_process_env(name: &str, value: impl AsRef<str>) {
     // for nothing. TMPDIR is never mirrored (safe_temp_dir_string reads
     // the inherited value; writing it would shadow sandbox configuration).
     let value = value.as_ref();
+    if crate::locale::is_locale_family_name(name) {
+        crate::locale::update_synced_thread_locale_var(name, Some(value));
+    }
     if name != "TMPDIR"
         && shell_assignment_needs_process_env(name)
         && is_valid_process_env(name, value)
@@ -402,6 +405,9 @@ pub(crate) fn set_process_env(name: &str, value: impl AsRef<str>) {
 /// existence check is a single non-locking getenv that keeps the common
 /// "never mirrored" unset off the locked environ mutation path.
 pub(crate) fn unset_process_env(name: &str) {
+    if crate::locale::is_locale_family_name(name) {
+        crate::locale::update_synced_thread_locale_var(name, None);
+    }
     if is_valid_process_env(name, "") && env::var_os(name).is_some() {
         with_process_state_lock(|| {
             env::remove_var(name);

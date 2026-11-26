@@ -76,14 +76,38 @@ pub enum Encoding {
     Utf8,
 }
 
+/// The locale variable family whose values decide the shell's locale
+/// categories, in one fixed slot order for the thread-local tables below.
+const LOCALE_VAR_NAMES: [&str; 7] = [
+    "LC_ALL",
+    "LC_CTYPE",
+    "LC_COLLATE",
+    "LC_MESSAGES",
+    "LC_NUMERIC",
+    "LC_TIME",
+    "LANG",
+];
+
+pub(crate) type LocaleVarTable = [Option<String>; 7];
+
+fn locale_var_index(name: &str) -> Option<usize> {
+    LOCALE_VAR_NAMES
+        .iter()
+        .position(|candidate| *candidate == name)
+}
+
+fn locale_table_from_vars(env_vars: &std::collections::HashMap<String, String>) -> LocaleVarTable {
+    std::array::from_fn(|index| env_vars.get(LOCALE_VAR_NAMES[index]).cloned())
+}
+
 // The locale name of the shell whose builtin is currently executing,
 // resolved from its VARIABLE table rather than the process environment.
 // GNU's sv_lc* watchers (variables.c:4283-4350) make a plain (unexported)
 // `LC_ALL=C` assignment change the shell's own locale semantics at once;
-// rubash only syncs the process env on `export`, so executor-side builtin
-// dispatch installs this override from env_vars for the duration of the
-// builtin (rubash#1488: `LC_ALL=C; echo -e '\u00e9'` must see the C locale
-// inside echo even though LC_ALL was never exported).
+// rubash only syncs the calling thread's locale table on `export`, so
+// executor-side builtin dispatch installs this override from env_vars for the
+// duration of the builtin (rubash#1488: `LC_ALL=C; echo -e '\u00e9'` must see
+// the C locale inside echo even though LC_ALL was never exported).
 thread_local! {
     static SHELL_LOCALE_OVERRIDE: RefCell<Option<String>> = const { RefCell::new(None) };
     /// The LC_NUMERIC category's name from the same variable table.
@@ -93,6 +117,19 @@ thread_local! {
     /// resolution above: LC_ALL > LC_NUMERIC > LANG gets its own slot
     /// (rubash#2979).
     static SHELL_NUMERIC_LOCALE_OVERRIDE: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// The complete locale-variable overlay behind the two resolved names
+    /// above. Category readers consult this table directly so an unset slot
+    /// in the executing shell does not resurrect a stale process-env value.
+    static SHELL_LOCALE_TABLE_OVERRIDE: RefCell<Option<LocaleVarTable>> =
+        const { RefCell::new(None) };
+}
+
+thread_local! {
+    /// The calling thread's synchronized locale-variable table. `None` means
+    /// this thread has no session synchronization yet and readers use the
+    /// inherited process environment; inside `Some`, a `None` slot is a real
+    /// unset in that session and must not fall back to the process copy.
+    static THREAD_LOCALE_VARS: RefCell<Option<LocaleVarTable>> = const { RefCell::new(None) };
 }
 
 /// RAII guard installing [`SHELL_LOCALE_OVERRIDE`] from a variable table.
@@ -104,6 +141,7 @@ thread_local! {
 pub struct ShellLocaleGuard {
     previous: Option<String>,
     previous_numeric: Option<String>,
+    previous_table: Option<LocaleVarTable>,
 }
 
 impl ShellLocaleGuard {
@@ -114,9 +152,12 @@ impl ShellLocaleGuard {
             cell.borrow_mut()
                 .replace(locale_numeric_name_from_vars(env_vars))
         });
+        let previous_table = SHELL_LOCALE_TABLE_OVERRIDE
+            .with(|cell| cell.borrow_mut().replace(locale_table_from_vars(env_vars)));
         ShellLocaleGuard {
             previous,
             previous_numeric,
+            previous_table,
         }
     }
 }
@@ -130,6 +171,10 @@ impl Drop for ShellLocaleGuard {
         let previous_numeric = std::mem::replace(&mut self.previous_numeric, None);
         SHELL_NUMERIC_LOCALE_OVERRIDE.with(|cell| {
             *cell.borrow_mut() = previous_numeric;
+        });
+        let previous_table = std::mem::replace(&mut self.previous_table, None);
+        SHELL_LOCALE_TABLE_OVERRIDE.with(|cell| {
+            *cell.borrow_mut() = previous_table;
         });
     }
 }
@@ -148,21 +193,44 @@ fn locale_numeric_name_from_vars(env_vars: &std::collections::HashMap<String, St
     String::new()
 }
 
+/// Read one locale variable through this thread's effective locale layers:
+/// first a builtin dispatch guard's complete variable-table overlay, then the
+/// table installed by [`sync_process_locale`] on this thread, and only when no
+/// synchronized table exists the inherited process environment. Inside either
+/// table a missing slot means the variable is unset in that shell; it never
+/// falls through to a stale lower-layer value.
+fn read_effective_locale_var(name: &str) -> String {
+    let Some(index) = locale_var_index(name) else {
+        return std::env::var(name).unwrap_or_default();
+    };
+    if let Some(slot) = SHELL_LOCALE_TABLE_OVERRIDE
+        .with(|cell| cell.borrow().as_ref().map(|table| table[index].clone()))
+    {
+        return slot.unwrap_or_default();
+    }
+    if let Some(slot) =
+        THREAD_LOCALE_VARS.with(|cell| cell.borrow().as_ref().map(|table| table[index].clone()))
+    {
+        return slot.unwrap_or_default();
+    }
+    std::env::var(name).unwrap_or_default()
+}
+
 /// The LC_NUMERIC category name a running builtin should observe: the
 /// executing shell's variable-table resolution when a guard is
-/// installed, the process environment (same chain) otherwise.
+/// installed, the thread's effective locale variables (same chain) otherwise.
 pub(crate) fn active_numeric_locale_name() -> String {
     match SHELL_NUMERIC_LOCALE_OVERRIDE.with(|cell| cell.borrow().clone()) {
         Some(name) => name,
         None => {
-            let locale_all = std::env::var("LC_ALL").unwrap_or_default();
-            let numeric = std::env::var("LC_NUMERIC").unwrap_or_default();
+            let locale_all = read_effective_locale_var("LC_ALL");
+            let numeric = read_effective_locale_var("LC_NUMERIC");
             if !locale_all.is_empty() {
                 locale_all
             } else if !numeric.is_empty() {
                 numeric
             } else {
-                std::env::var("LANG").unwrap_or_default()
+                read_effective_locale_var("LANG")
             }
         }
     }
@@ -191,21 +259,21 @@ pub fn locale_name_from_vars(env_vars: &std::collections::HashMap<String, String
 }
 
 /// The locale name a running builtin should observe: the executing
-/// shell's variable-table locale when a guard is installed, the process
-/// environment otherwise.
+/// shell's variable-table locale when a guard is installed, this thread's
+/// effective locale variables otherwise.
 pub fn active_locale_name() -> String {
     SHELL_LOCALE_OVERRIDE
         .with(|cell| cell.borrow().clone())
         .unwrap_or_else(locale_name)
 }
 
-/// Get the active locale name from environment variables.
+/// Get the active locale name from this thread's effective locale variables.
 /// Priority: LC_ALL > LC_CTYPE > LC_MESSAGES > LANG
 pub fn locale_name() -> String {
-    let locale_all = std::env::var("LC_ALL").unwrap_or_default();
-    let locale_ctype = std::env::var("LC_CTYPE").unwrap_or_default();
-    let locale_messages = std::env::var("LC_MESSAGES").unwrap_or_default();
-    let lang = std::env::var("LANG").unwrap_or_default();
+    let locale_all = read_effective_locale_var("LC_ALL");
+    let locale_ctype = read_effective_locale_var("LC_CTYPE");
+    let locale_messages = read_effective_locale_var("LC_MESSAGES");
+    let lang = read_effective_locale_var("LANG");
 
     if !locale_all.is_empty() {
         locale_all
@@ -1051,36 +1119,60 @@ pub fn locale_assignment_warning(
     }
 }
 
-/// Sync the locale-category variables into the PROCESS environment so the
-/// dynamic `locale_name()` readers (is_utf8, decimal_point, ...) observe
-/// assignments made inside the script. GNU variables.c installs sv_lang /
-/// sv_lc* watchers that call setlocale(3) on every LC_ALL/LC_CTYPE/LANG
-/// assignment (variables.c:4283-4350); the process env is rubash's
-/// equivalent single source of truth for those readers. Unset names are
-/// removed so the next-priority category applies.
+/// Sync the locale-category variables into the CALLING THREAD's locale table
+/// so the dynamic `locale_name()` readers (is_utf8, decimal_point, ...)
+/// observe assignments made inside the script. GNU variables.c installs
+/// sv_lang / sv_lc* watchers that call setlocale(3) on every
+/// LC_ALL/LC_CTYPE/LANG assignment (variables.c:4283-4350). Rubash keeps the
+/// variable values themselves thread-local: one process may host concurrent
+/// sessions on different threads, and process-env mutation is both a
+/// cross-session race and unsafe on Unix. Unset names stay as empty slots so
+/// the next-priority category inside the same table applies; they never fall
+/// through to a stale process-environment value.
 pub fn sync_process_locale(env_vars: &std::collections::HashMap<String, String>) {
     // rubash#1531: the full watcher family (GNU variables.c special_vars
     // binds every LC_* category plus LANG to sv_locale), not only the
     // collate/ctype subset the #1512 fix needed.
-    // G-01: the locale process-env sync is a process-global write —
-    // serialize it. It is deliberately NOT journaled (G-03): locale
-    // state is process-wide by C-library nature, and per-session
-    // locale isolation is WP-3 territory (see ms-stopbleed REPORT).
-    crate::executor::local_helpers::with_process_state_lock(|| {
-        for name in [
-            "LC_ALL",
-            "LC_CTYPE",
-            "LC_COLLATE",
-            "LC_MESSAGES",
-            "LC_NUMERIC",
-            "LC_TIME",
-            "LANG",
-        ] {
-            match env_vars.get(name) {
-                Some(value) => std::env::set_var(name, value),
-                None => std::env::remove_var(name),
-            }
+    let table = locale_table_from_vars(env_vars);
+    THREAD_LOCALE_VARS.with(|cell| {
+        *cell.borrow_mut() = Some(table);
+    });
+}
+
+/// Keep an already synchronized thread table current when the executor's
+/// assignment funnel commits one locale-family write or unset. The process-env
+/// mirror still exists for other transport reasons; this hook only prevents a
+/// later plain assignment (for example `export LC_ALL=C` followed by
+/// `LC_ALL=en_US.UTF-8`) from being hidden by the snapshot taken at export
+/// time. Without a synchronized table there is nothing to update: readers use
+/// the process-environment fallback exactly as before.
+pub(crate) fn update_synced_thread_locale_var(name: &str, value: Option<&str>) {
+    let Some(index) = locale_var_index(name) else {
+        return;
+    };
+    THREAD_LOCALE_VARS.with(|cell| {
+        if let Some(table) = cell.borrow_mut().as_mut() {
+            table[index] = value.map(str::to_string);
         }
+    });
+}
+
+/// Snapshot the calling thread's synchronized locale table for an executor
+/// construction. `None` means this thread currently reads the inherited
+/// process environment.
+pub(crate) fn snapshot_synced_thread_locale() -> Option<LocaleVarTable> {
+    THREAD_LOCALE_VARS.with(|cell| cell.borrow().clone())
+}
+
+/// Restore a snapshot taken by [`snapshot_synced_thread_locale`]. Executor
+/// drops use this instead of an unconditional clear: a fork-copy executor
+/// (GNU execute_cmd.c:1576 execute_in_subshell / subst.c:7143
+/// command_substitute) shares the host thread with its parent in rubash, so
+/// clearing would erase the parent's table, while keeping the child's table
+/// would leak the child's assignments into the parent.
+pub(crate) fn restore_synced_thread_locale(snapshot: Option<LocaleVarTable>) {
+    THREAD_LOCALE_VARS.with(|cell| {
+        *cell.borrow_mut() = snapshot;
     });
 }
 
@@ -1340,9 +1432,9 @@ pub fn decode_to_visible_text(text: &str) -> String {
 /// The active LC_COLLATE locale name.
 /// GNU setlocale category precedence: LC_ALL > LC_COLLATE > LANG > "C".
 fn collate_locale_name() -> String {
-    let locale_all = std::env::var("LC_ALL").unwrap_or_default();
-    let locale_collate = std::env::var("LC_COLLATE").unwrap_or_default();
-    let lang = std::env::var("LANG").unwrap_or_default();
+    let locale_all = read_effective_locale_var("LC_ALL");
+    let locale_collate = read_effective_locale_var("LC_COLLATE");
+    let lang = read_effective_locale_var("LANG");
     if !locale_all.is_empty() {
         locale_all
     } else if !locale_collate.is_empty() {
@@ -1943,13 +2035,25 @@ pub fn render_locale_string_dump(
 #[cfg(test)]
 mod tests {
     use super::{
-        active_locale_name, ansi_lex_locale_name, is_utf8_locale_name, locale_name, strcoll,
-        strcoll_posixcmp, with_ansi_lex_locale, ShellLocaleGuard,
+        active_locale_name, ansi_lex_locale_name, decimal_point, is_utf8, is_utf8_locale_name,
+        locale_name, strcoll, strcoll_posixcmp, sync_process_locale, with_ansi_lex_locale,
+        ShellLocaleGuard,
     };
     use std::cmp::Ordering;
+    use std::sync::{Arc, Barrier, Mutex};
+
+    static LOCALE_ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn locale_env_snapshot() -> Vec<(&'static str, Option<std::ffi::OsString>)> {
+        super::LOCALE_VAR_NAMES
+            .iter()
+            .map(|name| (*name, std::env::var_os(name)))
+            .collect()
+    }
 
     #[test]
     fn c_locale_collate_is_bytewise() {
+        let _lock = LOCALE_ENV_TEST_LOCK.lock().unwrap();
         // With no locale vars the collate category is C: strcmp order.
         let saved = std::env::var("LC_ALL").ok();
         std::env::remove_var("LC_ALL");
@@ -1997,6 +2101,159 @@ mod tests {
         assert_eq!(active_locale_name(), locale_name());
     }
 
+    #[test]
+    fn sync_process_locale_is_thread_isolated_and_does_not_write_process_env() {
+        let _lock = LOCALE_ENV_TEST_LOCK.lock().unwrap();
+        if !super::utf8_locale_active("en_US.UTF-8") {
+            eprintln!("skip: en_US.UTF-8 cannot be activated on this host");
+            return;
+        }
+        let host = super::host_collate_name("en_US.UTF-8").expect("en_US is not C/POSIX");
+        if super::platform_collate(".a", "a", &host) != Some(Ordering::Equal) {
+            eprintln!("skip: en_US.UTF-8 collation is unavailable on this host");
+            return;
+        }
+
+        let before = locale_env_snapshot();
+        let barrier = Arc::new(Barrier::new(2));
+        let cases: [(&str, Vec<(&str, &str)>, bool, Ordering, char); 2] = [
+            ("C", vec![("LC_ALL", "C")], false, Ordering::Less, '.'),
+            (
+                "en_US.UTF-8",
+                vec![
+                    ("LC_CTYPE", "en_US.UTF-8"),
+                    ("LC_COLLATE", "en_US.UTF-8"),
+                    ("LC_NUMERIC", "de_DE.UTF-8"),
+                    ("LANG", "C"),
+                ],
+                true,
+                Ordering::Equal,
+                ',',
+            ),
+        ];
+        let mut handles = Vec::new();
+        for (locale, assignments, expected_utf8, expected_collation, expected_decimal) in cases {
+            let barrier = Arc::clone(&barrier);
+            let before_thread = before.clone();
+            handles.push(std::thread::spawn(move || {
+                let mut vars = std::collections::HashMap::new();
+                for (name, value) in assignments {
+                    vars.insert(name.to_string(), value.to_string());
+                }
+                sync_process_locale(&vars);
+                barrier.wait();
+                for _ in 0..100 {
+                    assert_eq!(locale_name(), locale);
+                    assert_eq!(is_utf8(), expected_utf8);
+                    assert_eq!(decimal_point(), expected_decimal);
+                    assert_eq!(strcoll(".a", "a"), expected_collation);
+                }
+                assert_eq!(locale_env_snapshot(), before_thread);
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("locale isolation worker panicked");
+        }
+        assert_eq!(locale_env_snapshot(), before);
+    }
+
+    #[test]
+    fn shell_locale_guard_table_overlay_precedes_synced_table() {
+        std::thread::spawn(|| {
+            let mut synced = std::collections::HashMap::new();
+            synced.insert("LC_ALL".to_string(), "en_US.UTF-8".to_string());
+            sync_process_locale(&synced);
+            assert_eq!(locale_name(), "en_US.UTF-8");
+
+            let mut guard_vars = std::collections::HashMap::new();
+            guard_vars.insert("LC_CTYPE".to_string(), "C".to_string());
+            guard_vars.insert("LANG".to_string(), "C".to_string());
+            {
+                let _guard = ShellLocaleGuard::new(&guard_vars);
+                // LC_ALL is absent in the guard's complete variable-table
+                // overlay: it must not fall through to the synced table's
+                // en_US.UTF-8 slot.
+                assert_eq!(locale_name(), "C");
+            }
+            assert_eq!(locale_name(), "en_US.UTF-8");
+        })
+        .join()
+        .expect("guard overlay worker panicked");
+    }
+
+    #[test]
+    fn synced_thread_locale_tracks_assignment_funnel_updates() {
+        std::thread::spawn(|| {
+            let mut vars = std::collections::HashMap::new();
+            vars.insert("LC_ALL".to_string(), "C".to_string());
+            sync_process_locale(&vars);
+            assert_eq!(locale_name(), "C");
+
+            super::update_synced_thread_locale_var("LC_ALL", Some("en_US.UTF-8"));
+            assert_eq!(locale_name(), "en_US.UTF-8");
+            super::update_synced_thread_locale_var("LC_ALL", None);
+            // The unset slot is authoritative: no stale process-environment
+            // LC_ALL may resurrect after the funnel update.
+            assert_eq!(locale_name(), "");
+        })
+        .join()
+        .expect("thread locale update worker panicked");
+    }
+
+    #[test]
+    fn executor_drop_clears_synced_thread_locale() {
+        std::thread::spawn(|| {
+            const MARKER: &str = "rubash-locale-drop-marker";
+            {
+                let _executor = crate::executor::Executor::new();
+                let mut vars = std::collections::HashMap::new();
+                vars.insert("LC_ALL".to_string(), MARKER.to_string());
+                sync_process_locale(&vars);
+                assert_eq!(super::read_effective_locale_var("LC_ALL"), MARKER);
+            }
+            assert_eq!(
+                super::read_effective_locale_var("LC_ALL"),
+                std::env::var("LC_ALL").unwrap_or_default()
+            );
+            assert_ne!(super::read_effective_locale_var("LC_ALL"), MARKER);
+        })
+        .join()
+        .expect("executor drop worker panicked");
+    }
+
+    #[test]
+    fn comsub_child_drop_restores_parent_synced_thread_locale() {
+        std::thread::spawn(|| {
+            fn run(executor: &mut crate::executor::Executor, source: &str) {
+                let tokens = crate::lexer::tokenize(source);
+                let ast = crate::parser::parse(&tokens);
+                executor
+                    .execute_ast(&ast)
+                    .unwrap_or_else(|error| panic!("{source}: {error:?}"));
+            }
+            fn assert_parent_locale() {
+                let table = super::snapshot_synced_thread_locale()
+                    .expect("parent synchronized locale table was erased");
+                let lc_all = super::locale_var_index("LC_ALL").expect("LC_ALL slot");
+                assert_eq!(table[lc_all].as_deref(), Some("C"));
+                assert_eq!(locale_name(), "C");
+                assert!(!is_utf8());
+            }
+
+            let mut executor = crate::executor::Executor::new();
+            run(&mut executor, "export LC_ALL=C");
+            assert_parent_locale();
+
+            run(&mut executor, "x=$(echo hi)");
+            assert_parent_locale();
+
+            run(&mut executor, "x=$(export LC_ALL=en_US.UTF-8; echo hi)");
+            assert_parent_locale();
+        })
+        .join()
+        .expect("comsub locale worker panicked");
+    }
+
     /// rubash#681 slice b: the hoisted sort must match the per-comparison
     /// comparator exactly (byte order under C collation, host collation
     /// otherwise) — forward and reverse, on collation-tricky data.
@@ -2027,6 +2284,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn utf8_locale_collate_interleaves_punctuation() {
+        let _lock = LOCALE_ENV_TEST_LOCK.lock().unwrap();
         // glibc en_US.UTF-8 ignores punctuation at the primary weight:
         // ".a" ties "a" and the posixcmp first-byte break orders it first.
         std::env::set_var("LC_ALL", "en_US.UTF-8");

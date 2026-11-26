@@ -2145,6 +2145,7 @@ impl Executor {
     }
 
     pub(in crate::executor) fn command_substitution_executor(&self) -> Executor {
+        let saved_thread_locale = crate::locale::snapshot_synced_thread_locale();
         // The fork copy: every mutable shell datum arrives through the
         // cloned state boundary (execute_cmd.c:1576 execute_in_subshell /
         // subst.c:7143 command_substitute), so new semantic fields are
@@ -2565,6 +2566,7 @@ impl Executor {
                     .into_iter()
                     .collect()
             }),
+            saved_thread_locale,
             // G-03: a fork copy starts a fresh journal. (When the body runs
             // under a parent's execute_ast the journal stack attributes its
             // writes to the parent's journal, and this one stays empty —

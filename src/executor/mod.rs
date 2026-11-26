@@ -2644,6 +2644,10 @@ pub struct Executor {
     elevation_handler: Option<ElevationHandler>,
     external_file_builtins_enabled: bool,
     process_env_snapshot: HashMap<String, String>,
+    /// The thread-locale table this executor found at construction. Drop
+    /// restores exactly this state, so same-thread fork copies neither erase
+    /// nor leak into the enclosing executor's synchronized locale variables.
+    saved_thread_locale: Option<crate::locale::LocaleVarTable>,
     /// G-03: this lineage's process-env mirror-write journal (see
     /// local_helpers::EnvWriteJournal). Drop restores only journaled keys
     /// whose current value still equals the journal's final state.
