@@ -680,7 +680,7 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
             && close_char_operator_context(top)
             && !(top.is_some_and(|d| d.close == '`') && (backquote_single || backquote_double))
         {
-            if let Some((next, terminator_found)) = skip_heredoc_top_level(&chars, i) {
+            if let Some((next, _terminator_found)) = skip_heredoc_top_level(&chars, i) {
                 line += chars[i..next].iter().filter(|c| **c == '\n').count();
                 comment_start = true;
                 cur_word.clear();
@@ -4079,7 +4079,7 @@ fn update_command_substitution_case_depth_corrected_ex(
     current_word_boundary: &mut bool,
     lookahead: (&[char], usize),
     case_in_stage: &mut u8,
-    undecided: &mut bool,
+    _undecided: &mut bool,
     case_pattern_region: &mut bool,
 ) {
     if single || double {
@@ -6773,7 +6773,7 @@ fn update_command_substitution_case_depth_ex(
     case_depth: &mut usize,
     word_boundary: &mut bool,
     current_word_boundary: &mut bool,
-    undecided: &mut bool,
+    _undecided: &mut bool,
     case_pattern_region: &mut bool,
 ) {
     if ch == '_' || ch.is_ascii_alphanumeric() {
@@ -7773,7 +7773,7 @@ mod comsub_residual_incremental_tests {
             "\\n",
         ];
         let mut rng = Lcg(0x292_0000_0001);
-        for case in 0..4000u64 {
+        for _case in 0..4000u64 {
             let fragment_count = 2 + (rng.next() % 6) as usize;
             let mut fragments = Vec::with_capacity(fragment_count);
             for _ in 0..fragment_count {
@@ -7958,7 +7958,7 @@ mod quotes_residual_incremental_tests {
             "local ",
         ];
         let mut rng = Lcg(0x7066_3800_0001);
-        for case in 0..3000u64 {
+        for _case in 0..3000u64 {
             let fragment_count = 2 + (rng.next() % 6) as usize;
             let mut fragments = Vec::with_capacity(fragment_count);
             for _ in 0..fragment_count {
@@ -8135,7 +8135,7 @@ mod compound_residual_incremental_tests {
             "-f ",
         ];
         let mut rng = Lcg(0x636f_6d70_0001);
-        for case in 0..3000u64 {
+        for _case in 0..3000u64 {
             let fragment_count = 2 + (rng.next() % 6) as usize;
             let mut fragments = Vec::with_capacity(fragment_count);
             for _ in 0..fragment_count {

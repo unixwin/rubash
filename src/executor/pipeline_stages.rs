@@ -1613,7 +1613,7 @@ impl Executor {
             // "Is a directory" / "Permission denied" — not the PATH-miss
             // "command not found" (rubash#173).
             let not_found_word = super::execution_misc::printable_filename(&expanded_name);
-            let (word, message, status) =
+            let (word, message, _status) =
                 match super::external_inner::slash_command_execve_error_message(
                     &expanded_name,
                     &self.shell_state.env_vars,

@@ -4309,7 +4309,7 @@ fn arithmetic_error_message_ctx(expression: &str, trailing_space: bool) -> Optio
 
     if let Some(index) = expression.find("**") {
         let after = expression[index + 2..].trim_start();
-        if let Some(digits) = after
+        if let Some(_digits) = after
             .strip_prefix('-')
             .map(|rest| {
                 rest.chars()

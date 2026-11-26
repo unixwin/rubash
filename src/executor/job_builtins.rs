@@ -3492,7 +3492,7 @@ impl Executor {
                         .collect();
                     self.background_children.clear();
                     self.procsub_stream_children.clear();
-                    for pid in &pids {
+                    for _pid in &pids {
                         // rubash#1304: `disown -a` leaves nothing
                         // waitable (GNU: a later `wait <pid>` reports
                         // "not a child of this shell", 127) — unlike a

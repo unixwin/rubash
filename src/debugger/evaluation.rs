@@ -513,7 +513,7 @@ fn check_word_chars(chars: &[char], whole: &str) -> Result<(), WhitelistRejectio
 
 /// Classify the `$` construct at `chars[i]`; returns the index
 /// just past it.
-fn check_dollar(chars: &[char], i: usize, whole: &str) -> Result<usize, WhitelistRejection> {
+fn check_dollar(chars: &[char], i: usize, _whole: &str) -> Result<usize, WhitelistRejection> {
     match chars.get(i + 1) {
         None => Ok(i + 1),
         Some('(') => {

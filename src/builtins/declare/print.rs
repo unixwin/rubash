@@ -88,7 +88,7 @@ fn listing_filter_passes(requested: u16, held: u16) -> bool {
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn print_declare_names<W>(
-    command_name: &str,
+    _command_name: &str,
     names: &[&str],
     variables: &crate::shell::var_table::VarTable,
     options: DeclareOptions,

@@ -1275,7 +1275,7 @@ impl Executor {
                 return expanded;
             }
         }
-        let apply_result = self.apply_parameter_assignment_expansions_in_word(value);
+        let _apply_result = self.apply_parameter_assignment_expansions_in_word(value);
         // Compound-claim gate (rubash#3034): the two functions below
         // implement GNU expand_compound_array_assignment (arrayfunc.c:557),
         // which only ever runs on a genuine compound assignment — a decision
@@ -3882,7 +3882,7 @@ impl Executor {
         }
         // Plain `"${name[@]}"` / `"${name[*]}"`: one element per member
         // ([*] joined with IFS[0]).
-        let Some((array_name, storage)) = list_body
+        let Some((_array_name, storage)) = list_body
             .strip_suffix("[@]")
             .or_else(|| list_body.strip_suffix("[*]"))
             .filter(|array_name| is_shell_name(array_name))

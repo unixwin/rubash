@@ -839,7 +839,7 @@ impl Executor {
         source: &str,
         command: &CommandNode,
     ) {
-        let current_line = self
+        let _current_line = self
             .shell_state
             .env_vars
             .get("__RUBASH_CURRENT_LINE")

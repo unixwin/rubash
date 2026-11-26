@@ -1819,7 +1819,7 @@ pub(in crate::executor) fn read_stdin_until(
     let mut decoder = StdinCharDecoder::new();
     let mut units = 0usize;
     // GNU read.def escape state for the -n/-N budget (rubash#1328).
-    let escaped = false;
+    let _escaped = false;
     let mut eof = false;
     let mut timed_out = false;
     let mut interrupted = false;
@@ -2066,7 +2066,7 @@ fn trim_read_input_literal(
     word_first_byte: Option<u8>,
     char_limit: Option<usize>,
     exact_char_limit: bool,
-    escape_aware: bool,
+    _escape_aware: bool,
     raw: bool,
 ) -> String {
     if !exact_char_limit {

@@ -2961,7 +2961,7 @@ mod tests {
 
     #[test]
     fn parse_unix_command_spec_keeps_nested_quotes() {
-        let (keyseq, command) =
+        let (_keyseq, command) =
             parse_unix_command_spec(r#""\C-g": sh -c "echo inner""#).expect("parses");
         assert_eq!(command, r#"sh -c "echo inner""#);
     }

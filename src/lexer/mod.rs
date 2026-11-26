@@ -1843,7 +1843,7 @@ impl GroupScanFeeder {
         // re-lex rewrites the list from the fold point / line start, so the
         // summary refolds from the open line's start snapshot (the list is
         // byte-identical to a fresh full pass in all three cases).
-        let fold_chars = line_tokens.len() as u64;
+        let _fold_chars = line_tokens.len() as u64;
         self.fold_pass_tokens(&line_tokens, tail_resumed);
         if let Some(updated) =
             line_posix_mode_change(&mut self.posix_scan, &line_tokens, tail_resumed)
@@ -1908,7 +1908,7 @@ impl GroupScanFeeder {
         // byte offset into the logical line (only the position field is
         // overwritten with the line number below), so consecutive columns
         // recover the exact inter-token spacing for raw arithmetic capture.
-        let gap_tokens = line_tokens.len() as u64;
+        let _gap_tokens = line_tokens.len() as u64;
         // issue #241 admission: the leading_ws capture feeds five consumers
         // (arithmetic_command.rs `(( ))` raw text, arithmetic_for.rs
         // `for ((;;))` parts, case_command.rs's offending-line echo,
