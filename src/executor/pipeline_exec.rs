@@ -3937,7 +3937,7 @@ impl Executor {
         let spec_saved_discard = self.snapshot_discard_latches();
         let spec_saved_no_closing_brace = self.no_closing_brace_failure.get();
         let _speculative_guard = SpeculativeExpansionGuard::new();
-        let mut first_fields = self.expand_stage_first_word(command);
+        let first_fields = self.expand_stage_first_word(command);
         let expanded_name = first_fields.first().cloned().unwrap_or_default();
         // GNU runs every pipeline member through execute_disk_command
         // (execute_cmd.c:5789), so a restricted shell refuses members
@@ -5401,7 +5401,7 @@ impl Executor {
         // The last member's drains start NOW when it is a process (its
         // bytes may not wait for the shell stage to finish).
         let last_is_process = last_index != shell_index;
-        let (mut last_child, last_stdout_drain, last_stderr_drain) = if last_is_process {
+        let (last_child, last_stdout_drain, last_stderr_drain) = if last_is_process {
             let position = processes
                 .iter()
                 .position(|(stage_index, _)| *stage_index == last_index)
@@ -6207,7 +6207,7 @@ impl Executor {
             // structs (execute_cmd.c:2620 execute_pipeline ->
             // execute_simple_command -> expand_words; subst.c:4807
             // dequote_string drops only CTLESC escapes).
-            let mut first_fields = self.expand_stage_first_word(command);
+            let first_fields = self.expand_stage_first_word(command);
             let expanded_name = first_fields.first().cloned().unwrap_or_default();
             // Same restricted-member bail-out as the first concurrent path:
             // refused members are reported (and the rest of the pipeline
@@ -9416,7 +9416,7 @@ impl Executor {
                             continue;
                         }
                         other if other.starts_with('-') && other.len() > 1 => continue,
-                        _ => option_scan = false,
+                        _ => {}
                     }
                 }
                 operand = Some(value);

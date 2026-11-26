@@ -119,7 +119,6 @@ where
                     // word and breaks; the rest is ignored entirely
                     // (rubash#1380: `dirs -- -l`/`-- -c` must not apply).
                     "--" => {
-                        index += 1;
                         break;
                     }
                     _ if word.starts_with('+') || word.starts_with('-') => {

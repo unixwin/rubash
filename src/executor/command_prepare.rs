@@ -7011,7 +7011,6 @@ fn copy_comsub_body_verbatim_for_ifs_marking(
                 }
                 word.clear();
                 word_boundary = false;
-                token_boundary = false;
             }
             '$' if next == Some('(') => {
                 // GNU parse.y:4173: a nested `$(` hands its whole span to
@@ -7052,7 +7051,6 @@ fn copy_comsub_body_verbatim_for_ifs_marking(
                 if esac_prev_token_char('(') {
                     prev_sig = Some('(');
                 }
-                token_boundary = false;
             }
             '\'' => {
                 // Single-quoted span: through the closing `'` with no
@@ -7067,13 +7065,11 @@ fn copy_comsub_body_verbatim_for_ifs_marking(
                 }
                 word.clear();
                 word_boundary = false;
-                token_boundary = false;
             }
             '"' => {
                 copy_dquote_span_verbatim_for_ifs_marking(simulated, raw_chars, index);
                 word.clear();
                 word_boundary = false;
-                token_boundary = false;
             }
             '`' => {
                 // Backtick span: verbatim except `\<newline>` / `\<CRLF>`
@@ -7123,14 +7119,12 @@ fn copy_comsub_body_verbatim_for_ifs_marking(
                 }
                 word.clear();
                 word_boundary = false;
-                token_boundary = false;
             }
             '(' if case_depth == 0 || nested_case_subst > 0 => {
                 depth += 1;
                 if nested_case_subst > 0 {
                     nested_case_subst += 1;
                 }
-                token_boundary = true;
             }
             ')' if case_depth == 0 || nested_case_subst > 0 => {
                 depth = depth.saturating_sub(1);
@@ -7140,7 +7134,6 @@ fn copy_comsub_body_verbatim_for_ifs_marking(
                 if depth == 0 {
                     break;
                 }
-                token_boundary = true;
             }
             _ => {}
         }
@@ -8640,7 +8633,7 @@ mod command_word_materialization_tests {
         let mut bytes: Vec<u8> = Vec::new();
         bytes.extend(b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789");
         bytes.extend(b"_.,:@%+-/[]=");
-        let mut check = |word: &str| {
+        let check = |word: &str| {
             if is_expand_fast_literal_word(word) {
                 assert!(
                     split_assignment_word(word).is_none(),

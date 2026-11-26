@@ -970,7 +970,7 @@ fn source_has_matching_compound_end(source: &str) -> bool {
 
 fn source_has_matching_time_compound_end(source: &str) -> bool {
     let tokens = crate::lexer::tokenize(source);
-    let Some(mut index) = tokens
+    let Some(index) = tokens
         .iter()
         .position(|token| token.kind != crate::lexer::TokenKind::Semicolon)
     else {

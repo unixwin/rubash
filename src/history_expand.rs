@@ -589,7 +589,7 @@ fn history_expand_internal(
     };
 
     // Modifiers (histexpand.c:592-836).
-    let mut starting_index = i;
+    let starting_index = i;
     while chars.get(i) == Some(&':') {
         let mut c = match chars.get(i + 1) {
             Some(c) => *c,
@@ -784,8 +784,8 @@ fn get_history_word_specifier(
 ) -> Result<Option<String>, usize> {
     let chars: Vec<char> = spec.chars().collect();
     let mut i = *caller_index;
-    let mut first: i64 = 0;
-    let mut last: i64 = 0;
+    let first: i64;
+    let last: i64;
     let mut expecting_word_spec = false;
 
     if chars.get(i) == Some(&':') {
@@ -1169,7 +1169,6 @@ pub fn history_expand(
             i += 1;
             i = hist_string_extract_single_quoted(hstring, i, u32::from(flag));
             if i >= len {
-                i = len;
                 break;
             }
         } else if c == BS && (cc == Some('\'') || cc == Some(ctx.chars.expand)) {

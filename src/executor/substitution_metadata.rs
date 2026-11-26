@@ -2162,7 +2162,7 @@ mod tests {
             let esc = crate::executor::markers::LITERAL_CHAR_ESCAPE;
             let mut bytes = Vec::new();
             let mut text = String::new();
-            let mut push_char = |bytes: &mut Vec<u8>, text: &mut String, c: char| {
+            let push_char = |bytes: &mut Vec<u8>, text: &mut String, c: char| {
                 let mut buf = [0u8; 4];
                 bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
                 text.push(c);

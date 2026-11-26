@@ -245,7 +245,6 @@ impl<'a> Lexer<'a> {
                 '$' if self.peek() == Some('\'') => {
                     self.advance();
                     self.skip_ansi_c_single();
-                    token_boundary = false;
                 }
                 '$' if self.peek() == Some('(') => {
                     // GNU parse.y:4464-4473 (parse_comsub) + parse_matched_pair
@@ -275,15 +274,12 @@ impl<'a> Lexer<'a> {
                         self.advance();
                         self.skip_cmd_subst();
                     }
-                    token_boundary = false;
                 }
                 '\'' => {
                     self.skip_single();
-                    token_boundary = false;
                 }
                 '"' => {
                     self.skip_double();
-                    token_boundary = false;
                 }
                 '<' if self.peek() == Some('<') && self.peek_after(1) == Some('<') => {
                     self.advance();
@@ -930,7 +926,7 @@ impl<'a> Lexer<'a> {
     fn skip_brace_cached(
         &mut self,
         brace_offset: usize,
-        mut cache: Option<&mut BraceScanCache>,
+        cache: Option<&mut BraceScanCache>,
     ) -> BraceScan {
         if let Some(entry) = cache
             .as_ref()

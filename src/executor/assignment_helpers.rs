@@ -362,7 +362,6 @@ fn assoc_token_scan_state(token: &str) -> (usize, bool, bool) {
     // counting nested brackets in the key/value text made the merger glue
     // unrelated pairs together.
     let mut subscript_open = token.starts_with('[');
-    let mut after_subscript = false;
     for (i, ch) in token.char_indices() {
         if escaped {
             escaped = false;
@@ -375,7 +374,6 @@ fn assoc_token_scan_state(token: &str) -> (usize, bool, bool) {
             ']' if !in_single && !in_double => {
                 if subscript_open || i > 0 {
                     subscript_open = false;
-                    after_subscript = true;
                 }
             }
             // A `[` only opens a subscript at word start
@@ -661,7 +659,7 @@ pub(in crate::executor) fn assoc_entries(value: &str) -> Vec<(String, String)> {
 pub(in crate::executor) fn assoc_entries_cached(
     value: &str,
 ) -> std::sync::Arc<Vec<(String, String)>> {
-    let mut cache = assoc_parse_cache()
+    let cache = assoc_parse_cache()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     if let Some(hit) = cache.get(value) {
@@ -1012,7 +1010,7 @@ pub(in crate::executor) fn compound_field_split_transport(
     // synthetic tag+space never split). An empty separator falls back to
     // the historical space (IFS unset already yields " " from the caller).
     let separator_char = separator.chars().next().unwrap_or(' ');
-    let mut synthetic_body = |out: &mut String, started: &mut bool, body: &str| {
+    let synthetic_body = |out: &mut String, started: &mut bool, body: &str| {
         if *started {
             out.push(crate::executor::markers::COMPOUND_EXPANSION_WS_TAG);
             out.push(separator_char);

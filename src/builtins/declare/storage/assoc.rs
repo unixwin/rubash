@@ -279,7 +279,6 @@ fn assoc_token_scan_state(token: &str) -> (usize, bool, bool) {
     // counting nested brackets in the key/value text made the merger glue
     // unrelated pairs together.
     let mut subscript_open = token.starts_with('[');
-    let mut after_subscript = false;
     for (i, ch) in token.char_indices() {
         if escaped {
             escaped = false;
@@ -292,7 +291,6 @@ fn assoc_token_scan_state(token: &str) -> (usize, bool, bool) {
             ']' if !in_single && !in_double => {
                 if subscript_open || i > 0 {
                     subscript_open = false;
-                    after_subscript = true;
                 }
             }
             // A `[` only opens a subscript at word start

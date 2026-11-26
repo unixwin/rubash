@@ -1311,10 +1311,7 @@ pub(crate) fn skip_funsub_body(chars: &[char], open: usize) -> Option<usize> {
                     Some('{') => skip_dollar_brace(chars, index),
                     Some('(') => skip_dollar_paren(chars, index),
                     Some('\'') => skip_ansi_quote(chars, index),
-                    _ => {
-                        term = false;
-                        index + 1
-                    }
+                    _ => index + 1,
                 };
                 term = false;
                 at_word_start = false;

@@ -391,7 +391,7 @@ impl Executor {
         // TWICE — the first draws discarded, the second evaluated
         // (arith3.sub `(( dice[$RANDOM...]++ ))` lost its dice[6]/dice[7]
         // hits to doubled draws).
-        let mut expanded = if cmd.arithmetic_command.is_some() {
+        let expanded = if cmd.arithmetic_command.is_some() {
             cmd.clone()
         } else {
             // rubash#3605: GNU raises comsub_ignore_return around

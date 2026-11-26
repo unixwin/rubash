@@ -5134,6 +5134,7 @@ impl OutputFdState {
                 }
                 let resolved = executor
                     .session_path(shell_path_to_windows(&path, &executor.shell_state.env_vars));
+                #[cfg_attr(not(unix), allow(unused_mut))]
                 let mut is_fifo = crate::executor::shell_options::redirect_path_is_fifo(&resolved);
                 // rubash#3286: the joined-path check above misses from
                 // a deleted cwd — the anchor's fstatat classifies

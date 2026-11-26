@@ -143,7 +143,7 @@ fn de01_entry_stop_served_before_first_command() {
 
     // Phase 1: step from the entry stop to learn the file identity
     // the engine reports for the sourced file.
-    let mut discovered: Option<String> = None;
+    let discovered: Option<String>;
     {
         let mut wired = wired_executor(Box::new(|_session, _record| {
             StopLoopOutcome::Resume(StepArming::StepInto)

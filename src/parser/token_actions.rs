@@ -1948,7 +1948,6 @@ fn find_unquoted_ctrl_op(value: &str, extglob: bool) -> Option<String> {
         match c {
             b'\\' if !in_single => {
                 escaped = true;
-                prev_word_byte = b'\\';
             }
             b'\'' if !in_double => in_single = !in_single,
             b'"' if !in_single => in_double = !in_double,

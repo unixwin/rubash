@@ -271,19 +271,16 @@ fn copy_dollar_paren_body(
                 copy_quoted_word_part(current, chars, '\'');
                 word.clear();
                 word_boundary = false;
-                token_boundary = false;
             }
             '"' => {
                 copy_quoted_word_part(current, chars, '"');
                 word.clear();
                 word_boundary = false;
-                token_boundary = false;
             }
             '`' => {
                 copy_backtick_word_part(current, chars);
                 word.clear();
                 word_boundary = false;
-                token_boundary = false;
             }
             '$' if chars.peek().copied() == Some('\'') => {
                 // ANSI-C `$'...'` (parse.y:5476-5480 read_token_word ->
@@ -308,7 +305,6 @@ fn copy_dollar_paren_body(
                 }
                 word.clear();
                 word_boundary = false;
-                token_boundary = false;
             }
             '$' if chars.peek().copied() == Some('(') => {
                 chars.next();
@@ -337,14 +333,12 @@ fn copy_dollar_paren_body(
                 if crate::lexer::esac_prev_token_char('(') {
                     prev_sig = Some('(');
                 }
-                token_boundary = false;
             }
             '(' if case_depth == 0 || nested_case_subst > 0 => {
                 depth += 1;
                 if nested_case_subst > 0 {
                     nested_case_subst += 1;
                 }
-                token_boundary = true;
             }
             ')' if case_depth == 0 || nested_case_subst > 0 => {
                 depth = depth.saturating_sub(1);
@@ -354,7 +348,6 @@ fn copy_dollar_paren_body(
                 if depth == 0 {
                     break;
                 }
-                token_boundary = true;
             }
             _ => {}
         }

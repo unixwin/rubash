@@ -416,7 +416,7 @@ impl Executor {
                 .unwrap_or(0)
                 ^ ((std::process::id() as u64) << 32)
                 ^ attempt.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-            let mut random_suffix = |state: &mut u64| {
+            let random_suffix = |state: &mut u64| {
                 *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
                 let mut z = *state;
                 z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);

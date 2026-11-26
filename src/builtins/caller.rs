@@ -44,7 +44,7 @@ where
     //    any option word is an error. getopt names the option as `-'
     //    plus the word's second character (`-zx' -> `-z', `--foo' ->
     //    `--'); a lone `-' is not an option word, it is the operand.
-    let mut index = 0;
+    let index = 0;
     let mut operand: Option<&str> = None;
     while let Some(arg) = args.get(index) {
         let arg = arg.as_str();
