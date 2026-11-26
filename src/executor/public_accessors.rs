@@ -4382,6 +4382,7 @@ impl Default for Executor {
 
 impl Drop for Executor {
     fn drop(&mut self) {
+        crate::locale::restore_synced_thread_locale(self.saved_thread_locale.take());
         // startup21: the process-exit executor's process dies with this
         // drop, so its marker removal is skipped entirely: deliver()'s
         // dead-pid path (kill.rs deliver_rubash_signal -> process_exists

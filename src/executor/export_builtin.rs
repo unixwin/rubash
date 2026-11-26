@@ -183,22 +183,23 @@ impl Executor {
         }
         if status == 0 {
             self.sync_setattr_typed_assignments(cmd.words[1..].iter().map(String::as_str));
-            // Check for locale environment changes (LC_ALL, LC_CTYPE,
-            // LC_COLLATE, LANG)
+            // Check for locale environment changes across the whole sv_locale
+            // watcher family (LANG and every LC_* category).
             for word in &cmd.words[1..] {
-                if word.starts_with("LC_ALL=")
-                    || word.starts_with("LC_CTYPE=")
-                    || word.starts_with("LC_COLLATE=")
-                    || word.starts_with("LANG=")
+                if word
+                    .split_once('=')
+                    .map(|(name, _)| crate::locale::is_locale_family_name(name))
+                    .unwrap_or(false)
                 {
                     // rubash#1692: the setlocale warning itself is
                     // emitted at the bind site (builtins/setattr) —
                     // GNU's sv_locale fires inside bind_variable, not
                     // after the builtin returns.
                     // GNU variables.c sv_lang/sv_lc* call setlocale on the
-                    // assignment; sync the process env so the dynamic
-                    // locale readers (locale::is_utf8 - the dollar-quote
-                    // backslash-u locale gate, rubash#353) see the change.
+                    // assignment; sync this thread's locale table so the
+                    // dynamic locale readers (locale::is_utf8 - the
+                    // dollar-quote backslash-u locale gate, rubash#353) see
+                    // the change without a process-global environment write.
                     crate::locale::sync_process_locale(&self.shell_state.env_vars);
                     break;
                 }
