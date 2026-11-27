@@ -564,6 +564,11 @@ impl Executor {
                 Some("simple") => 1u8,
                 Some("subshell") => 2u8,
                 Some("procsub") => 3u8,
+                // rubash#4046: the async compound root whose own
+                // redirect list replays in the child — RX_ACTIVE like
+                // GNU's execute_in_subshell pass (execute_cmd.c:1761),
+                // consumed before the root's body executes.
+                Some("compound") => 4u8,
                 _ => 0,
             }
         } else {

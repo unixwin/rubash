@@ -2078,18 +2078,51 @@ impl Executor {
         Ok(())
     }
 
+    /// rubash#4046: the structural+respawn-face half of the RX_UNDOABLE
+    /// verdict, shared by the simple-command output walk
+    /// (`output_walk_is_undoable`) and the compound preflight/bind walks
+    /// (`compound_dup_bad_fd`, `with_command_input_redirects_scoped`) so
+    /// every redirect walk of one command agrees. False — GNU's
+    /// RX_ACTIVE-only pass, no undo saves, no `cannot duplicate fd`
+    /// first line — for:
+    /// - pipeline elements (execute_cmd.c:5522; the stage node carries
+    ///   `.pipe`),
+    /// - a `( )` subshell head's own list (execute_in_subshell,
+    ///   execute_cmd.c:1761),
+    /// - an async command's own list — the same execute_in_subshell
+    ///   pass for the forked `cmd &` child, whether the node still
+    ///   carries its background marking or executes as the respawned
+    ///   payload root (face 1 simple / face 4 compound).
+    /// True for the ordinary in-shell walks: face 0 (the main shell),
+    /// face 2 (inside a respawned `( ... ) &` body) and face 3 (inside
+    /// a respawned `<(...)` / `>(...)` body), whose commands run
+    /// do_redirections with RX_ACTIVE|RX_UNDOABLE exactly like the
+    /// parent shell would (execute_cmd.c:854/4268/5606) — the fork
+    /// already happened, so nothing inside the child replays the
+    /// RX_ACTIVE head pass. Face 4 is the one-shot async-compound
+    /// root: it reads false here and is consumed before the root's
+    /// body executes (with_command_input_redirects_inner), so nested
+    /// commands inside `{ ...; } &` are ordinary undoable walks.
+    pub(in crate::executor) fn move_walk_is_undoable(&self, cmd: &CommandNode) -> bool {
+        if cmd.pipe.is_some()
+            || cmd.pipeline_command.is_some()
+            || cmd.subshell_command.is_some()
+            || cmd.background
+            || cmd.background_command.is_some()
+        {
+            return false;
+        }
+        !matches!(self.respawn_payload_face.get(), 1 | 4)
+    }
+
     /// Whether `cmd`'s redirect list is applied with GNU's RX_UNDOABLE
     /// saves — the only walks where add_undo_redirect (redir.c:1296)
     /// runs and can sys_error `redirection error: cannot duplicate fd`
     /// (rubash#4028). RX_ACTIVE-only applications register no undo list
     /// at all, so a failing move reports only the `N: Bad file
     /// descriptor` line:
-    /// - pipeline elements are the fork child's pass
-    ///   (execute_cmd.c:5522; the stage node carries `.pipe`),
-    /// - a `( )` subshell head's own list is execute_in_subshell's
-    ///   RX_ACTIVE pass (execute_cmd.c:1761),
-    /// - the respawned async-simple body replays that same forked
-    ///   child face (its payload face is `simple`),
+    /// - the structural/respawn-face exclusions of
+    ///   `move_walk_is_undoable` (rubash#4046),
     /// - disk/external commands apply redirects in the forked child
     ///   (execute_cmd.c:5884) — classified by the effective command
     ///   word exactly like command_word_runs_in_current_shell.
@@ -2097,10 +2130,7 @@ impl Executor {
     /// arithmetic/conditional commands — runs do_redirections with
     /// RX_UNDOABLE in the current shell (execute_cmd.c:854/4268/5606).
     fn output_walk_is_undoable(&self, cmd: &CommandNode) -> bool {
-        if cmd.pipe.is_some() || cmd.pipeline_command.is_some() || cmd.subshell_command.is_some() {
-            return false;
-        }
-        if self.respawn_payload_face.get() == 1 {
+        if !self.move_walk_is_undoable(cmd) {
             return false;
         }
         if cmd.arithmetic_command.is_some() || cmd.conditional_command.is_some() {

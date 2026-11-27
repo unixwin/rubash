@@ -376,8 +376,14 @@ impl Executor {
         // rubash#3991: a pipeline element's own list is the fork
         // child's RX_ACTIVE pass (see fd_var_walk_undoable in
         // command_execute.rs), so it earns no saves either.
-        let undoable_walk =
-            cmd.subshell_command.is_none() && cmd.pipe.is_none() && cmd.pipeline_command.is_none();
+        // rubash#4046: one shared verdict with the simple-command
+        // output walk and the dup preflight — see
+        // Executor::move_walk_is_undoable. A respawned async
+        // compound root (face 4) earns no saves on its own list
+        // (execute_in_subshell's RX_ACTIVE pass, execute_cmd.c:1761);
+        // commands inside a respawned `( ... ) &` / procsub body
+        // (faces 2/3) walk undoable exactly like the parent shell.
+        let undoable_walk = self.move_walk_is_undoable(cmd);
         let mut apply_error: Option<ExecuteError> = None;
         // rubash#2612: the walk space of this list (see FdWalkBinding
         // in trap_exec.rs). This loop used to service the `{var}`
@@ -939,6 +945,25 @@ impl Executor {
                 return Ok(T::default());
             }
         };
+        // rubash#4046: consume the one-shot async-compound-root face
+        // (respawn payload face 4). GNU execute_in_subshell applies the
+        // forked async command's OWN redirect list with RX_ACTIVE
+        // (execute_cmd.c:1761-1764) and then disposes it before the
+        // body runs, so the root's walk — preflight, numbered opens,
+        // output opens and the fd-0 bind above, all complete by this
+        // point — reads face 4 as non-undoable, while every command
+        // the body executes is an ordinary RX_ACTIVE|RX_UNDOABLE walk
+        // (execute_cmd.c:854/4268/5606). Clearing here, once, before
+        // the body closure runs, is what keeps `{ true; } 8>&10- &`
+        // at the RX_ACTIVE single diagnostic line while
+        // `{ { true; } 8>&10-; } &` reports the inner group's undo
+        // pair. The first compound scope entered in the respawn child
+        // is the payload root itself: the `-c` prelude carries only
+        // function definitions and trap re-arms, which never enter
+        // this wrapper.
+        if self.respawn_payload_face.get() == 4 {
+            self.respawn_payload_face.set(0);
+        }
         let Some(guard) = guard else {
             return execute(self);
         };
@@ -3597,14 +3622,15 @@ impl Executor {
         // with GNU's RX_UNDOABLE saves — the only walks where
         // add_undo_redirect (redir.c:1296) runs and a move's
         // source-close save can sys_error `cannot duplicate fd`
-        // (redir.c:1171-1175). A `( )` subshell head's own list is the
-        // fork child's RX_ACTIVE pass (execute_cmd.c:1761), and a
-        // respawned background/procsub payload root replays that same
-        // child face, so neither earns the first diagnostic line.
-        let undoable_walk = cmd.subshell_command.is_none()
-            && cmd.pipe.is_none()
-            && cmd.pipeline_command.is_none()
-            && self.respawn_payload_face.get() == 0;
+        // (redir.c:1171-1175). rubash#4046: one shared verdict with the
+        // simple-command output walk — Executor::move_walk_is_undoable.
+        // A `( )` subshell head's own list is the fork child's RX_ACTIVE
+        // pass (execute_cmd.c:1761), a respawned async payload root
+        // (faces 1/4) replays that same child face, and the commands
+        // INSIDE a respawned `( ... ) &` / procsub body (faces 2/3)
+        // walk undoable exactly like the parent shell
+        // (execute_cmd.c:854/4268/5606).
+        let undoable_walk = self.move_walk_is_undoable(cmd);
         // rubash#3991: the undo saves a fixed entry earns are real
         // descriptors in GNU's walk (see fd_walk_register_saves), so
         // a dup naming a save slot is not a bad-fd dup. Mirror the

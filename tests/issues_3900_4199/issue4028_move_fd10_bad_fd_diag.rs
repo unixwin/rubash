@@ -123,6 +123,123 @@ fn move_first_line_absent_on_active_walks() {
     assert_eq!(err, second_line(1));
 }
 
+// rubash#4046: the RX_UNDOABLE verdict must agree across every respawn
+// payload face. GNU execute_in_subshell applies the forked async
+// command's OWN redirect list with RX_ACTIVE only
+// (execute_cmd.c:1761-1764 — no undo saves, no `cannot duplicate fd`
+// first line), whether the async command is a simple command or a
+// compound; commands executing INSIDE the forked child's body — the
+// body of `( ... ) &`, a nested `{ ...; }` inside `{ ...; } &`, or a
+// `<(...)` / `>(...)` process-substitution body — run ordinary
+// RX_ACTIVE|RX_UNDOABLE walks (execute_cmd.c:854/4268/5606) and report
+// both lines. Every expectation below was byte-measured against WSL
+// GNU Bash 5.3.20 running the same script files (oracle matrix in
+// target/issue-4046-probes).
+
+#[test]
+fn respawn_async_root_walks_active_regardless_of_command_shape() {
+    // Simple async command: one line (this already held through the
+    // face-1 transport).
+    let dir = test_dir("respawn_simple_async");
+    let (out, err, code) = run_script(&dir, "true 8>/dev/null 8>&10- & wait\n");
+    assert_eq!(out, "");
+    assert_eq!(err, second_line(1));
+    assert_eq!(code, Some(0));
+
+    // Async brace group: GNU applies the group's own redirects with
+    // RX_ACTIVE in the forked child (execute_cmd.c:1761), so the
+    // missing undo save means no first line here either.
+    let dir = test_dir("respawn_group_async");
+    let (out, err, code) = run_script(&dir, "{ true; } 8>/dev/null 8>&10- & wait\n");
+    assert_eq!(out, "");
+    assert_eq!(err, second_line(1));
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn respawn_child_body_walks_stay_undoable() {
+    let expected = |line_no: usize| format!("{}{}", first_line(), second_line(line_no));
+
+    // Nested group inside the async compound: the outer `{ ...; }` is
+    // the RX_ACTIVE root, but the inner `{ true; }` executes inside
+    // the forked child's body — an ordinary undoable walk, both lines.
+    let dir = test_dir("respawn_nested_group");
+    let (out, err, code) = run_script(&dir, "{ { true; } 8>/dev/null 8>&10-; } & wait\n");
+    assert_eq!(out, "");
+    assert_eq!(err, expected(1));
+    assert_eq!(code, Some(0));
+
+    // Group inside an async subshell body.
+    let dir = test_dir("respawn_subshell_body_group");
+    let (out, err, code) = run_script(&dir, "( { true; } 8>/dev/null 8>&10- ) & wait\n");
+    assert_eq!(out, "");
+    assert_eq!(err, expected(1));
+    assert_eq!(code, Some(0));
+
+    // If command inside an async subshell body. GNU reports line 1 in
+    // this shape (unlike the process-substitution if shape, whose
+    // parser-ahead line numbering is a separate owner).
+    let dir = test_dir("respawn_subshell_body_if");
+    let (out, err, code) = run_script(
+        &dir,
+        "( if true; then true; fi 8>/dev/null 8>&10- ) & wait\n",
+    );
+    assert_eq!(out, "");
+    assert_eq!(err, expected(1));
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn procsub_body_walks_stay_undoable() {
+    let expected = |line_no: usize| format!("{}{}", first_line(), second_line(line_no));
+
+    // Compound body of an input process substitution.
+    let dir = test_dir("respawn_procsub_in_group");
+    let (out, err, code) = run_script(&dir, "cat <({ true; } 8>/dev/null 8>&10-)\n");
+    assert_eq!(out, "");
+    assert_eq!(err, expected(1));
+    assert_eq!(code, Some(0));
+
+    // Simple-command body of an input process substitution.
+    let dir = test_dir("respawn_procsub_in_simple");
+    let (out, err, code) = run_script(&dir, "cat <(true 8>/dev/null 8>&10-)\n");
+    assert_eq!(out, "");
+    assert_eq!(err, expected(1));
+    assert_eq!(code, Some(0));
+
+    // Compound body of an output process substitution: echo's bytes
+    // feed the substitution, so stdout stays empty and the body's
+    // undoable walk reports both lines.
+    // rubash#4252: on macOS the async output-procsub child can finish
+    // writing after the outer shell exits, racing pipe stderr capture.
+    // Redirect the procsub body's stderr to a temp file and emit a
+    // sentinel file after the failing compound so we deterministically
+    // collect both lines without altering the `{ true; } 8>/dev/null 8>&10-`
+    // redirect walk or its 2-line diagnostic assertion.
+    let dir = test_dir("respawn_procsub_out_group");
+    let err_file = dir.join("out_procsub.err");
+    let done_file = dir.join("out_procsub.done");
+    let (out, err, code) = run_script(
+        &dir,
+        "echo hi > >(exec 2>out_procsub.err; { true; } 8>/dev/null 8>&10-; printf done >out_procsub.done)\n",
+    );
+    assert_eq!(out, "");
+    assert_eq!(err, "");
+    assert_eq!(code, Some(0));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !done_file.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        done_file.exists(),
+        "output process substitution body did not finish within 5s"
+    );
+    let procsub_err = std::fs::read_to_string(&err_file)
+        .expect("read out_procsub.err")
+        .replace("\r\n", "\n");
+    assert_eq!(procsub_err, expected(1));
+}
+
 #[test]
 fn bound_move_succeeds_silently() {
     // Negative guard: a move whose source fd is bound succeeds at its

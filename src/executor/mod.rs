@@ -1860,7 +1860,11 @@ pub struct Executor {
     /// execute_cmd.c:4553), 2 subshell body (the paren-face replay,
     /// execute_cmd.c:1799-1806, trap-gated + redirects block),
     /// 3 process-substitution body (should_suppress_fork with the
-    /// PROCSUB bit, evalstring.c:106-117 — trap-gated, redirects ride).
+    /// PROCSUB bit, evalstring.c:106-117 — trap-gated, redirects ride),
+    /// 4 async compound root carrying its own redirect list
+    /// (rubash#4046: the list replays execute_in_subshell's RX_ACTIVE
+    /// pass, execute_cmd.c:1761-1764 — a one-shot face consumed before
+    /// the root's body executes, with no nofork arming at all).
     /// The -c arming consults it; a forged ambient key arms nothing
     /// (consumed only for a validated internal respawn, then stripped).
     pub(crate) respawn_payload_face: Cell<u8>,
