@@ -9389,7 +9389,8 @@ impl<'e> FinishPass<'e> {
     /// the pass's order contract, gated per route) plus the
     /// post-trap duties — debugger exit note, persistent
     /// output procsub close, huponexit hangup, and the termsig
-    /// funnel's late re-take + die-by-signal. Once-only.
+    /// funnel's late re-take + process-owner-gated die-by-signal.
+    /// Once-only.
     pub(crate) fn run_stream_end_duties(&mut self, history_gate: FinishHistoryGate) {
         if self.duties_done {
             return;
@@ -9467,6 +9468,16 @@ impl<'e> FinishPass<'e> {
         // signal) it supersedes an earlier mark. Jobs get their hangup
         // at this late point when the late signal is a SIGHUP the
         // in-order funnel above did not already service.
+        //
+        // rubash#4211: that final kernel contract applies only when
+        // this process IS the shell — the standalone binary opted into
+        // process replacement and this executor owns the process image.
+        // An embedded Session or fork-copy executor must return to its
+        // host instead: raising the signal here would kill the host
+        // application. The library form of the same finish therefore
+        // resolves to the shell-level status 128+sig (including when an
+        // EXIT trap's own `exit` ran) and leaves process death to a
+        // host that genuinely owns the process.
         #[cfg(unix)]
         let termsig_death = match self.executor.take_termsig_death_pending() {
             Some(late) => {
@@ -9482,7 +9493,13 @@ impl<'e> FinishPass<'e> {
         };
         #[cfg(unix)]
         if let Some(sig) = termsig_death {
-            die_by_signal(sig);
+            if crate::builtins::exec::process_replacement_enabled()
+                && self.executor.owns_process_image()
+            {
+                die_by_signal(sig);
+            } else {
+                self.resolved_status = 128 + sig;
+            }
         }
     }
 
@@ -9506,6 +9523,14 @@ pub fn finish_shell(executor: &mut Executor, status: i32, interactive: bool) -> 
 /// signal. The signal is explicitly unblocked first (a delivery
 /// could have been consumed while masked at some layer); the plain
 /// exit is the fallback that in practice is unreachable.
+///
+/// Process-ownership contract (rubash#4211): callers may invoke
+/// this only when the hosting binary opted into process replacement
+/// AND the executor owns the process image (the standalone shell's
+/// root executor). Embedded Session hosts and fork-copy executors
+/// share a process that must survive the shell finish; their termsig
+/// completion is the shell-level status 128+sig, never a raise/exit
+/// here.
 #[cfg(unix)]
 fn die_by_signal(sig: i32) -> ! {
     // SAFETY: disposition and mask changes plus a self-directed raise
@@ -9519,6 +9544,25 @@ fn die_by_signal(sig: i32) -> ! {
         libc::raise(sig);
     }
     std::process::exit(128 + sig);
+}
+
+#[cfg(all(test, unix))]
+mod finish_pass_process_ownership_tests {
+    use super::*;
+
+    #[test]
+    fn embedded_finish_reports_termsig_status_without_process_death() {
+        let sig = libc::SIGTERM;
+        let mut executor = Executor::new();
+        assert!(!crate::builtins::exec::process_replacement_enabled());
+        assert!(executor.owns_process_image());
+        assert!(executor.note_routed_untrapped_termsig(sig));
+
+        let mut pass = FinishPass::new(&mut executor, 0, false);
+        pass.run_stream_end_duties(FinishHistoryGate::Skip);
+
+        assert_eq!(pass.resolved_status(), 128 + sig);
+    }
 }
 
 /// shell.c:1830-1842 init_interactive + bashhist.c:320-345: create the

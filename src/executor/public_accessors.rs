@@ -2357,6 +2357,18 @@ impl Executor {
         self.shell_state.invocation_login
     }
 
+    /// rubash#4211: whether this executor is the process-root owner
+    /// whose process image a process-level operation may act on.
+    /// Fork-copy executors (command substitution and the other
+    /// in-process fork models) share a process that must survive
+    /// them. Ownership is necessary but not sufficient: the hosting
+    /// binary must also have opted in with
+    /// `builtins::exec::enable_process_replacement` before any
+    /// execve/signal-death operation may end the process.
+    pub(crate) fn owns_process_image(&self) -> bool {
+        self.owns_process_image
+    }
+
     /// Declare the invocation shape directly (the funnel
     /// `SessionBuilder::invocation_shape` applies at build time):
     /// writes the typed state AND its projection carriers in one

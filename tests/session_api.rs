@@ -604,6 +604,70 @@ fn run_line_records_and_runs() {
 // Close: the finish machinery's duties are the contract's (§5.1).
 // ---------------------------------------------------------------------------
 
+#[cfg(unix)]
+const EMBEDDED_TERMSIG_CHILD_ENV: &str = "RUBASH_SESSION_API_EMBEDDED_TERMSIG_CHILD";
+#[cfg(unix)]
+const EMBEDDED_TERMSIG_DIR_ENV: &str = "RUBASH_SESSION_API_EMBEDDED_TERMSIG_DIR";
+
+/// rubash#4211: an embedded Session reports a termsig finish as
+/// 128+sig; it must not re-raise the signal or exit the host process.
+/// The body runs in a re-executed test process so the pre-fix failure
+/// mode (death by SIGTERM) is observable as the child's wait status
+/// instead of killing the whole integration-test harness.
+#[cfg(unix)]
+fn embedded_termsig_close_child(dir: &PathBuf) {
+    let expected = 128 + libc::SIGTERM;
+    let mut session = Session::builder()
+        .env("OUT", dir.to_string_lossy().into_owned())
+        .build()
+        .expect("session builds");
+    session
+        .run("trap 'echo trapped > \"$OUT/trap.txt\"' EXIT", &opts())
+        .expect("trap run");
+    session.inject_signal(libc::SIGTERM);
+    let outcome = session
+        .run("true", &opts())
+        .expect("termsig adjudication run");
+    assert_eq!(
+        outcome.status, expected,
+        "the queued termsig must adjudicate before close: {:?}",
+        outcome.classification
+    );
+
+    let report = session.close_with_report();
+    assert_eq!(report.status, expected);
+    assert_eq!(read(dir, "trap.txt"), "trapped\n");
+    println!("embedded termsig close returned {expected}");
+}
+
+#[cfg(unix)]
+#[test]
+fn embedded_session_termsig_close_does_not_kill_host_process() {
+    if std::env::var_os(EMBEDDED_TERMSIG_CHILD_ENV).is_some() {
+        let dir =
+            PathBuf::from(std::env::var_os(EMBEDDED_TERMSIG_DIR_ENV).expect("child temp dir env"));
+        embedded_termsig_close_child(&dir);
+        return;
+    }
+
+    let dir = temp_dir("embedded-termsig-close");
+    let mut command = std::process::Command::new(std::env::current_exe().expect("test executable"));
+    command
+        .arg("--exact")
+        .arg("embedded_session_termsig_close_does_not_kill_host_process")
+        .arg("--nocapture")
+        .env(EMBEDDED_TERMSIG_CHILD_ENV, "1")
+        .env(EMBEDDED_TERMSIG_DIR_ENV, &dir);
+    let output = command.output().expect("run embedded-close child");
+    assert!(
+        output.status.success(),
+        "embedded host must survive close and report 128+SIGTERM; status {:?}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn close_runs_exit_trap_and_persistent_procsub_delivery() {
     let dir = temp_dir("close");
