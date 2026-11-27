@@ -3464,12 +3464,12 @@ impl Executor {
             }
             // rubash#1688: a pipeline member is a fork of the shell
             // like any external child — pin the ambient descriptors.
-            self.attach_ambient_fd_pins(consumers[index], &mut process);
+            let mut parent_side_dups = self.attach_ambient_fd_pins(consumers[index], &mut process);
             // rubash#2308: the Text half of the ambient delivery
             // (heredoc bodies have no handle to pin); the parent-side
             // dups live until this stage's spawn resolves.
-            let parent_side_dups =
-                self.attach_ambient_text_delivery(consumers[index], &mut process);
+            parent_side_dups
+                .extend(self.attach_ambient_text_delivery(consumers[index], &mut process));
             self.stamp_spawn_cwd(&mut process);
             suppress_orphan_console(&mut process);
             // rubash#3456: a fatal arithmetic error in this member's
@@ -4489,12 +4489,12 @@ impl Executor {
             // diagnostic — a bare `line 1: Unknown error` hid which stage's
             // CreateProcess failed (and with which binary).
             // rubash#1688: pin the ambient descriptors for the stage.
-            self.attach_ambient_fd_pins(&commands[index], &mut process);
+            let mut parent_side_dups = self.attach_ambient_fd_pins(&commands[index], &mut process);
             // rubash#2308: the Text half of the ambient delivery
             // (heredoc bodies have no handle to pin); the parent-side
             // dups live until this stage's spawn resolves.
-            let parent_side_dups =
-                self.attach_ambient_text_delivery(&commands[index], &mut process);
+            parent_side_dups
+                .extend(self.attach_ambient_text_delivery(&commands[index], &mut process));
             self.stamp_spawn_cwd(&mut process);
             suppress_orphan_console(&mut process);
             // rubash#3456: a fatal arithmetic error in this member's
@@ -4859,11 +4859,12 @@ impl Executor {
             // binding — see the plan computed above the spawn loop.
             stderr_plan.wire(&mut process)?;
             // rubash#1688: pin the ambient descriptors for the stage.
-            self.attach_ambient_fd_pins(commands[index], &mut process);
+            let mut parent_side_dups = self.attach_ambient_fd_pins(commands[index], &mut process);
             // rubash#2308: the Text half of the ambient delivery
             // (heredoc bodies have no handle to pin); the parent-side
             // dups live until this stage's spawn resolves.
-            let parent_side_dups = self.attach_ambient_text_delivery(commands[index], &mut process);
+            parent_side_dups
+                .extend(self.attach_ambient_text_delivery(commands[index], &mut process));
             self.stamp_spawn_cwd(&mut process);
             suppress_orphan_console(&mut process);
             // rubash#3456: a fatal arithmetic error in this member's
@@ -5339,8 +5340,8 @@ impl Executor {
             }
             // rubash#1688 / #2308: ambient fd delivery, as in the
             // sibling paths.
-            self.attach_ambient_fd_pins(command, &mut process);
-            let parent_side_dups = self.attach_ambient_text_delivery(command, &mut process);
+            let mut parent_side_dups = self.attach_ambient_fd_pins(command, &mut process);
+            parent_side_dups.extend(self.attach_ambient_text_delivery(command, &mut process));
             self.stamp_spawn_cwd(&mut process);
             suppress_orphan_console(&mut process);
             // rubash#3456: a fatal arithmetic error in this member's
@@ -6438,7 +6439,7 @@ impl Executor {
             stderr_plan.wire(&mut process)?;
 
             // rubash#1688: pin the ambient descriptors for the stage.
-            self.attach_ambient_fd_pins(&commands[index], &mut process);
+            let mut parent_side_dups = self.attach_ambient_fd_pins(&commands[index], &mut process);
             // rubash#2589: the operand pass's descriptor deliveries
             // (fresh-open handles, endpoint pipes) pin AFTER the
             // ambient pins so they win their own slots — the order
@@ -6447,8 +6448,8 @@ impl Executor {
             // rubash#2308: the Text half of the ambient delivery
             // (heredoc bodies have no handle to pin); the parent-side
             // dups live until this stage's spawn resolves.
-            let parent_side_dups =
-                self.attach_ambient_text_delivery(&commands[index], &mut process);
+            parent_side_dups
+                .extend(self.attach_ambient_text_delivery(&commands[index], &mut process));
             self.stamp_spawn_cwd(&mut process);
             suppress_orphan_console(&mut process);
             // rubash#2836 slice 4: under job control every stage joins
