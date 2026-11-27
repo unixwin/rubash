@@ -842,56 +842,57 @@ fn scan(args: &[String]) -> ScanOutcome {
                 break;
             }
         }
-        let Some(&c) = word.as_bytes().get(sp) else {
+        let Some(ch) = word.get(sp..).and_then(|s| s.chars().next()) else {
             index += 1;
             sp = 1;
             continue;
         };
-        match c {
-            b'a' => {
+        let step = ch.len_utf8();
+        match ch {
+            'a' => {
                 all_limits = true;
-                sp += 1;
+                sp += step;
                 if sp >= word.len() {
                     index += 1;
                     sp = 1;
                 }
             }
-            b'S' => {
+            'S' => {
                 mode |= LIMIT_SOFT;
-                sp += 1;
+                sp += step;
                 if sp >= word.len() {
                     index += 1;
                     sp = 1;
                 }
             }
-            b'H' => {
+            'H' => {
                 mode |= LIMIT_HARD;
-                sp += 1;
+                sp += step;
                 if sp >= word.len() {
                     index += 1;
                     sp = 1;
                 }
             }
-            _ if findlim(char::from(c)).is_some() => {
+            _ if findlim(ch).is_some() => {
                 // `';'` option (bashgetopt.c:104-136): an attached rest
                 // (`-n2048`) or the following non-option word is the
                 // argument; otherwise none.
-                let attached = &word[sp + 1..];
+                let attached = &word[sp + step..];
                 if !attached.is_empty() {
-                    cmdlist.push((char::from(c), Some(attached.to_string())));
+                    cmdlist.push((ch, Some(attached.to_string())));
                     index += 1;
                     sp = 1;
                 } else if index + 1 < args.len() && notopt(&args[index + 1]) {
-                    cmdlist.push((char::from(c), Some(args[index + 1].clone())));
+                    cmdlist.push((ch, Some(args[index + 1].clone())));
                     index += 2;
                     sp = 1;
                 } else {
-                    cmdlist.push((char::from(c), None));
+                    cmdlist.push((ch, None));
                     index += 1;
                     sp = 1;
                 }
             }
-            _ => return ScanOutcome::InvalidOption(char::from(c)),
+            _ => return ScanOutcome::InvalidOption(ch),
         }
     }
 
@@ -1174,3 +1175,20 @@ where
 // `./script: line N:` when running a script file (baseline:
 // `./builtins11.sub: line 37: ulimit: -g: invalid option`), and the
 // shared builder names the frame's definition file (rubash#3035).
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn utf8_invalid_option_is_not_widened_as_latin1() {
+        assert!(matches!(
+            scan(&["-é".to_string()]),
+            ScanOutcome::InvalidOption('é')
+        ));
+        assert!(matches!(
+            scan(&["-a中".to_string()]),
+            ScanOutcome::InvalidOption('中')
+        ));
+    }
+}
