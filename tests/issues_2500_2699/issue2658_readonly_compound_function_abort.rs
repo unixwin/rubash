@@ -220,3 +220,29 @@ fn issue2658_top_level_errors_diagnose_once_and_continue() {
         "probe.sh: line 2: r: readonly variable\nprobe.sh: line 5: r2: readonly variable\n",
     );
 }
+
+/// rubash#4160 (R1): `declare -g` (and `typeset -g` / `local -g`) with a
+/// compound assignment against a readonly global inside a function emits
+/// ONE bare-name diagnostic and unwinds the function with status 1 (DISCARD).
+#[test]
+fn issue4160_declare_g_readonly_compound_aborts_function_once() {
+    check(
+        "declare-g-r1",
+        "readonly r=1\nf() { declare -g r=(2); echo AFTER_F; }\ng() { typeset -g r=(2); echo AFTER_G; }\nh() { local -g r=(2); echo AFTER_H; }\nf\necho \"rc_f=$?\"\ng\necho \"rc_g=$?\"\nh\necho \"rc_h=$?\"\ndeclare -p r\n",
+        "rc_f=1\nrc_g=1\nrc_h=1\ndeclare -r r=\"1\"\n",
+        "probe.sh: line 2: r: readonly variable\nprobe.sh: line 3: r: readonly variable\nprobe.sh: line 4: r: readonly variable\n",
+    );
+}
+
+/// rubash#4160 (R2): `declare` / `local` / `typeset` with a compound
+/// assignment against a same-scope readonly local inside a function emits
+/// ONE bare-name diagnostic and unwinds the function with status 1 (DISCARD).
+#[test]
+fn issue4160_same_scope_readonly_local_compound_aborts_function_once() {
+    check(
+        "same-scope-r2",
+        "f() { local -r r=1; declare r=(2); echo AFTER_F; }\ng() { local -ra r=(1); local r=(2); echo AFTER_G; }\nh() { local -ra r=(1); typeset r=(2); echo AFTER_H; }\nf\necho \"rc_f=$?\"\ng\necho \"rc_g=$?\"\nh\necho \"rc_h=$?\"\n",
+        "rc_f=1\nrc_g=1\nrc_h=1\n",
+        "probe.sh: line 1: r: readonly variable\nprobe.sh: line 2: r: readonly variable\nprobe.sh: line 3: r: readonly variable\n",
+    );
+}
