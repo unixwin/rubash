@@ -10713,6 +10713,7 @@ fn normalize_pipeerr_stage(command: &CommandNode) -> CommandNode {
         kind: crate::parser::RedirectKind::DuplicateOutput,
         target: "&1".to_string(),
         target_metadata: Box::new(target_metadata),
+        target_start_position: None,
         append: false,
         clobber: false,
     };

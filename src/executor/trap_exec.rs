@@ -4709,6 +4709,7 @@ impl Executor {
                         target.clone(),
                     )),
                     target,
+                    target_start_position: None,
                     append: true,
                     clobber: false,
                 };
@@ -4743,6 +4744,7 @@ impl Executor {
                     target.clone(),
                 )),
                 target,
+                target_start_position: None,
                 append: true,
                 clobber: false,
             };
@@ -4805,6 +4807,7 @@ impl Executor {
                         target.clone(),
                     )),
                     target,
+                    target_start_position: None,
                     append: true,
                     clobber: false,
                 };
@@ -4847,6 +4850,7 @@ impl Executor {
                         target.clone(),
                     )),
                     target,
+                    target_start_position: None,
                     append: true,
                     clobber: false,
                 };

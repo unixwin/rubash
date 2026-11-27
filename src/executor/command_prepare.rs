@@ -2448,7 +2448,7 @@ impl Executor {
             .comsub_site_frame
             .replace(Some(crate::executor::ComsubSiteFrame {
                 generation: self.preopened_generation.get(),
-                slot: index as u32,
+                slot: crate::executor::ComsubElementSlot::CommandWord(index as u32),
                 line: frame_line,
             }));
         let expanded = self.expand_command_word_inner(cmd, index, word, raw);

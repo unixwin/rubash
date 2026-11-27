@@ -2643,14 +2643,28 @@ impl Executor {
             // stdin_string_for_command_mut (rubash#270: without it,
             // `while read v; done <<< alpha` stages "alpha" and the read
             // ends at EOF-without-delimiter).
-            let mut input = self.expand_here_string_mut_from_carrier(&cmd.here_string_carrier);
+            let redirect = cmd.redirects.iter().rev().find(|redirect| {
+                redirect.kind == crate::parser::RedirectKind::HereString
+                    && redirect.fd.is_none()
+                    && redirect.fd_var.is_none()
+            });
+            let mut input = self.with_redirect_comsub_site_frame_mut(redirect, |executor| {
+                executor.expand_here_string_mut_from_carrier(&cmd.here_string_carrier)
+            });
             input.push('\n');
             return Some(input);
         }
         if let Some(here_string) = cmd.here_string.clone() {
             // Here-string content already had quote removal applied by the
             // parser; expand only substitutions with quotes-as-data semantics.
-            let mut input = self.expand_here_string_mut(&here_string);
+            let redirect = cmd.redirects.iter().rev().find(|redirect| {
+                redirect.kind == crate::parser::RedirectKind::HereString
+                    && redirect.fd.is_none()
+                    && redirect.fd_var.is_none()
+            });
+            let mut input = self.with_redirect_comsub_site_frame_mut(redirect, |executor| {
+                executor.expand_here_string_mut(&here_string)
+            });
             input.push('\n');
             return Some(input);
         }

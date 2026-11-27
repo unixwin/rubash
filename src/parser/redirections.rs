@@ -208,7 +208,7 @@ pub(super) fn collect_trailing_redirections(
                 let fd = redirect_operator_fd(&token.value)
                     .or_else(|| take_adjacent_redirect_fd_prefix(command, tokens, *index));
                 let (dup_value, dup_raw) = dup_close_target(command, &token.value, target);
-                let redirect = redirect_node_with_fd_var_raw(
+                let mut redirect = redirect_node_with_fd_var_raw(
                     &token.value,
                     fd,
                     redirect_fd_var_prefix(tokens, *index),
@@ -217,6 +217,7 @@ pub(super) fn collect_trailing_redirections(
                     false,
                     false,
                 );
+                redirect.target_start_position = Some((target.position, target.column));
                 command.redirects.push(redirect.clone());
                 if redirect.fd_var.is_none() && redirect.fd.unwrap_or(0) == 0 {
                     command.redirect_in = Some(Box::new(redirect));
@@ -305,6 +306,18 @@ pub(super) fn collect_trailing_redirections(
                     &target.raw,
                     redirect_fd_var_prefix(tokens, *index),
                 );
+                // rubash#4197: the fd-less here-string's expansion reads
+                // the `here_string` mirror rather than this list entry at
+                // execution time, but the list entry is the redirect word's
+                // metadata carrier. Stamp it before any mirror/clone can be
+                // consulted so the executor frames the word at its own
+                // physical start, not at the compound command's end.
+                if let Some(redirect) = command.redirects.last_mut() {
+                    redirect.target_start_position = Some((target.position, target.column));
+                }
+                if let Some(redirect) = command.heredoc_redirects.last_mut() {
+                    redirect.target_start_position = Some((target.position, target.column));
+                }
             }
             TokenKind::HereDoc => {
                 let fd = redirect_operator_fd(&token.value)
@@ -384,6 +397,7 @@ pub(super) fn assign_here_string_redirect_raw(
             here_string: true,
             body: Some(format!("{STORAGE_WORD_PREFIX_STR}{target}")),
             body_carrier: None,
+            target_start_position: None,
             gather_line: None,
         });
     } else {
@@ -598,6 +612,7 @@ pub(super) fn redirect_node_with_raw(
         kind: redirect_kind(operator, target),
         target: target.to_string(),
         target_metadata: Box::new(build_word_metadata(0, target, raw_target)),
+        target_start_position: None,
         append,
         clobber,
     }
@@ -1072,6 +1087,7 @@ pub(super) fn heredoc_redirect(
         here_string: false,
         body: None,
         body_carrier: None,
+        target_start_position: None,
         gather_line: None,
     }
 }

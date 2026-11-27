@@ -32,6 +32,13 @@ pub struct Redirect {
     pub kind: RedirectKind,
     pub target: String,
     pub target_metadata: Box<WordMetadata>,
+    /// rubash#4197: the PHYSICAL (line, column) where this redirect's
+    /// target word token started, when the parser read the word from
+    /// source. The executor uses it as the element identity/header-line
+    /// anchor for a command substitution inside the redirect word — the
+    /// redirect counterpart of CommandNode::word_start_lines. Synthetic
+    /// redirects carry None and keep the pre-existing fallback.
+    pub target_start_position: Option<(usize, usize)>,
     pub append: bool,
     pub clobber: bool,
 }
@@ -104,6 +111,12 @@ pub struct HereDocRedirect {
     /// `heredoc_redirects`; both need the typed carrier to avoid the in-band
     /// sentinel.
     pub body_carrier: Option<StdinBody>,
+    /// rubash#4197: for a here-string redirect, the PHYSICAL (line, column)
+    /// where its word token started. This mirrors Redirect::target_start_position
+    /// for the fd-prefixed representation, whose expansion walks this struct
+    /// rather than the ordered Redirect entry. Ordinary heredocs and synthetic
+    /// rows carry None.
+    pub target_start_position: Option<(usize, usize)>,
     /// Physical line where this heredoc's body scan began — the `line_number`
     /// GNU passes to make_here_document from gather_here_documents
     /// (parse.y:3130): the line on which the logical command line ended, plus
