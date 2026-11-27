@@ -80,10 +80,10 @@ where
     // TODO(builtins/trap.def/sig.c): Install real process signal handlers and
     // run EXIT/DEBUG/ERR/RETURN traps through Bash's unwind machinery. This
     // implements the shell-visible trap table and `trap -p` output.
+    // GNU builtins/trap.def:114 internal_getopt(list, "lpP"): `--` ends option
+    // scanning so a leading `--` makes a dash-prefixed handler (`trap -- -x INT`)
+    // an action operand rather than an option.
     let mut index = 0;
-    if args.first().map(String::as_str) == Some("--") {
-        index = 1;
-    }
 
     let mut list_signals = false;
     let mut print_trap_commands = false;
@@ -1349,6 +1349,59 @@ mod tests {
         assert_eq!(super::normalize_signal("RTMAX"), None);
         assert_eq!(super::normalize_signal("32"), None);
         assert_eq!(super::normalize_signal("64"), None);
+    }
+
+    #[test]
+    fn leading_double_dash_stops_option_scanning() {
+        let mut vars = super::VarTable::default();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let rc = super::execute_with_io(
+            &["--".to_string(), "-x".to_string(), "INT".to_string()],
+            &mut vars,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        assert_eq!(rc, 0, "stderr={}", String::from_utf8_lossy(&err));
+
+        out.clear();
+        err.clear();
+        let rc = super::execute_with_io(
+            &["-p".to_string(), "INT".to_string()],
+            &mut vars,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        assert_eq!(rc, 0);
+        assert_eq!(
+            String::from_utf8(out).unwrap().trim(),
+            "trap -- '-x' SIGINT"
+        );
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let rc = super::execute_with_io(
+            &["--".to_string(), "-p".to_string(), "INT".to_string()],
+            &mut vars,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        assert_eq!(rc, 0);
+        out.clear();
+        super::execute_with_io(
+            &["-p".to_string(), "INT".to_string()],
+            &mut vars,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap().trim(),
+            "trap -- '-p' SIGINT"
+        );
     }
 
     /// Non-unix builds pin the Windows mailbox wire format (Linux
