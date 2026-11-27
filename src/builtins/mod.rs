@@ -23,7 +23,6 @@ pub mod hash;
 pub mod help;
 pub mod history;
 pub mod jobs;
-#[allow(dead_code)] // Refs #4206: clean after #4221 merges
 pub mod kill;
 pub mod logout;
 pub(crate) mod prefix;

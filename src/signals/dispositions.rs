@@ -500,16 +500,6 @@ pub(in crate::signals) mod kernel_signals {
         }
     }
 
-    /// True when every managed signal currently sits at `Default` in the
-    /// recorded disposition state, so a reconcile whose wish-list is also
-    /// all-Default has nothing to do. Used by the boundary-poll fast path
-    /// (rubash#437) to skip the mutex + per-signal loop on the steady-state
-    /// command path. Reads the packed state words atomically; no lock.
-    pub(in crate::signals) fn at_default_state() -> bool {
-        DISPOSITION_STATE[0].load(Ordering::Relaxed) & state_mask(0) == 0
-            && DISPOSITION_STATE[1].load(Ordering::Relaxed) & state_mask(1) == 0
-    }
-
     /// The packed wish-space state of the ENTRY baseline: state 1
     /// (Ignore) for each signal that was SIG_IGN when this process was
     /// exec'd, 0 (Default) for every other managed signal. GNU snapshots
@@ -543,7 +533,7 @@ pub(in crate::signals) mod kernel_signals {
     /// rubash#2630: seed_startup_traps materializes each entry-ignored
     /// signal as an empty trap-table entry whose wish is Ignore, so the
     /// recorded state parks those signals at 1 forever and the
-    /// all-Default test in at_default_state could never pass — every
+    /// pre-rubash#2630 all-Default state test could never pass — every
     /// command boundary paid the full slow-path reconcile (~2x per
     /// command) in exactly the supervisor/nohup launch shape that
     /// ignores signals on entry. The gate stays sound because it pairs
@@ -1099,8 +1089,8 @@ pub(in crate::signals) mod kernel_signals {
     /// an ignored SIGQUIT and showed `trap -- '' SIGQUIT`). A snapshot
     /// handler that is neither SIG_DFL nor SIG_IGN records state 3
     /// ("foreign"): it never equals a reconcile target, so a later
-    /// era's reconciles always re-apply, and `at_default_state` stays
-    /// honestly false.
+    /// era's reconciles always re-apply, and the baseline-state fast
+    /// path stays honestly closed.
     pub(in crate::signals) fn release_session_policy() {
         let _process_state = crate::executor::local_helpers::acquire_process_state();
         let mut slot = SESSION_POLICY.lock().unwrap_or_else(|e| e.into_inner());
@@ -1444,6 +1434,7 @@ fn extend_trap_keys(keys: &mut Vec<(i32, String, String)>) {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
+#[cfg_attr(not(unix), allow(dead_code))]
 fn extend_trap_keys(_keys: &mut Vec<(i32, String, String)>) {}
 
 /// rubash#2347: the trap builtin's REVERT special case for an
@@ -1758,17 +1749,6 @@ pub fn reconcile_kernel_trap_dispositions(env_vars: &std::collections::HashMap<S
     ]);
 }
 
-/// Short signal name (TERM) for the __RUBASH_TRAP_SIG* key family, matching
-/// signal_trap_name's SIG{name} form minus the SIG prefix.
-#[cfg(unix)]
-fn signal_short_name(signal: i32) -> &'static str {
-    managed_trap_keys()
-        .iter()
-        .find(|(sig, _, _)| *sig == signal)
-        .map(|(_, short, _)| short.as_str())
-        .unwrap_or("")
-}
-
 /// Whether an armed EXIT trap reroutes `sig` through the handler
 /// (sig.c:226-229 initialize_terminating_signals). GNU's terminating
 /// set is a compile-time C table (sig.c:127 terminating_signals[]), so
@@ -1802,6 +1782,7 @@ fn exit_reroutes_platform(sig: i32) -> bool {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
+#[cfg_attr(not(unix), allow(dead_code))]
 fn exit_reroutes_platform(_sig: i32) -> bool {
     true
 }
