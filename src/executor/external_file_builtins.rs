@@ -3176,12 +3176,12 @@ impl Executor {
     /// transports (read_helpers::read_stdin_until), so an EOF verdict
     /// stops the collection with the rest of the stream still queued
     /// for the next reader.
-    fn disciplined_process_stdin_bytes(&mut self) -> Result<Vec<u8>, ExecuteError> {
+    pub(in crate::executor) fn disciplined_process_stdin_bytes(&self) -> std::io::Result<Vec<u8>> {
         let handle = crate::fd::process_std_handle(0);
         let mut discipline = super::read_helpers::ConsoleLineDiscipline::new();
         let mut out = Vec::new();
         loop {
-            let buf = crate::fd::read_some(handle, 1).map_err(ExecuteError::IoError)?;
+            let buf = crate::fd::read_some(handle, 1)?;
             if buf.is_empty() {
                 discipline.finish(&mut out);
                 break;

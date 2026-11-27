@@ -2802,6 +2802,26 @@ impl Executor {
         ))
     }
 
+    /// Render bytes read by the `$(< file)` quick-read. GNU reads them
+    /// through read_comsub (subst.c:6682), whose byte loop drops NULs and
+    /// warns once (subst.c:6720-6729) rather than validating UTF-8; the
+    /// surviving bytes use the same shell-text carrier as every other
+    /// substitution capture. Trailing capture terminators are removed by
+    /// the caller-visible conversion below.
+    fn comsub_quickread_bytes_output(&self, bytes: &[u8]) -> String {
+        self.last_command_substitution_status.set(Some(0));
+        if bytes.contains(&0) {
+            self.warn_comsub_nul_bytes();
+            let bytes: Vec<u8> = bytes.iter().copied().filter(|byte| *byte != 0).collect();
+            return bytes_to_shell_text(&bytes)
+                .trim_capture_terminator()
+                .to_string();
+        }
+        bytes_to_shell_text(bytes)
+            .trim_capture_terminator()
+            .to_string()
+    }
+
     /// Runs the admitted `$(< file)` body: builtins/evalstring.c:759
     /// open_redir_file on the redirect operand. Expansion follows
     /// redir.c:298 redirection_expand — expand_words_no_vars on the single
@@ -2949,46 +2969,126 @@ impl Executor {
         // `/dev/fd/+3` was accepted here even though GNU rejects that
         // spelling on every face.
         if let Some(fd) = crate::special_paths::fd_alias_target(file_word) {
+            let enoent =
+                || std::io::Error::new(std::io::ErrorKind::NotFound, "No such file or directory");
+            // GNU open_redir_file performs the plain open(fn, O_RDONLY)
+            // (builtins/evalstring.c:780); for an fd spelling on a
+            // HAVE_DEV_STDIN/HAVE_DEV_FD host the kernel resolves that
+            // open against the descriptor. A closed or absent descriptor
+            // therefore fails in the OPEN with ENOENT — the spelling must
+            // never fall through to the host filesystem (on Windows that
+            // path maps /dev/stdin to CONIN$, which is the console rather
+            // than STD_INPUT_HANDLE and blocks even when fd 0 is a pipe,
+            // a file, or NUL).
+            if self.fd_table.is_closed(fd) {
+                return fail(file_word, enoent());
+            }
+            // A socket's magic-link open fails ENXIO before any stream
+            // service (rubash#2276; fd_alias_spelling_open_error owns the
+            // endpoint-kind judgment).
+            if let Some(error) = self.fd_alias_spelling_open_error(fd) {
+                return fail(file_word, error);
+            }
             if let Some((data, offset)) = self.fd_table.input_snapshot_bytes(fd) {
                 if let Some(content) = data.get(offset..).map(<[u8]>::to_vec) {
-                    self.last_command_substitution_status.set(Some(0));
-                    return bytes_to_shell_text(&content)
-                        .trim_capture_terminator()
-                        .to_string();
+                    return self.comsub_quickread_bytes_output(&content);
                 }
-            }
-            // rubash#1952: a streamed procsub binds a live File
-            // endpoint instead of a buffered one — drain it
-            // through the shared handle (reads to EOF, the
-            // quick-read's defining semantics).
-            if let Some(content) = self.fd_table.read_file_endpoint_bytes(fd) {
-                self.last_command_substitution_status.set(Some(0));
-                return bytes_to_shell_text(&content)
-                    .trim_capture_terminator()
-                    .to_string();
             }
             // rubash#3964: the enclosing context's fd 0 can ride the
             // FUNCTION_STDIN channel instead of the fd table — a
             // pipeline stage's input for in-process stages (brace
-            // groups, subshells), a function's stdin. The table arms
-            // above carry no endpoint for it, so the ladder fell
-            // through to the filesystem read below and read the
-            // PROCESS's own /dev/stdin (empty at ambient EOF, a
-            // block while a live ambient stdin stays open). Presence
-            // of the channel is the fd-0 binding (rubash#2111),
-            // shadowed by a virtual fd-0 endpoint (a File endpoint
-            // is served by the arm above) and never serving a
-            // closed fd 0. Serve it through the same cursor the
-            // $(cat /dev/stdin) shortcut uses, writeback included.
+            // groups, subshells), a function's stdin. Presence of the
+            // channel is the fd-0 binding (rubash#2111), shadowed by a
+            // virtual or File fd-0 endpoint and never serving a closed
+            // fd 0. This must precede the inherited-process-stdin serve:
+            // FdTable::new seeds fd 0 as InheritedProcessStdin even when
+            // the logical fd arrives through this channel.
             if fd == 0
-                && !self.fd_table.is_closed(0)
                 && self.virtual_fd_stdin_remaining(0).is_none()
+                && !matches!(
+                    self.fd_table.read_endpoint(0),
+                    Some(FdReadEndpoint::File(_))
+                )
                 && self.shell_state.env_vars.contains_key(FUNCTION_STDIN)
             {
                 let text = self.comsub_cat_function_stdin_text();
                 self.last_command_substitution_status.set(Some(0));
                 return text.trim_capture_terminator().to_string();
             }
+            // A regular-file endpoint re-opens through the magic link as
+            // a fresh open file description at offset 0 (the #2256 alias
+            // rule): `read a; x=$(</dev/stdin)` with stdin on a file
+            // serves the whole file again instead of only the unread
+            // tail. fd_alias_reopen_path also answers fd 0 and inherited
+            // stdin dups. A failed fresh open falls through to the stream
+            // serve, as the alias open does for an unlinked target.
+            if let Some(path) = self.fd_alias_reopen_path(fd) {
+                if let Ok(content) = fs::read(&path) {
+                    return self.comsub_quickread_bytes_output(&content);
+                }
+            }
+            // rubash#1952: a streamed procsub binds a live File endpoint
+            // instead of a buffered one — pipes and other non-reopenable
+            // File endpoints drain through their shared handle (reads to
+            // EOF, the quick-read's defining semantics).
+            if let Some(content) = self.fd_table.read_file_endpoint_bytes(fd) {
+                return self.comsub_quickread_bytes_output(&content);
+            }
+            let drain_handle_bytes = |handle| -> std::io::Result<Vec<u8>> {
+                let mut bytes = Vec::new();
+                loop {
+                    match crate::fd::read_some(handle, 65536) {
+                        Ok(chunk) if chunk.is_empty() => break Ok(bytes),
+                        Ok(chunk) => bytes.extend_from_slice(&chunk),
+                        Err(error) if error.kind() == std::io::ErrorKind::IsADirectory => {
+                            break Ok(bytes);
+                        }
+                        Err(error) if bytes.is_empty() => break Err(error),
+                        Err(_) => break Ok(bytes),
+                    }
+                }
+            };
+            match self.fd_table.read_endpoint(fd) {
+                Some(FdReadEndpoint::InheritedProcessStdin) => {
+                    // fd 0 (and every dup carrying this endpoint) names
+                    // the process stdin stream. A pipe cannot be
+                    // re-opened, so GNU's magic-link open attaches to the
+                    // same stream: drain it here and advance the shared
+                    // cursor for a later `read`. Windows console input is
+                    // the one source that needs the canonical line
+                    // discipline; pipes, files already served above, and
+                    // NUL take the raw handle drain.
+                    let drained = if self.console_line_discipline_armed() {
+                        self.disciplined_process_stdin_bytes()
+                    } else {
+                        drain_handle_bytes(crate::fd::process_std_handle(0))
+                    };
+                    match drained {
+                        Ok(content) => return self.comsub_quickread_bytes_output(&content),
+                        Err(error) => return fail(file_word, error),
+                    }
+                }
+                Some(FdReadEndpoint::Directory) => {
+                    return self.comsub_quickread_bytes_output(&[]);
+                }
+                Some(FdReadEndpoint::CoprocStdout { fd: file, .. }) => {
+                    match drain_handle_bytes(file.handle) {
+                        Ok(content) => return self.comsub_quickread_bytes_output(&content),
+                        Err(error) => return fail(file_word, error),
+                    }
+                }
+                _ => {}
+            }
+            if let Some(FdWriteEndpoint::File(file)) = self.fd_table.write_endpoint(fd) {
+                if is_null_device(&file.path.to_string_lossy()) {
+                    return self.comsub_quickread_bytes_output(&[]);
+                }
+            }
+            // Every fd spelling is an open of the descriptor's alias,
+            // never a filesystem fallback. If no endpoint above could
+            // serve it (most importantly an unopened number), GNU's open
+            // fails ENOENT.
+            return fail(file_word, enoent());
         }
         // rubash#2359: there is deliberately NO net arm in this
         // ladder. GNU's $(<file) shortcut is optimize_cat_file
@@ -3021,10 +3121,7 @@ impl Executor {
         // Before, Windows had no /proc file for the mapped path to
         // land on, so `$(</proc/meminfo)` silently read empty.
         if let Some(bytes) = crate::special_paths::synthetic_proc_content(file_word) {
-            self.last_command_substitution_status.set(Some(0));
-            return bytes_to_shell_text(&bytes)
-                .trim_capture_terminator()
-                .to_string();
+            return self.comsub_quickread_bytes_output(&bytes);
         }
         // rubash#2211: the plain filesystem read anchors a relative
         // operand at the SESSION cwd, like every other comsub face
@@ -3073,28 +3170,17 @@ impl Executor {
         //   it for spellings whose stat still resolves; the EISDIR
         //   mapping below models it for the anchored route, where
         //   the joined spelling's stat is dead.
-        // The anchored read returns bytes; the string conversion
-        // keeps read_to_string's exact failure (InvalidData, same
-        // text) on the fail() path — only the byte source changed.
+        // The anchored read returns bytes. read_comsub consumes bytes
+        // rather than validating UTF-8 (subst.c:6706-6719); the output
+        // conversion above preserves non-UTF-8 bytes through the shell-text
+        // carrier and applies read_comsub's NUL drop.
         let read = if file_word.is_empty() {
             fs::read(&read_path)
         } else {
             self.read_session_anchored(&operand_path, &read_path)
         };
         match read {
-            Ok(bytes) => match String::from_utf8(bytes) {
-                Ok(value) => {
-                    self.last_command_substitution_status.set(Some(0));
-                    value.trim_capture_terminator().to_string()
-                }
-                Err(_) => fail(
-                    file_word,
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "stream did not contain valid UTF-8",
-                    ),
-                ),
-            },
+            Ok(bytes) => self.comsub_quickread_bytes_output(&bytes),
             Err(error) if error.kind() == std::io::ErrorKind::IsADirectory => {
                 self.last_command_substitution_status.set(Some(0));
                 String::new()
