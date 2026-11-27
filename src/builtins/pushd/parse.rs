@@ -136,11 +136,11 @@ pub(super) fn parse_pushd_operand<'a>(
                 diag.usage();
                 return ParseOutcome::Usage;
             };
-            let mut num = digits;
+            let mut num = i128::from(digits);
             if arg.starts_with('-') {
-                num = offset as i64 - num;
+                num = offset as i128 - num;
             }
-            if num > offset as i64 || num < 0 {
+            if num > offset as i128 || num < 0 {
                 super::pushd_error(offset, arg, diag);
                 return ParseOutcome::Failed;
             }
@@ -244,9 +244,12 @@ pub(super) fn parse_popd_operand<'a>(
 
     // pushd.def:374-377: `which > offset || which < -offset ||
     // (offset == 0 && which == 0)` hands `which_word` (or "" when no
-    // ±N word was seen) to pushd_error. `which` is the raw digits,
-    // always >= 0, so the `which < -offset` arm is dead in practice.
-    if which > offset as i64 || (offset == 0 && which == 0) {
+    // ±N word was seen) to pushd_error. `valid_number(word + 1, &which)`
+    // accepts signed values (`--1` -> which = -1), so `which < -offset`
+    // is reachable.
+    let offset_i128 = offset as i128;
+    let which_i128 = i128::from(which);
+    if which_i128 > offset_i128 || which_i128 < -offset_i128 || (offset == 0 && which == 0) {
         super::pushd_error(offset, which_word.unwrap_or(""), diag);
         return ParseOutcome::Failed;
     }
@@ -258,16 +261,45 @@ pub(super) fn parse_popd_operand<'a>(
     // and shifts the remainder left, no chdir. `list[i]` is display
     // slot `len - 1 - i` (the list holds the display tail oldest-
     // first, without the cwd).
-    if (direction == '+' && which == 0) || (direction == '-' && which == offset as i64) {
+    if (direction == '+' && which == 0) || (direction == '-' && which_i128 == offset_i128) {
         return ParseOutcome::Ok(PopdOperand::Top { no_cd });
     }
     let list_index = if direction == '+' {
-        offset as i64 - which
+        offset_i128 - which_i128
     } else {
-        which
+        which_i128
     };
+    // pushd.def:412: `if (i < 0 || i > directory_list_offset)` (and
+    // `i == offset` is already handled by Top above) reports pushd_error.
+    if list_index < 0 || list_index >= offset_i128 {
+        super::pushd_error(offset, which_word.unwrap_or(""), diag);
+        return ParseOutcome::Failed;
+    }
     ParseOutcome::Ok(PopdOperand::Index {
         display_index: offset - list_index as usize,
         no_cd,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn double_signed_offsets_do_not_overflow_or_underflow() {
+        let mut session = crate::api::Session::builder().build().unwrap();
+        assert_eq!(
+            session
+                .run_line("pushd --9223372036854775808 2>/dev/null")
+                .unwrap()
+                .status,
+            1
+        );
+        assert_eq!(
+            session
+                .run_line("pushd /tmp >/dev/null && popd --1 2>/dev/null")
+                .unwrap()
+                .status,
+            1
+        );
+        assert_eq!(session.run_line("popd +-2 2>/dev/null").unwrap().status, 1);
+    }
 }
