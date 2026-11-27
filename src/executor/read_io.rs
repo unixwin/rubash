@@ -228,16 +228,17 @@ impl Executor {
 
     /// GNU read.def:482 `input_is_pipe = fd_ispipe (fd)`: whether the
     /// descriptor the read will consume is a FIFO/pipe — the
-    /// classification that opens GNU's reap window. A `read` on a
-    /// pipe blocks: during that window the SIGCHLD handler's waitchld
-    /// records a dead coproc's status (jobs.c:4173 coproc_pidchk ->
-    /// execute_cmd.c:2323 coproc_setstatus sets COPROC_DEAD) and the
-    /// cleanup that follows disposes it (jobs.c:1342
-    /// cleanup_dead_jobs -> execute_cmd.c:2225 coproc_reap), so
-    /// `coproc xcase ...; read <&${COPROC[0]}` leaves `${COPROC[@]}`
-    /// empty at the next command (coproc.tests, rubash#3633). A read
-    /// of a regular file has no such window: `read -t 1 </dev/null`
-    /// leaves the array bound (GNU 5.3.20 probes).
+    /// classification that opens GNU's reap-recording window. A `read`
+    /// on a pipe blocks: during that window the SIGCHLD handler's
+    /// waitchld records a dead coproc's status (jobs.c:4173
+    /// coproc_pidchk -> execute_cmd.c:2323 coproc_setstatus sets
+    /// COPROC_DEAD). The read itself only publishes that record; the
+    /// pipe-read retirement gate additionally requires evidence that
+    /// this coproc's output pipe reached EOF, so no unread producer
+    /// bytes can be lost to coproc_dispose's close (execute_cmd.c:2166
+    /// -> :2199). A read of a regular file has no such window:
+    /// `read -t 1 </dev/null` leaves the array bound (GNU 5.3.20
+    /// probes).
     fn read_source_is_pipe(&self, cmd: &CommandNode, read_fd: Option<u32>) -> bool {
         let fd = read_fd.unwrap_or(0);
         if fd == 0 {
@@ -301,17 +302,17 @@ impl Executor {
         escape_aware: bool,
         raw: bool,
     ) -> Option<String> {
+        self.fd_table.read_coproc_pipe_eof = None;
         // GNU read.def:482 input_is_pipe: a read whose descriptor is a
         // pipe is where a blocking builtin hands the SIGCHLD handler a
         // synchronous window — the dead coproc's reap (record) lands in
-        // that window and publishes at the next command-boundary
-        // refresh. Publication only: a builtin read is not a wait_for,
-        // so GNU disposal (cleanup_dead_jobs) does not follow it
-        // (rubash#2053) — the note must not move the disposal mark,
-        // or the boundary refresh would retire a sibling coproc whose
-        // child died during this read before the next command can
-        // expand its name (the named-coproc fd race:
-        // `read <&${A[0]}; read <&${B[0]}` losing B).
+        // that window. Publication is deliberately narrower than the
+        // window: the read itself only records, and the boundary gate
+        // below retires a coproc solely when this same read observed
+        // EOF on that coproc's output pipe. A delimiter-terminated
+        // successful read is not EOF evidence, so a sibling coproc —
+        // or this coproc while unread bytes remain buffered — survives
+        // the boundary (the #2053 named-coproc fd race invariant).
         if self.read_source_is_pipe(cmd, read_fd) {
             self.note_blocking_read();
         }
@@ -339,6 +340,11 @@ impl Executor {
             raw,
         );
         self.fd_table.read_delim_word_byte = None;
+        if let Some(pid) = self.fd_table.read_coproc_pipe_eof.take() {
+            if !self.pipe_read_drained_coprocs.contains(&pid) {
+                self.pipe_read_drained_coprocs.push(pid);
+            }
+        }
         let line = line?;
         // A record WAS served (possibly by a fallback transport after a
         // probed endpoint failed): any recorded hard read error belongs
@@ -1935,10 +1941,10 @@ impl Executor {
             let pipe = self.coproc_read_file(fd)?;
             (fd, pipe)
         };
-        let _ = pid;
         let mut bytes = Vec::new();
         let mut consumed = false;
         let mut ended = false;
+        let mut source_eof = false;
         // rubash#2892: EOF (empty read or a read error) ends the loop
         // exactly like a deadline break — in no case does the read
         // close the descriptor (read.def keeps the fd across builtin
@@ -1972,6 +1978,7 @@ impl Executor {
             }
             match crate::fd::read_some(pipe.handle, 1) {
                 Ok(buf) if buf.is_empty() => {
+                    source_eof = true;
                     ended = true;
                     break;
                 }
@@ -1996,6 +2003,9 @@ impl Executor {
             }
         }
 
+        if source_eof {
+            self.fd_table.read_coproc_pipe_eof = Some(pid);
+        }
         // read.def:949 eof: the pipe drained (or errored) before the
         // delimiter arrived; a timeout break is not EOF. A delimiter or
         // budget stop never reaches `ended`.

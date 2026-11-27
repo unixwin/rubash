@@ -2335,6 +2335,7 @@ impl Executor {
             foreground_wait_count: Cell::new(0),
             disposal_wait_count: Cell::new(0),
             disposal_prev_mark: Cell::new(0),
+            pipe_read_drained_coprocs: Vec::new(),
             coproc_stderr_forwarders: HashMap::new(),
             assignment_output_process_substitutions: Vec::new(),
             assignment_input_process_substitution_files: Vec::new(),

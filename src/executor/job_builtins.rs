@@ -2071,6 +2071,7 @@ impl Executor {
             || (crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "monitor")
                 && self.stdin_source_is_terminal());
         let observe = state_observe;
+        let pipe_read_disposal = line_advanced && !self.pipe_read_drained_coprocs.is_empty();
         // rubash#1494: apply the ripe kill state marks at the same
         // per-command boundary that reaps finished children.
         self.shell_state
@@ -2092,9 +2093,14 @@ impl Executor {
                 // deterministic for a producer that already delivered
                 // EOF. A genuinely live producer pays the grace once
                 // and stays registered.
-                let grace = matches!(self.procsub_stream_children.get(pid), Some(false));
+                let grace = matches!(self.procsub_stream_children.get(pid), Some(false))
+                    || (line_advanced
+                        && self.pipe_read_drained_coprocs.contains(pid)
+                        && self.shell_state.coproc_names.contains_key(pid));
                 if grace {
-                    self.procsub_stream_children.insert(*pid, true);
+                    if self.procsub_stream_children.contains_key(pid) {
+                        self.procsub_stream_children.insert(*pid, true);
+                    }
                     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(5);
                     loop {
                         match child.try_wait() {
@@ -2227,17 +2233,23 @@ impl Executor {
         // any recorded by this very refresh. The gate is the DISPOSAL
         // mark, not the publication mark: a blocking builtin `read`
         // publishes the records from its SIGCHLD window
-        // (foreground_blocked) but is not a disposal point, so a
-        // stretch of builtin reads leaves every recorded coproc
-        // pending — otherwise `read <&${A[0]}; read <&${B[0]}` retired
-        // B at the boundary between the reads whenever B's child had
-        // died during the first read, and the second read met an
-        // unbound array (the named-coproc fd race). A refresh that
-        // observed nothing (bare boundary) likewise leaves them
-        // pending, so the next command still expands
-        // <name>/<name>_PID and {name[i]}.
+        // (foreground_blocked) but is not, by itself, a disposal
+        // point. A pipe read becomes a selective coproc-disposal
+        // boundary only after that same read observed EOF on the
+        // coproc's own output pipe; then only the drained coproc may
+        // retire. This preserves the named-coproc fd race invariant:
+        // `read <&${A[0]}; read <&${B[0]}` cannot retire B merely
+        // because B's child died during the first read, and cannot
+        // retire A while unread bytes still sit in A's pipe. A
+        // refresh that observed nothing (bare boundary) likewise
+        // leaves retirements pending, so the next command still
+        // expands <name>/<name>_PID and {name[i]}.
         if force_observe || disposal_blocked {
+            self.pipe_read_drained_coprocs.clear();
             self.flush_pending_coproc_retirements();
+        } else if pipe_read_disposal {
+            let drained = std::mem::take(&mut self.pipe_read_drained_coprocs);
+            self.flush_pending_coproc_retirements_for(&drained);
         }
         // GNU parse.y:2533 read_command -> notify_and_cleanup
         // (jobs.c:3642-3652): once per freshly read command list,
@@ -2455,6 +2467,26 @@ impl Executor {
         let pending = std::mem::take(&mut self.pending_coproc_retirements);
         for pid in pending {
             self.retire_completed_coproc(pid);
+        }
+    }
+
+    /// Perform deferred retirements only for coprocs whose output pipe
+    /// EOF was observed by the blocking read being accounted at this
+    /// reader boundary. A coproc whose child died while bytes still sit
+    /// unread in its pipe stays pending: retiring it here would close the
+    /// read end and unbind the array before the next line can consume
+    /// those bytes (the named-coproc fd race, rubash#2053/#4088).
+    fn flush_pending_coproc_retirements_for(&mut self, drained_pids: &[u32]) {
+        if self.pending_coproc_retirements.is_empty() {
+            return;
+        }
+        let pending = std::mem::take(&mut self.pending_coproc_retirements);
+        for pid in pending {
+            if drained_pids.contains(&pid) {
+                self.retire_completed_coproc(pid);
+            } else {
+                self.pending_coproc_retirements.push(pid);
+            }
         }
     }
 
