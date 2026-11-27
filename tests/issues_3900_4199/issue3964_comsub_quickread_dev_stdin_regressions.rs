@@ -66,6 +66,156 @@ fn assert_run(script: &str, expected_stdout: &str) {
     assert_eq!(run.code, Some(0), "status for {script:?}");
 }
 
+/// Collect a child under a hard deadline. The issue-4229 defect is a
+/// blocking read of the wrong Windows device, so every new probe must kill
+/// and reap a stuck child rather than hanging the suite.
+fn collect_bounded(mut child: std::process::Child, label: &str) -> Run {
+    let mut stdout_pipe = child.stdout.take().expect("stdout pipe");
+    let stdout_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut stdout_pipe, &mut buf);
+        String::from_utf8_lossy(&buf).into_owned()
+    });
+    let mut stderr_pipe = child.stderr.take().expect("stderr pipe");
+    let stderr_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut stderr_pipe, &mut buf);
+        String::from_utf8_lossy(&buf).into_owned()
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut timed_out = false;
+    let mut code = None;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                code = status.code();
+                break;
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                timed_out = true;
+                let _ = child.kill();
+                let _ = child.wait();
+                break;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+            Err(error) => panic!("try_wait failed for {label:?}: {error}"),
+        }
+    }
+    let stdout = stdout_thread.join().unwrap_or_default();
+    let stderr = stderr_thread.join().unwrap_or_default();
+    assert!(!timed_out, "rubash timed out for {label:?}");
+    Run {
+        stdout,
+        stderr,
+        code,
+    }
+}
+
+fn spawn_c(tag: &str, script: &str) -> (std::process::Child, PathBuf) {
+    let dir = tempdir(tag);
+    let child = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .args(["-c", script])
+        .current_dir(&dir)
+        .env_remove("BASH_ENV")
+        .env_remove("WINUXSH_ROOT")
+        .env_remove("__RUBASH_FUNCTION_STDIN")
+        .env_remove("__RUBASH_FUNCTION_STDIN_OFFSET")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn rubash");
+    (child, dir)
+}
+
+fn rubash_c_piped_stdin(tag: &str, script: &str, input: &[u8]) -> Run {
+    let (mut child, _dir) = spawn_c(tag, script);
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin pipe")
+        .write_all(input)
+        .expect("write piped stdin");
+    drop(child.stdin.take());
+    collect_bounded(child, script)
+}
+
+fn assert_piped_stdin(tag: &str, script: &str, input: &[u8], expected_stdout: &str) {
+    let run = rubash_c_piped_stdin(tag, script, input);
+    assert_eq!(run.stdout, expected_stdout, "stdout for {script:?}");
+    assert_eq!(run.stderr, "", "stderr for {script:?}");
+    assert_eq!(run.code, Some(0), "status for {script:?}");
+}
+
+fn rubash_c_file_stdin(tag: &str, script: &str, input: &[u8]) -> Run {
+    let dir = tempdir(tag);
+    std::fs::write(dir.join("stdin.txt"), input).expect("write stdin file");
+    let stdin_file = std::fs::File::open(dir.join("stdin.txt")).expect("open stdin file");
+    let child = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .args(["-c", script])
+        .current_dir(&dir)
+        .env_remove("BASH_ENV")
+        .env_remove("WINUXSH_ROOT")
+        .env_remove("__RUBASH_FUNCTION_STDIN")
+        .env_remove("__RUBASH_FUNCTION_STDIN_OFFSET")
+        .stdin(Stdio::from(stdin_file))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn rubash");
+    collect_bounded(child, script)
+}
+
+fn assert_file_stdin(tag: &str, script: &str, input: &[u8], expected_stdout: &str) {
+    let run = rubash_c_file_stdin(tag, script, input);
+    assert_eq!(run.stdout, expected_stdout, "stdout for {script:?}");
+    assert_eq!(run.stderr, "", "stderr for {script:?}");
+    assert_eq!(run.code, Some(0), "status for {script:?}");
+}
+
+fn rubash_c_null_stdin(tag: &str, script: &str) -> Run {
+    let dir = tempdir(tag);
+    let child = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .args(["-c", script])
+        .current_dir(&dir)
+        .env_remove("BASH_ENV")
+        .env_remove("WINUXSH_ROOT")
+        .env_remove("__RUBASH_FUNCTION_STDIN")
+        .env_remove("__RUBASH_FUNCTION_STDIN_OFFSET")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn rubash");
+    collect_bounded(child, script)
+}
+
+fn rubash_script_piped_stdin(tag: &str, script_text: &str, input: &[u8]) -> Run {
+    let dir = tempdir(tag);
+    std::fs::write(dir.join("case.sh"), script_text).expect("write script file");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("case.sh")
+        .current_dir(&dir)
+        .env_remove("BASH_ENV")
+        .env_remove("WINUXSH_ROOT")
+        .env_remove("__RUBASH_FUNCTION_STDIN")
+        .env_remove("__RUBASH_FUNCTION_STDIN_OFFSET")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn rubash script");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin pipe")
+        .write_all(input)
+        .expect("write piped stdin");
+    drop(child.stdin.take());
+    collect_bounded(child, script_text)
+}
+
 /// The pipeline-group position from the report: the stage input is
 /// the context fd 0 the substitution must read.
 #[test]
@@ -199,4 +349,159 @@ fn quickread_dev_stdin_never_reads_process_stdin() {
         "",
         "stderr with held-open process stdin"
     );
+}
+
+/// rubash#4229: at top level fd 0 is the inherited process stdin. With a
+/// pipe whose writer closes, the quick-read drains that pipe instead of
+/// opening Windows CONIN$.
+#[test]
+fn quickread_top_level_pipe_stdin() {
+    assert_piped_stdin(
+        "top-pipe",
+        r#"x=$(</dev/stdin); echo "[$x]""#,
+        b"hi\n",
+        "[hi]\n",
+    );
+}
+
+/// The headline brace-group form at top level uses the same inherited fd 0.
+#[test]
+fn quickread_top_level_brace_group_pipe_stdin() {
+    assert_piped_stdin(
+        "top-group-pipe",
+        r#"{ x=$(</dev/stdin); echo "[$x]"; }"#,
+        b"hi\n",
+        "[hi]\n",
+    );
+}
+
+/// White space after `<` is still the same optimized redirection operand.
+#[test]
+fn quickread_top_level_spaced_operand_pipe_stdin() {
+    assert_piped_stdin(
+        "top-space-pipe",
+        r#"x=$(< /dev/stdin); echo "[$x]""#,
+        b"hi\n",
+        "[hi]\n",
+    );
+}
+
+/// A regular file on process stdin is read through the same fd alias.
+#[test]
+fn quickread_top_level_regular_file_stdin() {
+    assert_file_stdin(
+        "top-file",
+        r#"x=$(</dev/stdin); echo "[$x]""#,
+        b"hi\n",
+        "[hi]\n",
+    );
+}
+
+/// NUL stdin is immediate EOF: empty output, status 0, and no console read.
+#[test]
+fn quickread_top_level_null_stdin() {
+    let run = rubash_c_null_stdin("top-null", r#"x=$(</dev/stdin); echo "[$x]""#);
+    assert_eq!(run.stdout, "[]\n");
+    assert_eq!(run.stderr, "");
+    assert_eq!(run.code, Some(0));
+}
+
+/// `/dev/fd/0` and `/proc/self/fd/0` are the same fd-0 spelling family.
+#[test]
+fn quickread_top_level_fd0_spellings_pipe_stdin() {
+    for (tag, spelling) in [
+        ("top-devfd0", "/dev/fd/0"),
+        ("top-procfd0", "/proc/self/fd/0"),
+    ] {
+        let script = format!(r#"x=$(<{spelling}); echo "[$x]""#);
+        assert_piped_stdin(tag, &script, b"hi\n", "[hi]\n");
+    }
+}
+
+/// A pipe cannot be re-opened: `read` and the quick-read share the one
+/// stream cursor, so the substitution sees only the unread remainder.
+#[test]
+fn quickread_top_level_pipe_after_read_shares_cursor() {
+    assert_piped_stdin(
+        "pipe-read-first",
+        r#"read a; x=$(</dev/stdin); echo "[$a|$x]""#,
+        b"l1\nl2\n",
+        "[l1|l2]\n",
+    );
+}
+
+/// Draining the pipe inside the substitution advances the shared cursor:
+/// a later `read` sees EOF.
+#[test]
+fn quickread_top_level_pipe_drains_for_later_read() {
+    assert_piped_stdin(
+        "pipe-drain-first",
+        r#"x=$(</dev/stdin); read a; echo "[$x|$a]""#,
+        b"l1\nl2\n",
+        "[l1\nl2|]\n",
+    );
+}
+
+/// A regular file's magic-link open is fresh (offset 0), so the
+/// substitution sees the whole file even after `read` consumed a line.
+#[test]
+fn quickread_top_level_regular_file_reopens_fresh() {
+    assert_file_stdin(
+        "file-fresh-reopen",
+        r#"read a; x=$(</dev/stdin); echo "[$a|$x]""#,
+        b"l1\nl2\n",
+        "[l1|l1\nl2]\n",
+    );
+}
+
+/// Closing fd 0 makes the alias OPEN fail ENOENT; it must not fall through
+/// to the process stdin handle or the console device.
+#[test]
+fn quickread_closed_stdin_fails_enoent() {
+    let run = rubash_c_piped_stdin(
+        "closed-stdin",
+        r#"exec 0<&-; x=$(</dev/stdin); echo "[$x] rc=$?""#,
+        b"hi\n",
+    );
+    assert_eq!(run.stdout, "[] rc=1\n");
+    assert!(
+        run.stderr.contains("No such file or directory"),
+        "stderr should carry ENOENT, got: {:?}",
+        run.stderr
+    );
+    assert_eq!(run.code, Some(0));
+}
+
+/// A dup of inherited stdin carries the same stream endpoint.
+#[test]
+fn quickread_dup_stdin_fd_reads_pipe() {
+    assert_piped_stdin(
+        "dup-stdin",
+        r#"exec 5<&0; x=$(</dev/fd/5); echo "[$x]""#,
+        b"hi\n",
+        "[hi]\n",
+    );
+}
+
+/// The Claude Code hook shape that reported the hang: the quick-read in a
+/// redirected brace group consumes the JSON payload without falling back.
+#[test]
+fn quickread_claude_hook_pattern_pipe_stdin() {
+    assert_piped_stdin(
+        "hook-json",
+        r#"{ input=$(</dev/stdin); } 2>/dev/null || input=$(cat); echo "[$input]""#,
+        br#"{"a":1}
+"#,
+        "[{\"a\":1}]\n",
+    );
+}
+
+/// Script-file invocation has the same inherited-stdin fd 0 as `-c`.
+#[test]
+fn quickread_script_file_pipe_stdin() {
+    let run =
+        rubash_script_piped_stdin("script-file", "x=$(</dev/stdin); echo \"[$x]\"\n", b"hi\n");
+    assert_eq!(run.stdout, "[hi]\n");
+    assert_eq!(run.stderr, "");
+    assert_eq!(run.code, Some(0));
 }
