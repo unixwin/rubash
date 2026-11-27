@@ -281,8 +281,10 @@ fn take_self_signals() -> Vec<i32> {
 /// ANCESTOR_SENDER_STATUS): the last status completed before the
 /// delivering kill builtin started, which is the addressed shell's
 /// last_command_exit_value at the moment GNU's wait is preempted.
+#[cfg(unix)]
 static ANCESTOR_SIGNALS: std::sync::Mutex<Vec<(i32, i32)>> = std::sync::Mutex::new(Vec::new());
 
+#[cfg(unix)]
 pub(crate) fn queue_ancestor_signal(signal: i32) {
     ANCESTOR_SIGNALS
         .lock()
@@ -299,6 +301,7 @@ pub(crate) fn queue_ancestor_signal(signal: i32) {
 
 /// The queued ancestor deliveries: (signal, sender exit status) — see
 /// ANCESTOR_SIGNALS for the status half's contract (rubash#2352).
+#[cfg(unix)]
 pub(crate) fn take_ancestor_signals() -> Vec<(i32, i32)> {
     let mut queue = ANCESTOR_SIGNALS
         .lock()
@@ -306,6 +309,7 @@ pub(crate) fn take_ancestor_signals() -> Vec<(i32, i32)> {
     std::mem::take(&mut *queue)
 }
 
+#[cfg(unix)]
 thread_local! {
     /// The exit status the queueing layer presents for the in-flight
     /// kill builtin (rubash#2352): Executor::execute_kill snapshots
@@ -323,6 +327,7 @@ thread_local! {
     static ANCESTOR_SENDER_STATUS: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
 }
 
+#[cfg(unix)]
 fn ancestor_sender_status() -> i32 {
     ANCESTOR_SENDER_STATUS.with(|cell| cell.get())
 }
@@ -330,21 +335,25 @@ fn ancestor_sender_status() -> i32 {
 /// RAII arm for the sender-status snapshot (rubash#2352), the same
 /// save/replace discipline as AncestorRouteGuard: nested kill
 /// invocations restore the outer dispatch's snapshot on drop.
+#[cfg(unix)]
 pub(crate) struct AncestorSenderStatusGuard {
     previous: i32,
 }
 
+#[cfg(unix)]
 pub(crate) fn arm_ancestor_sender_status(status: i32) -> AncestorSenderStatusGuard {
     let previous = ANCESTOR_SENDER_STATUS.with(|cell| cell.replace(status));
     AncestorSenderStatusGuard { previous }
 }
 
+#[cfg(unix)]
 impl Drop for AncestorSenderStatusGuard {
     fn drop(&mut self) {
         ANCESTOR_SENDER_STATUS.with(|cell| cell.set(self.previous));
     }
 }
 
+#[cfg(unix)]
 thread_local! {
     /// Armed by Executor::execute_kill while the current executor is
     /// a flat subshell layer sharing this process (rubash#1654): kill
@@ -356,20 +365,24 @@ thread_local! {
     static ANCESTOR_ROUTE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+#[cfg(unix)]
 pub(crate) fn ancestor_route_active() -> bool {
     ANCESTOR_ROUTE.with(|flag| flag.get())
 }
 
 /// RAII arm for the ancestor route (rubash#1654).
+#[cfg(unix)]
 pub(crate) struct AncestorRouteGuard {
     previous: bool,
 }
 
+#[cfg(unix)]
 pub(crate) fn arm_ancestor_route() -> AncestorRouteGuard {
     let previous = ANCESTOR_ROUTE.with(|flag| flag.replace(true));
     AncestorRouteGuard { previous }
 }
 
+#[cfg(unix)]
 impl Drop for AncestorRouteGuard {
     fn drop(&mut self) {
         ANCESTOR_ROUTE.with(|flag| flag.set(self.previous));
@@ -407,6 +420,7 @@ thread_local! {
 /// direction.
 static ADJUDICATED_SIGNAL_DEATH: std::sync::Mutex<Option<i32>> = std::sync::Mutex::new(None);
 
+#[cfg(unix)]
 pub(crate) fn direct_child_route_active() -> bool {
     DIRECT_CHILD_ROUTE.with(|flag| flag.get())
 }
@@ -601,6 +615,7 @@ fn take_file_signals(pid: u32) -> io::Result<Vec<i32>> {
 /// (measured 2026-09-12: 592 files -> 1.05ms per call). The pattern-limited
 /// query halves that; the caller gates the scan itself to every 64th poll
 /// so the per-command amortized cost is negligible.
+#[cfg(not(unix))]
 fn pending_signal_entries(
     dir: &std::path::Path,
     prefix: &str,
@@ -608,6 +623,7 @@ fn pending_signal_entries(
     scan_pending_signal_entries(dir, prefix)
 }
 
+#[cfg(not(unix))]
 fn scan_pending_signal_entries(
     dir: &std::path::Path,
     prefix: &str,

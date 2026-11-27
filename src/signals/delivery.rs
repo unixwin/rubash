@@ -206,6 +206,7 @@ ubash-signal-hint-";
 
 #[cfg(not(windows))]
 pub(in crate::signals) mod signal_hint {
+    #[cfg_attr(unix, allow(dead_code))]
     pub fn signaled() -> bool {
         false
     }
@@ -1053,13 +1054,6 @@ fn arm_pdeathsig(expected_parent: u32) -> std::io::Result<()> {
     if unsafe { libc::getppid() } != expected_parent as libc::pid_t {
         unsafe { libc::kill(libc::getpid(), libc::SIGKILL) };
     }
-    Ok(())
-}
-
-/// Non-Linux unix: no PR_SET_PDEATHSIG; parent tracking covers the wrapper
-/// contract there (rubash#737).
-#[cfg(all(unix, not(target_os = "linux")))]
-fn arm_pdeathsig(_expected_parent: u32) -> std::io::Result<()> {
     Ok(())
 }
 

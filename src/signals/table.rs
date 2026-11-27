@@ -182,10 +182,6 @@ fn strip_sig_prefix(value: &str) -> Option<&str> {
 /// an exact-uppercase `SIG` and special-cased `SIGEXIT` as valid, so
 /// mixed/lowercase prefixed spellings (`SigTerm`, `sigterm`, `sighup`)
 /// were rejected by `kill -l` (rubash#1386) and the `-s` validator.
-fn decode_signal_name(value: &str, allow_sig_prefix: bool) -> Option<&'static str> {
-    decode_signal_name_for_platform(value, allow_sig_prefix, Platform::host())
-}
-
 pub(crate) fn decode_signal_name_for_platform(
     value: &str,
     allow_sig_prefix: bool,
@@ -273,10 +269,12 @@ pub(crate) fn signal_number_from_spec(value: &str) -> Option<i32> {
 /// exact-uppercase-only prefix strip and an exact `EXIT` compare, so
 /// `kill -s SigTerm` was rejected and `kill -s Exit` fell through to
 /// the TERM default and delivered the wrong signal (rubash#1385).
+#[cfg(test)]
 pub(crate) fn sigspec_accepted(value: &str, posix: bool) -> bool {
     decode_signal_spec(value, posix).is_some()
 }
 
+#[cfg(all(test, unix))]
 fn signal_name(number: i32) -> Option<&'static str> {
     signal_name_for_platform(Platform::host(), number)
 }
@@ -285,6 +283,7 @@ pub(crate) fn signal_name_for_platform(platform: Platform, number: i32) -> Optio
     platform.signal_name_for_number(number)
 }
 
+#[cfg(all(test, any(target_os = "macos", target_os = "freebsd")))]
 fn signal_number(name: &str) -> Option<&'static str> {
     signal_number_for_platform(Platform::host(), name)
 }
