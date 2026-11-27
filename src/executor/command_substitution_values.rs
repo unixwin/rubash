@@ -1098,8 +1098,9 @@ impl Executor {
         // only there; this face's File/standard-backed set is the
         // measured #3201 shape (`exec 3<file 5<file2`).
         #[cfg(unix)]
-        {
+        let ambient_backing_dups = {
             let delivery = self.ambient_fd_pins_unbound();
+            let backing_dups = delivery.backing_dups.clone();
             if !delivery.is_empty() {
                 use std::os::unix::process::CommandExt;
                 // SAFETY: same contract as attach_ambient_fd_pins —
@@ -1116,10 +1117,16 @@ impl Executor {
                     });
                 }
             }
-        }
+            backing_dups
+        };
         self.stamp_spawn_cwd(&mut process);
         suppress_orphan_console(&mut process);
-        let mut spawned = match crate::fault_injection::spawn_command(&mut process) {
+        let spawn_result = crate::fault_injection::spawn_command(&mut process);
+        #[cfg(unix)]
+        for dup in ambient_backing_dups {
+            crate::fd::close_handle(dup);
+        }
+        let mut spawned = match spawn_result {
             Ok(child) => child,
             Err(_) => {
                 // rubash#2602: the spawn produced no child — disarm

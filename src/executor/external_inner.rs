@@ -65,12 +65,36 @@ impl AmbientDevicePin {
 pub(in crate::executor) struct AmbientFdPins {
     pub(in crate::executor) pins: Vec<(std::os::unix::io::RawFd, u32)>,
     pub(in crate::executor) devices: Vec<AmbientDevicePin>,
+    /// Parent-side CLOEXEC duplicates of symbolic stdio backing descriptors.
+    /// A pin cannot source fd 0/1/2 directly: std arranges the child's stdio
+    /// before pre_exec runs, so the number may already name the child's wired
+    /// stdio rather than the shell descriptor the endpoint copied. The caller
+    /// closes these duplicates once the spawn resolves.
+    pub(in crate::executor) backing_dups: Vec<crate::fd::HANDLE>,
 }
 
 #[cfg(unix)]
 impl AmbientFdPins {
     pub(in crate::executor) fn is_empty(&self) -> bool {
         self.pins.is_empty() && self.devices.is_empty()
+    }
+
+    fn push_standard_backing_pin(&mut self, handle: crate::fd::HANDLE, slot: u32) {
+        // F_DUPFD_CLOEXEC: the duplicate is visible in the forked child's
+        // pre_exec pass but cannot leak past exec at its transport number.
+        // Keep it at or above the shell-fd base so the transport number does
+        // not resurrect a low user slot in the child before the pin pass runs.
+        let dup = unsafe { libc::fcntl(handle, libc::F_DUPFD_CLOEXEC, 10) };
+        let source = if dup >= 0 {
+            self.backing_dups.push(dup);
+            dup
+        } else {
+            handle
+        };
+        let pin = (source, slot);
+        if !self.pins.contains(&pin) {
+            self.pins.push(pin);
+        }
     }
 }
 
@@ -3690,18 +3714,12 @@ impl Executor {
             // for that descriptor.
             if let Some(read) = &entry.read {
                 if let Some((handle, _label)) = read.standard_backing() {
-                    let pin = (handle, *fd);
-                    if !delivery.pins.contains(&pin) {
-                        delivery.pins.push(pin);
-                    }
+                    delivery.push_standard_backing_pin(handle, *fd);
                 }
             }
             if let Some(write) = &entry.write {
                 if let Some((handle, _label)) = write.standard_backing() {
-                    let pin = (handle, *fd);
-                    if !delivery.pins.contains(&pin) {
-                        delivery.pins.push(pin);
-                    }
+                    delivery.push_standard_backing_pin(handle, *fd);
                 }
             }
         }
@@ -3813,8 +3831,9 @@ impl Executor {
         &self,
         cmd: &crate::parser::CommandNode,
         process: &mut std::process::Command,
-    ) {
+    ) -> Vec<crate::fd::HANDLE> {
         let delivery = self.ambient_fd_pins_for(cmd);
+        let backing_dups = delivery.backing_dups.clone();
         if !delivery.is_empty() {
             use std::os::unix::process::CommandExt;
             // SAFETY: same contract as the spawn_external_process
@@ -3827,6 +3846,7 @@ impl Executor {
                 });
             }
         }
+        backing_dups
     }
 
     #[cfg(not(unix))]
@@ -3834,7 +3854,8 @@ impl Executor {
         &self,
         _cmd: &crate::parser::CommandNode,
         _process: &mut std::process::Command,
-    ) {
+    ) -> Vec<crate::fd::HANDLE> {
+        Vec::new()
     }
 
     /// rubash#2308: the Text half of the ambient delivery for a stage
@@ -4636,6 +4657,8 @@ impl Executor {
         // above) once their slots are pinned — a foreign child then
         // sees each file at its slot number only. Carriers of unpinned
         // slots stay open as the rubash-child restore's fallback.
+        #[cfg(unix)]
+        parent_side_dups.extend(ambient_delivery.backing_dups.iter().copied());
         #[cfg(not(unix))]
         let _ = (&fd_carriers, &dead_carriers);
         ExternalFdDelivery {

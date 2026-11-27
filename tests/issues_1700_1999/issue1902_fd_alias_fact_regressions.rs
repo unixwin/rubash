@@ -21,16 +21,38 @@
 //! the fd-alias answer agree with each other, which is the contract this
 //! issue owns.
 
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn run_c(script: &str) -> (String, String, Option<i32>) {
-    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
-        .args(["-c", script])
-        .stdin(std::process::Stdio::null())
-        .current_dir(fixture_dir())
-        .output()
-        .expect("run rubash");
+    run_c_with_stdin(script, None)
+}
+
+fn run_c_with_stdin(script: &str, stdin_payload: Option<&str>) -> (String, String, Option<i32>) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rubash"));
+    command.args(["-c", script]).current_dir(fixture_dir());
+    if stdin_payload.is_some() {
+        command.stdin(std::process::Stdio::piped());
+    } else {
+        command.stdin(std::process::Stdio::null());
+    }
+    let mut child = command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn rubash");
+    if let Some(payload) = stdin_payload {
+        child
+            .stdin
+            .as_mut()
+            .expect("stdin pipe")
+            .write_all(payload.as_bytes())
+            .expect("write stdin");
+    }
+    drop(child.stdin.take());
+    let output = child.wait_with_output().expect("wait rubash");
     (
         String::from_utf8_lossy(&output.stdout).into_owned(),
         String::from_utf8_lossy(&output.stderr).into_owned(),
@@ -44,21 +66,39 @@ fn fixture_dir() -> PathBuf {
     dir
 }
 
+static FIXTURE_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
 fn fixture_path() -> PathBuf {
-    fixture_dir().join("issue1902-fixture.txt")
+    let serial = FIXTURE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    fixture_dir().join(format!(
+        "issue1902-fixture-{}-{serial}.txt",
+        std::process::id()
+    ))
 }
 
 /// Runs the script with `$F` bound to the fixture path so the binds stay
 /// inside the sandboxed fixture dir regardless of the shell's cwd.
 fn run_with_fixture(script: &str) -> (String, String, Option<i32>) {
+    let (stdout, stderr, code, _) = run_with_fixture_capture_file(script, None);
+    (stdout, stderr, code)
+}
+
+fn run_with_fixture_capture_file(
+    script: &str,
+    stdin_payload: Option<&str>,
+) -> (String, String, Option<i32>, String) {
     let path = fixture_path();
     std::fs::write(&path, b"hello world\n").expect("write fixture");
     // Forward slashes: a backslash path inside a -c script is an escape
     // sequence to the shell parser, not a path separator.
     let shell_path = path.to_string_lossy().replace('\\', "/");
-    let run = run_c(&script.replace("$F", &shell_path));
+    let (stdout, stderr, code) =
+        run_c_with_stdin(&script.replace("$F", &shell_path), stdin_payload);
+    let file = std::fs::read(&path)
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default();
     std::fs::remove_file(&path).ok();
-    run
+    (stdout, stderr, code, file)
 }
 
 fn verdicts(stdout: &str) -> Vec<(String, bool)> {
@@ -150,6 +190,93 @@ fn issue1902_stdout_stderr_names_follow_their_bindings() {
     // in variables and printed through the saved script stdout on fd 5,
     // since the very binds under test own fds 1 and 2 while they hold.
     assert_verdicts(&stdout, &[("w", true), ("r", true), ("e", true)]);
+}
+
+#[test]
+fn issue4091_saved_stdout_dup_keeps_original_stdout_when_fd1_redirected() {
+    let (stdout, stderr, code, file) = run_with_fixture_capture_file(
+        "exec 5>&1\n\
+         exec 1>$F\n\
+         echo into-file\n\
+         echo via-5 >&5\n\
+         exec 1>&5\n\
+         echo restored\n",
+        None,
+    );
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert_eq!(stdout, "via-5\nrestored\n", "stderr: {stderr}");
+    assert_eq!(stderr, "", "stdout: {stdout}");
+    assert_eq!(file, "into-file\n", "stdout: {stdout}");
+}
+
+#[cfg(unix)]
+#[test]
+fn issue4091_external_child_saved_stdout_dup_writes_original_stdout() {
+    let (stdout, stderr, code, file) = run_with_fixture_capture_file(
+        "exec 5>&1\n\
+         exec 1>$F\n\
+         echo into-file\n\
+         sh -c 'echo ext-via-5 >&5'\n\
+         exec 1>&5\n\
+         echo restored\n",
+        None,
+    );
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert_eq!(stdout, "ext-via-5\nrestored\n", "stderr: {stderr}");
+    assert_eq!(stderr, "", "stdout: {stdout}");
+    assert_eq!(file, "into-file\n", "stdout: {stdout}");
+}
+
+#[test]
+fn issue4091_single_exec_list_saved_stdout_dup_keeps_original_stdout() {
+    let (stdout, stderr, code, file) = run_with_fixture_capture_file(
+        "exec 5>&1 1>$F\n\
+         echo into-file\n\
+         echo via-5 >&5\n\
+         exec 1>&5\n\
+         echo restored\n",
+        None,
+    );
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert_eq!(stdout, "via-5\nrestored\n", "stderr: {stderr}");
+    assert_eq!(stderr, "", "stdout: {stdout}");
+    assert_eq!(file, "into-file\n", "stdout: {stdout}");
+}
+
+#[test]
+fn issue4091_saved_stderr_dup_keeps_original_stderr_when_fd2_redirected() {
+    let (stdout, stderr, code, file) = run_with_fixture_capture_file(
+        "exec 6>&2\n\
+         exec 2>$F\n\
+         echo err-file >&2\n\
+         echo err-6 >&6\n\
+         exec 2>&6\n\
+         echo err-restored >&2\n",
+        None,
+    );
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert_eq!(stdout, "", "stderr: {stderr}");
+    assert_eq!(stderr, "err-6\nerr-restored\n", "stdout: {stdout}");
+    assert_eq!(file, "err-file\n", "stdout: {stdout}");
+}
+
+#[test]
+fn issue4091_saved_stdin_dup_keeps_original_stdin_when_fd0_redirected() {
+    let (stdout, stderr, code, file) = run_with_fixture_capture_file(
+        "printf 'f1\\n' >$F\n\
+         exec 5<&0\n\
+         exec 0<$F\n\
+         read from_file\n\
+         read from_5 <&5\n\
+         exec 0<&5\n\
+         read from_restored\n\
+         printf '%s|%s|%s\\n' \"$from_file\" \"$from_5\" \"$from_restored\"\n",
+        Some("s1\ns2\n"),
+    );
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert_eq!(stdout, "f1|s1|s2\n", "stderr: {stderr}");
+    assert_eq!(stderr, "", "stdout: {stdout}");
+    assert_eq!(file, "f1\n", "stdout: {stdout}");
 }
 
 #[test]

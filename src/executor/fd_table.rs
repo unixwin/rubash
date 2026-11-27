@@ -1298,6 +1298,33 @@ impl FdTable {
         relocated_any
     }
 
+    /// Whether another live entry holds kernel descriptor `target`.
+    /// File-backed endpoints name their own descriptor; the symbolic
+    /// stdio endpoints alias process descriptors 0/1/2 and therefore
+    /// hold those numbers too (GNU redir.c:1190 makes a dup such as
+    /// `exec 5>&1` an independent descriptor of the same open file
+    /// description, so a later replacement of fd 1 must not clobber
+    /// the kernel number the alias still resolves through).
+    #[cfg(unix)]
+    fn other_entry_holds_kernel_fd(&self, exclude_fd: u32, target: crate::fd::HANDLE) -> bool {
+        self.entries.iter().any(|(other, entry)| {
+            *other != exclude_fd
+                && !entry.closed
+                && (matches!(&entry.read,
+                    Some(FdReadEndpoint::File(f))
+                    | Some(FdReadEndpoint::CoprocStdout { fd: f, .. })
+                    if !f.is_retired() && f.handle == target)
+                    || matches!(&entry.write,
+                        Some(FdWriteEndpoint::File(f))
+                        | Some(FdWriteEndpoint::CoprocStdin { fd: f, .. })
+                        if !f.is_retired() && f.handle == target)
+                    || (target == 0
+                        && matches!(&entry.read, Some(FdReadEndpoint::InheritedProcessStdin)))
+                    || (target == 1 && matches!(&entry.write, Some(FdWriteEndpoint::Stdout)))
+                    || (target == 2 && matches!(&entry.write, Some(FdWriteEndpoint::Stderr))))
+        })
+    }
+
     /// rubash#3917: dup `file`'s handle onto kernel descriptor `fd`
     /// (GNU redir.c:1017/:1120 — the redirector IS the file,
     /// whatever occupied the number before), returning a fresh
@@ -1339,18 +1366,7 @@ impl FdTable {
         // so the held scan below only sees real bindings.
         self.evict_adopted_copy_from(target);
         // Another live entry's handle on this number: never clobber.
-        let held = self.entries.iter().any(|(other, entry)| {
-            *other != fd
-                && (matches!(&entry.read,
-                    Some(FdReadEndpoint::File(f))
-                    | Some(FdReadEndpoint::CoprocStdout { fd: f, .. })
-                    if !f.is_retired() && f.handle == target)
-                    || matches!(&entry.write,
-                        Some(FdWriteEndpoint::File(f))
-                        | Some(FdWriteEndpoint::CoprocStdin { fd: f, .. })
-                        if !f.is_retired() && f.handle == target))
-        });
-        if held {
+        if self.other_entry_holds_kernel_fd(fd, target) {
             return None;
         }
         // A directory (cwd anchor) or socket (signal pair, /dev/tcp)
@@ -1487,18 +1503,7 @@ impl FdTable {
         // The same "never destroy what we cannot name" guards as
         // place_persistent_file.
         self.evict_adopted_copy_from(to);
-        let held = self.entries.iter().any(|(other, entry)| {
-            *other != target
-                && (matches!(&entry.read,
-                    Some(FdReadEndpoint::File(f))
-                    | Some(FdReadEndpoint::CoprocStdout { fd: f, .. })
-                    if !f.is_retired() && f.handle == to)
-                    || matches!(&entry.write,
-                        Some(FdWriteEndpoint::File(f))
-                        | Some(FdWriteEndpoint::CoprocStdin { fd: f, .. })
-                        if !f.is_retired() && f.handle == to))
-        });
-        if held {
+        if self.other_entry_holds_kernel_fd(target, to) {
             return (read, write, false);
         }
         let mut st: libc::stat = unsafe { std::mem::zeroed() };
