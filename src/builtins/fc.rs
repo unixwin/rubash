@@ -83,7 +83,7 @@ fn is_number_arg(arg: &str) -> bool {
     } else {
         arg
     };
-    !s.is_empty() && s.parse::<isize>().is_ok()
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_digit())
 }
 
 /// Verbatim port of fc.def fc_gethnum: resolve a numeric or prefix-string
@@ -99,19 +99,25 @@ fn fc_gethnum(
     listing: bool,
     hn_first: bool,
 ) -> Result<usize, SpecErr> {
+    // GNU builtins/fc.def:599-600: when last_hist < 0 (only the current fc
+    // invocation is on the history list), every specification is out of range.
+    if last_hist < 0 {
+        return Err(SpecErr::Erange);
+    }
     let mut s = spec;
-    let mut sign: i64 = 1;
+    let mut sign: i128 = 1;
     if let Some(rest) = spec.strip_prefix('-') {
         sign = -1;
         s = rest;
     }
     if !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()) {
-        let mut n: i64 = s.parse::<i64>().unwrap_or(0) * sign;
+        let mag = s.parse::<i128>().unwrap_or(i128::from(i64::MAX) + 1);
+        let n = (mag * sign).clamp(i128::from(i64::MIN), i128::from(i64::MAX));
         if n < 0 {
             // fc.def: "If the value is negative or zero, then it is an
             // offset from the current history item."
-            n += last_hist + 1;
-            return Ok(if n < 0 { 0 } else { n as usize });
+            let shifted = n + i128::from(last_hist) + 1;
+            return Ok(if shifted < 0 { 0 } else { shifted as usize });
         } else if n == 0 {
             return if sign == -1 {
                 if listing {
@@ -123,14 +129,14 @@ fn fc_gethnum(
                 Ok(last_hist as usize)
             };
         }
-        let n = n - history_base as i64;
-        if n < 0 {
+        let rel = n - history_base as i128;
+        if rel < 0 {
             return Ok(if hn_first { 0 } else { last_hist as usize });
         }
-        if n >= last_hist {
+        if rel >= i128::from(last_hist) {
             return Ok(if hn_first { 0 } else { last_hist as usize });
         }
-        return Ok(n as usize);
+        return Ok(rel as usize);
     }
     // String prefix search, most recent match first (fc.def STREQN loop).
     let mut j: i64 = last_hist;
@@ -928,5 +934,32 @@ mod tests {
         let (out, _, result) = run_fc(&["--help"], &[]);
         expect_status(&result, EXECUTION_SUCCESS);
         assert!(out.contains("display or execute commands"));
+    }
+
+    #[test]
+    fn test_fc_negative_last_hist_on_sole_current_entry_returns_erange() {
+        for args in [&["-l", "0"][..], &["-l", "1", "2"][..], &["-l", "-1"][..]] {
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            let args_vec: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+            let result = execute_with_history(
+                &args_vec,
+                "bash: ",
+                vec!["fc -l 0".to_string()],
+                1,
+                true,
+                true,
+                false,
+                &mut out,
+                &mut err,
+            )
+            .unwrap();
+            expect_status(&result, EXECUTION_FAILURE);
+            assert!(
+                String::from_utf8_lossy(&err).contains("history specification out of range"),
+                "unexpected stderr for {args:?}: {}",
+                String::from_utf8_lossy(&err)
+            );
+        }
     }
 }
