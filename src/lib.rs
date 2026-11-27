@@ -11,6 +11,10 @@ pub mod console_readline;
 pub(crate) mod debugger;
 pub mod executor;
 pub mod expand;
+#[cfg(any(test, debug_assertions))]
+pub mod fault_injection;
+#[cfg(not(any(test, debug_assertions)))]
+pub(crate) mod fault_injection;
 #[cfg(any(windows, unix))]
 pub(crate) mod fd;
 pub mod history;

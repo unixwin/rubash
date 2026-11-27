@@ -2334,6 +2334,12 @@ impl Executor {
             self.note_foreground_wait();
             const SLICE: std::time::Duration = std::time::Duration::from_millis(50);
             loop {
+                if let Err(err) = crate::fault_injection::maybe_inject_wait_eintr() {
+                    if err.kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    return Err(ExecuteError::IoError(err));
+                }
                 if let Some(status) =
                     crate::fd::wait_child_slice(child, SLICE).map_err(ExecuteError::IoError)?
                 {
@@ -2576,6 +2582,12 @@ impl Executor {
         }
         let mut forwarded = false;
         let outcome: Result<FgWaitOutcome, std::io::Error> = loop {
+            if let Err(err) = crate::fault_injection::maybe_inject_wait_eintr() {
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                break Err(err);
+            }
             let mut raw: libc::c_int = 0;
             let waited =
                 unsafe { libc::waitpid(pid as i32, &mut raw, libc::WUNTRACED | libc::WNOHANG) };
@@ -5691,7 +5703,7 @@ impl Executor {
                 };
                 process.env("SHLVL", adjusted);
             }
-            process.spawn()
+            crate::fault_injection::spawn_command(&mut process)
         };
         // Drop the Command NOW: std retains every `Stdio::from(..)` it was
         // given (the #144 shared capture-pipe write clones among them), so a
@@ -6467,6 +6479,12 @@ pub(crate) fn wait_fg_child_draining(
 ) -> Result<std::process::ExitStatus, ExecuteError> {
     const SLICE: std::time::Duration = std::time::Duration::from_millis(10);
     loop {
+        if let Err(err) = crate::fault_injection::maybe_inject_wait_eintr() {
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(ExecuteError::IoError(err));
+        }
         if let Some(status) = child.try_wait().map_err(ExecuteError::IoError)? {
             return Ok(status);
         }
@@ -6498,6 +6516,12 @@ pub(crate) fn wait_fg_child_draining(
     // notify_and_cleanup -> coproc_reap disposal) — move both marks
     // like wait_external_child's arm above (rubash#3948).
     executor.note_foreground_wait();
+    while let Err(err) = crate::fault_injection::maybe_inject_wait_eintr() {
+        if err.kind() == std::io::ErrorKind::Interrupted {
+            continue;
+        }
+        return Err(ExecuteError::IoError(err));
+    }
     child.wait().map_err(ExecuteError::IoError)
 }
 
@@ -6521,6 +6545,12 @@ fn wait_fg_child_recording(
 ) -> Result<std::process::ExitStatus, ExecuteError> {
     const SLICE: std::time::Duration = std::time::Duration::from_millis(10);
     loop {
+        if let Err(err) = crate::fault_injection::maybe_inject_wait_eintr() {
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(ExecuteError::IoError(err));
+        }
         if let Some(status) = child.try_wait().map_err(ExecuteError::IoError)? {
             // The handler is still installed for one more instant —
             // give a just-landed SIGINT its recorded verdict before
@@ -6579,6 +6609,12 @@ fn wait_fg_child_sliced(
     let child_pid = child.id() as i32;
     let mut forwarded = false;
     loop {
+        if let Err(err) = crate::fault_injection::maybe_inject_wait_eintr() {
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(ExecuteError::IoError(err));
+        }
         if let Some(status) = child.try_wait().map_err(ExecuteError::IoError)? {
             return Ok(status);
         }

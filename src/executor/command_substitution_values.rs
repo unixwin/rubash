@@ -1119,7 +1119,7 @@ impl Executor {
         }
         self.stamp_spawn_cwd(&mut process);
         suppress_orphan_console(&mut process);
-        let mut spawned = match process.spawn() {
+        let mut spawned = match crate::fault_injection::spawn_command(&mut process) {
             Ok(child) => child,
             Err(_) => {
                 // rubash#2602: the spawn produced no child — disarm

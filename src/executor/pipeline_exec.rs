@@ -3488,7 +3488,7 @@ impl Executor {
                 processes.push(None);
                 continue;
             }
-            let spawned = process.spawn();
+            let spawned = crate::fault_injection::spawn_command(&mut process);
             for dup in parent_side_dups {
                 crate::fd::close_handle(dup);
             }
@@ -4514,7 +4514,7 @@ impl Executor {
                 results[index].2 = status;
                 continue;
             }
-            let spawned = process.spawn();
+            let spawned = crate::fault_injection::spawn_command(&mut process);
             for dup in parent_side_dups {
                 crate::fd::close_handle(dup);
             }
@@ -4882,7 +4882,7 @@ impl Executor {
                 processes.push(None);
                 continue;
             }
-            let spawned = process.spawn();
+            let spawned = crate::fault_injection::spawn_command(&mut process);
             for dup in parent_side_dups {
                 crate::fd::close_handle(dup);
             }
@@ -5359,7 +5359,7 @@ impl Executor {
                 processes.push((index, None));
                 continue;
             }
-            let spawned = process.spawn();
+            let spawned = crate::fault_injection::spawn_command(&mut process);
             for dup in parent_side_dups {
                 crate::fd::close_handle(dup);
             }
@@ -6501,7 +6501,7 @@ impl Executor {
                 results[index].2 = status;
                 continue;
             }
-            let spawned = process.spawn();
+            let spawned = crate::fault_injection::spawn_command(&mut process);
             for dup in parent_side_dups {
                 crate::fd::close_handle(dup);
             }

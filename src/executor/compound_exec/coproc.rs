@@ -1401,7 +1401,7 @@ impl Executor {
             // child is a fork of the region's shell and carries its
             // pair. No-op when no emulated-limit cells exist.
             crate::builtins::ulimit::arm_emulated_limits(&mut child, &self.shell_state.env_vars);
-            match child.spawn() {
+            match crate::fault_injection::spawn_command(&mut child) {
                 Ok(mut child_proc) => {
                     // Rubash does not expose real coproc file descriptors yet,
                     // but keep the parent ends until after spawn so stdio uses

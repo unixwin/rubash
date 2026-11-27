@@ -2249,7 +2249,7 @@ impl Executor {
         crate::executor::dev_fd_operands::attach_unix_dev_fd_operands(&mut process, &dev_ops);
         self.stamp_spawn_cwd(&mut process);
         suppress_orphan_console(&mut process);
-        let spawned = process.spawn();
+        let spawned = crate::fault_injection::spawn_command(&mut process);
         // The child holds its own duplicated inheritable handles;
         // close the parent-side duplicates the fd delivery opened —
         // the same unwind spawn_external_process performs once its
