@@ -62,31 +62,26 @@ impl Executor {
                 return Err(ExecuteError::ExitCode(code));
             }
         }
-        // GNU redir.c:298 redirection_expand uses expand_words_no_vars:
-        // redirect words expand with the temp environment IGNORED
-        // (`a=9 echo >&$(echo $a)` sees the outer a, not 9). Expanding here —
-        // before apply_temporary_assignments — seeds the redirect-target memo
-        // with the correct pre-binding values; the apply sites reuse them.
-        // rubash#2121: classify the apply funnel so the reject gate
-        // settles superseded net output entries only where the funnel
-        // itself would lose them.
-        let settle_superseded_net_outputs =
-            self.superseded_net_output_settlement_applies(cmd, false);
-        let redirect_rejection =
-            self.reject_invalid_redirects(cmd, settle_superseded_net_outputs)?;
-        let mut skip_command = redirect_rejection.is_some();
-        if redirect_rejection == Some(super::redirection::RedirectRejection::FatalNounset) {
-            // rubash#535: an unbound variable in a redirect word is a fatal
-            // word expansion error classified by where do_redirections runs
-            // (finish_heredoc_expansion_error — the same main-shell/child
-            // split the heredoc bodies use): a builtin/function target ends
-            // the noninteractive script, an external target contains the
-            // jump in the forked child. The diagnostic and status 1 are
-            // already in place from the walker.
-            self.finish_heredoc_expansion_error(cmd, Self::FATAL_PARAMETER_EXPANSION_STATUS)?;
-            skip_command = true;
+        // rubash#4036: GNU execute_cmd.c:4648-4649 prints the simple-command
+        // xtrace head BEFORE do_redirections runs (execute_builtin_or_function
+        // execute_cmd.c:5606 / execute_disk_command execute_cmd.c:4938+), so
+        // `set -x; echo hi 1>&3` traces `+ echo hi` ahead of `3: Bad file
+        // descriptor`. The reject gate below therefore runs AFTER the xtrace
+        // block; its redirect-word expansion still has to see the
+        // pre-tempenv bindings (redir.c:298 redirection_expand hides the
+        // temporary environment, variables.c:1978), which the pre-pass
+        // secures for a command carrying prefix assignments by snapshotting
+        // the gate-reachable expansions into redirect_target_memo before
+        // apply_temporary_assignments binds — the gate's own
+        // expand_redirect_target calls then hit the memo. The pre-pass is a
+        // no-op when there are no prefix assignments to hide. Skipped for
+        // standalone (wordless) commands: their permanent bindings are
+        // already applied above and ARE visible to redirect expansion
+        // (rubash#2718), so the gate may expand lazily at its own position —
+        // after the head line, the GNU do_redirections point.
+        if !standalone_assignments {
+            self.preexpand_redirect_targets(cmd);
         }
-        let redirect_rejected = skip_command;
         let assignment_raws = (cmd.assignment_raws.len() == cmd.assignments.len())
             .then(|| cmd.assignment_raws.as_slice());
         let temporary_assignments = if standalone_assignments {
@@ -206,6 +201,27 @@ impl Executor {
                 self.xtrace_write(&xtrace_output);
             }
         }
+
+        // rubash#2121: classify the apply funnel so the reject gate
+        // settles superseded net output entries only where the funnel
+        // itself would lose them.
+        let settle_superseded_net_outputs =
+            self.superseded_net_output_settlement_applies(cmd, false);
+        let redirect_rejection =
+            self.reject_invalid_redirects(cmd, settle_superseded_net_outputs)?;
+        let mut skip_command = redirect_rejection.is_some();
+        if redirect_rejection == Some(super::redirection::RedirectRejection::FatalNounset) {
+            // rubash#535: an unbound variable in a redirect word is a fatal
+            // word expansion error classified by where do_redirections runs
+            // (finish_heredoc_expansion_error — the same main-shell/child
+            // split the heredoc bodies use): a builtin/function target ends
+            // the noninteractive script, an external target contains the
+            // jump in the forked child. The diagnostic and status 1 are
+            // already in place from the walker.
+            self.finish_heredoc_expansion_error(cmd, Self::FATAL_PARAMETER_EXPANSION_STATUS)?;
+            skip_command = true;
+        }
+        let redirect_rejected = skip_command;
 
         // GNU execute_cmd.c:4480 resets special_builtin_failed before each
         // simple command; builtins that return EX_USAGE/EX_UTILERROR/etc.
