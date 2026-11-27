@@ -1240,6 +1240,35 @@ pub(in crate::executor) fn scan_substitution_spans(raw: &str) -> Vec<Substitutio
                     break;
                 }
                 if dollar_paren {
+                    // GNU parse_comsub (parse.y:4451) parses the `$(...)`
+                    // body as a command stream, so a nested backquote
+                    // substitution is its own command-substitution unit.
+                    // Quote state inside that nested unit must not leak into
+                    // the outer paren matcher: in
+                    // `$(echo `echo "x`; echo world)` the unbalanced `"` is
+                    // diagnosed by the inner backquote parse, while the outer
+                    // `)` still closes its substitution. Skip the backquote
+                    // body as a unit for span-boundary scanning.
+                    if inner == char::from(96) && !inner_single {
+                        cursor += 1;
+                        let mut backtick_escaped = false;
+                        while cursor < chars.len() {
+                            let c = chars[cursor].1;
+                            cursor += 1;
+                            if backtick_escaped {
+                                backtick_escaped = false;
+                            } else if c == '\\' {
+                                backtick_escaped = true;
+                            } else if c == char::from(96) {
+                                break;
+                            }
+                        }
+                        inner_word.clear();
+                        inner_word_boundary = false;
+                        inner_current_word_boundary = false;
+                        inner_token_boundary = false;
+                        continue;
+                    }
                     if inner == '#' && !inner_single && !inner_double && inner_token_boundary {
                         while cursor < chars.len() && chars[cursor].1 != '\n' {
                             cursor += 1;

@@ -804,7 +804,17 @@ fn push_quoted_pattern_char(output: &mut String, ch: char) {
         output.push('\'');
         return;
     }
-    if matches!(ch, '*' | '?' | '[' | '\\') {
+    // rubash#4126: GNU quote_string (pathexp.c) CTLESC-quotes EVERY
+    // character of a quoted pattern span, and escape_case_pattern_literal
+    // already applies that full-marking model on the case path. Marking
+    // only `* ? [ \` left the other pattern-significant characters bare
+    // for the matcher to read as operators: a quoted `]` closed a
+    // bracket expression early, a quoted `-` became a range, quoted
+    // `!`/`^` became bracket negation, quoted `#`/`%` became patsub
+    // anchors, and a quoted `+` opened an extglob group. Mark the whole
+    // printable-ASCII range; control bytes and non-ASCII characters
+    // keep the bare spelling (their data rides separate carriers).
+    if ch.is_ascii_graphic() || ch == ' ' {
         output.push(crate::executor::markers::CTLESC);
     }
     output.push(ch);

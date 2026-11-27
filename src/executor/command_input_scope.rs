@@ -2710,7 +2710,13 @@ impl Executor {
     /// user-typed literal U+E401 stays data (rubash#735, rubash#1867).
     pub(in crate::executor) fn expand_stored_here_string_word(&mut self, word: &str) -> String {
         let input = decode_ansi_c_quoted_word(word).unwrap_or_else(|| self.expand_word(word));
-        crate::executor::markers::strip_ansi_c_ifs_guard(&input)
+        // Same final-data boundary as expand_here_string_mut: GNU's expanded
+        // redirection word is dequote_string'd (subst.c:4807) before
+        // here_document_to_fd writes it, so source-quoting CTLESC
+        // introducers must not survive into the stdin byte stream.
+        crate::executor::markers::strip_ansi_c_ifs_guard(
+            &crate::executor::markers::dequote_ctlesc_pairs_cow(&input),
+        )
     }
 
     pub(in crate::executor) fn expand_heredoc_redirect_text(

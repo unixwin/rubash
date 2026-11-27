@@ -307,9 +307,19 @@ impl Executor {
         // not be claimed by the restores. Typed U+E319 data stays safe:
         // the ANSI-C entry E400-escapes it and this decoder skips
         // E400-escaped sentinels (rubash#840).
+        // GNU redir.c heredoc_expand returns the expanded word to
+        // here_document_to_fd as data after word expansion's final dequote
+        // (subst.c:4807 dequote_string strips CTLESC markers). The
+        // here-string expansion walker preserves source-quoting markers in
+        // the same CTLESC port, so this byte-stream boundary must drop the
+        // marker introducers before the body is staged; literal user 0x11
+        // bytes entered through source are raw-byte-marker tagged and are
+        // not affected (rubash#3816).
+        let carrier_decoded = crate::executor::markers::decode_word_position_carriers(&expanded);
+        let dequoted = crate::executor::markers::dequote_ctlesc_pairs_cow(&carrier_decoded);
         let decoded = crate::executor::execution_misc::decode_command_substitution_payload(
             &crate::executor::markers::restore_bare_sentinels(
-                &crate::executor::markers::decode_word_position_carriers(&expanded),
+                &dequoted,
                 &[
                     (crate::executor::markers::DATA_BACKSLASH, "\\"),
                     (crate::executor::markers::PROTECTED_BACKSLASH, "\\"),
