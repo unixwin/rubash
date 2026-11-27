@@ -4889,17 +4889,15 @@ impl Executor {
             // exec_redirection_undo_list): EX_BADUSAGE rolls the
             // redirections — kernel placements included — back; a
             // clean parse commits them.
-            let placement_mark = if self.builtin_wrapper_depth == 0
-                && self.shell_state.subshell_depth.get() == 0
-                && self.compound_redirect_scope_depth == 0
-            {
-                let mark = self.fd_table.placement_mark();
-                self.execute_stdio_only_exec_redirect(cmd, true)?;
-                Some(mark)
-            } else {
-                self.execute_stdio_only_exec_redirect_scoped(cmd)?;
-                None
-            };
+            let placement_mark =
+                if self.builtin_wrapper_depth == 0 && self.owns_process_fd_mutations() {
+                    let mark = self.fd_table.placement_mark();
+                    self.execute_stdio_only_exec_redirect(cmd, true)?;
+                    Some(mark)
+                } else {
+                    self.execute_stdio_only_exec_redirect_scoped(cmd)?;
+                    None
+                };
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
             // rubash#3401 (face 3): the simulated-exec wait takes the
@@ -6772,6 +6770,32 @@ impl Executor {
         result
     }
 
+    /// rubash#4225 / #1838 / #3917 / #4044: whether this executor owns
+    /// the OS process's descriptor table at the current execution frame,
+    /// so persistent `exec` placements/closes may mutate kernel
+    /// descriptors directly (GNU redir.c:1017/:1120/:1190/:1239/:1267).
+    ///
+    /// False when:
+    /// - the hosting binary is a library consumer
+    ///   (`!process_replacement_enabled()`, e.g. `niubash` or an
+    ///   in-process Rust test harness — `rubash#1838` / `#4225`, where
+    ///   the host owns the process's original descriptors);
+    /// - this executor is a fork-copy clone (`!self.owns_process_image`);
+    /// - execution is inside an emulated child region
+    ///   (`emulated_child_depth > 0`);
+    /// - execution is inside an in-process subshell layer above the
+    ///   level this process realized (`subshell_depth >
+    ///   bashpid_origin_depth`);
+    /// - execution is inside a compound command's redirect bracket whose
+    ///   restore is table-only (`compound_redirect_scope_depth > 0`).
+    fn owns_process_fd_mutations(&self) -> bool {
+        crate::builtins::exec::process_replacement_enabled()
+            && self.owns_process_image
+            && self.emulated_child_depth.get() == 0
+            && self.shell_state.subshell_depth.get() <= self.bashpid_origin_depth
+            && self.compound_redirect_scope_depth == 0
+    }
+
     fn execute_stdio_only_exec_redirect(
         &mut self,
         cmd: &CommandNode,
@@ -6787,22 +6811,18 @@ impl Executor {
         // (FdTable::kernel_close_persistent) is armed here with
         // the same gate — see close_adopted_process_fd.
         //
-        // The arming is narrowed to the true persistent scope
-        // (captain review of PR #3930): GNU's dup2 (redir.c:1017)
-        // is process state, and GNU runs a subshell body or a
-        // compound command's body in a FORK — the parent's
-        // descriptors never move. This executor is in-process:
-        // inside a subshell scope (subshell_depth > 0) or a
-        // compound command's redirect bracket
-        // (compound_redirect_scope_depth > 0) the scope restores
-        // the fd TABLE only, so a kernel placement would leak past
-        // the restore and corrupt the outer scope's descriptors
-        // (the issue2690/issue726/issue3403 census regressions).
-        // Over-suppression is safe: an unplaced install stays
-        // virtual, exactly the pre-#3917 model.
-        let arm = place_persistent
-            && self.shell_state.subshell_depth.get() == 0
-            && self.compound_redirect_scope_depth == 0;
+        // The arming is narrowed to the true persistent process-owning
+        // scope (`owns_process_fd_mutations`, rubash#4225 / PR #3930):
+        // GNU's dup2/close (redir.c:1017/:1239) mutate process state in
+        // a process that IS the shell, whereas an embedded library
+        // executor (`!process_replacement_enabled()`, rubash#1838) shares
+        // its process with a host that owns the inherited descriptors,
+        // and fork-copy clones / emulated children / subshells /
+        // compound redirect brackets restore only the fd TABLE on exit.
+        // Over-suppression is safe: an unplaced install or close stays
+        // virtual in `FdTable`, preserving the host's descriptors while
+        // keeping shell-visible semantics intact.
+        let arm = place_persistent && self.owns_process_fd_mutations();
         let prev = std::mem::replace(&mut self.fd_table.kernel_place_persistent, arm);
         let prev_close = std::mem::replace(&mut self.fd_table.kernel_close_persistent, arm);
         let prev_save_slots = std::mem::take(&mut self.exec_walk_save_slots);
@@ -8645,7 +8665,8 @@ impl Executor {
         // bashpid_origin_depth, the level the spawn realized (a coproc
         // body's `exec >&-` must still close the real c2p writer,
         // rubash#3633).
-        if !self.owns_process_image
+        if !crate::builtins::exec::process_replacement_enabled()
+            || !self.owns_process_image
             || self.emulated_child_depth.get() > 0
             || self.exec_scoped_redirect_walk_depth > 0
             || self.shell_state.subshell_depth.get() > self.bashpid_origin_depth
