@@ -653,6 +653,17 @@ pub(in crate::executor) struct TempenvBoundFrame {
     pub(in crate::executor) records: Vec<(String, String, String, String)>,
 }
 
+/// rubash#4190: the element half of a comsub occurrence's identity.
+/// Command words are indexed within their command; redirect words are
+/// anchored by the physical position of their target token (rubash#4197),
+/// which distinguishes two textually identical redirect words without
+/// depending on the word's expansion text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(in crate::executor) enum ComsubElementSlot {
+    CommandWord(u32),
+    RedirectWord { line: usize, column: usize },
+}
+
 /// rubash#4190: the driver half of a comsub occurrence's identity —
 /// stamped by an element's expansion driver around that element's
 /// expansion (see the `comsub_site_frame` field). `generation` binds
@@ -662,9 +673,8 @@ pub(in crate::executor) struct TempenvBoundFrame {
 #[derive(Debug, Clone, Copy)]
 pub(in crate::executor) struct ComsubSiteFrame {
     pub(in crate::executor) generation: u64,
-    /// Element slot within the dispatch (the word index for command
-    /// words).
-    pub(in crate::executor) slot: u32,
+    /// Element slot within the dispatch.
+    pub(in crate::executor) slot: ComsubElementSlot,
     /// The element's physical start line in the enclosing input.
     pub(in crate::executor) line: usize,
 }
@@ -688,7 +698,7 @@ pub(in crate::executor) struct ComsubSiteMark {
 /// gather would have used (make_cmd.c:627's `lineno`).
 #[derive(Debug, Clone, Copy)]
 pub(in crate::executor) struct ComsubSite {
-    pub(in crate::executor) slot: u32,
+    pub(in crate::executor) slot: ComsubElementSlot,
     pub(in crate::executor) ordinal: u32,
     pub(in crate::executor) header_line: usize,
 }
@@ -2053,7 +2063,7 @@ pub struct Executor {
     /// generation, keyed (slot, ordinal) — the per-occurrence
     /// replacement for the source-text dedup within a stamped frame.
     /// Cleared whenever the observed generation changes.
-    heredoc_warning_sites: RefCell<std::collections::HashSet<(u32, u32)>>,
+    heredoc_warning_sites: RefCell<std::collections::HashSet<(ComsubElementSlot, u32)>>,
     heredoc_warning_sites_generation: Cell<u64>,
     /// A current-shell (`${ ...; }` / `${| ...; }`) body that ran `exit N`
     /// aborts the enclosing (sub)shell with status N (GNU subst.c: the

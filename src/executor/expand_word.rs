@@ -362,7 +362,62 @@ impl Executor {
         redirect_target_is_ambiguous(raw, target, extglob)
     }
 
+    /// rubash#4197: the redirect-word counterpart of
+    /// `expand_command_word`'s site-frame stamp. GNU parses the command
+    /// substitution in the redirect word at the word's own physical
+    /// position (parse.y:5305 read_token_word -> parse.y:4451
+    /// parse_comsub; the heredoc gather warning is make_cmd.c:627
+    /// make_here_document via parse.y:3120 gather_here_documents), so a
+    /// compound command's trailing redirect must not inherit the legacy
+    /// command-start seed merely because it never passes the command-word
+    /// driver. The frame uses the same generation + element-slot identity
+    /// as command words; the slot is the redirect target token's physical
+    /// position, which is stable across the list/mirror clones of one
+    /// redirect and distinct across two textual duplicates.
+    fn comsub_site_frame_for_redirect(
+        &self,
+        redirect: &crate::parser::Redirect,
+    ) -> Option<crate::executor::ComsubSiteFrame> {
+        let (line, column) = redirect.target_start_position?;
+        Some(crate::executor::ComsubSiteFrame {
+            generation: self.preopened_generation.get(),
+            slot: crate::executor::ComsubElementSlot::RedirectWord { line, column },
+            line,
+        })
+    }
+
+    /// Mutable-entry twin of the frame bracket in `expand_redirect_target`:
+    /// here-string words expand through redir.c:348 heredoc_expand rather
+    /// than redirection_expand, but their command substitutions are the
+    /// same per-occurrence mechanism. The caller supplies the redirect
+    /// metadata carrier for the here-string word it is expanding.
+    pub(in crate::executor) fn with_redirect_comsub_site_frame_mut<T>(
+        &mut self,
+        redirect: Option<&crate::parser::Redirect>,
+        expand: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let Some(frame) =
+            redirect.and_then(|redirect| self.comsub_site_frame_for_redirect(redirect))
+        else {
+            return expand(self);
+        };
+        let saved_frame = self.comsub_site_frame.replace(Some(frame));
+        let expanded = expand(self);
+        self.comsub_site_frame.set(saved_frame);
+        expanded
+    }
+
     pub(crate) fn expand_redirect_target(&self, redirect: &crate::parser::Redirect) -> String {
+        let Some(frame) = self.comsub_site_frame_for_redirect(redirect) else {
+            return self.expand_redirect_target_inner(redirect);
+        };
+        let saved_frame = self.comsub_site_frame.replace(Some(frame));
+        let expanded = self.expand_redirect_target_inner(redirect);
+        self.comsub_site_frame.set(saved_frame);
+        expanded
+    }
+
+    fn expand_redirect_target_inner(&self, redirect: &crate::parser::Redirect) -> String {
         // A heredoc delimiter word is NEVER word-expanded (rubash#2686):
         // GNU make_cmd.c make_here_document stores `here_doc_eof =
         // string_quote_removal(word)` when the redirect is built, and

@@ -1018,6 +1018,7 @@ impl Printer {
                     here_string: false,
                     body: None,
                     body_carrier: None,
+                    target_start_position: None,
                     gather_line: None,
                 };
                 self.cprintf(&heredoc_header(&info));
@@ -1154,6 +1155,7 @@ impl Printer {
                         here_string.clone(),
                         here_string.clone(),
                     )),
+                    target_start_position: None,
                     append: false,
                     clobber: false,
                 });
@@ -1331,6 +1333,7 @@ pub(crate) fn heredoc_redirect_info(
         here_string: false,
         body: cmd.heredoc.clone(),
         body_carrier: None,
+        target_start_position: None,
         gather_line: cmd.heredoc_gather_line,
     }
 }

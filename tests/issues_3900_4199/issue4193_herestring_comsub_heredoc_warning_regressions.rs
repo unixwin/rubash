@@ -18,12 +18,10 @@
 //!
 //! Expectations are byte-verified against the GNU Bash 5.3.20 oracle
 //! (script-file batteries; the C.UTF-8 and C locales agree on all of
-//! these shapes), except the while-loop pin's warning LINE NUMBERS: on
-//! compound commands a comsub in a redirect word still takes the legacy
-//! line seed (the #4190 frontier for unstamped redirect words — the
-//! same attribution is produced by a plain `< $(...)` redirect word,
-//! which this fix does not touch), so that pin asserts the warning's
-//! presence and text, not its line numbers. Its stdout is byte-exact.
+//! these shapes). rubash#4197 then carried the same per-occurrence
+//! identity onto compound-command redirect words: the redirect target
+//! token's physical start frames the comsub, so a compound end line can
+//! no longer become the heredoc header line.
 
 use std::process::Command;
 
@@ -66,23 +64,61 @@ const WARNING_E_3_1: &str =
 
 /// The reported shape: a while loop whose stdin is a here-string built
 /// from a comsub whose heredoc delimiter line carries the closing `)`.
-/// On the unfixed tree stderr was EMPTY (no warning at all); GNU warns.
-/// The warning's line numbers ride the legacy redirect-word seed (see
-/// the module doc), so this pin asserts presence + warning text.
+/// On the unfixed #4193 tree stderr was EMPTY; after #4193 the warning
+/// fired but the compound redirect word kept the legacy seed (#4197).
+/// GNU attributes the EOF warning to the redirect word's own occurrence.
 const HS_WHILE: &str = "while read x; do echo \"got $x\"; done <<< $(cat <<E\nbody\nE)\n";
 
 #[test]
-fn herestring_while_loop_comsub_warns() {
+fn herestring_while_loop_comsub_warns_byte_exact() {
+    assert_both_locales(HS_WHILE, "got body\n", WARNING_E_3_1);
+}
+
+/// rubash#4197 control without the here-string operator: the compound's
+/// plain input redirect word carries the same comsub. GNU warns with the
+/// redirect word's occurrence lines, then fails the input open because
+/// the substitution expands to the filename `body`.
+const INPUT_WHILE: &str = "while read x; do echo \"got $x\"; done < $(cat <<E\nbody\nE)\n";
+
+#[test]
+fn input_redirect_while_loop_comsub_warns_byte_exact() {
     for lc_all in ["C.UTF-8", "C"] {
-        let (stdout, stderr, code) = rubash_file(HS_WHILE, lc_all);
-        assert_eq!(stdout, "got body\n", "stdout mismatch ({lc_all})");
-        assert!(
-            stderr.contains("warning: here-document at line ")
-                && stderr.contains("delimited by end-of-file (wanted `E')"),
-            "warning missing or malformed ({lc_all}): {stderr:?}"
+        let (stdout, stderr, code) = rubash_file(INPUT_WHILE, lc_all);
+        assert_eq!(stdout, "", "stdout mismatch ({lc_all})");
+        assert_eq!(
+            stderr,
+            concat!(
+                "case.sh: line 3: warning: here-document at line 1 delimited by end-of-file (wanted `E')\n",
+                "case.sh: line 3: body: No such file or directory\n"
+            ),
+            "stderr mismatch ({lc_all})"
         );
-        assert_eq!(code, Some(0), "exit code mismatch ({lc_all})");
+        assert_eq!(code, Some(1), "exit code mismatch ({lc_all})");
     }
+}
+
+/// The same occurrence identity on a brace group: attribution must not
+/// depend on the loop executor's ambient line bookkeeping.
+const HS_BRACE: &str = "{ echo x; } <<< $(cat <<E\nbody\nE)\n";
+
+#[test]
+fn herestring_brace_group_comsub_warns_byte_exact() {
+    assert_both_locales(HS_BRACE, "x\n", WARNING_E_3_1);
+}
+
+/// A redirect written on a later physical line of the compound command:
+/// GNU's `at line` is the redirect word's own line (4), not either the
+/// compound start (1) or end-of-word line (6).
+const HS_WHILE_LATE_REDIRECT: &str =
+    "while read x\ndo\n  echo \"got $x\"\ndone <<< $(cat <<E\nbody\nE)\n";
+
+#[test]
+fn herestring_later_redirect_line_uses_word_occurrence_line() {
+    assert_both_locales(
+        HS_WHILE_LATE_REDIRECT,
+        "got body\n",
+        "case.sh: line 6: warning: here-document at line 4 delimited by end-of-file (wanted `E')\n",
+    );
 }
 
 /// Same shape on a simple command: byte-exact against GNU, line
