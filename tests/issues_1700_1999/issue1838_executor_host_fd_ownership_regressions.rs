@@ -180,3 +180,169 @@ fn issue1838_shell_close_of_adopted_fd_spares_host_original() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// rubash#4225: persistent `exec N>other` in an embedded Executor must
+/// stay virtual and never `dup2` over (and subsequently close) a
+/// host-owned descriptor on slot N.
+#[test]
+fn issue1838_shell_persistent_redirect_onto_adopted_fd_spares_host_original() {
+    let dir = tempdir("place");
+    let host_path = dir.join("host.txt");
+    let shell_path = dir.join("shell.txt");
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(true)
+        .open(&host_path)
+        .expect("open host file");
+    let fd = file.as_raw_fd();
+
+    {
+        let mut executor = Executor::new();
+        let script = format!(
+            "exec {fd}>{shell}; echo shell >&{fd}",
+            shell = shell_path.display()
+        );
+        run_script(&mut executor, &script);
+        // Executor drops here: must not close the host's original fd.
+    }
+
+    assert!(
+        fd_is_open(fd),
+        "persistent redirect onto adopted fd closed or displaced the host's original"
+    );
+    file.write_all(b"host\n")
+        .expect("host original still writable");
+    drop(file);
+    assert_eq!(
+        std::fs::read_to_string(&host_path).expect("read host file"),
+        "host\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&shell_path).expect("read shell file"),
+        "shell\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// rubash#4225: `exec M>&N-` (move-source close of an adopted fd)
+/// must close only the shell's adopted copy, leaving the host's
+/// original open and usable.
+#[test]
+fn issue1838_shell_move_of_adopted_fd_spares_host_original() {
+    let dir = tempdir("move");
+    let host_path = dir.join("host.txt");
+    let out_path = dir.join("rc.txt");
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(true)
+        .open(&host_path)
+        .expect("open host file");
+    let fd = file.as_raw_fd();
+    let target_fd = if fd == 9 { 8 } else { 9 };
+
+    {
+        let mut executor = Executor::new();
+        let script = format!(
+            "exec {target_fd}>&{fd}-; echo from-dup >&{target_fd}; echo X >&{fd}; echo rc=$? > {out}",
+            out = out_path.display()
+        );
+        run_script(&mut executor, &script);
+    }
+
+    assert_eq!(
+        std::fs::read_to_string(&out_path).expect("read rc file"),
+        "rc=1\n"
+    );
+    assert!(
+        fd_is_open(fd),
+        "move-source close of adopted fd closed the host's original"
+    );
+    file.write_all(b"host\n")
+        .expect("host original still writable");
+    drop(file);
+    assert_eq!(
+        std::fs::read_to_string(&host_path).expect("read host file"),
+        "from-dup\nhost\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// rubash#4225: the public Session API shares the same host-fd
+/// ownership invariant as raw `Executor::new()`.
+#[test]
+fn issue1838_session_close_of_adopted_fd_spares_host_original() {
+    use rubash::api::{RunOptions, Session};
+
+    let dir = tempdir("session-close");
+    let data_path = dir.join("data.txt");
+    let out_path = dir.join("rc.txt");
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(true)
+        .open(&data_path)
+        .expect("open data file");
+    let fd = file.as_raw_fd();
+
+    {
+        let mut session = Session::builder().build().expect("build session");
+        let script = format!(
+            "exec {fd}>&-; echo X >&{fd}; echo rc=$? > {out}",
+            out = out_path.display()
+        );
+        let outcome = session
+            .run(&script, &RunOptions::default())
+            .expect("run session script");
+        assert_eq!(outcome.status, 0);
+    }
+
+    assert_eq!(
+        std::fs::read_to_string(&out_path).expect("read rc file"),
+        "rc=1\n"
+    );
+    assert!(
+        fd_is_open(fd),
+        "Session-level close of adopted fd closed the host's original"
+    );
+    file.write_all(b"host\n")
+        .expect("host original still writable");
+    drop(file);
+    assert_eq!(
+        std::fs::read_to_string(&data_path).expect("read data file"),
+        "host\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// rubash#4225: `exec >&-` in an embedded Executor must not close the
+/// host process's OS stdout descriptor.
+#[test]
+fn issue1838_shell_close_of_stdio_spares_host_stdio() {
+    let was_open = fd_is_open(1);
+    let dir = tempdir("stdio-close");
+    let out_path = dir.join("rc.txt");
+    {
+        let mut executor = Executor::new();
+        let script = format!(
+            "exec >&-; echo X; echo rc=$? > {out}",
+            out = out_path.display()
+        );
+        run_script(&mut executor, &script);
+    }
+    assert_eq!(
+        std::fs::read_to_string(&out_path).expect("read rc file"),
+        "rc=1\n"
+    );
+    if was_open {
+        assert!(
+            fd_is_open(1),
+            "embedded Executor exec >&- closed the host process's OS fd 1"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
