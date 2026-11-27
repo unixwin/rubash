@@ -277,21 +277,23 @@ pub(crate) struct ProcessStateGuard {
 }
 
 pub(crate) fn acquire_process_state() -> ProcessStateGuard {
-    let depth = PROCESS_STATE_DEPTH.with(|depth| depth.get());
+    let depth = PROCESS_STATE_DEPTH
+        .try_with(|depth| depth.get())
+        .unwrap_or(0);
     if depth > 0 {
-        PROCESS_STATE_DEPTH.with(|cell| cell.set(depth + 1));
+        let _ = PROCESS_STATE_DEPTH.try_with(|cell| cell.set(depth + 1));
         return ProcessStateGuard { owned: None };
     }
     let guard = super::EXECUTION_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    PROCESS_STATE_DEPTH.with(|depth| depth.set(1));
+    let _ = PROCESS_STATE_DEPTH.try_with(|depth| depth.set(1));
     ProcessStateGuard { owned: Some(guard) }
 }
 
 impl Drop for ProcessStateGuard {
     fn drop(&mut self) {
-        PROCESS_STATE_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+        let _ = PROCESS_STATE_DEPTH.try_with(|depth| depth.set(depth.get().saturating_sub(1)));
         // The MutexGuard drops after the depth clears, so a funnel
         // write triggered by another thread's wakeup can never observe
         // this thread as still holding the lock.
