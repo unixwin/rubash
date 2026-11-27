@@ -383,11 +383,13 @@ fn get_history_event(
     if chars.get(i).map(|c| is_digit(*c)) == Some(true) {
         let mut which: usize = 0;
         while chars.get(i).map(|c| is_digit(*c)) == Some(true) {
-            which = which * 10 + chars[i].to_digit(10).unwrap() as usize;
+            which = which
+                .saturating_mul(10)
+                .saturating_add(chars[i].to_digit(10).unwrap() as usize);
             i += 1;
         }
         if sign < 0 {
-            let total = hist.length() + hist.base();
+            let total = hist.length().saturating_add(hist.base());
             if which >= total {
                 return (None, i);
             }
@@ -821,7 +823,9 @@ fn get_history_word_specifier(
     } else if chars.get(i).map(|c| is_digit(*c)) == Some(true) && expecting_word_spec {
         let mut value: i64 = 0;
         while chars.get(i).map(|c| is_digit(*c)) == Some(true) {
-            value = value * 10 + chars[i].to_digit(10).unwrap() as i64;
+            value = value
+                .saturating_mul(10)
+                .saturating_add(chars[i].to_digit(10).unwrap() as i64);
             i += 1;
         }
         first = value;
@@ -843,7 +847,9 @@ fn get_history_word_specifier(
         if chars.get(i).map(|c| is_digit(*c)) == Some(true) {
             let mut value: i64 = 0;
             while chars.get(i).map(|c| is_digit(*c)) == Some(true) {
-                value = value * 10 + chars[i].to_digit(10).unwrap() as i64;
+                value = value
+                    .saturating_mul(10)
+                    .saturating_add(chars[i].to_digit(10).unwrap() as i64);
                 i += 1;
             }
             last = value;
@@ -873,20 +879,21 @@ fn get_history_word_specifier(
 /// histexpand.c history_arg_extract: extract words first..last (inclusive).
 pub fn history_arg_extract(first: i64, last: i64, string: &str, ctx: HistCtx) -> Option<String> {
     let list = history_tokenize(string, Some(ctx.chars.comment))?;
-    let len = list.len() as i64;
+    let len = list.len() as i128;
+    let dollar = i128::from(DOLLAR);
 
-    let mut first = first;
-    let mut last = last;
-    if last < 0 && last != DOLLAR {
+    let mut first = i128::from(first);
+    let mut last = i128::from(last);
+    if last < 0 && last != dollar {
         last = len + last - 1;
     }
-    if first < 0 && first != DOLLAR {
+    if first < 0 && first != dollar {
         first = len + first - 1;
     }
-    if last == DOLLAR {
+    if last == dollar {
         last = len - 1;
     }
-    if first == DOLLAR {
+    if first == dollar {
         first = len - 1;
     }
     last += 1;
@@ -896,9 +903,10 @@ pub fn history_arg_extract(first: i64, last: i64, string: &str, ctx: HistCtx) ->
     }
 
     let mut parts: Vec<&str> = Vec::new();
-    let mut index = first;
-    while index < last {
-        parts.push(&list[index as usize]);
+    let mut index = first as usize;
+    let end = last as usize;
+    while index < end {
+        parts.push(&list[index]);
         index += 1;
     }
     Some(parts.join(" "))
@@ -1327,5 +1335,49 @@ fn expand_pass(
     HistExpandResult {
         status: 0,
         text: result,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct SingleEntryHist;
+
+    impl HistLookup for SingleEntryHist {
+        fn base(&self) -> usize {
+            1
+        }
+        fn length(&self) -> usize {
+            1
+        }
+        fn get(&self, offset: usize) -> Option<&str> {
+            (offset == 1).then_some("echo alpha beta")
+        }
+    }
+
+    #[test]
+    fn overflowing_event_and_word_specifiers_fail_without_panicking() {
+        let ctx = HistCtx {
+            chars: HistChars::default(),
+            posix: false,
+        };
+        let mut state = HistEngineState::default();
+
+        let ev = history_expand(
+            "!999999999999999999999999",
+            &SingleEntryHist,
+            &mut state,
+            ctx,
+        );
+        assert_eq!(ev.status, -1);
+        assert!(ev.text.contains("event not found"), "text={}", ev.text);
+
+        let ws = history_expand("!!:9223372036854775807", &SingleEntryHist, &mut state, ctx);
+        assert_eq!(ws.status, -1);
+        assert!(ws.text.contains("bad word specifier"), "text={}", ws.text);
+
+        assert_eq!(history_arg_extract(0, i64::MAX, "echo a b", ctx), None);
+        assert_eq!(history_arg_extract(i64::MIN, 0, "echo a b", ctx), None);
     }
 }
