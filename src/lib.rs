@@ -26,6 +26,7 @@ pub mod proc_vfs;
 pub mod readline_editor;
 pub mod script_driver;
 pub mod shell;
+pub(crate) mod signals;
 pub mod special_paths;
 pub(crate) mod stack_growth;
 pub mod token_str;
