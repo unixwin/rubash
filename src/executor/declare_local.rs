@@ -740,39 +740,65 @@ impl Executor {
                             return Err(());
                         }
                     } else if nested_readonly {
-                        // rubash#2658: two prolog classes split by which
-                        // layer refuses the readonly bind. When the operand
-                        // replays attribute letters through a nested
-                        // declare (subst.c:12949 expand_declaration_argument
-                        // -> subst.c:12792 make_internal_declare) the
-                        // refusal is declare's own sh_readonly
-                        // (declare.def:876) -> builtin_error, whose
-                        // this_command_name is the enclosing FUNCTION name
-                        // at expansion time (builtins/common.c:83-105 —
-                        // execute_cmd.c:4800 installs the builtin name only
-                        // after expand_words) — `f() { local r=(4); }` on
-                        // readonly r prints `f: r: readonly variable`. That
-                        // class covers declare/typeset/local always (a
-                        // local-scope declare of a readonly global fails)
-                        // and export/readonly ONLY when -a/-A replay:
-                        // setattr.def:231-251 turns `readonly -a r=(6)` into
-                        // `declare -gra r`, whose attr-set refusal prints
-                        // `f: r:`, while flagless `readonly r=(4)` reduces
-                        // to `declare -g r` — a scope-only no-op that
-                        // succeeds — so its refusal arrives later from the
-                        // bind layer's err_readonly (error.c:453
-                        // report_error), which prints the bare variable
-                        // name with no this_command_name segment. The
-                        // operand's expansion-time bind failure is a real
-                        // DISCARD for the special builtins
-                        // (subst.c:13033 exp_jump_to_top_level): inside a
-                        // function the body is abandoned after the single
-                        // line, before the builtin runs
-                        // (probe: `f() { readonly r=(4); declare -p r; }`
-                        // prints `r: readonly variable` once, f's tail
-                        // never runs, the caller continues at top level).
-                        if declare_family || array_hint || assoc_hint {
-                            match self.shell_state.function_name_stack.first() {
+                        // rubash#2658, rubash#4160: in GNU
+                        // expand_declaration_argument (subst.c:12949-13048),
+                        // make_internal_declare runs a valueless nested
+                        // declare (`offset == 0`) with the replayed option
+                        // letters (`-a`/`-A` from W_ASSIGNARRAY/W_ASSIGNASSOC
+                        // and `-i`/`-l`/`-u`/`-c`/`+i`/`+l`/`+u`/`+c` from
+                        // the option scan at subst.c:12973-13000). When the
+                        // bound instance itself is already readonly, that
+                        // valueless nested declare fails ONLY if an
+                        // invalid_readonly_attrs option was replayed
+                        // (declare.def:893 -> sh_readonly); inside a function
+                        // with W_FORCELOCAL (subst.c:13034) the failure is
+                        // non-fatal (`skip = 1`), and the outer builtin
+                        // reports the operand a second time under its own
+                        // name. When no invalid_readonly_attrs letter is
+                        // replayed (`declare -g r=(2)`, `declare -gr r=(2)`,
+                        // `declare -g +r r=(2)`, same-scope `declare r=(2)`
+                        // / `local r=(2)` / `typeset r=(2)` after `local -r`,
+                        // or flagless `readonly r=(4)` / `export r=(4)`),
+                        // make_internal_declare succeeds (`t == 0`, `skip ==
+                        // 0`) and subst.c:13042 runs do_word_assignment ->
+                        // do_compound_assignment (subst.c:3441-3515), which
+                        // reports one bare-name err_readonly (error.c:453)
+                        // and calls bash_variable_assignment_error(0) ->
+                        // exp_jump_to_top_level(DISCARD) unconditionally
+                        // (subst.c:13046).
+                        let omap_invalid_readonly = assoc_hint
+                            || array_hint
+                            || args[..region_end].iter().any(|arg| {
+                                (arg.starts_with('-') || arg.starts_with('+'))
+                                    && arg.len() > 1
+                                    && arg != "--"
+                                    && arg != "--help"
+                                    && arg[1..].contains(['i', 'l', 'u', 'c'])
+                            });
+                        let internal_declare_refuses = omap_invalid_readonly;
+                        if internal_declare_refuses {
+                            // In R2 (same-scope local already exists at
+                            // current variable_context), an earlier command
+                            // in the function body ran and its return_result
+                            // cleared this_command_name to NULL
+                            // (execute_cmd.c:4952), so sh_readonly omits the
+                            // command segment; otherwise this_command_name
+                            // still holds the enclosing function name
+                            // installed at execute_cmd.c:4800.
+                            let same_scope_local = declare_family
+                                && self.shell_state.function_depth > 0
+                                && !declare_args_force_global(args)
+                                && self
+                                    .shell_state
+                                    .local_var_scopes
+                                    .last()
+                                    .is_some_and(|scope| scope.contains_key(lhs));
+                            match self
+                                .shell_state
+                                .function_name_stack
+                                .first()
+                                .filter(|_| !same_scope_local)
+                            {
                                 Some(func) => eprintln!(
                                     "{}{func}: {lhs}: readonly variable",
                                     self.diagnostic_prefix()
@@ -785,14 +811,19 @@ impl Executor {
                         } else {
                             eprintln!(
                                 "{}{lhs}: readonly variable",
-                                self.diagnostic_prefix()
+                                self.error_prefix()
                             );
                         }
-                        if self.shell_state.function_depth == 0 || !declare_family {
-                            // Same subst.c:13033 DISCARD for the nested
-                            // readonly bind (GNU probe run401/nro.sh:
-                            // `declare ro=() 2> E1; echo same-line` skips the
-                            // echo, next line sees $? 1, E1 never created).
+                        if !internal_declare_refuses
+                            || self.shell_state.function_depth == 0
+                            || !declare_family
+                        {
+                            // DISCARD: either do_word_assignment failed and
+                            // called bash_variable_assignment_error(0)
+                            // (subst.c:13042-13046, independent of
+                            // W_FORCELOCAL), or make_internal_declare failed
+                            // without W_FORCELOCAL (subst.c:13034-13037: top
+                            // level or non-localvar builtins export/readonly).
                             self.raise_evalerror_abort();
                             return Err(());
                         }
@@ -2527,7 +2558,6 @@ impl Executor {
                     );
                 }
             }
-            self.write_local_compound_readonly_assignment_errors(&args, &mut stderr)?;
             // GNU declare.def:565 uses variable_context to decide between the
             // global-scope self-reference error and the function-scope
             // circular-reference warning; local always runs in a function, so
@@ -2941,34 +2971,6 @@ impl Executor {
         )?;
         diag.flush_with(|| prolog.build(&self.shell_state.env_vars));
         Ok(status)
-    }
-
-    pub(in crate::executor) fn write_local_compound_readonly_assignment_errors<W>(
-        &self,
-        args: &[String],
-        stderr: &mut W,
-    ) -> io::Result<()>
-    where
-        W: Write,
-    {
-        for arg in args {
-            let Some((name, value)) = split_assignment_word(arg) else {
-                continue;
-            };
-            if !value.starts_with(COMPOUND_ASSIGNMENT_MARKER) {
-                continue;
-            }
-            let (name, _) = assignment_name_and_append(name);
-            if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, name) {
-                writeln!(
-                    stderr,
-                    "{}{}: readonly variable",
-                    self.diagnostic_prefix(),
-                    name
-                )?;
-            }
-        }
-        Ok(())
     }
 
     /// GNU variables.c:2579-2631 make_local_variable (was_tmpvar path): a
