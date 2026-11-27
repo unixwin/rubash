@@ -980,7 +980,23 @@ impl FdTable {
     /// On Windows the snapshot is always empty (handle inheritance is
     /// opt-in per handle; see the annotated stubs in
     /// fd/windows_impl.rs), so this is a no-op there.
-    pub(crate) fn register_inherited_process_fds(&mut self, snapshot: &[(u32, bool, bool)]) {
+    ///
+    /// `adopt_unclaimed` gates the fd>=3 adoption loop (the fd-0
+    /// O_RDWR reconciliation above is unconditional). A validated
+    /// internal respawn passes false only when the __RUBASH_FD_*
+    /// restore provably covers every live descriptor in the birth
+    /// snapshot: GNU's forked child holds exactly the parent's fd
+    /// table (execute_cmd.c:1576 execute_in_subshell in the make_child
+    /// fork), so covered extras are transport/runtime plumbing, never
+    /// user fds (rubash#4045 — the carrier surfaced as `fd 12 -> file`
+    /// in `( ls /proc/self/fd ) &`). When coverage has a gap the
+    /// caller passes true and keeps the #1557 inherited-fd fallback
+    /// rather than severing an undelivered face.
+    pub(crate) fn register_inherited_process_fds(
+        &mut self,
+        snapshot: &[(u32, bool, bool)],
+        adopt_unclaimed: bool,
+    ) {
         // rubash#2530: fd 0's birth seed above claims only the read
         // arm (InheritedProcessStdin), but a process can be BORN with
         // fd 0 open read-write — a parent shell's `<> file` spawn
@@ -1024,36 +1040,38 @@ impl FdTable {
                 }
             }
         }
-        for &(fd, _, _) in snapshot {
-            if self.entries.contains_key(&fd) {
-                continue;
-            }
-            let Some((readable, writable)) = crate::fd::fd_directions(fd) else {
-                continue;
-            };
-            let Some(handle) = crate::fd::dup_adopted_fd(fd) else {
-                continue;
-            };
-            let file = Rc::new(FileFd {
-                handle,
-                closed: std::cell::Cell::new(false),
-                adopted: true,
-                path: crate::fd::inherited_fd_path(fd),
-            });
-            if readable && writable {
-                // rubash#3655: one inherited description open in
-                // both directions — a single open_readwrite install,
-                // never two sequential binds.
-                self.open_readwrite(
-                    fd,
-                    FdReadEndpoint::File(file.clone()),
-                    FdWriteEndpoint::File(file),
-                    false,
-                );
-            } else if readable {
-                self.open_input(fd, FdReadEndpoint::File(file.clone()), false);
-            } else if writable {
-                self.open_output(fd, FdWriteEndpoint::File(file), false);
+        if adopt_unclaimed {
+            for &(fd, _, _) in snapshot {
+                if self.entries.contains_key(&fd) {
+                    continue;
+                }
+                let Some((readable, writable)) = crate::fd::fd_directions(fd) else {
+                    continue;
+                };
+                let Some(handle) = crate::fd::dup_adopted_fd(fd) else {
+                    continue;
+                };
+                let file = Rc::new(FileFd {
+                    handle,
+                    closed: std::cell::Cell::new(false),
+                    adopted: true,
+                    path: crate::fd::inherited_fd_path(fd),
+                });
+                if readable && writable {
+                    // rubash#3655: one inherited description open in
+                    // both directions — a single open_readwrite install,
+                    // never two sequential binds.
+                    self.open_readwrite(
+                        fd,
+                        FdReadEndpoint::File(file.clone()),
+                        FdWriteEndpoint::File(file),
+                        false,
+                    );
+                } else if readable {
+                    self.open_input(fd, FdReadEndpoint::File(file.clone()), false);
+                } else if writable {
+                    self.open_output(fd, FdWriteEndpoint::File(file), false);
+                }
             }
         }
     }
