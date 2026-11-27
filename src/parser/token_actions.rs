@@ -1957,6 +1957,14 @@ fn find_unquoted_ctrl_op(value: &str, extglob: bool) -> Option<String> {
                 }
                 continue;
             }
+            // Skip $'...' ANSI-C single-quoted string (parse.y:5552-5576
+            // read_token_word -> parse_matched_pair with P_ALLOWESC).
+            b'$' if !in_single && !in_double && i + 1 < bytes.len() && bytes[i + 1] == b'\'' => {
+                i = skip_ansi_single_quoted(bytes, i + 2);
+                prev_word_byte = b'\'';
+                word_start = false;
+                continue;
+            }
             // Skip $(...) command substitution — GNU read_token_word
             // consumes it as one unit; control operators inside are
             // part of the subshell, not the compound assignment.
@@ -2072,6 +2080,22 @@ fn find_unquoted_ctrl_op(value: &str, extglob: bool) -> Option<String> {
 
 /// Skip from just after an element-leading `[` in a compound assignment
 /// to the index just past the matching `]`. Mirrors the lexer's
+/// Skip from just after `$'` to the matching `'`, honoring backslash escapes
+/// inside ANSI-C single-quoted strings (GNU parse.y:5552-5576).
+fn skip_ansi_single_quoted(bytes: &[u8], mut i: usize) -> usize {
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            i = (i + 2).min(bytes.len());
+            continue;
+        }
+        if bytes[i] == b'\'' {
+            return i + 1;
+        }
+        i += 1;
+    }
+    bytes.len()
+}
+
 /// skip_compound_element_subscript (parse.y:3906 parse_matched_pair
 /// P_ARRAYSUB): `[`/`]` pairs nest, single/double quotes and backticks
 /// are consumed as units, backslash escapes the next byte, and every
@@ -2092,6 +2116,15 @@ fn skip_compound_subscript_span(bytes: &[u8], mut i: usize) -> usize {
         }
         match c {
             b'\\' if !in_single => escaped = true,
+            b'$' if !in_single
+                && !in_double
+                && !in_backtick
+                && i + 1 < bytes.len()
+                && bytes[i + 1] == b'\'' =>
+            {
+                i = skip_ansi_single_quoted(bytes, i + 2);
+                continue;
+            }
             b'\'' if !in_double && !in_backtick => in_single = !in_single,
             b'"' if !in_single && !in_backtick => in_double = !in_double,
             b'`' if !in_single => in_backtick = !in_backtick,
@@ -2120,6 +2153,10 @@ fn skip_dollar_paren(bytes: &[u8], mut i: usize) -> usize {
         }
         match c {
             b'\\' if !in_single => escaped = true,
+            b'$' if !in_single && !in_double && i + 1 < bytes.len() && bytes[i + 1] == b'\'' => {
+                i = skip_ansi_single_quoted(bytes, i + 2);
+                continue;
+            }
             b'\'' if !in_double => in_single = !in_single,
             b'"' if !in_single => in_double = !in_double,
             b'$' if !in_single && i + 1 < bytes.len() && bytes[i + 1] == b'(' => {
@@ -2183,6 +2220,10 @@ fn skip_procsub_paren(bytes: &[u8], mut i: usize) -> Option<usize> {
         }
         match c {
             b'\\' if !in_single => escaped = true,
+            b'$' if !in_single && !in_double && i + 1 < bytes.len() && bytes[i + 1] == b'\'' => {
+                i = skip_ansi_single_quoted(bytes, i + 2);
+                continue;
+            }
             b'\'' if !in_double => in_single = !in_single,
             b'"' if !in_single => in_double = !in_double,
             // A backquote group is a unit at this span's level (see the
@@ -2233,6 +2274,10 @@ fn skip_dollar_brace(bytes: &[u8], mut i: usize) -> usize {
         }
         match c {
             b'\\' if !in_single => escaped = true,
+            b'$' if !in_single && !in_double && i + 1 < bytes.len() && bytes[i + 1] == b'\'' => {
+                i = skip_ansi_single_quoted(bytes, i + 2);
+                continue;
+            }
             b'\'' if !in_double => in_single = !in_single,
             b'"' if !in_single => in_double = !in_double,
             b'{' if !in_single && !in_double => depth += 1,
@@ -2242,4 +2287,19 @@ fn skip_dollar_brace(bytes: &[u8], mut i: usize) -> usize {
         i += 1;
     }
     i
+}
+
+#[cfg(test)]
+mod ansi_quote_span_tests {
+    #[test]
+    fn compound_assignment_scans_ansi_single_quoted_metacharacters() {
+        let mut session = crate::api::Session::builder().build().unwrap();
+        let out = session
+            .run_line(
+                "f=($'\\'(' $'\\')' $'\\';' $'\\'|' $'\\'&' $'\\'<' $'\\'>') && \
+                 [[ ${#f[@]} -eq 7 && ${f[0]} == \"'(\" && ${f[2]} == \"';\" && ${f[6]} == \"'>\" ]]",
+            )
+            .unwrap();
+        assert_eq!(out.status, 0);
+    }
 }
