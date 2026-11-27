@@ -2886,6 +2886,16 @@ impl Executor {
         program: &PathBuf,
         dev_ops: &crate::executor::dev_fd_operands::DevOperandMaterialization,
     ) -> bool {
+        // rubash#4211: process replacement is a process-owner-only
+        // operation. The standalone binary opts in because its process
+        // IS the shell; embedded Sessions never do, and fork-copy
+        // executors share a process that must survive them. This gate
+        // is the last invariant before `Command::exec` / the fallback
+        // `std::process::exit`, so it must stand here even though the
+        // -c tail stamp is normally armed only by main.rs.
+        if !crate::builtins::exec::process_replacement_enabled() || !self.owns_process_image {
+            return false;
+        }
         if !self.exec_replace_tail_state_ready() {
             return false;
         }
