@@ -153,6 +153,8 @@ pub(crate) enum ChildCwdStamp {
     /// The session anchor's raw fd. Only ever constructed on Unix
     /// (Executor::spawn_cwd_stamp gates it); replayed as a pre_exec
     /// fchdir by external_exec_process.
+    // Unix-only producer: Executor::spawn_cwd_stamp anchors a dead cwd.
+    #[cfg_attr(not(unix), allow(dead_code))]
     AnchorFd(i32),
     Unstamped,
 }
@@ -175,6 +177,8 @@ pub(crate) enum ChildCwdStamp {
 pub(crate) struct ChildFdSetup {
     env: Vec<(std::ffi::OsString, Option<std::ffi::OsString>)>,
     pins: FdPinPlan,
+    // Unix-only consumer: ChildFdSetup::apply closes these in pre_exec.
+    #[cfg_attr(not(unix), allow(dead_code))]
     close_fds: Vec<u32>,
     cwd_stamp: ChildCwdStamp,
 }
@@ -249,6 +253,8 @@ enum NumberedDupBinding {
     /// dup's source slot is not rebound by any later entry of the
     /// list, so the wired slot the spawn arranged IS the binding
     /// the dup saw at its position (the #2277 step-5 shape).
+    // Unix-only consumer: numbered dup delivery pins this child slot.
+    #[cfg_attr(not(unix), allow(dead_code))]
     ChildSlot(u32),
     /// A parent-side handle captured at the dup's position: a
     /// later entry rebinds the source slot, so the at-position
@@ -257,6 +263,8 @@ enum NumberedDupBinding {
     /// face the handle duplicates the shell's ambient stdio
     /// descriptor; on the pipeline stage face it can instead be
     /// the stage's stdin channel carrier (see StageStdioContext).
+    // Unix-only consumer: numbered dup delivery pins this captured handle.
+    #[cfg_attr(not(unix), allow(dead_code))]
     Handle(crate::fd::HANDLE),
 }
 
@@ -7109,6 +7117,7 @@ fn ordered_env_contains(entries: &[(String, String)], name: &str) -> bool {
     entries.iter().any(|(existing, _)| existing == name)
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn ordered_env_get<'a>(entries: &'a [(String, String)], name: &str) -> Option<&'a String> {
     entries
         .iter()

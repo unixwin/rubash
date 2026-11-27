@@ -21,7 +21,6 @@ use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 
 const INLINE_CAP: usize = 22;
-const HEAP_TAG: u8 = 0xFF;
 
 #[derive(Clone)]
 pub struct TokStr {

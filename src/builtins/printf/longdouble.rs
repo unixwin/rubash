@@ -26,14 +26,6 @@ pub(super) enum FloatVal {
 }
 
 impl FloatVal {
-    pub(super) fn is_negative(&self) -> bool {
-        match self {
-            FloatVal::Finite { neg, .. } => *neg,
-            FloatVal::Infinite { neg } => *neg,
-            FloatVal::Nan { neg } => *neg,
-        }
-    }
-
     /// Positive zero (empty and unconvertible operands; printf.def
     /// getfloatmax returns 0 for a missing argument).
     pub(super) fn zero() -> Self {

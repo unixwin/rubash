@@ -276,6 +276,7 @@ impl DebugSession {
     }
 
     /// The current state.
+    #[cfg(test)]
     pub fn state(&self) -> SessionState {
         self.state
     }
@@ -286,6 +287,7 @@ impl DebugSession {
     }
 
     /// Whether the session is parked at a stop.
+    #[cfg(test)]
     pub fn is_stopped(&self) -> bool {
         self.state == SessionState::Stopped
     }
@@ -452,6 +454,7 @@ impl DebugSession {
     }
 
     /// Number of events waiting for the frontend.
+    #[cfg(test)]
     pub fn pending_event_count(&self) -> usize {
         self.pending_events.len()
     }
@@ -530,6 +533,7 @@ impl DebugSession {
     /// flag. The boundary poll services it — after dispatching any
     /// signal trap — through [`DebugSession::take_async_stop`] and a
     /// [`DebugEvent::AsyncStopServiced`] event.
+    #[cfg(test)]
     pub fn request_async_stop(&self) {
         self.async_stop.store(true, Ordering::Release);
     }
@@ -545,6 +549,7 @@ impl DebugSession {
     }
 
     /// Whether an asynchronous stop is waiting to be serviced.
+    #[cfg(test)]
     pub fn async_stop_requested(&self) -> bool {
         self.async_stop.load(Ordering::Acquire)
     }

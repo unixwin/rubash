@@ -231,7 +231,7 @@ pub(super) fn push_command_word(cmd: &mut CommandNode, token: &Token) {
     let WordScans {
         extglob_patterns,
         pathname_patterns,
-        process_substitutions,
+        process_substitutions: _,
     } = &scans;
     cmd.extglob_patterns
         .extend(extglob_patterns.iter().cloned().map(|mut p| {
@@ -430,16 +430,6 @@ pub(super) fn collect_compound_or_keyword_word_value(
     })
 }
 
-pub(super) fn set_body_line(body: &mut [CommandNode], line: usize) {
-    // TODO(parse.y): Bash preserves source locations through compound command
-    // parsing. Rubash reparses inline function bodies from text today, so
-    // recover the definition line for diagnostics such as readonly errors.
-    for command in body {
-        command.line = Some(line);
-        command.logical_line = command.logical_line.or(Some(line));
-    }
-}
-
 pub(super) fn is_keyword(tokens: &[Token], index: usize, value: &str) -> bool {
     tokens.get(index).is_some_and(|token| {
         // rubash#461: a fragment of an open `=~' RHS regexp word is WORD
@@ -552,48 +542,6 @@ pub(super) fn follows_case_in_keyword(tokens: &[Token], index: usize) -> bool {
         }
         return is_keyword(tokens, previous, "in");
     }
-    false
-}
-
-fn case_pattern_starts_with_esac(tokens: &[Token], index: usize) -> bool {
-    // A clause terminator proves this is the case command's closing esac,
-    // even when the following subshell close is adjacent (esac)).
-    if index > 0 && is_case_clause_terminator_token(&tokens[index - 1]) {
-        return false;
-    }
-
-    if !matches!(
-        tokens.get(index + 1).map(|token| token.value.as_str()),
-        Some(")" | "|")
-    ) {
-        return false;
-    }
-
-    let mut close = index + 1;
-    while close < tokens.len() {
-        if is_keyword(tokens, close, ")") {
-            break;
-        }
-        if tokens[close].kind == TokenKind::Semicolon {
-            return false;
-        }
-        close += 1;
-    }
-    if !is_keyword(tokens, close, ")") {
-        return false;
-    }
-
-    let mut scan = close + 1;
-    while scan < tokens.len() {
-        if is_case_clause_terminator_token(&tokens[scan]) || is_keyword(tokens, scan, "esac") {
-            return true;
-        }
-        if is_keyword(tokens, scan, ")") && command_boundary_keyword_allowed(tokens, scan) {
-            return false;
-        }
-        scan += 1;
-    }
-
     false
 }
 

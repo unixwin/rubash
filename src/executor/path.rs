@@ -582,6 +582,7 @@ pub(crate) const INITIAL_PATH_KEY: &str = "__RUBASH_INITIAL_PATH";
 /// boundary (contains_key guard), so subshell/command-substitution
 /// executors inherit the process's original reference value; if the
 /// startup boundary never ran (embedded library use), the fixture stays.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn path_is_user_owned(env_vars: &HashMap<String, String>) -> bool {
     let initial = env_vars.get(INITIAL_PATH_KEY);
     match (env_vars.get("PATH"), initial) {
@@ -701,7 +702,7 @@ pub fn find_user_command(name: &str, env_vars: &HashMap<String, String>) -> Opti
         // on to the PATH walk with the entry kept (rubash#3359). The
         // PATH-scan memo for the name is stale evidence then too.
         if let Some(result) = mirror.get(name).cloned() {
-            if let Some(path) = &result {
+            if let Some(_path) = &result {
                 // GNU hashcmd.c:146-191 phash_search's CHKDOT/RELPATH
                 // arm (rubash#3551): `./NAME` (or `./<stored>`) wins
                 // while executable, and a `.`-leading stored path
@@ -1267,12 +1268,11 @@ fn memoized_miss_still_absent(
         })
 }
 
-#[cfg_attr(unix, allow(unused_variables))]
 fn find_user_command_uncached(
     name: &str,
     env_vars: &HashMap<String, String>,
-    fingerprint: &str,
-    name_had_transport: bool,
+    #[cfg_attr(unix, allow(unused_variables))] fingerprint: &str,
+    #[cfg_attr(not(unix), allow(unused_variables))] name_had_transport: bool,
 ) -> Option<PathBuf> {
     if has_path_separator(name) {
         // `/bin/bash` / `/usr/bin/bash` normally resolve to the literal
@@ -1525,6 +1525,7 @@ pub fn find_user_command_as_written(
 ) -> Option<String> {
     // Folded like find_user_command (rubash#3076): the recorded join
     // names the raw file, never the stored pair.
+    #[cfg_attr(not(unix), allow(unused_variables))]
     let name_had_transport = crate::executor::markers::contains_decodable_transport(name);
     let folded_name = crate::executor::substitution_metadata::fold_literal_char_escapes(name);
     let name = folded_name.as_str();
@@ -1579,9 +1580,9 @@ pub(crate) fn exec_name_for_program(
 /// form. Non-unix keeps the existing rendering (the #2302/#2317
 /// status quo for Windows display forms).
 pub(crate) fn recorded_resolution_spelling(
-    name: &str,
+    #[cfg_attr(not(unix), allow(unused_variables))] name: &str,
     program: &Path,
-    env_vars: &HashMap<String, String>,
+    #[cfg_attr(not(unix), allow(unused_variables))] env_vars: &HashMap<String, String>,
 ) -> String {
     #[cfg(unix)]
     {
@@ -2017,6 +2018,7 @@ pub(in crate::executor) fn program_dir_hosts_posix_runtime(program: &Path) -> bo
 }
 
 #[cfg(not(windows))]
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(in crate::executor) fn program_dir_hosts_posix_runtime(_program: &Path) -> bool {
     false
 }
@@ -2251,6 +2253,8 @@ pub fn external_command_for_named_program_with_exec_name(
         .iter()
         .enumerate()
         .map(|(position, arg)| {
+            #[cfg(not(windows))]
+            let _ = position;
             // unixwin/niubash#164: a virtual-system-root operand (/usr/bin,
             // /etc/..., /tmp, /home/...) exists only in the shell's root
             // map and NO non-shell child resolves it, so it translates
@@ -2938,6 +2942,7 @@ fn mask_all_positionals(args: &[String], masked: &mut std::collections::HashSet<
     }
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn short_option_char(opts: &[&str]) -> Option<char> {
     opts.iter().find_map(|opt| {
         let bytes = opt.as_bytes();
@@ -3410,6 +3415,7 @@ pub(crate) fn shell_path_process_entries(
 /// shell form splits and rejoins unchanged, so the in-process
 /// `${THIS_SH} ./x.sub` child path that re-imports a normalized PATH keeps
 /// it stable.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn process_path_to_shell(path: &str) -> String {
     if !cfg!(windows) {
         return path.to_string();
@@ -3424,6 +3430,7 @@ pub(crate) fn process_path_to_shell(path: &str) -> String {
 /// Rewrite one PATH entry from Windows drive spelling to shell spelling:
 /// `C:\Windows` / `C:/Windows` -> `/c/Windows`. Non-drive entries (shell
 /// paths, UNC paths, relative entries) pass through unchanged.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn windows_drive_entry_to_shell(entry: &str) -> String {
     let bytes = entry.as_bytes();
     if bytes.len() >= 3
@@ -3688,6 +3695,7 @@ fn external_argument_path(arg: &str, env_vars: &HashMap<String, String>) -> Stri
 /// `external_command_for_named_program`: shell-wrapped scripts, namespace
 /// bridges (`wsl`/`ssh`/etc.), and POSIX-aware WinuxCmd applets stay in the
 /// POSIX namespace, while native Windows executables receive converted paths.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(in crate::executor) fn external_child_uses_native_env(
     program: &Path,
     env_vars: &HashMap<String, String>,
@@ -3715,6 +3723,7 @@ pub(in crate::executor) fn external_child_uses_native_env(
     }
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn env_var_excluded_by_rubash_conv_excl(name: &str, env_vars: &HashMap<String, String>) -> bool {
     let Some(excl) = env_vars
         .iter()
@@ -3744,6 +3753,7 @@ fn env_var_excluded_by_rubash_conv_excl(name: &str, env_vars: &HashMap<String, S
 /// `__RUBASH_ENV_CONV_EXCL` and keeping contract-verbatim variables (`PWD`,
 /// `OLDPWD`, `PATH`, `TMPDIR`, `__RUBASH_*`), URLs, and non-path values
 /// untouched.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(in crate::executor) fn external_env_value(
     name: &str,
     value: &str,
@@ -4491,6 +4501,7 @@ pub(crate) fn has_path_separator(name: &str) -> bool {
     }
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn is_standard_unix_bash_path(name: &str) -> bool {
     matches!(
         name.replace('\\', "/").as_str(),
@@ -5001,16 +5012,6 @@ pub(in crate::executor) fn windows_shm_dir() -> Option<PathBuf> {
     Some(PathBuf::from(base).join("dev").join("shm"))
 }
 
-/// Best-effort creation of the /var/tmp backing directory at shell startup.
-/// Open() callers never mkdir, so without this every /var/tmp open fails.
-/// The backing directory lives below the per-user temp base even when a
-/// shell root is configured, so this also works for read-only install roots.
-pub(in crate::executor) fn ensure_var_tmp_dir(_env_vars: &HashMap<String, String>) {
-    if let Some(dir) = windows_var_tmp_dir() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-}
-
 fn configured_shell_root(env_vars: &HashMap<String, String>) -> Option<PathBuf> {
     // Walk the chain and take the first NON-EMPTY value: an empty entry must
     // not shadow later names (a host exporting an empty __RUBASH_SHELL_ROOT
@@ -5131,6 +5132,7 @@ pub(crate) fn windows_posix_tools_dir(env_vars: &HashMap<String, String>) -> Opt
 /// natively. Deliberately NOT routed through `shell_path_to_windows`,
 /// whose logical `/bin` mapping consults `windows_posix_tools_dir` and
 /// would recurse into this probe.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn shell_drive_entry_to_windows(entry: &str) -> PathBuf {
     let bytes = entry.as_bytes();
     if bytes.len() >= 3 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() && bytes[2] == b'/' {

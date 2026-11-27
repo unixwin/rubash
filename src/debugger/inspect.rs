@@ -15,6 +15,7 @@ use crate::api::views::{
 
 /// Which slice of a snapshot's variables a listing renders.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum VariablePartition {
     /// Every captured variable.
     All,
@@ -50,6 +51,7 @@ pub fn render_where(snapshot: &InspectionSnapshot) -> String {
 /// `caller`'s presentation rule for a frame source: the synthetic
 /// inline-string source renders as `environment` (the mapping
 /// `execute_caller` applies before the builtin prints).
+#[cfg(test)]
 fn present_source(source: &str) -> &str {
     if source == "main" {
         "environment"
@@ -64,22 +66,14 @@ fn present_source(source: &str) -> &str {
 /// frame — its call-site line, name, and presented source. `None`
 /// when the level names no frame, matching the builtin's silent
 /// failure.
+#[cfg(test)]
 pub fn render_caller(frames: &[FrameSnapshot], level: usize) -> Option<String> {
     let frame = frames.get(level + 1)?;
     Some(format!(
-        "{} {} {}",
+        "{} {}",
         frame.line,
-        frame.function,
-        present_source(&frame.source)
+        format!("{} {}", frame.function, present_source(&frame.source))
     ))
-}
-
-/// Render the no-argument `caller` form: `{BASH_LINENO[0]}
-/// {BASH_SOURCE[1]}` (caller.def:89-105). `None` outside a function
-/// call, where the builtin fails.
-pub fn render_caller_bare(frames: &[FrameSnapshot]) -> Option<String> {
-    let frame = frames.get(1)?;
-    Some(format!("{} {}", frame.line, present_source(&frame.source)))
 }
 
 /// Render a frame's arguments, one per line in call order

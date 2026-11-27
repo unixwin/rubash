@@ -1089,7 +1089,7 @@ pub fn history_tokenize(string: &str, comment_char: Option<char>) -> Option<Vec<
 }
 
 /// histexpand.c history_find_word: the word containing char index ind.
-fn history_find_word(line: &str, ind: usize, ctx: HistCtx) -> Option<String> {
+fn history_find_word(line: &str, ind: usize, _ctx: HistCtx) -> Option<String> {
     let (words, wind) = history_tokenize_internal(line, ind as i64, None);
     if wind < 0 {
         return None;

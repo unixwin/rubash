@@ -1045,6 +1045,7 @@ impl SpawnedChild {
         }
     }
 
+    #[allow(dead_code)]
     pub fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
         match &mut self.inner {
             SpawnedChildInner::Std(child) => child.wait(),
@@ -1072,6 +1073,7 @@ impl SpawnedChild {
         }
     }
 
+    #[allow(dead_code)]
     pub fn kill(&mut self) -> std::io::Result<()> {
         match &mut self.inner {
             SpawnedChildInner::Std(child) => child.kill(),
@@ -1266,6 +1268,7 @@ fn dup_for_child(fd: HANDLE) -> std::io::Result<HANDLE> {
 /// boundary — the plain blocking wait already carries GNU's
 /// interruptible-wait semantics (jobs.c:3064 wait_for), so no slicing is
 /// needed and the timeout is unused.
+#[allow(dead_code)]
 pub fn wait_child_slice(
     child: &mut std::process::Child,
     _timeout: std::time::Duration,

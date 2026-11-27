@@ -903,6 +903,7 @@ pub fn is_locale_family_name(name: &str) -> bool {
 /// storage string to setlocale and into the warning text was
 /// rubash#3065. The projection primitives are the scalar read path's
 /// own (Executor::scalar_parameter_value uses the same pair).
+#[cfg(unix)]
 fn stored_scalar_value(env_vars: &crate::shell::var_table::VarTable, name: &str) -> Option<String> {
     let value = env_vars.get(name)?;
     let attrs = env_vars.attr_of(name);
@@ -920,6 +921,7 @@ fn stored_scalar_value(env_vars: &crate::shell::var_table::VarTable, name: &str)
 /// environment-default locale). Each candidate is read through the
 /// scalar projection (GNU get_locale_var reads stored bindings the
 /// same get_string_value way sv_locale does).
+#[cfg(unix)]
 fn get_locale_var(var: &str, env_vars: &crate::shell::var_table::VarTable) -> String {
     let nonempty =
         |name: &str| stored_scalar_value(env_vars, name).filter(|value| !value.is_empty());
@@ -1013,16 +1015,6 @@ fn attempt_setlocale(category: libc::c_int, name: &str) -> Result<(), Option<Str
         }
     }
 }
-
-#[cfg(not(unix))]
-fn attempt_setlocale(_category: std::ffi::c_int, _name: &str) -> Result<(), Option<String>> {
-    // The Windows CRT has no compiled locale archive to reject a name
-    // (see utf8_locale_active); GNU's warning has no failing call to
-    // mirror there. (std::ffi::c_int keeps the signature identical to
-    // the unix form; no caller reaches this on non-unix.)
-    Ok(())
-}
-
 /// locale.c reset_locale_vars: composite re-apply when LC_ALL is
 /// empty — setlocale(LC_ALL, lang) then each category from its
 /// precedence value. Never warns (the function has no diagnostic).
@@ -1070,7 +1062,7 @@ fn reset_locale_vars_mirror(env_vars: &crate::shell::var_table::VarTable) {
 /// string of an array binding; rubash#3065).
 pub fn locale_assignment_warning(
     var: &str,
-    env_vars: &crate::shell::var_table::VarTable,
+    #[cfg_attr(not(unix), allow(unused_variables))] env_vars: &crate::shell::var_table::VarTable,
 ) -> Option<String> {
     if !is_locale_family_name(var) {
         return None;

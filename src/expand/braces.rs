@@ -942,6 +942,7 @@ fn split_brace_commas(s: &str) -> Vec<&str> {
     parts
 }
 
+#[cfg(test)]
 fn expand_range(s: &str) -> Option<Vec<String>> {
     expand_range_tagged(s)
         .map(|products| products.into_iter().map(|product| product.text).collect())

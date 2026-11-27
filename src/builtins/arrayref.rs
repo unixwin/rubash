@@ -10,9 +10,6 @@
 //! (subst.c:2086 skip_matched_pair, flags=0), so `a[80's]` — an unbalanced
 //! single quote — is not a valid reference (assoc9.sub `read a[$b]`).
 
-use crate::executor::markers::DATA_DOLLAR;
-use std::collections::HashMap;
-
 /// In-band W_ARRAYREF carrier (GNU execute_cmd.c:4366 fix_arrayref_words):
 /// an operand word of an ARRAYREF_BUILTIN whose pre-expansion text passed
 /// valid_array_reference(.., 0) carries this flag through expansion, where
@@ -210,50 +207,6 @@ fn skip_balanced_substitution(text: &[u8], start: usize) -> usize {
     index
 }
 
-/// Convenience for builtin operands: resolve the inputs GNU derives from
-/// live shell state — the array_expand_once shopt and assoc_p(base) — then
-/// run valid_array_reference. `w_arrayref` is the operand word's in-band
-/// W_ARRAYREF flag; `one_word_gated` mirrors SET_VFLAGS (common.h:279),
-/// which only lets W_ARRAYREF set VA_ONEWORD when array_expand_once is on —
-/// read.def:404/1036/1089, printf.def:305, wait.def:156 all use it.
-/// unset (set.def:887) instead uses builtin_arrayref_flags (common.c:1050),
-/// which applies VA_ONEWORD|VA_NOEXPAND unconditionally; that caller passes
-/// `one_word_gated: false` and pre-ORs its own noexpand.
-pub(crate) fn valid_array_reference_for_env(
-    word: &str,
-    env_vars: &HashMap<String, String>,
-    w_arrayref: bool,
-) -> bool {
-    let Some(open) = word.find('[') else {
-        return false;
-    };
-    // SET_VFLAGS (common.h:279): vflags = expand_once ? VA_NOEXPAND : 0;
-    // if (expand_once && W_ARRAYREF) vflags |= VA_ONEWORD|VA_NOEXPAND.
-    // Without array_expand_once a marked word still gets the arithmetic
-    // subscript scan (`read A[$rkey]` -> `A[]]` is then invalid).
-    let expand_once = crate::builtins::shopt::option_enabled(env_vars, "array_expand_once");
-    let oneword = w_arrayref && expand_once;
-    let base_is_assoc = expand_once && is_marked_assoc(env_vars, &word[..open]);
-    valid_array_reference(word, expand_once, base_is_assoc, oneword)
-}
-
-/// GNU common.c builtin_arrayref_flags semantics for unset (set.def:887):
-/// VA_ONEWORD|VA_NOEXPAND is applied whenever the operand carried
-/// W_ARRAYREF — no array_expand_once gate.
-pub(crate) fn valid_array_reference_for_unset(
-    word: &str,
-    env_vars: &HashMap<String, String>,
-    w_arrayref: bool,
-) -> bool {
-    let Some(open) = word.find('[') else {
-        return false;
-    };
-    let expand_once = crate::builtins::shopt::option_enabled(env_vars, "array_expand_once");
-    let noexpand = expand_once || w_arrayref;
-    let base_is_assoc = noexpand && is_marked_assoc(env_vars, &word[..open]);
-    valid_array_reference(word, noexpand, base_is_assoc, w_arrayref)
-}
-
 /// GNU general.c legal_identifier: a shell variable name — leading
 /// alpha/underscore, then alphanumeric/underscore.
 fn valid_identifier(name: &str) -> bool {
@@ -263,11 +216,4 @@ fn valid_identifier(name: &str) -> bool {
     };
     (first == '_' || first.is_ascii_alphabetic())
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-}
-
-fn is_marked_assoc(env_vars: &HashMap<String, String>, base: &str) -> bool {
-    env_vars
-        .get(crate::executor::types::ASSOC_VARS)
-        .map(|marked| marked.split(DATA_DOLLAR).any(|entry| entry == base))
-        .unwrap_or(false)
 }

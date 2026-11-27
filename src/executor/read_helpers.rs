@@ -74,6 +74,7 @@ static REAPED_CHILDREN_CPU: std::sync::LazyLock<
 /// form holds a raw OwnedHandle, not a std Child, so demanding a Child
 /// here made the two job_builtins reap sites uncompilable (E0308).
 pub(in crate::executor) trait ReapedChildCpu {
+    #[cfg_attr(not(windows), allow(dead_code))]
     fn reaped_pid(&self) -> u32;
     #[cfg(windows)]
     fn reaped_handle(&self) -> windows_sys::Win32::Foundation::HANDLE;
@@ -998,9 +999,6 @@ pub(in crate::executor) struct ByteRecordScan {
     pub tail: String,
     pub delimiter_found: bool,
     pub limit_reached: bool,
-    /// Decoded-byte length of the record (the bytes before the
-    /// delimiter / budget cut in the scanned stream).
-    pub record_bytes: usize,
     /// Decoded bytes consumed in total (record + delimiter, or the
     /// record alone when the budget or the stream end stopped it).
     pub consumed_bytes: usize,
@@ -1175,7 +1173,6 @@ pub(in crate::executor) fn scan_text_record_bytes(
         tail: substitution_metadata::bytes_to_shell_text(&bytes[consumed..]),
         delimiter_found,
         limit_reached,
-        record_bytes: record_end,
         consumed_bytes: consumed,
     }
 }
@@ -1246,31 +1243,6 @@ pub(in crate::executor) fn slurped_record(
         ),
         eof_no_delimiter,
     )
-}
-
-/// True when `text` holds the delimiter in any transport form: the tagged
-/// marker pair (normalized records), the single-byte marker form a
-/// byte-locale delimiter takes (the delimiter char then stands for one
-/// raw byte), or the literal char (raw mirror texts such as
-/// FUNCTION_STDIN, which stores raw pipe bytes). With `escape_aware`
-/// (a non-raw read with a non-newline delimiter), an occurrence whose
-/// character is backslash-escaped does not count (rubash#1300).
-pub(in crate::executor) fn record_contains_delimiter(
-    text: &str,
-    delimiter: char,
-    word_first_byte: Option<u8>,
-    escape_aware: bool,
-) -> bool {
-    if escape_aware {
-        return unescaped_delimiter_index(text, delimiter, word_first_byte).is_some();
-    }
-    if text.contains(delimiter) || text.contains(&read_delimiter_needle(delimiter)) {
-        return true;
-    }
-    if let Some(single) = read_delimiter_single_form(delimiter, word_first_byte) {
-        return text.contains(&single);
-    }
-    false
 }
 
 /// EOF accounting for the slurp transports — the serves that hold the
@@ -1407,37 +1379,6 @@ pub(in crate::executor) fn slurped_record_eof_no_delimiter(
         }
     }
     true
-}
-
-/// Byte index of the first UNESCAPED delimiter occurrence in `text`,
-/// for non-raw reads (GNU builtins/read.def: a backslash consumes the
-/// following character as an escaped literal, and an escaped character
-/// can never be the delimiter — rubash#1300). Matches the same forms
-/// as record_contains_delimiter: the marker needle, the literal char,
-/// and the single-byte marker form of a U+0080..=U+00FF delimiter.
-pub(in crate::executor) fn unescaped_delimiter_index(
-    text: &str,
-    delimiter: char,
-    word_first_byte: Option<u8>,
-) -> Option<usize> {
-    let needle = read_delimiter_needle(delimiter);
-    let single = read_delimiter_single_form(delimiter, word_first_byte);
-    let mut escaped = false;
-    for (index, ch) in text.char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if ch == '\\' {
-            escaped = true;
-            continue;
-        }
-        let rest = &text[index..];
-        if read_delimiter_match_len(rest, &needle, single.as_deref(), delimiter).is_some() {
-            return Some(index);
-        }
-    }
-    None
 }
 
 /// Normalize a served `read` record into the shell's storage domain: every
@@ -1819,7 +1760,7 @@ pub(in crate::executor) fn read_stdin_until(
     let mut decoder = StdinCharDecoder::new();
     let mut units = 0usize;
     // GNU read.def escape state for the -n/-N budget (rubash#1328).
-    let escaped = false;
+    let _escaped = false;
     let mut eof = false;
     let mut timed_out = false;
     let mut interrupted = false;
@@ -2066,7 +2007,7 @@ fn trim_read_input_literal(
     word_first_byte: Option<u8>,
     char_limit: Option<usize>,
     exact_char_limit: bool,
-    escape_aware: bool,
+    _escape_aware: bool,
     raw: bool,
 ) -> String {
     if !exact_char_limit {
@@ -2364,38 +2305,6 @@ pub(in crate::executor) fn split_escaped_words_on_whitespace(line: &str) -> Vec<
         }
 
         if ch.is_whitespace() {
-            if !current.is_empty() {
-                words.push(std::mem::take(&mut current));
-            }
-            continue;
-        }
-
-        current.push(ch);
-    }
-    if !current.is_empty() {
-        words.push(current);
-    }
-    words
-}
-
-pub(in crate::executor) fn split_escaped_words_on_set(line: &str, separators: &str) -> Vec<String> {
-    let mut words = Vec::new();
-    let mut current = String::new();
-    let mut chars = line.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\\' {
-            match chars.next() {
-                Some('\n') => {}
-                Some('\r') if chars.peek() == Some(&'\n') => {
-                    chars.next();
-                }
-                Some(next) => current.push(next),
-                None => {}
-            }
-            continue;
-        }
-
-        if separators.contains(ch) {
             if !current.is_empty() {
                 words.push(std::mem::take(&mut current));
             }

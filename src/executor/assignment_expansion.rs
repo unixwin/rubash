@@ -1275,7 +1275,7 @@ impl Executor {
                 return expanded;
             }
         }
-        let apply_result = self.apply_parameter_assignment_expansions_in_word(value);
+        let _apply_result = self.apply_parameter_assignment_expansions_in_word(value);
         // Compound-claim gate (rubash#3034): the two functions below
         // implement GNU expand_compound_array_assignment (arrayfunc.c:557),
         // which only ever runs on a genuine compound assignment — a decision
@@ -1418,13 +1418,6 @@ impl Executor {
             // backslash before `"`) out of the walker for compound
             // assignments so they survive as literal element text.
             let compound_paren_value = value.starts_with('(') && value.ends_with(')');
-            const DATA_BACKTICK: &'static str = crate::executor::markers::ASSIGN_DATA_BACKTICK_STR;
-            const DATA_ESCAPED_DQUOTE: &'static str =
-                crate::executor::markers::ASSIGN_ESCAPED_DQUOTE_STR;
-            const DATA_ESCAPED_SQUOTE: &'static str =
-                crate::executor::markers::ASSIGN_ESCAPED_SQUOTE_STR;
-            const DATA_ESCAPED_BACKSLASH: &'static str =
-                crate::executor::markers::ASSIGN_ESCAPED_BACKSLASH_STR;
             // In preserve mode the walker emits escape pairs verbatim with
             // quote-context awareness, so hoisting `\X` here is both
             // redundant and wrong: a context-blind `.replace("\\'", ..)`
@@ -3882,7 +3875,7 @@ impl Executor {
         }
         // Plain `"${name[@]}"` / `"${name[*]}"`: one element per member
         // ([*] joined with IFS[0]).
-        let Some((array_name, storage)) = list_body
+        let Some((_array_name, storage)) = list_body
             .strip_suffix("[@]")
             .or_else(|| list_body.strip_suffix("[*]"))
             .filter(|array_name| is_shell_name(array_name))

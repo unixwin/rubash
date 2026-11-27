@@ -1433,7 +1433,7 @@ fn conditional_offending_line(
 fn conditional_error_source(
     tokens: &[Token],
     start: usize,
-    end: usize,
+    _end: usize,
     echo_line: Option<usize>,
 ) -> Option<String> {
     let line = echo_line.or_else(|| tokens.get(start).map(|token| token.position))?;

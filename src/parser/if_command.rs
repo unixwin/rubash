@@ -19,7 +19,7 @@ pub(super) fn parse_if_command(
     // condition is parsed by the shared command loop stopped at `then'
     // (the old model re-walked the region once in find_if_then and again
     // in the slice parse — the depth-amplified double walk).
-    let condition = match run_inline_section(tokens, state, start + 1, SectionStop::IfCondition) {
+    let _condition = match run_inline_section(tokens, state, start + 1, SectionStop::IfCondition) {
         SectionOutcome::Ended {
             body,
             index: then_index,
@@ -40,7 +40,7 @@ pub(super) fn parse_if_command(
             );
         }
         // No `then` at any section level: find_if_then's None.
-        SectionOutcome::Eof { .. } => return None,
+        SectionOutcome::Eof => return None,
         // The condition errored before its `then`; the cold scanner
         // recovers the boundary the slice parse would have used.
         SectionOutcome::Errored { body } => {
@@ -75,7 +75,7 @@ pub(super) fn parse_if_command(
             );
         }
         // `then` cannot be an abort token for a condition stop set.
-        SectionOutcome::AbortedThen { .. } => return None,
+        SectionOutcome::AbortedThen => return None,
     };
 }
 
@@ -195,7 +195,7 @@ fn parse_if_command_after_condition(
                         None
                     }
                 },
-                SectionOutcome::Eof { .. } | SectionOutcome::AbortedThen { .. } => None,
+                SectionOutcome::Eof | SectionOutcome::AbortedThen => None,
             };
         let Some((mut condition, elif_then)) = elif_condition else {
             return None;
@@ -358,9 +358,9 @@ fn parse_if_section_inline(
         SectionOutcome::Ended { body, index } => Some((non_empty_body(body), index)),
         // `then` where a body command was expected: the scanner's
         // return-None abort.
-        SectionOutcome::AbortedThen { .. } => None,
+        SectionOutcome::AbortedThen => None,
         // EOF inside the section: the scanner's tokens.get(index)? -> None.
-        SectionOutcome::Eof { .. } => None,
+        SectionOutcome::Eof => None,
         // The body errored before its closer; recover the boundary the
         // slice scanner found (cold path — error sections are rare, and
         // the enclosing parse discards the construct via

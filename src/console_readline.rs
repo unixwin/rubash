@@ -347,10 +347,15 @@ impl RawConsole {
     }
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 const ENABLE_PROCESSED_INPUT: u32 = 0x0001;
+#[cfg_attr(not(windows), allow(dead_code))]
 const ENABLE_LINE_INPUT: u32 = 0x0002;
+#[cfg_attr(not(windows), allow(dead_code))]
 const ENABLE_ECHO_INPUT: u32 = 0x0004;
+#[cfg_attr(not(windows), allow(dead_code))]
 const ENABLE_WINDOW_INPUT: u32 = 0x0008;
+#[cfg_attr(not(windows), allow(dead_code))]
 const KEY_EVENT: u16 = 0x0001;
 
 #[cfg(windows)]

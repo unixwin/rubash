@@ -46,6 +46,7 @@ mod command_substitution;
 mod command_substitution_pipelines;
 mod command_substitution_values;
 mod command_words;
+#[allow(dead_code)] // Refs #4206: clean after #4224 merges
 mod compound_exec;
 pub(crate) use compound_exec::test_rubash_binary_from_current_exe;
 pub(crate) use compound_exec::test_rubash_binary_from_env;
@@ -203,6 +204,7 @@ mod builtin_names;
 // differential-matrix generator (D5). Pure additive posts: no existing
 // call site is re-routed in this phase.
 pub(crate) mod builtin_diag;
+#[cfg(test)]
 pub(crate) mod builtin_matrix;
 pub(crate) mod builtin_opt;
 pub(crate) mod builtin_table;

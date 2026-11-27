@@ -6,6 +6,8 @@ pub(super) struct TimeZoneRule {
     daylight_offset: i32,
     start_rule: Option<MonthWeekdayRule>,
     end_rule: Option<MonthWeekdayRule>,
+    // Unix-only consumer: local_time delegates to system_local_time.
+    #[cfg_attr(not(unix), allow(dead_code))]
     system_local: bool,
     /// A resolved TZif database entry (an Olson name, an absolute
     /// path, or a POSIX-looking name that exists as a file — glibc

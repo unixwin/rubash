@@ -102,21 +102,25 @@ thread_local! {
 }
 
 #[cfg(windows)]
+#[cfg(test)]
 pub(crate) fn toolhelp_snapshot_count() -> usize {
     TOOLHELP_SNAPSHOTS.with(|count| count.get())
 }
 
 #[cfg(windows)]
+#[cfg(test)]
 pub(crate) fn reset_toolhelp_snapshot_count() {
     TOOLHELP_SNAPSHOTS.with(|count| count.set(0));
 }
 
 #[cfg(not(windows))]
+#[cfg(test)]
 pub(crate) fn toolhelp_snapshot_count() -> usize {
     0
 }
 
 #[cfg(not(windows))]
+#[cfg(test)]
 pub(crate) fn reset_toolhelp_snapshot_count() {}
 
 /// Take a ToolHelp process snapshot, counted (see TOOLHELP_SNAPSHOTS).
@@ -1397,6 +1401,7 @@ pub fn proc_file_content(_path: &str) -> Option<Vec<u8>> {
 }
 
 #[cfg(not(windows))]
+#[cfg_attr(not(windows), allow(dead_code))]
 fn cpu_count() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())

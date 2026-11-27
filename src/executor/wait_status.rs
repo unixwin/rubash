@@ -23,7 +23,9 @@ pub(crate) fn process_exit_status(status: &std::process::ExitStatus) -> i32 {
 /// WTERMSIG of a reaped child, or None when it exited normally. This is the
 /// cfg bridge for `ExitStatus::signal` (a unix-only trait method) so callers
 /// like the rubash#229 signal-death notices stay cross-platform.
-pub(crate) fn exit_status_signal(status: &std::process::ExitStatus) -> Option<i32> {
+pub(crate) fn exit_status_signal(
+    #[cfg_attr(not(unix), allow(unused_variables))] status: &std::process::ExitStatus,
+) -> Option<i32> {
     #[cfg(unix)]
     {
         use std::os::unix::process::ExitStatusExt;

@@ -759,38 +759,6 @@ impl Executor {
             self.shell_state.env_vars.get("IFS").map(String::as_str),
         )
     }
-
-    pub(in crate::executor) fn expand_escaped_indirect_parameter_literal(
-        &self,
-        value: &str,
-    ) -> Option<String> {
-        let marker = "\\${$";
-        let start = value.find(marker)?;
-        let mut output = String::new();
-        output.push_str(&value[..start]);
-        let mut index = start + marker.len();
-        let rest = &value[index..];
-        let mut name = String::new();
-        for ch in rest.chars() {
-            if !is_shell_name_char(ch) {
-                break;
-            }
-            name.push(ch);
-            index += ch.len_utf8();
-        }
-        if name.is_empty() {
-            return None;
-        }
-        let tail = &value[index..];
-        let end = tail.find('}')?;
-        let resolved = self.expand_embedded_parameters(&format!("${name}"));
-        output.push_str("${");
-        output.push_str(&resolved);
-        output.push_str(&tail[..end]);
-        output.push('}');
-        output.push_str(&tail[end + 1..]);
-        Some(output)
-    }
 }
 
 fn dynamic_scalar_parameter_name(word: &str) -> Option<&str> {

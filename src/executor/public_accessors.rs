@@ -2756,13 +2756,6 @@ impl Executor {
         self.shell_state.positional_params = positional_params;
         self.shell_state.positional_offset = 0;
     }
-
-    /// Live `$1..$#` window (offset-aware; see
-    /// `ShellState::positional_window`).
-    pub(crate) fn positional_window(&self) -> &[String] {
-        self.shell_state.positional_window()
-    }
-
     /// `$#` over the live window.
     pub(crate) fn positional_len(&self) -> usize {
         self.shell_state.positional_len()
@@ -4013,25 +4006,6 @@ impl Executor {
         // family. At top level and during source the two agree.
         format!("{}: ", self.error_report_name())
     }
-
-    pub(in crate::executor) fn comsub_eof_diagnostic(&self, line: usize) -> String {
-        if self.invocation_interactive() {
-            // parser_error's interactive branch prints only the shell name
-            // (base_pathname(shell_name), same rule as get_name_for_error).
-            return format!(
-                "{}: ",
-                Self::interactive_shell_basename(&self.shell_state.env_vars)
-            );
-        }
-        let name = self
-            .shell_state
-            .env_vars
-            .get("__RUBASH_SCRIPT_NAME")
-            .cloned()
-            .unwrap_or_else(|| self.error_report_name());
-        format!("{name}: command substitution: line {line}: ")
-    }
-
     /// GNU error.c:300-316 parser_error gated twin of comsub_eof_diagnostic:
     /// `script: command substitution:2: ` under gnu_errfmt.
     pub(in crate::executor) fn comsub_eof_error_diagnostic(&self, line: usize) -> String {

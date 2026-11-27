@@ -64,6 +64,7 @@
 
 /// Decode boundary at which a carrier is restored.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg(test)]
 pub(crate) enum Boundary {
     /// Restored before text reaches stdout/stderr/`declare -p`/xtrace.
     Output,
@@ -74,6 +75,7 @@ pub(crate) enum Boundary {
 }
 
 /// One registered marker.
+#[cfg(test)]
 pub(crate) struct MarkerInfo {
     /// Registry constant name.
     pub name: &'static str,
@@ -369,12 +371,17 @@ pub(crate) const ASSIGN_EXPANSION_SQUOTE: char = '\u{E30F}';
 // char sentinel. A registry test asserts each pair agrees.
 pub(crate) const ASSIGN_DATA_SQUOTE_STR: &str = "\u{E301}";
 pub(crate) const ASSIGN_DATA_DQUOTE_STR: &str = "\u{E302}";
+#[cfg(test)]
 pub(crate) const ASSIGN_DATA_BACKTICK_STR: &str = "\u{E303}";
+#[cfg(test)]
 pub(crate) const ASSIGN_ESCAPED_DQUOTE_STR: &str = "\u{E304}";
+#[cfg(test)]
 pub(crate) const ASSIGN_ESCAPED_SQUOTE_STR: &str = "\u{E305}";
+#[cfg(test)]
 pub(crate) const ASSIGN_ESCAPED_BACKSLASH_STR: &str = "\u{E306}";
 pub(crate) const ASSIGN_HOISTED_SQUOTE_STR: &str = "\u{E307}";
 pub(crate) const ASSIGN_HOISTED_BACKSLASH_STR: &str = "\u{E308}";
+#[cfg(test)]
 pub(crate) const COMPOUND_EXPANSION_WS_TAG_STR: &str = "\u{E309}";
 pub(crate) const ASSIGN_SQ_DOLLAR_STR: &str = "\u{E30A}";
 pub(crate) const ASSIGN_SQ_BACKTICK_STR: &str = "\u{E30B}";
@@ -385,6 +392,7 @@ pub(crate) const ASSIGN_EXPANSION_SQUOTE_STR: &str = "\u{E30F}";
 pub(crate) const ANSI_C_QUOTE_MARKER_STR: &str = "\u{E010}";
 pub(crate) const ANSI_C_DQUOTE_MARKER_STR: &str = "\u{E011}";
 pub(crate) const ANSI_C_IFS_GUARD_STR: &str = "\u{E401}";
+#[cfg(test)]
 pub(crate) const QUOTED_NULL_MARKER_STR: &str = "\u{E002}";
 
 // C0 carrier &str spellings for `str::replace` targets / format strings.
@@ -395,19 +403,27 @@ pub(crate) const PROTECTED_BACKSLASH_STR: &str = "\u{15}";
 pub(crate) const PROTECTED_ESCAPED_SQUOTE_STR: &str = "\u{16}";
 pub(crate) const DATA_SQUOTE_STR: &str = "\u{17}";
 pub(crate) const DATA_DQUOTE_STR: &str = "\u{18}";
+#[cfg(test)]
 pub(crate) const PROTECTED_LITERAL_BACKSLASH_STR: &str = "\u{19}";
 pub(crate) const DATA_BACKTICK_STR: &str = "\u{1a}";
 pub(crate) const QUOTED_WORD_PREFIX_STR: &str = "\u{1b}";
 pub(crate) const IFS_GLUE_STR: &str = "\u{1c}";
 pub(crate) const STORAGE_WORD_PREFIX_STR: &str = "\u{1d}";
+#[cfg(test)]
 pub(crate) const SUBSCRIPT_CARRIER_STR: &str = "\u{1e}";
 pub(crate) const DATA_DOLLAR_STR: &str = "\u{1f}";
+#[cfg(test)]
 pub(crate) const PROTECTED_LITERAL_DOLLAR_STR: &str = "\u{12}";
+#[cfg(test)]
 pub(crate) const PROMPT_IGNORE_START_STR: &str = "\u{01}";
+#[cfg(test)]
 pub(crate) const PROMPT_IGNORE_END_STR: &str = "\u{02}";
+#[cfg(test)]
 pub(crate) const DEFERRED_COMPOUND_BODY_STR: &str = "\u{3}";
 pub(crate) const PREEXPANDED_STDIN_BODY_STR: &str = "\u{5}";
+#[cfg(test)]
 pub(crate) const ARRAY_FIELD_SPLIT_MARKER_STR: &str = "\u{10}";
+#[cfg(test)]
 pub(crate) const ARRAYREF_FLAG_STR: &str = "\u{E318}";
 
 // ==========================================================================
@@ -433,6 +449,7 @@ pub(crate) const QUOTED_HEREDOC_MARKER: &str = "__RUBASH_HD1__";
 /// is now pure user data everywhere and passes through verbatim.
 pub(crate) const COMSUB_PAYLOAD_SENTINEL: char = '\u{E319}';
 /// `&str` companion of COMSUB_PAYLOAD_SENTINEL.
+#[cfg(test)]
 pub(crate) const COMSUB_PAYLOAD_SENTINEL_STR: &str = "\u{E319}";
 
 /// `( ... )` compound-assignment operand marker (types.rs).
@@ -476,8 +493,6 @@ pub(crate) const COMPOUND_ASSIGNMENT_MARKER_CHAR: char = '\u{E31A}';
 /// decoder (`decode_to_visible_text`, rubash#3433) and that decoder
 /// drops it, the same treatment as the sibling U+E31A marker.
 pub(crate) const QUOTED_EXPANSION_SITE: char = '\u{E31B}';
-/// `&str` companion of QUOTED_EXPANSION_SITE.
-pub(crate) const QUOTED_EXPANSION_SITE_STR: &str = "\u{E31B}";
 
 /// GNU `W_SPLITSPACE` port (command.h:79 "Split this word on ' '
 /// regardless of IFS"): an unquoted `$*`/`$@`/`${*}`/`${@}` piece produced
@@ -492,8 +507,6 @@ pub(crate) const QUOTED_EXPANSION_SITE_STR: &str = "\u{E31B}";
 /// it). U+E31C continues the registry zone; a bare codepoint in transport
 /// is always protocol (typed `$'\uE31C'` arrives E400-escaped at entry).
 pub(crate) const SPLIT_ON_SPACES_SENTINEL: char = '\u{E31C}';
-/// `&str` companion of SPLIT_ON_SPACES_SENTINEL.
-pub(crate) const SPLIT_ON_SPACES_SENTINEL_STR: &str = "\u{E31C}";
 
 /// Injected tag marking a group-command redirect that the executor added
 /// (support_names.rs) — `\x1e`-prefixed so it sorts into the carrier family.
@@ -750,6 +763,7 @@ pub(crate) const HASH_ENV_FIELD_SEP: char = SUBSCRIPT_CARRIER;
 // EXACT __RUBASH_ZSH_OPTIONS - state key (zsh options) - serialized across the respawn/subshell boundary; see the owning subsystem
 // END ENV NAMESPACE CENSUS
 
+#[cfg(test)]
 pub(crate) const MARKERS: &[MarkerInfo] = &[
     MarkerInfo {
         name: "CTLESC",
@@ -1163,21 +1177,17 @@ pub(crate) const MARKERS: &[MarkerInfo] = &[
 // ==========================================================================
 
 /// Encode one raw byte as a marker pair (E000 + E001+byte).
+#[cfg(test)]
 pub(crate) fn push_raw_byte_marker(output: &mut String, byte: u8) {
     output.push(char::from_u32(RAW_BYTE_MARKER_ESCAPE).expect("sentinel is valid"));
     output.push(char::from_u32(RAW_BYTE_MARKER_FIRST + byte as u32).expect("marker char is valid"));
 }
 
+#[cfg(test)]
 pub(crate) fn encode_raw_byte_marker(byte: u8) -> String {
     let mut output = String::new();
     push_raw_byte_marker(&mut output, byte);
     output
-}
-
-/// CTLESC pair: mark `data` as a protected literal char.
-pub(crate) fn push_ctlesc_escaped(output: &mut String, data: char) {
-    output.push(CTLESC);
-    output.push(data);
 }
 
 /// IFS-protect `text`, the field-splitting half of GNU's quote_string
@@ -1273,7 +1283,6 @@ pub(crate) const MARKER_ZONE_FIRST: u32 = 0xE000;
 pub(crate) const MARKER_ZONE_LAST: u32 = 0xE401;
 /// Introducer for the literal-char escape; sits just above the zone.
 pub(crate) const LITERAL_CHAR_ESCAPE: char = '\u{E400}';
-pub(crate) const LITERAL_CHAR_ESCAPE_STR: &str = "\u{E400}";
 
 /// True when `c` collides with a transport codepoint and therefore must
 /// be escaped when it arrives as user data: the whole registry zone plus

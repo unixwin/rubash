@@ -95,6 +95,7 @@ pub struct EvaluationRequest {
 /// The diagnostic class of a failed or rejected evaluation
 /// (design 6.3's diagnostic face).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum DiagnosticKind {
     /// The text did not parse.
     Parse,
@@ -513,7 +514,7 @@ fn check_word_chars(chars: &[char], whole: &str) -> Result<(), WhitelistRejectio
 
 /// Classify the `$` construct at `chars[i]`; returns the index
 /// just past it.
-fn check_dollar(chars: &[char], i: usize, whole: &str) -> Result<usize, WhitelistRejection> {
+fn check_dollar(chars: &[char], i: usize, _whole: &str) -> Result<usize, WhitelistRejection> {
     match chars.get(i + 1) {
         None => Ok(i + 1),
         Some('(') => {
@@ -861,11 +862,6 @@ fn matched_span_end(chars: &[char], start: usize, open: char, close: char) -> Op
 /// (a process substitution's body).
 fn span_end(chars: &[char], start: usize) -> usize {
     matched_span_end(chars, start, '(', ')').unwrap_or(chars.len())
-}
-
-/// The end index just past a `{` span opening at `chars[start]`.
-fn brace_span_end(chars: &[char], start: usize) -> Option<usize> {
-    matched_span_end(chars, start, '{', '}')
 }
 
 /// Whether a `{...}` body is a brace expansion (a top-level

@@ -262,13 +262,6 @@ impl Executor {
         result
     }
 
-    // Variant for `${var-word}` style alternate words: whitespace that was
-    // inside quotes is marked \x1c so the field splitter keeps it glued
-    // (posixexp2 37), while bare spaces stay splittable.
-    pub(in crate::executor) fn expand_embedded_parameters_protect_ifs(&self, word: &str) -> String {
-        self.expand_embedded_parameters_with_context_inner(word, false, true, false)
-    }
-
     /// Alternate-word-half variant on the non-mut path (rubash#3088):
     /// like `expand_embedded_parameters_protect_ifs`, but expansion-result
     /// backslashes and single-quoted-span backslashes ride as the U+E30D

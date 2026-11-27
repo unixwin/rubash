@@ -680,7 +680,7 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
             && close_char_operator_context(top)
             && !(top.is_some_and(|d| d.close == '`') && (backquote_single || backquote_double))
         {
-            if let Some((next, terminator_found)) = skip_heredoc_top_level(&chars, i) {
+            if let Some((next, _terminator_found)) = skip_heredoc_top_level(&chars, i) {
                 line += chars[i..next].iter().filter(|c| **c == '\n').count();
                 comment_start = true;
                 cur_word.clear();
@@ -2211,6 +2211,7 @@ fn assignment_prefix_word(word: &str) -> bool {
 /// (`echo a=(b`) is an immediate syntax error in GNU, so it must NOT swallow
 /// the following lines: the collector finalizes the logical line and the
 /// parser reports the error.
+#[cfg(test)]
 pub(super) fn has_unclosed_compound_assignment(input: &str) -> bool {
     // rubash#292 plan-B shape (perf8): this is the full-buffer oracle; the
     // join gate (GroupScanFeeder::advance_compound_scan) drives
@@ -3029,13 +3030,7 @@ fn classify_top_level_word(
     *seen_command_word = true;
 }
 
-/// Skip a balanced `(` ... `)` unit starting at `open` (the index of the `(`),
-/// returning the index just past the matching `)`. Returns `None` if unbalanced.
-fn skip_parenthesized_unit(chars: &[char], open: usize) -> Option<usize> {
-    skip_parenthesized_unit_ex(chars, open).map(|(end, _)| end)
-}
-
-/// rubash#292 plan B variant of [`skip_parenthesized_unit`]: the `Some`
+/// rubash#292 plan B balanced `(` ... `)` skipper: the `Some`
 /// payload additionally reports whether the closure decision is *decided*
 /// by the current buffer. The unit's internal `esac)` case-pattern
 /// lookahead (`case_pattern_starts_with_esac_chars_ex`) scans PAST the
@@ -3983,88 +3978,6 @@ fn skip_arith_substitution_corrected_chars(chars: &[char], mut index: usize) -> 
     None
 }
 
-/// Mirror of skip.rs `case_pattern_starts_with_esac_rest` over the char
-/// slice directly (the original materializes `[delimiter] + rest` per call;
-/// both scan the same span starting at the delimiter). Returns
-/// (starts_with_esac_chars, eof_based): `eof_based` marks every branch whose
-/// answer consulted text up to the buffer end without concluding — the
-/// park-relevant undecided signal for checkpoint callers.
-fn case_pattern_starts_with_esac_rest_chars(all: &[char], at: usize) -> (bool, bool) {
-    if !matches!(all.get(at), Some(')' | '|')) {
-        return (false, false);
-    }
-
-    let mut close = at;
-    while close < all.len() {
-        match all[close] {
-            ')' => break,
-            ';' | '\n' => return (false, false),
-            _ => close += 1,
-        }
-    }
-    if all.get(close) != Some(&')') {
-        // No `)` before the end of input: the answer was decided by EOF,
-        // and more appended text could still supply the closer.
-        return (false, true);
-    }
-
-    let mut scan = close + 1;
-    let mut word = String::new();
-    let mut word_boundary = true;
-    while scan < all.len() {
-        let ch = all[scan];
-        if ch == ';' && all.get(scan + 1) == Some(&';') {
-            // `;;` right after `esac)` can be either a case-list separator
-            // (esac is a pattern) or an arithmetic-for separator that lives
-            // *outside* the command substitution (esac is the keyword and `)`
-            // closes the `$(...)`).  GNU arith-for.tests:
-            //   for (( $(case x in x) esac);; )); do break; done
-            // After `;;`, a `)` (possibly following whitespace/newlines)
-            // closes an enclosing `$(...)` or `(( ))`; that cannot be a
-            // case-list context, so `esac` is the keyword, not a pattern.
-            let mut after = scan + 2;
-            while after < all.len() && all[after].is_whitespace() {
-                after += 1;
-            }
-            if all.get(after) == Some(&')') {
-                return (false, false);
-            }
-            // Whitespace running to the end of input leaves the `)` check
-            // undecided until more text arrives.
-            return (true, after >= all.len());
-        }
-        if ch == '_' || ch.is_ascii_alphanumeric() {
-            word.push(ch);
-            scan += 1;
-            continue;
-        }
-        if word == "esac" && word_boundary {
-            return (true, false);
-        }
-        if ch == ')' {
-            return (false, false);
-        }
-        if word.is_empty() {
-            if command_substitution_separator_allows_reserved_word(ch) {
-                word_boundary = true;
-            } else if !ch.is_whitespace() {
-                word_boundary = false;
-            }
-            scan += 1;
-            continue;
-        }
-        let reserved_word_allows_next =
-            word_boundary && command_substitution_reserved_word_allows_next(&word);
-        word.clear();
-        word_boundary =
-            reserved_word_allows_next || command_substitution_separator_allows_reserved_word(ch);
-        scan += 1;
-    }
-    // The trailing word ends at end-of-input: a longer input could extend
-    // it into `esac' (or past it), so this answer is EOF-based.
-    (word == "esac" && word_boundary, true)
-}
-
 /// Mirror of skip.rs `update_command_substitution_case_depth` (verbatim
 /// arms) plus the `undecided` report: the `esac` arm's case-pattern
 /// lookahead consulted text past the buffer end without concluding.
@@ -4079,7 +3992,7 @@ fn update_command_substitution_case_depth_corrected_ex(
     current_word_boundary: &mut bool,
     lookahead: (&[char], usize),
     case_in_stage: &mut u8,
-    undecided: &mut bool,
+    _undecided: &mut bool,
     case_pattern_region: &mut bool,
 ) {
     if single || double {
@@ -6773,7 +6686,7 @@ fn update_command_substitution_case_depth_ex(
     case_depth: &mut usize,
     word_boundary: &mut bool,
     current_word_boundary: &mut bool,
-    undecided: &mut bool,
+    _undecided: &mut bool,
     case_pattern_region: &mut bool,
 ) {
     if ch == '_' || ch.is_ascii_alphanumeric() {
@@ -6858,90 +6771,6 @@ fn update_command_substitution_case_depth_ex(
 
 fn command_substitution_separator_allows_reserved_word(ch: char) -> bool {
     matches!(ch, ';' | '&' | '|' | '(' | ')' | '\n')
-}
-
-/// rubash#292 plan B variant of the `esac)` case-pattern lookahead: also
-/// reports whether the decision was *decided* by the current buffer. A
-/// scan that runs off `chars.len()` (matching `)` not yet present, or the
-/// post-close `;;` / `esac` / `)` evidence not yet present) returns its
-/// partial-text answer with `decided == false`: future text can flip it,
-/// so checkpoint callers must re-derive instead of committing.
-fn case_pattern_starts_with_esac_chars_ex(chars: &[char], delimiter_index: usize) -> (bool, bool) {
-    if !matches!(chars.get(delimiter_index), Some(')' | '|')) {
-        return (false, true);
-    }
-
-    let mut close = delimiter_index;
-    while close < chars.len() {
-        match chars[close] {
-            ')' => break,
-            ';' | '\n' => return (false, true),
-            _ => close += 1,
-        }
-    }
-    if chars.get(close) != Some(&')') {
-        // Ran off the end before the pattern list's `)`: a longer buffer
-        // may find it and continue to opposite evidence.
-        return (false, false);
-    }
-
-    let mut scan = close + 1;
-    let mut word = String::new();
-    let mut word_boundary = true;
-    while scan < chars.len() {
-        let ch = chars[scan];
-        if ch == ';' && chars.get(scan + 1) == Some(&';') {
-            return (true, true);
-        }
-        if ch == '_' || ch.is_ascii_alphanumeric() {
-            word.push(ch);
-            scan += 1;
-            continue;
-        }
-        if word == "esac" && word_boundary {
-            return (true, true);
-        }
-        if ch == ')' {
-            return (false, true);
-        }
-        if word.is_empty() {
-            if command_substitution_separator_allows_reserved_word(ch) {
-                word_boundary = true;
-            } else if !ch.is_whitespace() {
-                word_boundary = false;
-            }
-            scan += 1;
-            continue;
-        }
-        let reserved_word_allows_next =
-            word_boundary && command_substitution_reserved_word_allows_next(&word);
-        word.clear();
-        word_boundary =
-            reserved_word_allows_next || command_substitution_separator_allows_reserved_word(ch);
-        scan += 1;
-    }
-
-    // Off the end with (at best) a partial trailing word: more text can
-    // still turn this into `;;`, a boundary `esac`, or `)`.
-    (word == "esac" && word_boundary, false)
-}
-
-fn command_substitution_reserved_word_allows_next(word: &str) -> bool {
-    matches!(
-        word,
-        "for"
-            | "select"
-            | "while"
-            | "until"
-            | "then"
-            | "do"
-            | "else"
-            | "elif"
-            | "in"
-            | "fi"
-            | "done"
-            | "esac"
-    )
 }
 
 #[cfg(test)]
@@ -7773,7 +7602,7 @@ mod comsub_residual_incremental_tests {
             "\\n",
         ];
         let mut rng = Lcg(0x292_0000_0001);
-        for case in 0..4000u64 {
+        for _case in 0..4000u64 {
             let fragment_count = 2 + (rng.next() % 6) as usize;
             let mut fragments = Vec::with_capacity(fragment_count);
             for _ in 0..fragment_count {
@@ -7958,7 +7787,7 @@ mod quotes_residual_incremental_tests {
             "local ",
         ];
         let mut rng = Lcg(0x7066_3800_0001);
-        for case in 0..3000u64 {
+        for _case in 0..3000u64 {
             let fragment_count = 2 + (rng.next() % 6) as usize;
             let mut fragments = Vec::with_capacity(fragment_count);
             for _ in 0..fragment_count {
@@ -8135,7 +7964,7 @@ mod compound_residual_incremental_tests {
             "-f ",
         ];
         let mut rng = Lcg(0x636f_6d70_0001);
-        for case in 0..3000u64 {
+        for _case in 0..3000u64 {
             let fragment_count = 2 + (rng.next() % 6) as usize;
             let mut fragments = Vec::with_capacity(fragment_count);
             for _ in 0..fragment_count {

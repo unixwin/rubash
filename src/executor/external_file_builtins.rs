@@ -3691,6 +3691,7 @@ fn diag_invalid_value(
 }
 
 /// mkfifo's long-option table (coreutils mkfifo.c).
+#[cfg_attr(not(windows), allow(dead_code))]
 const MKFIFO_LONG_OPTIONS: &[LongOption] = &[
     long_option("context", LongArg::Optional),
     long_option("help", LongArg::NoArg),
@@ -4052,10 +4053,6 @@ struct CpPreserve {
 }
 
 impl CpPreserve {
-    fn any(&self) -> bool {
-        self.mode || self.times || self.links || self.xattr || self.context
-    }
-
     fn set_all(&mut self, value: bool) {
         self.mode = value;
         self.times = value;
@@ -4367,6 +4364,8 @@ fn cp_inode_key(_source: &std::path::Path) -> Option<(u64, u64)> {
 pub(in crate::executor) struct CpStat {
     pub is_dir: bool,
     pub is_symlink: bool,
+    // Unix-only consumers: copy_bytes_mixed, cp_apply_preserved, and chmod.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub mode: u32,
     pub dev: u64,
     pub ino: u64,
@@ -4805,69 +4804,6 @@ impl CpNode {
             }
         }
     }
-
-    pub(in crate::executor) fn create_dir_all(&self) -> io::Result<()> {
-        match &self.root {
-            CpRoot::Plain(_) => fs::create_dir_all(self.eff_path()),
-            #[cfg(unix)]
-            CpRoot::At { dir, .. } => {
-                use std::os::unix::io::AsRawFd;
-                let fd = dir.as_raw_fd();
-                let rel = self.at_rel();
-                // mkdirat answers one component chain per call only
-                // when its parents exist, so create_dir_all's walk
-                // goes cumulative-prefix by cumulative-prefix. `.`
-                // and `..` prefixes name existing directories and
-                // answer EEXIST; the fstatat confirm keeps the
-                // NotADirectory verdict a file in the chain earns.
-                let mut cumulative = std::path::PathBuf::new();
-                let mut stepped = false;
-                for component in rel.components() {
-                    use std::path::Component;
-                    match component {
-                        Component::RootDir | Component::Prefix(_) => {
-                            return Err(io::Error::new(
-                                io::ErrorKind::InvalidInput,
-                                "anchor-relative path turned absolute",
-                            ));
-                        }
-                        Component::CurDir | Component::ParentDir | Component::Normal(_) => {
-                            cumulative.push(component.as_os_str());
-                        }
-                    }
-                    stepped = true;
-                    let c_path = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(
-                        cumulative.as_os_str(),
-                    ))
-                    .map_err(|_| {
-                        io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte")
-                    })?;
-                    // SAFETY: fd is the anchor handle (see
-                    // cp_fstatat); mkdirat takes no descriptor.
-                    let rc = unsafe { libc::mkdirat(fd, c_path.as_ptr(), 0o777 as libc::mode_t) };
-                    if rc == 0 {
-                        continue;
-                    }
-                    let error = io::Error::last_os_error();
-                    if error.raw_os_error() != Some(libc::EEXIST) {
-                        return Err(error);
-                    }
-                    let st = cp_fstatat(fd, &cumulative, true)?;
-                    if u32::from(st.st_mode) & u32::from(libc::S_IFMT) != u32::from(libc::S_IFDIR) {
-                        return Err(io::Error::from_raw_os_error(libc::ENOTDIR));
-                    }
-                }
-                if !stepped {
-                    let st = cp_fstatat(fd, &rel, true)?;
-                    if u32::from(st.st_mode) & u32::from(libc::S_IFMT) != u32::from(libc::S_IFDIR) {
-                        return Err(io::Error::from_raw_os_error(libc::ENOTDIR));
-                    }
-                }
-                Ok(())
-            }
-        }
-    }
-
     /// Whether this node's root is the anchor-relative form
     /// (rubash#3276: rm's preserve-root guard asks it to choose
     /// between the node verdict and the pre-face string verdict).
@@ -5014,6 +4950,7 @@ impl CpNode {
         }
     }
 
+    #[cfg(unix)]
     pub(in crate::executor) fn open_read(&self) -> io::Result<File> {
         match &self.root {
             CpRoot::Plain(_) => File::open(self.eff_path()),
@@ -5025,6 +4962,7 @@ impl CpNode {
         }
     }
 
+    #[cfg(unix)]
     fn open_write(&self) -> io::Result<File> {
         match &self.root {
             CpRoot::Plain(_) => File::options().write(true).open(self.eff_path()),
@@ -5257,6 +5195,7 @@ impl CpNode {
     /// cp_apply_preserved's timestamp half through handles (the
     /// pre-face form tries a write handle, then a read one — a
     /// directory target only ever takes the second).
+    #[cfg(unix)]
     pub(in crate::executor) fn set_file_times(
         &self,
         accessed: SystemTime,

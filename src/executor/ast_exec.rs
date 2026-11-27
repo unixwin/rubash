@@ -443,7 +443,7 @@ impl Executor {
         command: &CommandNode,
         allow_redirects: bool,
     ) -> bool {
-        let redirects_absent = command.redirects.is_empty()
+        let _redirects_absent = command.redirects.is_empty()
             && command.redirect_in.is_none()
             && command.redirect_out.is_none()
             && command.redirect_err.is_none()

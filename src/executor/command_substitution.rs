@@ -4329,10 +4329,6 @@ fn restore_old_style_backtick_markers(value: &str) -> String {
         .replace(crate::executor::markers::DATA_BACKSLASH, "\\")
 }
 
-fn readfile_path_is_quoted(path: &str) -> bool {
-    path.chars().any(|ch| matches!(ch, '\'' | '"' | '\\'))
-}
-
 /// GNU cat's quotef rendering of an operand in its open/read diagnostics
 /// (rubash#2027; coreutils gnulib quotearg shell-escape style, measured
 /// against coreutils 9.4: `/tmp`, `./missing`, `a+b`, `a,b`, `a@b`, `a%b`,

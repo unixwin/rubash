@@ -19,20 +19,6 @@ const EX_USAGE: i32 = 2;
 
 const DISABLED_BUILTINS: &str = "__RUBASH_DISABLED_BUILTINS";
 
-pub(crate) fn execute_with_io<'a, W>(
-    row: &'a BuiltinRow,
-    args: &'a [String],
-    env_vars: &mut VarTable,
-    diag: &mut Diag<'a>,
-    stdout: &mut W,
-) -> io::Result<i32>
-where
-    W: Write,
-{
-    let cwd = std::env::current_dir().unwrap_or_default();
-    execute_with_io_in_dir(row, args, env_vars, &cwd, diag, stdout)
-}
-
 /// `enable` entry point with the shell's physical cwd.  Loadable objects
 /// are resolved against the SHELL cwd, not the host process cwd — rubash
 /// `cd` moves `ShellState::cwd` without calling `chdir` (see

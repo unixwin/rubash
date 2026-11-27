@@ -106,6 +106,8 @@ pub fn enable_process_replacement() {
     PROCESS_REPLACEMENT_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
+// Unix-only consumer: Executor::exec_image_replacement_applies.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn process_replacement_enabled() -> bool {
     PROCESS_REPLACEMENT_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
 }

@@ -313,20 +313,6 @@ fn record_env_write(name: &str, value: Option<&str>) {
     });
 }
 
-/// Unconditional process-env write + journal record, for the scoped
-/// restore paths (subshell/function-local restores) whose direct writes
-/// the #916 assignment gate must not filter: whatever they write is this
-/// lineage's final state for the key.
-pub(crate) fn mirror_env_set(name: &str, value: &str) {
-    // G-01: the mutation + journal record are one process-state
-    // critical section — a concurrent Drop restore must never slip
-    // between the write and its record.
-    with_process_state_lock(|| {
-        env::set_var(name, value);
-        record_env_write(name, Some(value));
-    });
-}
-
 /// Removal counterpart of `mirror_env_set`.
 pub(crate) fn mirror_env_remove(name: &str) {
     with_process_state_lock(|| {
@@ -567,19 +553,6 @@ pub(in crate::executor) fn safe_temp_dir_string() -> String {
         env::current_dir()
             .map(|path| path.join("target").to_string_lossy().into_owned())
             .unwrap_or_else(|_| ".".to_string())
-    }
-}
-
-pub(in crate::executor) fn set_marked_var(
-    env_vars: &mut crate::shell::var_table::VarTable,
-    key: &str,
-    name: &str,
-    marked: bool,
-) {
-    if marked {
-        mark_env_name(env_vars, key, name);
-    } else {
-        unmark_env_name(env_vars, key, name);
     }
 }
 

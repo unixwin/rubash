@@ -725,7 +725,6 @@ impl ConditionalArithParser<'_> {
             dynamic_values: self.dynamic_values,
             cells: self.cells,
             error_category: None,
-            no_expand: false,
             // Variable-value recursion: the value text reaches subexpr
             // verbatim (expr.c:1241), so a non-empty bracket span there
             // never diagnoses on expansion (rubash#3252).
@@ -784,15 +783,6 @@ impl ConditionalArithParser<'_> {
         self.set_lvalue(&lvalue, updated);
         self.record_locale_bind(&lvalue, updated);
         Some(if prefix { updated } else { current })
-    }
-
-    pub(super) fn assign_lvalue(
-        &mut self,
-        lvalue: &ArithLValue,
-        op: &str,
-        rhs: i128,
-    ) -> Option<i128> {
-        self.assign_lvalue_precaptured(lvalue, op, rhs, None)
     }
 
     /// `precaptured` is the lvalue's value read BEFORE the RHS was parsed

@@ -398,11 +398,6 @@ impl<'a> Lexer<'a> {
         self.compound_unclosed_pending = false;
     }
 
-    pub(super) fn skip_word(&mut self) {
-        self.skip_word_inner(self.position);
-        self.compound_unclosed_pending = false;
-    }
-
     fn skip_word_inner(&mut self, token_start: usize) {
         let mut extglob_operator = false;
         let array_assignment = self.looks_like_array_element_assignment();

@@ -143,16 +143,6 @@ pub(crate) fn is_special(name: &str) -> bool {
         .is_some_and(|builtin| builtin.flags & SPECIAL_BUILTIN != 0)
 }
 
-/// GNU `BUILTIN_ENABLED` on the loaded `struct builtin`.
-pub(crate) fn is_enabled(name: &str) -> bool {
-    registry()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .iter()
-        .find(|builtin| builtin.name == name)
-        .is_some_and(|builtin| builtin.flags & BUILTIN_ENABLED != 0)
-}
-
 /// Mirror `enable`'s enabled/disabled change into the loaded struct and
 /// the plugin's own flags field, like GNU's `enable_shell_command`
 /// (`enable.def:279-306`).

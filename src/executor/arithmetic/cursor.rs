@@ -11,19 +11,6 @@ impl ConditionalArithParser<'_> {
         self.input.get(self.pos).copied()
     }
 
-    pub(super) fn consume(&mut self, value: &str) -> bool {
-        if self.input[self.pos..].starts_with(value.as_bytes()) {
-            self.pos += value.len();
-            true
-        } else {
-            false
-        }
-    }
-
-    pub(super) fn starts_with(&self, value: &str) -> bool {
-        self.input[self.pos..].starts_with(value.as_bytes())
-    }
-
     pub(super) fn skip_arithmetic_conditional_branch(&mut self, boundaries: &[&str]) {
         let mut depth = 0usize;
         let mut ternary_depth = 0usize;

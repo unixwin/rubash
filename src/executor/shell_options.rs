@@ -1905,6 +1905,7 @@ impl Executor {
             // bind, and symbolic write endpoints (FullDevice,
             // ProcContentWrite, PipeChannel) carry no kernel handle of
             // the referent — those keep the literal-stat fallback.
+            #[cfg_attr(not(unix), allow(unused_variables))]
             let stat_handle: Option<crate::fd::HANDLE> = match &entry.read {
                 Some(FdReadEndpoint::File(file)) => Some(file.handle),
                 Some(FdReadEndpoint::CoprocStdout { fd, .. }) => Some(fd.handle),
@@ -1919,6 +1920,7 @@ impl Executor {
                     _ => None,
                 },
             };
+            #[cfg_attr(not(unix), allow(unused_variables))]
             let is_procsub_pipe = matches!(
                 &entry.read,
                 Some(FdReadEndpoint::File(file)) if procsub_pipe(&file.path, file.handle)
@@ -2502,7 +2504,7 @@ impl Executor {
     /// stands in, as it did before spellings were recorded.
     fn transport_spelling_path(
         spelling: &[u8],
-        normalized: &std::path::Path,
+        #[cfg_attr(unix, allow(unused_variables))] normalized: &std::path::Path,
     ) -> std::path::PathBuf {
         #[cfg(unix)]
         {
@@ -2729,22 +2731,6 @@ impl Executor {
             }
         }
         File::create(path).map_err(|e| crate::posix_errors::path_error(&target, e))
-    }
-
-    /// rubash#1025: prepare-phase variant of [`Self::create_redirect_output`]
-    /// for compound commands. GNU do_redirection_internal opens a
-    /// compound's redirect ONCE; rubash's prepare phase (create/truncate
-    /// here, splice appends into the body) and bind phase
-    /// (open_compound_output_redirects) open it twice, so a successful
-    /// noclobber O_EXCL create is recorded here and the bind phase
-    /// consumes the record instead of failing on the file this same
-    /// command just created.
-    pub(in crate::executor) fn create_redirect_output_prepared(
-        &self,
-        target: &str,
-        clobber: bool,
-    ) -> io::Result<File> {
-        self.create_redirect_output_prepared_for(None, target, clobber)
     }
 
     /// [`Self::create_redirect_output_prepared`] with the redirect
@@ -3438,37 +3424,6 @@ impl Executor {
                 crate::posix_errors::path_error(target, e)
             }
         })
-    }
-
-    /// rubash#2285: resolve an output redirect's target word through
-    /// the alias layer and fresh-open the regular file it names.
-    /// Some only when the word is an fd-alias PATH spelling
-    /// (/dev/fd/N, /proc/self/fd/N, /dev/std*) — a `&N` spelling is a
-    /// dup2, never an open (redir.c r_duplicating_output, redir.c:157)
-    /// — and the aliased endpoint re-opens fresh (rubash#2256: with
-    /// HAVE_DEV_FD defined, redir.c's RF_DEVFD dup special case at
-    /// redir.c:602-629 does not compile, so the word takes the plain
-    /// open in redir_open, redir.c:725, like every other r_output /
-    /// r_appending_to word in do_redirections, redir.c:237). Every
-    /// other shape returns None and the caller's existing arms own
-    /// it. This is the resolver arm the buffered face
-    /// (write_dev_stdio_redirect_output) already had; the external
-    /// faces lacked it, so a read-bound source — which has no write
-    /// endpoint to dup — fell through every arm and the child
-    /// inherited the shell's real stdout (or, at a numbered slot,
-    /// got no descriptor at all).
-    pub(in crate::executor) fn open_alias_spelling_fresh_output(
-        &self,
-        target: &str,
-        append: bool,
-        clobber: bool,
-    ) -> Option<io::Result<File>> {
-        if redirect_target_is_dup_spelling(target) {
-            return None;
-        }
-        let fd = redirect_target_fd(target)?;
-        let path = self.fd_alias_reopen_path(fd)?;
-        Some(self.open_fresh_alias_file(&path, target, append, clobber))
     }
 
     /// rubash#2329: the positional form of

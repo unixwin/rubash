@@ -87,7 +87,6 @@ enum ArgKind {
 /// lets the machine be dropped (or simply go dead) and the `Diag`
 /// be read afterwards.
 pub struct BuiltinOpt<'a, 'd> {
-    row: &'a BuiltinRow,
     words: &'a [String],
     diag: &'d mut Diag<'a>,
     /// The parsed spec: (option byte, argument kind) pairs, plus
@@ -151,7 +150,6 @@ impl<'a, 'd> BuiltinOpt<'a, 'd> {
             ),
         };
         BuiltinOpt {
-            row,
             words,
             diag,
             spec,
@@ -164,11 +162,6 @@ impl<'a, 'd> BuiltinOpt<'a, 'd> {
             scannable,
             posix,
         }
-    }
-
-    /// The row this machine scans for.
-    pub fn row(&self) -> &'a BuiltinRow {
-        self.row
     }
 
     /// The words after the scan point (`loptend`): the operands.

@@ -914,7 +914,6 @@ pub(crate) struct ReadlineCompletionSettings {
     pub ignore_case: bool,
     pub map_case: bool,
     pub match_hidden_files: bool,
-    pub expand_tilde: bool,
     pub disable_completion: bool,
 }
 
@@ -926,7 +925,6 @@ impl Default for ReadlineCompletionSettings {
             ignore_case: false,
             map_case: false,
             match_hidden_files: true,
-            expand_tilde: false,
             disable_completion: false,
         }
     }
@@ -939,7 +937,6 @@ impl ReadlineCompletionSettings {
             ignore_case: on("completion-ignore-case"),
             map_case: on("completion-map-case"),
             match_hidden_files: on("match-hidden-files"),
-            expand_tilde: on("expand-tilde"),
             disable_completion: on("disable-completion"),
         }
     }
@@ -1687,6 +1684,7 @@ pub(crate) fn resolve_compspec_with_rebuild<'a>(
 /// `Executor::complete_line`, which calls
 /// `complete_line_candidates_with_dynamic` with the registry and the
 /// pre-resolved dynamic candidates.
+#[cfg(test)]
 pub(crate) fn complete_line_candidates(
     line: &str,
     cursor: usize,
@@ -1716,6 +1714,7 @@ pub(crate) fn complete_line_candidates(
 /// output are appended UNfiltered (pcomplete.c:1129-1132), and the -X
 /// filter then runs over the whole list (pcomplete.c:1402-1407).
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(crate) fn complete_line_candidates_with_dynamic(
     line: &str,
     cursor: usize,
@@ -2700,6 +2699,7 @@ fn env_account_candidates(env_vars: &HashMap<String, String>, keys: &[&str]) -> 
 /// blank lines carry no record; a record with an empty name field is
 /// malformed and skipped. With no readable database the generators
 /// yield nothing (mirrors the #1044 services walk).
+#[cfg(unix)]
 fn account_db_names(path: &std::path::Path) -> Vec<String> {
     let Ok(contents) = std::fs::read_to_string(path) else {
         return Vec::new();

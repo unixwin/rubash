@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 
-use super::value::valid_identifier;
 use super::{ARRAY_VARS, ASSOC_VARS, EXPORTED_VARS, NAMEREF_VARS, READONLY_VARS};
 
 /// GNU variables.h:124-133: attributes are att_* bits on the SHELL_VAR.
@@ -54,28 +53,6 @@ pub(super) fn marked_vars(
     // the serialized string: writers no longer maintain it per mark
     // (#916 follow-up). Non-attribute keys still read their string.
     env_vars.marked_names(key).into_iter().collect()
-}
-
-pub(super) fn nameref_target_name(
-    env_vars: &crate::shell::var_table::VarTable,
-    name: &str,
-) -> Option<String> {
-    let mut current = name;
-    let mut seen = HashSet::new();
-    for _ in 0..16 {
-        if !seen.insert(current.to_string()) || !env_vars.is_marked(NAMEREF_VARS, current) {
-            return None;
-        }
-        let target = env_vars.get(current)?;
-        if !valid_identifier(target) {
-            return None;
-        }
-        if !env_vars.is_marked(NAMEREF_VARS, target) {
-            return Some(target.clone());
-        }
-        current = target;
-    }
-    None
 }
 
 /// GNU builtins/setattr.def:651 + variables.c:2188-2205

@@ -36,6 +36,7 @@ pub(in crate::executor) enum DevOperandStdin<'a> {
     /// fd 0 is a live pipeline reader destined for the child; an fd-0
     /// operand drains it into a temp file (upstream runs to EOF first,
     /// same bytes the child's dup'd fd 0 would have delivered).
+    #[cfg_attr(not(windows), allow(dead_code))]
     Reader(&'a mut dyn Read),
 }
 
@@ -46,6 +47,7 @@ pub(in crate::executor) enum DevOperandStdout {
     Path(PathBuf),
     /// A duplicate of the pipeline writer handed to the child as fd 1;
     /// the operand temp flushes into it after the child exits.
+    #[cfg_attr(not(windows), allow(dead_code))]
     PipeWriter(crate::fd::HANDLE),
     /// The caller captures fd 1; flushed operand bytes are handed back.
     Capture,
@@ -59,6 +61,7 @@ pub(in crate::executor) enum DevOperandStdout {
 /// plainly; their own `od` does not rendezvous with their own `mkfifo`
 /// marker — unixwin/WinuxCmd#1493), so the default is the byte-correct
 /// drain for every consumer.
+#[cfg_attr(not(windows), allow(dead_code))]
 const PROCSUB_FIFO_MARKER_PROOF_ENV: &str = "RUBASH_PROCSUB_FIFO_MARKER";
 
 enum DevOperandFlush {
@@ -143,6 +146,7 @@ impl DevOperandMaterialization {
     /// real target after the child exits — a process-replacing exec
     /// has no "after", so the spawn site must refuse exec replacement
     /// while any flush is pending.
+    #[cfg(unix)]
     pub(in crate::executor) fn has_deferred_flushes(&self) -> bool {
         !self.flushes.is_empty()
     }
@@ -221,6 +225,7 @@ impl DevOperandMaterialization {
     /// be consumed or re-pinned on the stage's behalf (entry 0 in
     /// particular is the enclosing context's binding, not the
     /// stage's).
+    #[cfg(unix)]
     pub(in crate::executor) fn exclude_std_fd_records(&mut self) {
         self.consume_fds.retain(|fd| *fd > 2);
         self.consume_endpoints.retain(|(fd, _)| *fd > 2);
@@ -482,6 +487,7 @@ fn drain_reader_to_temp(
 
 /// How a procsub read end delivered to an external child as an argv word
 /// reaches that child (rubash#2225 gate on the #1959 rendezvous).
+#[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ProcsubOperandDelivery {
     /// The #1903 fifo-marker rendezvous: the word names an on-disk
@@ -528,6 +534,7 @@ enum ProcsubOperandDelivery {
 /// including the WinuxCmd class — takes the byte-correct drain; the
 /// failure direction costs the #1959 streaming win, never bytes,
 /// exactly the #2225 safe direction.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn procsub_operand_delivery(
     consumer_program: Option<&Path>,
     env_vars: &HashMap<String, String>,
@@ -865,7 +872,7 @@ impl Executor {
         &self,
         fd: u32,
         m: &mut DevOperandMaterialization,
-        consumer_program: Option<&Path>,
+        #[cfg_attr(not(windows), allow(unused_variables))] consumer_program: Option<&Path>,
     ) -> Option<String> {
         let entry = self.fd_table.entries.get(&fd).filter(|e| !e.closed)?;
         if let Some(read) = &entry.read {

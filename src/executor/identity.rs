@@ -167,6 +167,7 @@ pub fn sysname() -> String {
     }
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn msystem_prefix() -> &'static str {
     let Ok(value) = std::env::var("MSYSTEM") else {
         return "MSYS_NT";
@@ -349,12 +350,14 @@ fn windows_version() -> String {
 }
 
 #[cfg(not(windows))]
+#[cfg_attr(not(windows), allow(dead_code))]
 fn windows_version() -> String {
     "unknown".to_string()
 }
 
 /// Civil-date formatting (no chrono dependency): days-from-civil inverse
 /// per Howard Hinnant's algorithm.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn format_utc_timestamp(time: std::time::SystemTime) -> Option<String> {
     let seconds = time.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
     let days = (seconds / 86_400) as i64;
@@ -367,6 +370,7 @@ fn format_utc_timestamp(time: std::time::SystemTime) -> Option<String> {
     ))
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;

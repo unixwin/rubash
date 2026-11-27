@@ -279,6 +279,7 @@ fn dquote_segment_close(prefix: &[char], start: usize) -> Option<usize> {
     None
 }
 
+#[cfg(test)]
 pub(in crate::executor) fn collect_braced_parameter_name(
     chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
 ) -> String {

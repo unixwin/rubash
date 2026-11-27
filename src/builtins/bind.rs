@@ -22,9 +22,6 @@
 
 use std::io::{self, Write};
 
-const EXECUTION_SUCCESS: i32 = 0;
-const EX_USAGE: i32 = 2;
-
 /// The readline function names, in GNU's funmap order — the order
 /// `bind -l` lists them (rl_list_funmap_names) and the dumpers iterate
 /// them. The table is readline's funmap.c `funmap[]` (153 entries) plus
@@ -2961,7 +2958,7 @@ mod tests {
 
     #[test]
     fn parse_unix_command_spec_keeps_nested_quotes() {
-        let (keyseq, command) =
+        let (_keyseq, command) =
             parse_unix_command_spec(r#""\C-g": sh -c "echo inner""#).expect("parses");
         assert_eq!(command, r#"sh -c "echo inner""#);
     }

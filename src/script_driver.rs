@@ -1891,7 +1891,7 @@ fn fnbody_residuals_advance(
 /// (stdin_source_has_unclosed_function_delimited_body's tail): the peeled
 /// `name ()` form or the `function NAME` keyword form. `delimiter` is a
 /// CHAR index into the pending mirror; `pending` carries the same text.
-fn fnbody_signature_before(chars: &[char], delimiter: usize, pending: &str) -> bool {
+fn fnbody_signature_before(_chars: &[char], delimiter: usize, pending: &str) -> bool {
     let byte = pending
         .char_indices()
         .nth(delimiter)
@@ -3149,31 +3149,6 @@ pub fn stdin_heredoc_line_declarations(
     state: &mut HeredocScanState,
 ) -> Vec<(String, bool)> {
     scan_heredoc_operators_with_state(line, state)
-}
-
-/// `<<`/`<<-` operator declarations on one physical line. GNU parse.y
-/// read_token: `<<` inside quotes is word text, not a redirection —
-/// `alias lb='cat <<E2'` declares no heredoc. Unquoted < > | & ; ( ) are
-/// token breaks (`x<<EOF` attaches EOF to x), `#` starts a comment only at
-/// a word boundary, `$(...)`/`<(...)`/backquote bodies are reparsed so a
-/// `<<` inside them is live syntax, and the delimiter is remembered
-/// dequoted (quoting only suppresses body expansion, never the match).
-///
-/// GNU parse.y:3727-3728 read_token hands a `((' to parse_dparen
-/// (parse.y:4895) BEFORE the redirection branch (parse.y:3690-3706) can lex
-/// `<<`: the whole `((...))` body is arithmetic text consumed by
-/// parse_arith_cmd/parse_matched_pair, so `<<`/`<<=` there are the shift
-/// operators, never REDIR_LESSLESS (same class as rubash#181's
-/// inside_arithmetic_command guard in the tokenizer). A `$((...))`
-/// arithmetic expansion in a word gets the same treatment. Without this,
-/// `((__ble_weight<<=1,...))` (ble.sh:6733) declared a phantom heredoc with
-/// delimiter `=1,` that never terminates, so the group driver accumulated
-/// the rest of the file into one pending group — O(n^2) re-scans per line
-/// and a mis-parse of the merged text (rubash#244/#245: ble.sh -n died at
-/// line 28355 after 117 s; GNU parses instantly, rc=0).
-fn scan_heredoc_operators(line: &str) -> Vec<(String, bool)> {
-    let mut state = HeredocScanState::default();
-    scan_heredoc_operators_with_state(line, &mut state)
 }
 
 fn scan_heredoc_operators_with_state(
@@ -6096,6 +6071,7 @@ fn windows_console_size_of(handle: *mut std::ffi::c_void) -> Option<(i32, i32)> 
 }
 
 #[cfg(not(windows))]
+#[cfg_attr(not(windows), allow(dead_code))]
 fn windows_console_size_of(_handle: *mut std::ffi::c_void) -> Option<(i32, i32)> {
     None
 }
@@ -6545,6 +6521,8 @@ enum TerminalAvailability {
     /// background process group through the SIGTTIN wait
     /// (jobs.c:4786-4810): monitor off, only the background
     /// diagnostic — the `goto just_bail` skips the second line.
+    // Unix-only producer/consumer: controlling-terminal job-control establishment.
+    #[cfg_attr(not(unix), allow(dead_code))]
     BackgroundBail,
 }
 
@@ -7479,6 +7457,8 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
             }
             Ok(_) => {}
             Err(err) => {
+                #[cfg(not(unix))]
+                let _ = &err;
                 // rubash#2233: a read ERROR on the interactive
                 // terminal (the hangup shape: the master closed and
                 // the blocked read wakes with EIO) reaches the reader
@@ -8939,6 +8919,8 @@ pub fn run_stdin_script(executor: &mut Executor) -> i32 {
             Ok(0) => break,
             Ok(_) => {}
             Err(err) => {
+                #[cfg(not(unix))]
+                let _ = &err;
                 // rubash#2233: a read ERROR is not EOF in the script
                 // reader. GNU's parser input layer (parse.y
                 // shell_getc, READERR arm, FATAL_READERROR) reports
