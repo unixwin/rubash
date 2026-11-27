@@ -46,11 +46,18 @@ impl TzifZone {
                 return footer.local_time(epoch);
             }
         }
-        let ty = &self.types[self.type_index_at(epoch)];
-        let mut parts = epoch_to_parts(epoch + i64::from(ty.offset));
+        let effective_epoch =
+            if shifted_epoch_fits_tm_year(epoch, self.types[self.type_index_at(epoch)].offset) {
+                epoch
+            } else {
+                // GNU builtins/printf.def:635-638: localtime EOVERFLOW resets secs = 0.
+                0
+            };
+        let ty = &self.types[self.type_index_at(effective_epoch)];
+        let mut parts = epoch_to_parts(effective_epoch.saturating_add(i64::from(ty.offset)));
         parts.zone_name = ty.abbrev.clone();
         parts.offset = ty.offset;
-        parts.epoch = epoch;
+        parts.epoch = effective_epoch;
         parts
     }
 
@@ -171,13 +178,19 @@ impl TimeZoneRule {
         if self.system_local {
             return system_local_time(epoch);
         }
-        let daylight = self.is_daylight_time(epoch);
+        let effective_epoch = if shifted_epoch_fits_tm_year(epoch, self.standard_offset) {
+            epoch
+        } else {
+            // GNU builtins/printf.def:635-638: localtime EOVERFLOW resets secs = 0.
+            0
+        };
+        let daylight = self.is_daylight_time(effective_epoch);
         let offset = if daylight {
             self.daylight_offset
         } else {
             self.standard_offset
         };
-        let mut parts = epoch_to_parts(epoch + i64::from(offset));
+        let mut parts = epoch_to_parts(effective_epoch.saturating_add(i64::from(offset)));
         parts.zone_name = if daylight {
             self.daylight_name
                 .clone()
@@ -186,7 +199,7 @@ impl TimeZoneRule {
             self.standard_name.clone()
         };
         parts.offset = offset;
-        parts.epoch = epoch;
+        parts.epoch = effective_epoch;
         parts
     }
 
@@ -196,8 +209,11 @@ impl TimeZoneRule {
         else {
             return false;
         };
+        if !shifted_epoch_fits_tm_year(epoch, self.standard_offset) {
+            return false;
+        }
 
-        let standard_parts = epoch_to_parts(epoch + i64::from(self.standard_offset));
+        let standard_parts = epoch_to_parts(epoch.saturating_add(i64::from(self.standard_offset)));
         let year = standard_parts.year;
         let start_epoch = transition_epoch(year, start, self.standard_offset);
         let end_epoch = transition_epoch(year, end, self.daylight_offset);
@@ -698,15 +714,23 @@ fn system_timezone() -> Option<TimeZoneRule> {
 // inventing a target-specific alias.
 #[allow(deprecated)]
 fn system_local_time(epoch: i64) -> LocalTimeParts {
-    let stamp = epoch as libc::time_t;
+    let mut effective_epoch = epoch;
+    let mut stamp = epoch as libc::time_t;
     let mut broken: libc::tm = unsafe { std::mem::zeroed() };
     // SAFETY: `stamp` and `broken` are valid owned values; localtime_r only
     // reads the first and writes the second, returning null on failure.
-    let ok = unsafe { libc::localtime_r(&stamp, &mut broken) };
+    let mut ok = unsafe { libc::localtime_r(&stamp, &mut broken) };
     if ok.is_null() {
-        let mut fallback = epoch_to_parts(epoch);
-        fallback.epoch = epoch;
-        return fallback;
+        // GNU builtins/printf.def:635-638: when localtime(&secs) returns NULL,
+        // reset secs = 0 and retry localtime(&secs).
+        effective_epoch = 0;
+        stamp = 0;
+        ok = unsafe { libc::localtime_r(&stamp, &mut broken) };
+        if ok.is_null() {
+            let mut fallback = epoch_to_parts(0);
+            fallback.epoch = 0;
+            return fallback;
+        }
     }
     let zone_name = if broken.tm_zone.is_null() {
         String::new()
@@ -716,7 +740,7 @@ fn system_local_time(epoch: i64) -> LocalTimeParts {
             .into_owned()
     };
     LocalTimeParts {
-        year: broken.tm_year + 1900,
+        year: broken.tm_year.saturating_add(1900),
         month: (broken.tm_mon + 1) as u8,
         day: broken.tm_mday as u8,
         hour: broken.tm_hour as u8,
@@ -725,7 +749,7 @@ fn system_local_time(epoch: i64) -> LocalTimeParts {
         weekday: (broken.tm_wday as u8) % 7,
         zone_name,
         offset: broken.tm_gmtoff as i32,
-        epoch,
+        epoch: effective_epoch,
     }
 }
 
@@ -743,6 +767,14 @@ fn is_leap_year(year: i32) -> bool {
     (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
 
+fn shifted_epoch_fits_tm_year(epoch: i64, offset: i32) -> bool {
+    let shifted = i128::from(epoch) + i128::from(offset);
+    let days = shifted.div_euclid(86_400);
+    let (year, _, _) = civil_from_days_i128(days);
+    let tm_year = year - 1900;
+    tm_year >= i128::from(i32::MIN) && tm_year <= i128::from(i32::MAX)
+}
+
 fn epoch_to_parts(epoch: i64) -> LocalTimeParts {
     let days = epoch.div_euclid(86_400);
     let seconds_of_day = epoch.rem_euclid(86_400);
@@ -754,7 +786,7 @@ fn epoch_to_parts(epoch: i64) -> LocalTimeParts {
         hour: (seconds_of_day / 3600) as u8,
         minute: ((seconds_of_day % 3600) / 60) as u8,
         second: (seconds_of_day % 60) as u8,
-        weekday: (days + 4).rem_euclid(7) as u8,
+        weekday: (days.rem_euclid(7) + 4).rem_euclid(7) as u8,
         zone_name: "UTC".to_string(),
         offset: 0,
         epoch,
@@ -771,13 +803,13 @@ fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
     i64::from(era) * 146_097 + i64::from(day_of_era) - 719_468
 }
 
-fn civil_from_days(days: i64) -> (i32, u32, u32) {
+fn civil_from_days_i128(days: i128) -> (i128, u32, u32) {
     let days = days + 719_468;
     let era = (if days >= 0 { days } else { days - 146_096 }) / 146_097;
     let day_of_era = (days - era * 146_097) as u32;
     let year_of_era =
         (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let mut year = year_of_era as i32 + era as i32 * 400;
+    let mut year = i128::from(year_of_era) + era * 400;
     let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
     let month_prime = (5 * day_of_year + 2) / 153;
     let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
@@ -786,6 +818,50 @@ fn civil_from_days(days: i64) -> (i32, u32, u32) {
     } else {
         month_prime - 9
     };
-    year += (month <= 2) as i32;
+    year += i128::from(month <= 2);
     (year, month, day)
+}
+
+fn civil_from_days(days: i64) -> (i32, u32, u32) {
+    let (year, month, day) = civil_from_days_i128(i128::from(days));
+    let clamped = year.clamp(i128::from(i32::MIN), i128::from(i32::MAX)) as i32;
+    (clamped, month, day)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extreme_timestamps_fall_back_to_epoch_zero_without_overflow() {
+        let utc = parse_posix_timezone("UTC0").expect("UTC0 rule");
+        let max_parts = utc.local_time(i64::MAX);
+        assert_eq!(
+            (
+                max_parts.year,
+                max_parts.month,
+                max_parts.day,
+                max_parts.epoch
+            ),
+            (1970, 1, 1, 0)
+        );
+
+        let min_parts = utc.local_time(i64::MIN);
+        assert_eq!(
+            (
+                min_parts.year,
+                min_parts.month,
+                min_parts.day,
+                min_parts.epoch
+            ),
+            (1970, 1, 1, 0)
+        );
+
+        #[cfg(unix)]
+        {
+            let sys = system_local_time(i64::MAX);
+            assert_eq!(sys.epoch, 0);
+            assert!(sys.year == 1970 || sys.year == 1969);
+        }
+    }
 }
