@@ -301,13 +301,29 @@ where
 }
 
 fn valid_alias_name(name: &str) -> bool {
+    // GNU general.c:403-411 valid_alias_name: rejects shellbreak ("()<>;&| \t\n"),
+    // shellxquote ("\"`'\\"), shellexp ("$<>"), and '/'.
     !name.is_empty()
-        && !name.chars().any(|ch| {
-            ch.is_whitespace()
-                || matches!(
-                    ch,
-                    '/' | '$' | '`' | '"' | '\'' | '\\' | '(' | ')' | '<' | '>' | '&' | '|'
-                )
+        && !name.bytes().any(|b| {
+            matches!(
+                b,
+                b'(' | b')'
+                    | b'<'
+                    | b'>'
+                    | b';'
+                    | b'&'
+                    | b'|'
+                    | b' '
+                    | b'\t'
+                    | b'\n'
+                    | b'"'
+                    | b'`'
+                    | b'\''
+                    | b'\\'
+                    | b'$'
+                    | b'/'
+                    | b'='
+            )
         })
 }
 
@@ -409,5 +425,28 @@ mod tests {
         )
         .unwrap();
         assert_eq!(String::from_utf8(out).unwrap(), "alias ll='echo LL'\n");
+    }
+
+    #[test]
+    fn semicolon_in_alias_name_is_rejected_like_gnu() {
+        let mut aliases = HashMap::new();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let status = alias_with_io(
+            &["a;b=echo hi".to_string()],
+            &mut aliases,
+            &mut out,
+            &mut err,
+            false,
+            diag_prolog(),
+        )
+        .unwrap();
+        assert_eq!(status, 1);
+        assert!(
+            String::from_utf8_lossy(&err).contains("`a;b': invalid alias name"),
+            "stderr={}",
+            String::from_utf8_lossy(&err)
+        );
+        assert!(aliases.is_empty());
     }
 }
