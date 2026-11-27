@@ -2,6 +2,24 @@ use super::types::{FUNCTION_STDIN, FUNCTION_STDIN_OFFSET, INHERIT_PROCESS_STDIN}
 use super::*;
 use crate::executor::markers::STORAGE_WORD_PREFIX;
 
+fn parse_gnu_valid_number(value: &str) -> Option<i64> {
+    // GNU general.c:262 legal_number: skip leading isspace, optional +/-,
+    // decimal digits, and trailing blanks (' ' or '\t').
+    let trimmed_start = value.trim_start_matches(|c: char| c.is_ascii_whitespace());
+    let trimmed = trimmed_start.trim_end_matches([' ', '\t']);
+    if trimmed.is_empty() {
+        return None;
+    }
+    let digits = trimmed
+        .strip_prefix('+')
+        .or_else(|| trimmed.strip_prefix('-'))
+        .unwrap_or(trimmed);
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    trimmed.parse::<i64>().ok()
+}
+
 impl Executor {
     pub(in crate::executor) fn parse_mapfile_usize(
         &self,
@@ -10,14 +28,19 @@ impl Executor {
         diagnostic: &str,
         stderr: &mut Vec<u8>,
     ) -> Result<usize, i32> {
-        value.parse::<usize>().map_err(|_| {
-            let _ = writeln!(
-                stderr,
-                "{}{command_name}: {value}: {diagnostic}",
-                self.diagnostic_prefix()
-            );
-            1
-        })
+        // GNU builtins/mapfile.def:266-305: valid_number(list_optarg, &intval)
+        // followed by `intval < 0 || intval != (unsigned)intval`.
+        parse_gnu_valid_number(value)
+            .and_then(|n| u32::try_from(n).ok())
+            .and_then(|n| usize::try_from(n).ok())
+            .ok_or_else(|| {
+                let _ = writeln!(
+                    stderr,
+                    "{}{command_name}: {value}: {diagnostic}",
+                    self.diagnostic_prefix()
+                );
+                1
+            })
     }
 
     pub(in crate::executor) fn parse_mapfile_callback_quantum(
@@ -45,9 +68,9 @@ impl Executor {
         value: &str,
         stderr: &mut Vec<u8>,
     ) -> Result<u32, i32> {
-        value
-            .parse::<i32>()
-            .ok()
+        // GNU builtins/mapfile.def:256-260: valid_number + (int)fd == intval && fd >= 0.
+        parse_gnu_valid_number(value)
+            .and_then(|fd| i32::try_from(fd).ok())
             .and_then(|fd| u32::try_from(fd).ok())
             .ok_or_else(|| {
                 let _ = writeln!(
@@ -1647,4 +1670,38 @@ fn finish_mapfile_record(mut raw: Vec<u8>, delimiter: u8) -> String {
         }
     }
     bytes_to_shell_text(&raw)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mapfile_origin_and_count_enforce_gnu_uint_bounds_and_whitespace() {
+        let ex = Executor::new();
+        let mut err = Vec::new();
+        assert_eq!(
+            ex.parse_mapfile_usize(
+                "mapfile",
+                "18446744073709551615",
+                "invalid array origin",
+                &mut err
+            ),
+            Err(1)
+        );
+        assert!(String::from_utf8_lossy(&err).contains("invalid array origin"));
+
+        err.clear();
+        assert_eq!(
+            ex.parse_mapfile_usize("mapfile", "4294967296", "invalid array origin", &mut err),
+            Err(1)
+        );
+
+        err.clear();
+        assert_eq!(
+            ex.parse_mapfile_usize("mapfile", " +2 ", "invalid line count", &mut err),
+            Ok(2)
+        );
+        assert!(err.is_empty());
+    }
 }
