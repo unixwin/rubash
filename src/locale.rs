@@ -39,8 +39,10 @@ struct AnsiLexLocaleGuard {
 
 impl AnsiLexLocaleGuard {
     fn new(locale: &str) -> Self {
-        let previous =
-            ANSI_LEX_LOCALE_OVERRIDE.with(|cell| cell.borrow_mut().replace(locale.to_string()));
+        let previous = ANSI_LEX_LOCALE_OVERRIDE
+            .try_with(|cell| cell.borrow_mut().replace(locale.to_string()))
+            .ok()
+            .flatten();
         AnsiLexLocaleGuard { previous }
     }
 }
@@ -48,7 +50,7 @@ impl AnsiLexLocaleGuard {
 impl Drop for AnsiLexLocaleGuard {
     fn drop(&mut self) {
         let previous = std::mem::replace(&mut self.previous, None);
-        ANSI_LEX_LOCALE_OVERRIDE.with(|cell| {
+        let _ = ANSI_LEX_LOCALE_OVERRIDE.try_with(|cell| {
             *cell.borrow_mut() = previous;
         });
     }
@@ -65,7 +67,9 @@ pub fn with_ansi_lex_locale<T>(locale: &str, f: impl FnOnce() -> T) -> T {
 /// when one is active, the live environment otherwise.
 pub fn ansi_lex_locale_name() -> String {
     ANSI_LEX_LOCALE_OVERRIDE
-        .with(|cell| cell.borrow().clone())
+        .try_with(|cell| cell.borrow().clone())
+        .ok()
+        .flatten()
         .unwrap_or_else(locale_name)
 }
 
@@ -147,13 +151,20 @@ pub struct ShellLocaleGuard {
 impl ShellLocaleGuard {
     pub fn new(env_vars: &std::collections::HashMap<String, String>) -> Self {
         let previous = SHELL_LOCALE_OVERRIDE
-            .with(|cell| cell.borrow_mut().replace(locale_name_from_vars(env_vars)));
-        let previous_numeric = SHELL_NUMERIC_LOCALE_OVERRIDE.with(|cell| {
-            cell.borrow_mut()
-                .replace(locale_numeric_name_from_vars(env_vars))
-        });
+            .try_with(|cell| cell.borrow_mut().replace(locale_name_from_vars(env_vars)))
+            .ok()
+            .flatten();
+        let previous_numeric = SHELL_NUMERIC_LOCALE_OVERRIDE
+            .try_with(|cell| {
+                cell.borrow_mut()
+                    .replace(locale_numeric_name_from_vars(env_vars))
+            })
+            .ok()
+            .flatten();
         let previous_table = SHELL_LOCALE_TABLE_OVERRIDE
-            .with(|cell| cell.borrow_mut().replace(locale_table_from_vars(env_vars)));
+            .try_with(|cell| cell.borrow_mut().replace(locale_table_from_vars(env_vars)))
+            .ok()
+            .flatten();
         ShellLocaleGuard {
             previous,
             previous_numeric,
@@ -165,15 +176,15 @@ impl ShellLocaleGuard {
 impl Drop for ShellLocaleGuard {
     fn drop(&mut self) {
         let previous = std::mem::replace(&mut self.previous, None);
-        SHELL_LOCALE_OVERRIDE.with(|cell| {
+        let _ = SHELL_LOCALE_OVERRIDE.try_with(|cell| {
             *cell.borrow_mut() = previous;
         });
         let previous_numeric = std::mem::replace(&mut self.previous_numeric, None);
-        SHELL_NUMERIC_LOCALE_OVERRIDE.with(|cell| {
+        let _ = SHELL_NUMERIC_LOCALE_OVERRIDE.try_with(|cell| {
             *cell.borrow_mut() = previous_numeric;
         });
         let previous_table = std::mem::replace(&mut self.previous_table, None);
-        SHELL_LOCALE_TABLE_OVERRIDE.with(|cell| {
+        let _ = SHELL_LOCALE_TABLE_OVERRIDE.try_with(|cell| {
             *cell.borrow_mut() = previous_table;
         });
     }
@@ -204,12 +215,16 @@ fn read_effective_locale_var(name: &str) -> String {
         return std::env::var(name).unwrap_or_default();
     };
     if let Some(slot) = SHELL_LOCALE_TABLE_OVERRIDE
-        .with(|cell| cell.borrow().as_ref().map(|table| table[index].clone()))
+        .try_with(|cell| cell.borrow().as_ref().map(|table| table[index].clone()))
+        .ok()
+        .flatten()
     {
         return slot.unwrap_or_default();
     }
-    if let Some(slot) =
-        THREAD_LOCALE_VARS.with(|cell| cell.borrow().as_ref().map(|table| table[index].clone()))
+    if let Some(slot) = THREAD_LOCALE_VARS
+        .try_with(|cell| cell.borrow().as_ref().map(|table| table[index].clone()))
+        .ok()
+        .flatten()
     {
         return slot.unwrap_or_default();
     }
@@ -220,7 +235,11 @@ fn read_effective_locale_var(name: &str) -> String {
 /// executing shell's variable-table resolution when a guard is
 /// installed, the thread's effective locale variables (same chain) otherwise.
 pub(crate) fn active_numeric_locale_name() -> String {
-    match SHELL_NUMERIC_LOCALE_OVERRIDE.with(|cell| cell.borrow().clone()) {
+    match SHELL_NUMERIC_LOCALE_OVERRIDE
+        .try_with(|cell| cell.borrow().clone())
+        .ok()
+        .flatten()
+    {
         Some(name) => name,
         None => {
             let locale_all = read_effective_locale_var("LC_ALL");
@@ -263,7 +282,9 @@ pub fn locale_name_from_vars(env_vars: &std::collections::HashMap<String, String
 /// effective locale variables otherwise.
 pub fn active_locale_name() -> String {
     SHELL_LOCALE_OVERRIDE
-        .with(|cell| cell.borrow().clone())
+        .try_with(|cell| cell.borrow().clone())
+        .ok()
+        .flatten()
         .unwrap_or_else(locale_name)
 }
 
@@ -574,16 +595,18 @@ thread_local! {
 
 #[cfg(unix)]
 fn utf8_locale_active(name: &str) -> bool {
-    UTF8_ACTIVE_CACHE.with(|cache| {
-        if let Some((seen, value)) = cache.borrow().as_ref() {
-            if seen == name {
-                return *value;
+    UTF8_ACTIVE_CACHE
+        .try_with(|cache| {
+            if let Some((seen, value)) = cache.borrow().as_ref() {
+                if seen == name {
+                    return *value;
+                }
             }
-        }
-        let value = probe_utf8_locale(name);
-        *cache.borrow_mut() = Some((name.to_string(), value));
-        value
-    })
+            let value = probe_utf8_locale(name);
+            *cache.borrow_mut() = Some((name.to_string(), value));
+            value
+        })
+        .unwrap_or_else(|_| probe_utf8_locale(name))
 }
 
 #[cfg(unix)]
@@ -1134,7 +1157,7 @@ pub fn sync_process_locale(env_vars: &std::collections::HashMap<String, String>)
     // binds every LC_* category plus LANG to sv_locale), not only the
     // collate/ctype subset the #1512 fix needed.
     let table = locale_table_from_vars(env_vars);
-    THREAD_LOCALE_VARS.with(|cell| {
+    let _ = THREAD_LOCALE_VARS.try_with(|cell| {
         *cell.borrow_mut() = Some(table);
     });
 }
@@ -1150,7 +1173,7 @@ pub(crate) fn update_synced_thread_locale_var(name: &str, value: Option<&str>) {
     let Some(index) = locale_var_index(name) else {
         return;
     };
-    THREAD_LOCALE_VARS.with(|cell| {
+    let _ = THREAD_LOCALE_VARS.try_with(|cell| {
         if let Some(table) = cell.borrow_mut().as_mut() {
             table[index] = value.map(str::to_string);
         }
@@ -1161,7 +1184,10 @@ pub(crate) fn update_synced_thread_locale_var(name: &str, value: Option<&str>) {
 /// construction. `None` means this thread currently reads the inherited
 /// process environment.
 pub(crate) fn snapshot_synced_thread_locale() -> Option<LocaleVarTable> {
-    THREAD_LOCALE_VARS.with(|cell| cell.borrow().clone())
+    THREAD_LOCALE_VARS
+        .try_with(|cell| cell.borrow().clone())
+        .ok()
+        .flatten()
 }
 
 /// Restore a snapshot taken by [`snapshot_synced_thread_locale`]. Executor
@@ -1171,7 +1197,7 @@ pub(crate) fn snapshot_synced_thread_locale() -> Option<LocaleVarTable> {
 /// clearing would erase the parent's table, while keeping the child's table
 /// would leak the child's assignments into the parent.
 pub(crate) fn restore_synced_thread_locale(snapshot: Option<LocaleVarTable>) {
-    THREAD_LOCALE_VARS.with(|cell| {
+    let _ = THREAD_LOCALE_VARS.try_with(|cell| {
         *cell.borrow_mut() = snapshot;
     });
 }
@@ -2722,5 +2748,32 @@ mod dump_strings_tests {
             super::render_locale_string_dump(&strings, false, "probe.sh"),
             "\"a\"\n\"b c\"\n"
         );
+    }
+
+    #[test]
+    fn issue4228_tls_teardown_drop_does_not_panic() {
+        use std::cell::RefCell;
+
+        thread_local! {
+            static EARLY_EXECUTOR: RefCell<Option<crate::executor::Executor>> =
+                const { RefCell::new(None) };
+            static LATE_EXECUTOR: RefCell<Option<crate::executor::Executor>> =
+                const { RefCell::new(None) };
+        }
+
+        std::thread::spawn(|| {
+            EARLY_EXECUTOR.with(|slot| {
+                *slot.borrow_mut() = Some(crate::executor::Executor::new());
+            });
+            let mut vars = std::collections::HashMap::new();
+            vars.insert("LC_ALL".to_string(), "C".to_string());
+            super::sync_process_locale(&vars);
+            let _ = super::active_locale_name();
+            LATE_EXECUTOR.with(|slot| {
+                *slot.borrow_mut() = Some(crate::executor::Executor::new());
+            });
+        })
+        .join()
+        .expect("thread teardown with TLS-owned Executor must not panic");
     }
 }
