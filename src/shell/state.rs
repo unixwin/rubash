@@ -311,6 +311,22 @@ pub struct ShellState {
     pub(crate) pipestatus_shape: PipestatusShape,
     /// variables.c FUNCNAME stack.
     pub(crate) function_name_stack: Vec<String>,
+    /// execute_cmd.c `this_command_name` — the simple-command name
+    /// currently in force for `builtin_error_prolog`. GNU installs it
+    /// after word expansion (execute_cmd.c:4800) and clears it when the
+    /// simple command returns (execute_cmd.c:4952); the Rc lets the
+    /// command-completion guard clear the same cell without borrowing
+    /// the executor. ShellState clones deep-copy the value because a GNU
+    /// fork copy owns an independent cell.
+    pub(crate) this_command_name: Rc<RefCell<Option<String>>>,
+    /// The value `this_command_name` held while the current simple
+    /// command's words were expanded. GNU's expand_declaration_argument
+    /// (subst.c:12949) runs make_internal_declare during word expansion —
+    /// before execute_simple_command installs the command word at
+    /// execute_cmd.c:4800 — so its diagnostics read the pre-install label.
+    /// rubash defers that preprocessing into the builtin body, so the
+    /// expansion-time label is captured here at the install point.
+    pub(crate) expansion_command_name: Rc<RefCell<Option<String>>>,
     /// variables.c BASH_ARGC/BASH_ARGV stacks.
     pub(crate) bash_argc_stack: Vec<String>,
     pub(crate) bash_argv_stack: Vec<String>,
@@ -976,6 +992,8 @@ pub(crate) struct InteriorSnapshot {
     bad_substitution_reported: bool,
     redirect_failglob_error: bool,
     redirect_failglob_seen: bool,
+    this_command_name: Option<String>,
+    expansion_command_name: Option<String>,
     debug_trap_command: Option<String>,
     xtrace_fd: i32,
     xtrace_fd_source: String,
@@ -1050,6 +1068,8 @@ impl ShellState {
             bad_substitution_reported: self.bad_substitution_reported.get(),
             redirect_failglob_error: self.redirect_failglob_error.get(),
             redirect_failglob_seen: self.redirect_failglob_seen.get(),
+            this_command_name: self.this_command_name.borrow().clone(),
+            expansion_command_name: self.expansion_command_name.borrow().clone(),
             debug_trap_command: self.debug_trap_command.borrow().clone(),
             xtrace_fd: self.xtrace_fd.get(),
             xtrace_fd_source: self.xtrace_fd_source.borrow().clone(),
@@ -1128,6 +1148,8 @@ impl ShellState {
             .set(snapshot.redirect_failglob_error);
         self.redirect_failglob_seen
             .set(snapshot.redirect_failglob_seen);
+        *self.this_command_name.borrow_mut() = snapshot.this_command_name.clone();
+        *self.expansion_command_name.borrow_mut() = snapshot.expansion_command_name.clone();
         *self.debug_trap_command.borrow_mut() = snapshot.debug_trap_command.clone();
         self.xtrace_fd.set(snapshot.xtrace_fd);
         *self.xtrace_fd_source.borrow_mut() = snapshot.xtrace_fd_source.clone();
@@ -1175,6 +1197,10 @@ impl Clone for ShellState {
             pipestatus: self.pipestatus.clone(),
             pipestatus_shape: self.pipestatus_shape,
             function_name_stack: self.function_name_stack.clone(),
+            this_command_name: Rc::new(RefCell::new(self.this_command_name.borrow().clone())),
+            expansion_command_name: Rc::new(RefCell::new(
+                self.expansion_command_name.borrow().clone(),
+            )),
             bash_argc_stack: self.bash_argc_stack.clone(),
             bash_argv_stack: self.bash_argv_stack.clone(),
             bash_arg_bottom: self.bash_arg_bottom.clone(),

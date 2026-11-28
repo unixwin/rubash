@@ -688,9 +688,9 @@ impl Executor {
                     // copies from is the readonly GLOBAL — the name lives
                     // in no local scope — GNU's make_local_variable refuses
                     // the copy itself (variables.c:2658): the nested
-                    // declare reports through builtin_error with
-                    // this_command_name = the enclosing function
-                    // (builtins/common.c:240 sh_readonly), the bind is
+                    // declare reports through builtin_error with the live
+                    // expansion-time this_command_name (builtins/common.c:240
+                    // sh_readonly), the bind is
                     // skipped, and the outer builtin's own pre-check then
                     // reports the same operand under its own name — two
                     // layers, no abort. A readonly mark carried by an
@@ -706,15 +706,24 @@ impl Executor {
                             .local_var_scopes
                             .iter()
                             .any(|scope| scope.contains_key(lhs));
+                    // GNU subst.c:13030 make_internal_declare runs during
+                    // expand_words, before execute_simple_command installs
+                    // the builtin's own word at execute_cmd.c:4800. Its
+                    // builtin_error prolog therefore reads the live
+                    // expansion-time this_command_name verbatim — the
+                    // enclosing invocation only until the first body command
+                    // completes, NULL afterwards (execute_cmd.c:4952).
+                    let expansion_command_name =
+                        self.shell_state.expansion_command_name.borrow().clone();
                     if nested_assoc_convert || nested_indexed_convert {
                         let kind = if nested_assoc_convert {
                             "indexed to associative"
                         } else {
                             "associative to indexed"
                         };
-                        match self.shell_state.function_name_stack.first() {
-                            Some(func) => eprintln!(
-                                "{}{func}: {lhs}: cannot convert {kind} array",
+                        match expansion_command_name.as_deref() {
+                            Some(command) => eprintln!(
+                                "{}{command}: {lhs}: cannot convert {kind} array",
                                 self.diagnostic_prefix()
                             ),
                             None => eprintln!(
@@ -777,30 +786,14 @@ impl Executor {
                             });
                         let internal_declare_refuses = omap_invalid_readonly;
                         if internal_declare_refuses {
-                            // In R2 (same-scope local already exists at
-                            // current variable_context), an earlier command
-                            // in the function body ran and its return_result
-                            // cleared this_command_name to NULL
-                            // (execute_cmd.c:4952), so sh_readonly omits the
-                            // command segment; otherwise this_command_name
-                            // still holds the enclosing function name
-                            // installed at execute_cmd.c:4800.
-                            let same_scope_local = declare_family
-                                && self.shell_state.function_depth > 0
-                                && !declare_args_force_global(args)
-                                && self
-                                    .shell_state
-                                    .local_var_scopes
-                                    .last()
-                                    .is_some_and(|scope| scope.contains_key(lhs));
-                            match self
-                                .shell_state
-                                .function_name_stack
-                                .first()
-                                .filter(|_| !same_scope_local)
-                            {
-                                Some(func) => eprintln!(
-                                    "{}{func}: {lhs}: readonly variable",
+                            // sh_readonly reads the expansion-time
+                            // this_command_name snapshot computed above;
+                            // execute_cmd.c:4952 clears it as each simple
+                            // command returns, so no same-scope predicate is
+                            // needed to reproduce the NULL window.
+                            match expansion_command_name.as_deref() {
+                                Some(command) => eprintln!(
+                                    "{}{command}: {lhs}: readonly variable",
                                     self.diagnostic_prefix()
                                 ),
                                 None => eprintln!(
@@ -837,9 +830,9 @@ impl Executor {
                         // expand_declaration_argument (subst.c:12949) +
                         // declare_internal. No DISCARD: the function
                         // continues.
-                        match self.shell_state.function_name_stack.first() {
-                            Some(func) => eprintln!(
-                                "{}{func}: {lhs}: readonly variable",
+                        match expansion_command_name.as_deref() {
+                            Some(command) => eprintln!(
+                                "{}{command}: {lhs}: readonly variable",
                                 self.diagnostic_prefix()
                             ),
                             None => eprintln!(

@@ -1545,6 +1545,8 @@ impl Executor {
                         }
                     }),
                 function_name_stack: Vec::new(),
+                this_command_name: std::rc::Rc::new(std::cell::RefCell::new(None)),
+                expansion_command_name: std::rc::Rc::new(std::cell::RefCell::new(None)),
                 bash_argc_stack: Vec::new(),
                 bash_argv_stack: Vec::new(),
                 // rubash#2058: a materialized bottom frame crosses the
