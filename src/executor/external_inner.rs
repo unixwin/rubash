@@ -5684,8 +5684,8 @@ impl Executor {
         // kernel could not exec and feed the refusal classifier below a
         // synthetic ENOEXEC, so the ENOEXEC shell-script fallback (or the
         // bad-interpreter/binary refusal) applies exactly as if execve
-        // had refused. The 4-byte read costs microseconds against the
-        // millisecond spawn; `used_shell` spawns already run under a shell
+        // had refused. The small header sniff costs microseconds against
+        // the millisecond spawn; `used_shell` spawns already run under a shell
         // and skip it. Unix-only: Windows routes scripts through the shell
         // fallback before reaching any spawn (should_run_with_shell), so a
         // magic sniff here would only misroute batch files and MZ images.
@@ -7360,9 +7360,9 @@ fn is_exec_format_error(error: &io::Error) -> bool {
 }
 
 /// Whether execve(2) would refuse `program` with ENOEXEC: a regular
-/// file whose first bytes are neither a `#!` interpreter line nor the
-/// ELF magic of a native image (the only two formats the kernel takes
-/// directly on modern Linux). Directories and unreadable files are
+/// file whose first bytes are neither a `#!` interpreter line nor a
+/// structurally valid native ELF image (the only two formats the kernel
+/// takes directly on modern Linux). Directories and unreadable files are
 /// left to the normal spawn-error classification.
 #[cfg(unix)]
 pub(in crate::executor) fn is_enoexec_candidate(program: &std::path::Path) -> bool {
@@ -7395,6 +7395,14 @@ pub(in crate::executor) fn is_enoexec_candidate(program: &std::path::Path) -> bo
     //     ("cannot execute binary file", 126) instead of libc's silent
     //     /bin/sh substitution running its bytes as a script
     //     (`./x: line 1: ELFgarbage: command not found`, rc 127).
+    //     On Linux the structural validator must match the kernel's
+    //     binfmt_elf header checks: a truncated header, bad
+    //     EI_CLASS/EI_DATA/EI_VERSION, or non-executable e_type (ET_REL)
+    //     is refused by execve and therefore remains an ENOEXEC candidate
+    //     here too (rubash#3605). GNU shell_execve's post-refusal
+    //     check_binary_file then rejects the `\x7fELF` prefix with 126
+    //     (execute_cmd.c:6228-6232, general.c:745-746); only a valid
+    //     ET_EXEC/ET_DYN header is excluded as directly executable.
     //   - Mach-O (rubash#3510 rework): a native binary the Darwin
     //     kernel execs directly, so on macOS it is not an ENOEXEC
     //     candidate. On Linux the kernel refuses it with ENOEXEC, so
@@ -7405,7 +7413,7 @@ pub(in crate::executor) fn is_enoexec_candidate(program: &std::path::Path) -> bo
     //   - (MZ stays a candidate here on every platform: on unix the
     //     kernel refuses a PE image with ENOEXEC.)
     !head.starts_with(b"#!")
-        && (cfg!(target_vendor = "apple") || !head.starts_with(b"\x7fELF"))
+        && !(cfg!(not(target_vendor = "apple")) && crate::executor::path::is_elf_binary_magic(head))
         && !(cfg!(target_os = "macos") && crate::executor::path::is_macho_binary_magic(head))
 }
 

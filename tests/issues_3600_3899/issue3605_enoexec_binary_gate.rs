@@ -2,14 +2,20 @@
 //! binary gate: a file the kernel refuses with ENOEXEC must be
 //! classified by its FIRST BYTES before any fallback, exactly as GNU
 //! shell_execve does (execute_cmd.c:6139-6233; check_binary_file is
-//! general.c:718-741). On Darwin the local kernel loads Mach-O, not
+//! general.c:738-761 in the vendored Bash 5.3.20 tree). On Darwin the
+//! local kernel loads Mach-O, not
 //! ELF — treating `\x7fELF` as a native image skipped the
 //! classification entirely, so a corrupt ELF operand fell into libc's
 //! silent /bin/sh spawn substitution and its bytes ran as a script
 //! (`./x: line 1: ELFgarbage: command not found`, rc 127) where GNU
 //! refuses it: `bash: line 1: ./x: cannot execute binary file: Exec
 //! format error`, EX_BINARY_FILE = 126 (internal_error's
-//! `%s: %s: %s`, strerror(ENOENTEXEC) appended).
+//! `%s: %s: %s`, strerror(ENOENTEXEC) appended). Linux had the symmetric
+//! structural hole: every `\x7fELF` prefix was treated as kernel-execable,
+//! so a truncated or otherwise invalid ELF header bypassed the refusal and
+//! glibc's ENOEXEC fallback ran the bytes under /bin/sh. The pre-exec ELF
+//! test therefore validates the binfmt_elf header structure before either
+//! classifier may call the file native.
 //!
 //! Pinned against GNU bash 5.3.20 on macOS arm64:
 //!   bash -c './x'          -> bash: line 1: ./x: cannot execute binary file: Exec format error (126)
@@ -73,6 +79,24 @@ fn elf_operand_is_refused_not_run_as_script() {
     assert!(
         stderr.contains("line 2: ./x: cannot execute binary file: Exec format error"),
         "the command's own line is reported, got: {stderr:?}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn corrupt_elf_background_wait_is_refused_not_run_as_script() {
+    let dir = scratch("elf-bg");
+    place(&dir, "x", b"\x7fELFgarbage");
+    // GNU bash 5.3.20 on WSL Linux:
+    //   /usr/local/bin/bash -c './x & wait $!'
+    //   stderr: /usr/local/bin/bash: line 1: ./x: cannot execute binary file: Exec format error
+    //   status: 126 (EX_BINARY_FILE)
+    let (stdout, stderr, code) = run_c(&dir, "./x & wait $!");
+    assert_eq!(code, 126, "stderr was: {stderr}");
+    assert_eq!(stdout, "", "stdout was: {stdout}");
+    assert_eq!(
+        stderr.trim_end_matches(['\r', '\n']),
+        format!("{RUBASH}: line 1: ./x: cannot execute binary file: Exec format error")
     );
     let _ = fs::remove_dir_all(&dir);
 }
