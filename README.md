@@ -369,7 +369,7 @@ Everyone who has landed code is listed under [Contributors](#contributors).
 ## Contributors
 
 <!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->
-[![All Contributors](https://img.shields.io/badge/all_contributors-18-orange.svg?style=flat-square)](#contributors)
+[![All Contributors](https://img.shields.io/badge/all_contributors-21-orange.svg?style=flat-square)](#contributors)
 <!-- ALL-CONTRIBUTORS-BADGE:END -->
 
 Thanks to everyone who has contributed code, compatibility reproductions, and fixes ([emoji key](https://allcontributors.org/docs/en/emoji-key)):
@@ -402,6 +402,9 @@ Thanks to everyone who has contributed code, compatibility reproductions, and fi
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/claude"><img src="https://avatars.githubusercontent.com/u/81847?v=4&size=100" width="100px" height="100px" alt="claude"/><br /><sub><b>claude</b></sub></a><br /><a href="https://github.com/unixwin/rubash/commits?author=claude" title="Code">💻</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/apps/github-actions"><img src="https://avatars.githubusercontent.com/u/41898282?v=4&size=100" width="100px" height="100px" alt="github-actions[bot]"/><br /><sub><b>github-actions[bot]</b></sub></a><br /><a href="#tool-github-actions[bot]" title="Tools">🔧</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/arookieofc-ai"><img src="https://avatars.githubusercontent.com/u/282213208?v=4&size=100" width="100px" height="100px" alt="arookieofc-ai"/><br /><sub><b>arookieofc-ai</b></sub></a><br /><a href="https://github.com/unixwin/rubash/commits?author=arookieofc-ai" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/dingyi580"><img src="https://avatars.githubusercontent.com/u/63770542?v=4&size=100" width="100px" height="100px" alt="dingyi580"/><br /><sub><b>dingyi580</b></sub></a><br /><a href="https://github.com/unixwin/rubash/commits?author=dingyi580" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/ShiomiHC"><img src="https://avatars.githubusercontent.com/u/136112345?v=4&size=100" width="100px" height="100px" alt="shiomi"/><br /><sub><b>shiomi</b></sub></a><br /><a href="https://github.com/unixwin/rubash/issues?q=author%3AShiomiHC" title="Bug reports">🐛</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/xuangeyouneihan"><img src="https://avatars.githubusercontent.com/u/50788434?v=4&size=100" width="100px" height="100px" alt="轩哥有内涵"/><br /><sub><b>轩哥有内涵</b></sub></a><br /><a href="https://github.com/unixwin/rubash/issues?q=author%3Axuangeyouneihan" title="Bug reports">🐛</a></td>
     </tr>
   </tbody>
 </table>
