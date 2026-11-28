@@ -290,6 +290,42 @@ fn heredoc_admission_memo_key(source: &str) -> String {
     }
 }
 
+/// Replay the gather order of the tokenized substitution body: heredoc
+/// headers queue in operator order and each HereDocBody consumes the oldest
+/// queue entry (GNU parse.y:3120-3135 gather_here_documents). The final body
+/// is the one whose delimiter line can carry the substitution's EOF token;
+/// its token position is the gather-start line GNU passes as `lineno`, and
+/// `heredoc_end_line` is the delimiter/EOF line used by internal_warning.
+fn last_comsub_heredoc_site(
+    tokens: &[crate::lexer::Token],
+) -> Option<(String, usize, Option<usize>)> {
+    let mut pending = std::collections::VecDeque::new();
+    let mut last = None;
+    let mut index = 0usize;
+    while index < tokens.len() {
+        match tokens[index].kind {
+            crate::lexer::TokenKind::HereDoc => {
+                if let Some(delimiter) = tokens.get(index + 1) {
+                    pending.push_back(crate::parser::heredoc_delimiter_text(&delimiter.value));
+                    index += 1;
+                }
+            }
+            crate::lexer::TokenKind::HereDocBody => {
+                if let Some(delimiter) = pending.pop_front() {
+                    last = Some((
+                        delimiter,
+                        tokens[index].position,
+                        tokens[index].heredoc_end_line,
+                    ));
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    last
+}
+
 /// Produce the captured output of an admitted heredoc comsub plan:
 /// a sequence of plain `cat` commands concatenates each command's
 /// stdin body; a single `cat` may feed the `[sort, -u]` pipeline arm.
@@ -624,6 +660,7 @@ impl Executor {
             true,
             &comsub_marks,
         );
+        let heredoc_site = last_comsub_heredoc_site(&tokens);
         let mut ast = crate::parser::parse(&tokens);
         super::command_substitution::normalize_comsub_body_statement_lines(&mut ast, &tokens);
         let first = ast.commands.first()?;
@@ -635,6 +672,72 @@ impl Executor {
         } else {
             (first, ast.commands.get(1))
         };
+        if closed_by_paren || command_has_warned_heredoc(first) {
+            // Deduplicate within one command dispatch only: the same
+            // comsub occurrence can be planned through multiple expansion
+            // paths of the SAME command (expand_assignment_value_inner and
+            // expand_embedded_parameters_mut; a typed plan whose produce
+            // declines is retried by the readback entry), which would emit
+            // the warning twice for one GNU parse. The record is stamped
+            // with the dispatch's preopened_generation — the same
+            // per-command scoping the parked-handle channel uses, whose
+            // walks (prepare probes included) all run inside the
+            // generation — so a later command whose comsub source is
+            // textually identical still warns: GNU make_cmd.c:627
+            // make_here_document warns per heredoc occurrence per parse,
+            // with no cross-command dedup (rubash#4140).
+            //
+            // rubash#4190: with a resolved occurrence site, the dedup
+            // keys on the occurrence identity (slot, ordinal) instead of
+            // the source text — two DISTINCT occurrences in one dispatch
+            // whose sources are textually identical are different sites
+            // and both warn, while the same occurrence's two entry faces
+            // mint the same identity and warn once. The legacy
+            // (source, generation) record is still written on a marked
+            // emission, so an unmarked re-plan of the same source inside
+            // this dispatch (a face whose dispatch site minted no mark)
+            // stays suppressed by the legacy check below.
+            let generation = self.preopened_generation.get();
+            let should_emit = match site {
+                Some(site) => {
+                    if self.heredoc_warning_sites_generation.get() != generation {
+                        self.heredoc_warning_sites.borrow_mut().clear();
+                        self.heredoc_warning_sites_generation.set(generation);
+                    }
+                    self.heredoc_warning_sites
+                        .borrow_mut()
+                        .insert((site.slot, site.ordinal))
+                }
+                None => self
+                    .last_heredoc_warning_source
+                    .borrow()
+                    .as_ref()
+                    .map(|(last, last_generation)| {
+                        *last_generation != generation || last.as_str() != source.as_str()
+                    })
+                    .unwrap_or(true),
+            };
+            if should_emit {
+                *self.last_heredoc_warning_source.borrow_mut() =
+                    Some((source.to_string(), generation));
+                let (delimiter, gather_line, end_line) =
+                    heredoc_site.clone().unwrap_or_else(|| {
+                        let gather_line = first.heredoc_gather_line.or(first.line).unwrap_or(1);
+                        (
+                            first.heredoc_delimiter.clone().unwrap_or_default(),
+                            gather_line,
+                            None,
+                        )
+                    });
+                let warning_line = end_line
+                    .unwrap_or_else(|| gather_line + source.lines().count().saturating_sub(1));
+                self.report_command_substitution_heredoc_warning(
+                    gather_line,
+                    warning_line,
+                    &delimiter,
+                );
+            }
+        }
         if first
             .words
             .first()
@@ -732,57 +835,6 @@ impl Executor {
             .is_some_and(|pipeline| pipeline.stages.len() > 2)
         {
             return None;
-        }
-        if closed_by_paren || command_has_warned_heredoc(first) {
-            // Deduplicate within one command dispatch only: the same
-            // comsub occurrence can be planned through multiple expansion
-            // paths of the SAME command (expand_assignment_value_inner and
-            // expand_embedded_parameters_mut; a typed plan whose produce
-            // declines is retried by the readback entry), which would emit
-            // the warning twice for one GNU parse. The record is stamped
-            // with the dispatch's preopened_generation — the same
-            // per-command scoping the parked-handle channel uses, whose
-            // walks (prepare probes included) all run inside the
-            // generation — so a later command whose comsub source is
-            // textually identical still warns: GNU make_cmd.c:627
-            // make_here_document warns per heredoc occurrence per parse,
-            // with no cross-command dedup (rubash#4140).
-            //
-            // rubash#4190: with a resolved occurrence site, the dedup
-            // keys on the occurrence identity (slot, ordinal) instead of
-            // the source text — two DISTINCT occurrences in one dispatch
-            // whose sources are textually identical are different sites
-            // and both warn, while the same occurrence's two entry faces
-            // mint the same identity and warn once. The legacy
-            // (source, generation) record is still written on a marked
-            // emission, so an unmarked re-plan of the same source inside
-            // this dispatch (a face whose dispatch site minted no mark)
-            // stays suppressed by the legacy check below.
-            let generation = self.preopened_generation.get();
-            let should_emit = match site {
-                Some(site) => {
-                    if self.heredoc_warning_sites_generation.get() != generation {
-                        self.heredoc_warning_sites.borrow_mut().clear();
-                        self.heredoc_warning_sites_generation.set(generation);
-                    }
-                    self.heredoc_warning_sites
-                        .borrow_mut()
-                        .insert((site.slot, site.ordinal))
-                }
-                None => self
-                    .last_heredoc_warning_source
-                    .borrow()
-                    .as_ref()
-                    .map(|(last, last_generation)| {
-                        *last_generation != generation || last.as_str() != source.as_str()
-                    })
-                    .unwrap_or(true),
-            };
-            if should_emit {
-                *self.last_heredoc_warning_source.borrow_mut() =
-                    Some((source.to_string(), generation));
-                self.report_command_substitution_heredoc_warning(&source, first);
-            }
         }
         Some(HeredocComsubPlan { ast })
     }

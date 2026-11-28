@@ -1268,6 +1268,17 @@ impl GroupScanFeeder {
         };
         if found {
             let mut awaiting = self.awaiting_bodies.remove(0);
+            // GNU gather_here_documents (parse.y:3130) passes the parser's
+            // advancing line_number into each make_here_document call: after
+            // one document's delimiter line is read, the next pending heredoc
+            // of the same batch gathers from that same physical line. The
+            // queue is a single gather batch (a later command header cannot
+            // be lexed until this batch finishes), so carry the boundary into
+            // the next awaiting entry instead of reusing the logical command
+            // line for every heredoc.
+            if let Some(next) = self.awaiting_bodies.first_mut() {
+                next.gather_line = self.line_number.saturating_sub(1);
+            }
             if found_with_warning {
                 awaiting
                     .body

@@ -180,6 +180,26 @@ impl SubstitutionOutput {
         }
     }
 
+    /// Construct stdin text that merely crosses the same raw-byte boundary as
+    /// a capture. This is deliberately not `readback`: GNU make_cmd.c:622-624
+    /// copies each here-document body line with its newline into the document,
+    /// and redir.c:348-404 heredoc_expand/heredoc_write writes that document
+    /// verbatim (only r_reading_string appends a newline at redir.c:391-397).
+    /// Applying command-substitution capture trimming here erases interior
+    /// record boundaries when several stdin-producing commands concatenate.
+    pub(in crate::executor) fn stdin_body(
+        bytes: Vec<u8>,
+        status: i32,
+        context: SubstitutionQuoteContext,
+    ) -> Self {
+        Self {
+            bytes,
+            status,
+            context,
+            dropped_nul_bytes: false,
+        }
+    }
+
     pub(in crate::executor) fn text_lossy(&self) -> String {
         bytes_to_shell_text(&self.bytes)
     }

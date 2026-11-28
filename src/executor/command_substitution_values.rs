@@ -836,27 +836,18 @@ impl Executor {
 
     pub(in crate::executor) fn report_command_substitution_heredoc_warning(
         &self,
-        source: &str,
-        command: &CommandNode,
+        gather_line: usize,
+        warning_line: usize,
+        delimiter: &str,
     ) {
-        let _current_line = self
-            .shell_state
-            .env_vars
-            .get("__RUBASH_CURRENT_LINE")
-            .and_then(|line| line.parse::<usize>().ok())
-            .unwrap_or_else(|| command.line.unwrap_or(1));
-        let start_line = command.line.unwrap_or(1);
-        // GNU make_cmd.c:627: `lineno` is the line_number at the time
-        // gather_here_documents was called (the line where `<<EOF` appeared),
-        // and internal_warning's prefix uses the current line_number (after
-        // make_here_document read the body, i.e. the EOF/delimiter line).
-        // Use start_line (which accounts for leading newlines in the comsub
-        // source) as the base, not current_line (which is the outer command
-        // line, not the comsub body start line).
-        let warning_line = start_line + source.lines().count().saturating_sub(1);
-        let delimiter = command.heredoc_delimiter.as_deref().unwrap_or("");
+        // GNU make_cmd.c:627: `lineno` is the line_number gather_here_documents
+        // passed to this document's make_here_document call, while
+        // internal_warning's prefix uses line_number after the body scan (the
+        // delimiter/EOF line). The caller replays the body's gather order;
+        // do not rederive either number from the outer command or the whole
+        // substitution text, which both misnumber later heredocs in one batch.
         eprintln!(
-            "{}warning: here-document at line {start_line} delimited by end-of-file (wanted `{delimiter}')",
+            "{}warning: here-document at line {gather_line} delimited by end-of-file (wanted `{delimiter}')",
             self.error_prefix_for_line(warning_line)
         );
     }

@@ -3016,7 +3016,7 @@ impl Executor {
         let expanded = self.expand_heredoc_body(body);
         // expand_heredoc_body returns shell text; readback takes raw bytes,
         // so decode marker pairs once instead of re-encoding them.
-        SubstitutionOutput::readback(
+        SubstitutionOutput::stdin_body(
             crate::executor::substitution_metadata::shell_text_to_raw_bytes(&expanded),
             0,
             SubstitutionQuoteContext::HereDocument,
@@ -3035,7 +3035,7 @@ impl Executor {
     ) -> SubstitutionOutput {
         match carrier {
             Some(crate::parser::StdinBody::Preexpanded(text)) => {
-                return SubstitutionOutput::readback(
+                return SubstitutionOutput::stdin_body(
                     crate::executor::substitution_metadata::shell_text_to_raw_bytes(
                         &decode_stdin_body_enq(text),
                     ),
