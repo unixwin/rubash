@@ -735,9 +735,15 @@ impl Executor {
             // quoted text where GNU sees plain data).
             return Ok(vec![finalize_for_list_value(expanded)]);
         }
-        // Apply glob expansion for for-loop words
+        // Apply glob expansion for for-loop words. A literal-only source
+        // word carries its quoting oracle in `raw`; rebuild the protected
+        // pattern at this glob boundary (subst.c:4773 quote_string) rather
+        // than asking the lexer to expose CTLESC in token values.
+        let glob_pattern = raw
+            .and_then(glob::source_literal_glob_pattern)
+            .unwrap_or_else(|| expanded.clone());
         match glob::pathname_expand_word(
-            &expanded,
+            &glob_pattern,
             &self.shell_state.env_vars,
             &self.shell_state.cwd,
         ) {

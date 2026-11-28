@@ -146,6 +146,8 @@ fn issue4126_conditional_patterns_treat_quoted_chars_as_literal() {
         r#"
 for c in '[' ']' a '-' b; do if [[ $c == ["[]"] ]]; then echo "A1-$c:T"; else echo "A1-$c:F"; fi; done
 for c in a '-' b z; do if [[ $c == [a"-"z] ]]; then echo "A2-$c:T"; else echo "A2-$c:F"; fi; done
+for c in '^' a b; do if [[ $c == ["^"a] ]]; then echo "A3-$c:T"; else echo "A3-$c:F"; fi; done
+for c in '!' a b; do if [[ $c == ["!"a] ]]; then echo "A4-$c:T"; else echo "A4-$c:F"; fi; done
 if [[ abc == a* ]]; then echo "AG1:T"; else echo "AG1:F"; fi
 if [[ b == [a-z] ]]; then echo "AG2:T"; else echo "AG2:F"; fi
 "#,
@@ -158,6 +160,12 @@ if [[ b == [a-z] ]]; then echo "AG2:T"; else echo "AG2:F"; fi
          A2--:T\n\
          A2-b:F\n\
          A2-z:T\n\
+         A3-^:T\n\
+         A3-a:T\n\
+         A3-b:F\n\
+         A4-!:T\n\
+         A4-a:T\n\
+         A4-b:F\n\
          AG1:T\n\
          AG2:T\n",
     );
@@ -183,18 +191,45 @@ x=ABC; echo "BG4:[${x,,[a]}]"
 #[test]
 fn issue4126_pathname_glob_treats_quoted_chars_as_literal() {
     let s = Scratch::new("glob");
-    for name in ["a", "b", "x", "]", "-"] {
+    for name in ["a", "b", "x", "]", "-", "^", "!"] {
         fs::write(s.dir.join(name), "").unwrap();
     }
     s.assert_script(
         r#"
 echo "C1:" [a"]"b]
 echo "C2:" [a"-"z]
+echo "C3:" [a']'b]
+echo "C4:" [a'-'z]
+echo "C5:" ["^"az]
+echo "C6:" ['^'az]
+echo "C7:" [[":"alpha:]]
 echo "CG1:" [ab]
 echo "CG2:" "[a]"
 echo "CG3:" [a-z]
 "#,
-        "C1: ] a b\nC2: - a\nCG1: a b\nCG2: [a]\nCG3: a b x\n",
+        "C1: ] a b\nC2: - a\nC3: ] a b\nC4: - a\nC5: ^ a\nC6: ^ a\nC7: [[:alpha:]]\nCG1: a b\nCG2: [a]\nCG3: a b x\n",
+    );
+}
+
+/// ANSI-C decoded bytes are quoted source data too (GNU parse.y:5560-5575
+/// hands them through the same quoted-character machinery). In particular a
+/// decoded `]` or `-` inside a bracket expression is a member, not bracket
+/// syntax; UTF-8 subject bytes around the ASCII metacharacter must pass
+/// through unchanged.
+#[test]
+fn issue4126_ansi_c_and_utf8_pattern_chars_stay_literal() {
+    let s = Scratch::new("ansi-c-utf8");
+    for name in ["a", "b", "z", "]", "-"] {
+        fs::write(s.dir.join(name), "").unwrap();
+    }
+    s.assert_script(
+        r#"
+x='é]é'; printf 'U01:[%s]\n' "${x//"]"/X}"
+x='a\b'; printf 'U02:[%s]\n' "${x//["\\"]/X}"
+printf 'U04:'; printf '<%s>' [a$'\x5d'b]; printf '\n'
+printf 'U05:'; printf '<%s>' [a$'\x2d'z]; printf '\n'
+"#,
+        "U01:[éXé]\nU02:[aXb]\nU04:<]><a><b>\nU05:<-><a><z>\n",
     );
 }
 

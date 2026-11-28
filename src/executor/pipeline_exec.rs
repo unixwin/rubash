@@ -7016,8 +7016,11 @@ impl Executor {
                     out.push(unguard_pipeline_operand(&expanded));
                     continue;
                 }
+                let glob_pattern = raw
+                    .and_then(glob::source_literal_glob_pattern)
+                    .unwrap_or_else(|| expanded.clone());
                 match glob::pathname_expand_word(
-                    &expanded,
+                    &glob_pattern,
                     &self.shell_state.env_vars,
                     &self.shell_state.cwd,
                 ) {
@@ -8843,8 +8846,11 @@ impl Executor {
                         file_operands.push(unguard_pipeline_operand(&value));
                         continue;
                     }
+                    let glob_pattern = raw
+                        .and_then(glob::source_literal_glob_pattern)
+                        .unwrap_or_else(|| value.clone());
                     match glob::pathname_expand_word(
-                        &value,
+                        &glob_pattern,
                         &self.shell_state.env_vars,
                         &self.shell_state.cwd,
                     ) {

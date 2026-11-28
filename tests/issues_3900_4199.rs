@@ -124,6 +124,8 @@ mod issue4102_severed_dynamic_array_faces;
 mod issue4103_procsub_mtime;
 #[path = "issues_3900_4199/issue4125_rematch_carrier_bytes_regressions.rs"]
 mod issue4125_rematch_carrier_bytes_regressions;
+#[path = "issues_3900_4199/issue4126_quoted_pattern_chars.rs"]
+mod issue4126_quoted_pattern_chars;
 #[path = "issues_3900_4199/issue4127_procsub_coproc_env_case.rs"]
 mod issue4127_procsub_coproc_env_case;
 #[path = "issues_3900_4199/issue4128_comsub_quoted_heredoc_glue_regressions.rs"]
