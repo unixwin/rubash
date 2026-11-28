@@ -1,4 +1,4 @@
-use super::glob::{pathname_expand_word, PathnameExpansion};
+use super::glob::{pathname_expand_word, source_literal_glob_pattern, PathnameExpansion};
 use super::*;
 use crate::executor::command_substitution_values::{
     decode_protected_ifs_chars, protect_ifs_field_chars,
@@ -2045,6 +2045,7 @@ impl Executor {
                 // — no later word of the command is expanded, so a second
                 // bad substitution can never raise its diagnostic
                 // (`${(aO)foo} ${(s/x/)foo}` reports only the first).
+                let source_glob_pattern = raw.and_then(source_literal_glob_pattern);
                 if self.shell_state.parameter_bad_substitution.get()
                     || self.no_closing_brace_failure.get()
                 {
@@ -2059,7 +2060,7 @@ impl Executor {
                     } else {
                         word
                     };
-                    (word, suppress_glob)
+                    (word, suppress_glob, source_glob_pattern.clone())
                 })
             })
             .collect::<Vec<_>>();
@@ -2095,14 +2096,14 @@ impl Executor {
         if is_conditional_cmd {
             variable_expanded.words = expanded_words
                 .iter()
-                .map(|(word, _)| materialize_expanded_command_word(word))
+                .map(|(word, _, _)| materialize_expanded_command_word(word))
                 .collect();
         }
         variable_expanded.word_kinds = Vec::new();
 
         if !is_conditional_cmd {
             let mut words = Vec::new();
-            for (word, suppress_glob) in expanded_words {
+            for (word, suppress_glob, source_glob_pattern) in expanded_words {
                 // W_ARRAYREF rides as an in-band prefix through expansion;
                 // strip it for pathname matching and re-attach to each
                 // result the way GNU copies word->flags to every output
@@ -2133,8 +2134,9 @@ impl Executor {
                         .replace(crate::executor::markers::DATA_SQUOTE, "'");
                     words.push(remark(materialized));
                 } else {
+                    let glob_pattern = source_glob_pattern.as_deref().unwrap_or(word_text);
                     match pathname_expand_word(
-                        word_text,
+                        glob_pattern,
                         &self.shell_state.env_vars,
                         &self.shell_state.cwd,
                     ) {

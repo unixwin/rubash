@@ -81,6 +81,51 @@ pub(crate) fn compound_element_glob_pattern(token: &str) -> String {
     // backslash itself stays as data.
     while let Some(ch) = chars.next() {
         match ch {
+            '$' if chars.peek() == Some(&'\'') => {
+                chars.next();
+                let mut body = String::new();
+                let mut escaped = false;
+                for c in chars.by_ref() {
+                    if escaped {
+                        body.push('\\');
+                        body.push(c);
+                        escaped = false;
+                        continue;
+                    }
+                    if c == '\\' {
+                        escaped = true;
+                        continue;
+                    }
+                    if c == '\'' {
+                        break;
+                    }
+                    body.push(c);
+                }
+                if escaped {
+                    body.push('\\');
+                }
+                // `$'...'` bytes are quoted source data too (parse.y:5560-
+                // 5575): decode through the lexer owner's ANSI-C table,
+                // then CTLESC-protect every decoded character exactly like
+                // quote_string (subst.c:4773). Raw-byte and literal-char
+                // marker pairs stay paired; they are transport spellings,
+                // not two independent pattern characters.
+                let decoded = crate::lexer::ansi::decode_ansi_c_quoted(&body);
+                let mut decoded_chars = decoded.chars().peekable();
+                while let Some(decoded_ch) = decoded_chars.next() {
+                    if decoded_ch as u32 == crate::executor::markers::RAW_BYTE_MARKER_ESCAPE
+                        || decoded_ch == crate::executor::markers::LITERAL_CHAR_ESCAPE
+                    {
+                        out.push(decoded_ch);
+                        if let Some(payload) = decoded_chars.next() {
+                            out.push(payload);
+                        }
+                        continue;
+                    }
+                    out.push(crate::executor::markers::CTLESC);
+                    out.push(decoded_ch);
+                }
+            }
             '\'' => {
                 for quoted in chars.by_ref() {
                     if quoted == '\'' {
@@ -123,6 +168,92 @@ pub(crate) fn compound_element_glob_pattern(token: &str) -> String {
         }
     }
     out
+}
+
+/// Re-encode a source word as the glob engine's protected pattern when the
+/// word is provably literal-only. This is a whitelist (rubash#117): `$` /
+/// backtick expansion, brace expansion, tilde expansion, and process
+/// substitution all fall back to the expanded word unchanged. For the
+/// admitted literal-only shape the raw word is the quoting oracle: quote
+/// characters never enter `token.value`, but GNU still CTLESC-protects the
+/// characters they covered before pathname expansion (subst.c:4773
+/// quote_string; pathexp.c:212 quote_string_for_globbing). Building that
+/// pattern here keeps the protection at the glob-entry boundary instead of
+/// widening general lexer token values (rubash#4126).
+pub(crate) fn source_literal_glob_pattern(raw: &str) -> Option<String> {
+    // Fast reject on the same byte class pathname_expand_word uses before
+    // its option lookups: without one of these bytes the word is provably
+    // not a glob pattern, so the quoting oracle cannot change the result.
+    // Non-ASCII UTF-8 bytes never collide with this ASCII set.
+    if !raw
+        .bytes()
+        .any(|byte| matches!(byte, b'*' | b'?' | b'[' | b']' | b'(' | b'+' | b'@' | b'!'))
+    {
+        return None;
+    }
+    let chars: Vec<char> = raw.chars().collect();
+    let mut index = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    while index < chars.len() {
+        let ch = chars[index];
+        if in_single {
+            if ch == '\'' {
+                in_single = false;
+            }
+            index += 1;
+            continue;
+        }
+        if ch == '\\' {
+            index += 2;
+            continue;
+        }
+        if in_double {
+            match ch {
+                '"' => in_double = false,
+                '$' | '`' => return None,
+                _ => {}
+            }
+            index += 1;
+            continue;
+        }
+        match ch {
+            '\'' => in_single = true,
+            '"' => in_double = true,
+            '`' | '{' | '}' | '~' => return None,
+            '$' => {
+                if chars.get(index + 1) != Some(&'\'') {
+                    return None;
+                }
+                index += 2;
+                let mut escaped = false;
+                let mut closed = false;
+                while index < chars.len() {
+                    let c = chars[index];
+                    index += 1;
+                    if escaped {
+                        escaped = false;
+                    } else if c == '\\' {
+                        escaped = true;
+                    } else if c == '\'' {
+                        closed = true;
+                        break;
+                    }
+                }
+                if !closed {
+                    return None;
+                }
+                continue;
+            }
+            '<' | '>' if chars.get(index + 1) == Some(&'(') => return None,
+            _ => {}
+        }
+        index += 1;
+    }
+    if in_single || in_double {
+        return None;
+    }
+    Some(compound_element_glob_pattern(raw))
 }
 
 /// Check if a shopt option is enabled.
@@ -2579,6 +2710,28 @@ mod tests {
         // An unquoted backslash keeps both characters for the engine's own
         // escape handling.
         assert_eq!(compound_element_glob_pattern("dir/\\*.txt"), "dir/\\*.txt");
+        // ANSI-C decoded bytes are quoted span data too: a decoded `]` is
+        // protected as a bracket member rather than closing the expression.
+        assert_eq!(
+            compound_element_glob_pattern(r#"[a$'\x5d'b]"#),
+            format!("[a{c}]b]")
+        );
+    }
+
+    #[test]
+    fn source_literal_glob_pattern_whitelists_literal_words() {
+        let c = crate::executor::markers::CTLESC;
+        assert_eq!(
+            source_literal_glob_pattern(r#"[a']'b]"#),
+            Some(format!("[a{c}]b]"))
+        );
+        assert_eq!(
+            source_literal_glob_pattern(r#"@(a"("b)"#),
+            Some(format!("@(a{c}(b)"))
+        );
+        assert!(source_literal_glob_pattern(r#"[a]$x"#).is_none());
+        assert!(source_literal_glob_pattern(r#"[a]{x,y}"#).is_none());
+        assert!(source_literal_glob_pattern(r#"~[a]"#).is_none());
     }
 
     #[cfg(windows)]

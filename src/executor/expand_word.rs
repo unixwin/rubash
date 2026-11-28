@@ -905,8 +905,10 @@ impl Executor {
             self.note_redirect_target_transport(redirect, &literal, &expanded);
             return (literal, false, field_verdict);
         }
+        let glob_pattern =
+            glob::source_literal_glob_pattern(raw).unwrap_or_else(|| expanded.clone());
         match glob::pathname_expand_word(
-            &expanded,
+            &glob_pattern,
             &self.shell_state.env_vars,
             &self.shell_state.cwd,
         ) {

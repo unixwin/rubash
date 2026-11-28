@@ -3048,7 +3048,26 @@ fn append_literal_glob_text(output: &mut String, text: &str) {
         // `-` between two members became a range. The shared bracket
         // parser's escape arm reads `\]` / `\-` as literal members,
         // so escaping them here is the same spelling as the rest.
-        if matches!(ch, '*' | '?' | '[' | '\\' | '(' | ')' | '|' | ']' | '-') {
+        if matches!(
+            ch,
+            '*' | '?'
+                | '['
+                | '\\'
+                | '('
+                | ')'
+                | '|'
+                | ']'
+                | '-'
+                | '!'
+                | '^'
+                | '+'
+                | '@'
+                | '.'
+                | ':'
+                | '='
+                | '#'
+                | '%'
+        ) {
             output.push('\\');
         }
         output.push(ch);
