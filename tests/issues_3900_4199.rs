@@ -158,6 +158,8 @@ mod issue4158_eval_input_redirects;
 mod issue4159_redirect_discard_next_command;
 #[path = "issues_3900_4199/issue4161_this_command_name_lifecycle.rs"]
 mod issue4161_this_command_name_lifecycle;
+#[path = "issues_3900_4199/issue4166_heredoc_eof_warning_comsub_piped.rs"]
+mod issue4166_heredoc_eof_warning_comsub_piped;
 #[path = "issues_3900_4199/issue4169_two_heredoc_comsubs_one_unit_regressions.rs"]
 mod issue4169_two_heredoc_comsubs_one_unit_regressions;
 #[path = "issues_3900_4199/issue4170_coproc_declined_launch.rs"]

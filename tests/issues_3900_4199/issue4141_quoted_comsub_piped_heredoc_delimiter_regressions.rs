@@ -28,10 +28,8 @@
 //! for every shape asserted with stderr below: one delimited-by-end-of
 //! -file warning per `E)` shape, emitted by the plan's closed-by-paren
 //! arm during admission (which runs before the produce decline). The
-//! three-stage shape is asserted on stdout only: its missing warning
-//! (the plan declines it before the warning arm) is a pre-existing
-//! warning-side gap of the same family as the unquoted form's, not
-//! this issue.
+//! three-stage shape now asserts the same warning: rubash#4166 moved that
+//! diagnostic to parse-time ownership before the plan's admission decline.
 //!
 //! Every expectation below is byte-verified against the GNU Bash
 //! 5.3.20 oracle (script-file batteries; the C.UTF-8 and C locales
@@ -122,13 +120,18 @@ fn quoted_comsub_piped_heredoc_battery_c_locale() {
 }
 
 /// A third pipeline stage also declines the plan (it models at most
-/// two) and leaks the same way through the real route. Stdout only —
-/// see the header note on this shape's pre-existing warning gap.
+/// two) and leaks the same way through the real route. rubash#4166 pins
+/// the parse-time warning this decline must not suppress.
 #[test]
 fn three_stage_pipeline_delimiter_does_not_leak() {
     let script = "echo \"$(cat <<E | sort | tr a-z A-Z\nbody\nE)\"\n";
-    let (stdout, _stderr, code) = rubash_file(script, "C.UTF-8");
+    let (stdout, stderr, code) = rubash_file(script, "C.UTF-8");
     assert_eq!(stdout, "BODY\n", "stdout mismatch");
+    assert_eq!(
+        stderr,
+        "case.sh: line 3: warning: here-document at line 1 delimited by end-of-file (wanted `E')\n",
+        "stderr mismatch"
+    );
     assert_eq!(code, Some(0), "exit code mismatch");
 }
 
@@ -149,9 +152,8 @@ fn delimiter_plus_words_line_stays_body() {
 
 /// Adjacent routes that were already correct must stay correct: the
 /// plan-produced `[sort, -u]` arm, the non-piped quoted form, the
-/// assignment form, and the unquoted form (stdout only — the unquoted
-/// form's missing end-of-file warning is a separate pre-existing face,
-/// not this issue).
+/// assignment form, and the unquoted form — including the parse-time
+/// warning rubash#4166 owns independent of the execution route.
 #[test]
 fn adjacent_routes_unchanged() {
     let script = r#"echo "$(cat <<E | sort -u
@@ -178,7 +180,12 @@ case.sh: line 10: warning: here-document at line 8 delimited by end-of-file (wan
     );
     assert_eq!(code, Some(0), "exit code mismatch");
 
-    let (stdout, _stderr, code) = rubash_file("echo $(cat <<E | sort\nbody\nE)\n", "C.UTF-8");
+    let (stdout, stderr, code) = rubash_file("echo $(cat <<E | sort\nbody\nE)\n", "C.UTF-8");
     assert_eq!(stdout, "body\n", "unquoted stdout mismatch");
+    assert_eq!(
+        stderr,
+        "case.sh: line 3: warning: here-document at line 1 delimited by end-of-file (wanted `E')\n",
+        "unquoted stderr mismatch"
+    );
     assert_eq!(code, Some(0), "unquoted exit code mismatch");
 }
