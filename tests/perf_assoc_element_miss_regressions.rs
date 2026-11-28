@@ -20,18 +20,25 @@
 use std::process::{Command, Stdio};
 
 fn run_script(script: &str) -> (Option<i32>, String, String) {
+    run_script_with_locale(script, None)
+}
+
+fn run_script_with_locale(script: &str, locale: Option<&str>) -> (Option<i32>, String, String) {
     let dir = std::env::temp_dir().join(format!("rubash-perf-assoc-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create perf-assoc scratch dir");
     let script_path = dir.join("probe.sh");
     std::fs::write(&script_path, script).expect("write probe script");
-    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rubash"));
+    command
         .arg(&script_path)
         .stdin(Stdio::null())
         .env_remove("BASH_ENV")
-        .env_remove("WINUXSH_ROOT")
-        .output()
-        .expect("run rubash script");
+        .env_remove("WINUXSH_ROOT");
+    if let Some(locale) = locale {
+        command.env("LC_ALL", locale);
+    }
+    let output = command.output().expect("run rubash script");
     let _ = std::fs::remove_dir_all(&dir);
     (
         output.status.code(),
@@ -138,19 +145,25 @@ fn assoc_length_subscript_evaluated_once_hit_and_miss() {
 
 /// rubash#2004: the nameref-cell length leg (`declare -n ref=m`;
 /// `${#ref[key]}`) takes the same settled lookup, and a value with
-/// multibyte text measures like GNU's `${#}`.
+/// multibyte text measures like GNU's `${#}`: characters in a UTF-8
+/// locale, bytes in the C locale.
 #[test]
 fn assoc_length_through_nameref_and_multibyte_value() {
-    let (code, stdout, stderr) = run_script(
-        "declare -A m=()\n\
+    let script = "declare -A m=()\n\
          for ((j=0; j<50; j++)); do m[key$j]=val$j; done\n\
          m[uni]=héllo\n\
          declare -n ref=m\n\
-         echo \"ref-hit=[${#ref[key7]}] ref-miss=[${#ref[zz]}] uni=[${#m[uni]}]\"\n",
-    );
-    assert_eq!(code, Some(0));
-    assert_eq!(stdout, "ref-hit=[4] ref-miss=[0] uni=[6]\n");
-    assert_eq!(stderr, "");
+         echo \"ref-hit=[${#ref[key7]}] ref-miss=[${#ref[zz]}] uni=[${#m[uni]}]\"\n";
+    for (locale, uni_len) in [("C.UTF-8", 5), ("C", 6)] {
+        let (code, stdout, stderr) = run_script_with_locale(script, Some(locale));
+        assert_eq!(code, Some(0), "locale {locale}");
+        assert_eq!(
+            stdout,
+            format!("ref-hit=[4] ref-miss=[0] uni=[{uni_len}]\n"),
+            "locale {locale}"
+        );
+        assert_eq!(stderr, "", "locale {locale}");
+    }
 }
 
 /// rubash#2004: the empty-key `bad array subscript` error

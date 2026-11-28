@@ -351,10 +351,13 @@ fn fixture_text_tree_matches_normalized_output() {
     let _ = run_rubash(&argv, &temp.dir);
     let report = fs::read_to_string(&text_path).unwrap();
     // Column padding depends on the time magnitude (`7.39ms` vs
-    // `126.23ms`), so compare whitespace-collapsed on both sides.
+    // `126.23ms`), so whitespace is collapsed inside normalize_text before
+    // the deterministic line-set sort. Applying the same normalization to
+    // the fixture keeps frame names and call counts strict without letting
+    // column-width timing jitter reorder otherwise identical lines.
     assert_eq!(
-        collapse_ws(&normalize_text(&report)),
-        collapse_ws(include_str!("fixtures/profiler/demo.txt.masked")),
+        normalize_text(&report),
+        normalize_text(include_str!("fixtures/profiler/demo.txt.masked")),
         "normalized text tree diverged from the committed fixture"
     );
 }
@@ -366,9 +369,14 @@ fn collapse_ws(s: &str) -> String {
 /// Masks the time/percentage fields of the text report (wall durations and
 /// self% vary run to run); call counts and tree shape stay exact.
 fn normalize_text(report: &str) -> String {
+    // Collapse each line before sorting: column alignment depends on the
+    // unmasked timing width, while the line set itself is deterministic.
     // Sorted so sibling rows whose SELF order is timing-dependent (close
     // durations reorder across runs) compare as the same line set.
-    let mut lines: Vec<String> = report.lines().map(regex_mask_times).collect();
+    let mut lines: Vec<String> = report
+        .lines()
+        .map(|line| collapse_ws(&regex_mask_times(line)))
+        .collect();
     lines.sort();
     lines.join("\n")
 }

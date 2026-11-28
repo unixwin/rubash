@@ -20,6 +20,13 @@ fn rubash_c(script: &str) -> (String, String, Option<i32>) {
     )
 }
 
+/// The invocation path in the same display form main.rs binds to `$0`:
+/// Windows drive spellings render POSIX-style (`D:/...` -> `/d/...`),
+/// while Unix paths pass through unchanged.
+fn invocation_display_name() -> String {
+    rubash::executor::shell_pwd_display_path(&env!("CARGO_BIN_EXE_rubash").replace('\\', "/"))
+}
+
 fn rubash_file(script: &str) -> (String, String, Option<i32>) {
     let dir = std::env::temp_dir().join(format!("b6-diag-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("create temp dir");
@@ -97,16 +104,17 @@ fn b6_f1_dangling_and_or_multi_command_list_rejected() {
 }
 
 /// B6-F2: `times` diagnostics carry the shell diagnostic prefix
-/// (builtins/common.c builtin_error), not a hardcoded program name.
+/// (error.c:90-118 get_name_for_error, builtins/common.c builtin_error),
+/// not a hardcoded program name.
 #[test]
 fn b6_f2_times_diagnostic_prefix() {
     let (_out, err, code) = rubash_c("times -z; echo rc=$?");
     assert_eq!(code, Some(0));
-    assert!(
-        err.contains("bash: line 1: times: -z: invalid option\ntimes: usage: times"),
-        "stderr was: {err}"
+    let expected = format!(
+        "{}: line 1: times: -z: invalid option\ntimes: usage: times",
+        invocation_display_name()
     );
-    assert!(!err.contains("rubash:"), "stderr was: {err}");
+    assert!(err.contains(&expected), "stderr was: {err}");
 }
 
 /// B6-F3: at the top level of a -c string, `caller` argument validation

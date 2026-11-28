@@ -37,6 +37,9 @@ fn run(script: &str) -> (i32, String, String) {
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("-c")
         .arg(script)
+        // The recorded GNU baseline was measured with `bash -c`, where
+        // the word after the command string binds $0 to "bash".
+        .arg("bash")
         .current_dir(&dir)
         .env_remove("BASH_ENV")
         .env_remove("ENV")

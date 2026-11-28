@@ -10,7 +10,8 @@
 //! both sides and compares (dev, ino); either stat failing trips it.
 //!
 //! Expectations measured against GNU bash 5.2.21 (script files,
-//! 2026-11-16), stdout and stderr separately. Unix-only.
+//! 2026-11-16), stdout and stderr separately; the cd-out diagnostic
+//! pin is rechecked against GNU bash 5.3.20. Unix-only.
 
 #![cfg(unix)]
 
@@ -71,8 +72,8 @@ fn run_script_in_with_env(
     )
 }
 
-const GETCWD_DIAGNOSTIC: &str =
-    "pwd: error retrieving current directory: getcwd: cannot access parent directories: No such file or directory\n";
+const GETCWD_DIAGNOSTIC: &str = "pwd: error retrieving current directory: getcwd: cannot access parent directories: No such file or directory\n";
+const CHDIR_GETCWD_DIAGNOSTIC: &str = "chdir: error retrieving current directory: getcwd: cannot access parent directories: No such file or directory\n";
 
 #[test]
 fn issue3575_posix_pwd_l_in_deleted_cwd_fails() {
@@ -167,14 +168,12 @@ fn issue3575_posix_poison_survives_set_plus_o_posix() {
 #[test]
 fn issue3575_posix_cd_out_after_failure_restores_pwd() {
     // The poison is not permanent: a successful cd re-establishes
-    // the_current_working_directory, so pwd works again.
-    // GNU's stderr here carries one more line than rubash's: the cd
-    // entry re-derivation (cd.def:529-534 get_working_directory
-    // ("chdir")) prints `chdir: error retrieving current directory:
-    // getcwd: ...` before the move stands. That is cd's face of the
-    // poisoned state, not pwd's, and is owed separately (#3375 owed
-    // item 1, recorded in #3349 cell5) — this cell pins only the pwd
-    // faces (one pwd diagnostic) plus the restore.
+    // the_current_working_directory, so pwd works again. Before the
+    // move stands, cd's entry re-derivation (cd.def:529-534
+    // get_working_directory("chdir")) reports the still-poisoned cwd
+    // with the `chdir:` diagnostic. GNU bash 5.3.20 therefore emits
+    // both lines: first pwd's failed re-derivation, then cd's entry
+    // diagnostic.
     let tree = make_tree("cell4");
     let script = format!(
         "set -o posix; cd \"{r}/d\"; rmdir ../d; pwd -L; echo \"rc=$?\"; cd \"{r}\"; pwd; echo \"rc=$?\"\n",
@@ -183,7 +182,10 @@ fn issue3575_posix_cd_out_after_failure_restores_pwd() {
     let (stdout, stderr, code) = run_script_in(&tree.base, &script);
     assert_eq!(code, Some(0));
     assert_eq!(stdout, format!("rc=1\n{r}\nrc=0\n", r = tree.real));
-    assert_eq!(stderr, GETCWD_DIAGNOSTIC);
+    assert_eq!(
+        stderr,
+        format!("{GETCWD_DIAGNOSTIC}{CHDIR_GETCWD_DIAGNOSTIC}")
+    );
 }
 
 #[test]
