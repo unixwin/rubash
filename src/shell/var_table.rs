@@ -295,6 +295,7 @@ impl VarTable {
     /// Register a live typed cell for `name`. Starts fresh at the current
     /// mirror epoch (a just-created cell agrees with the mirror by
     /// construction; the writer synced it).
+    #[cfg(any(debug_assertions, test))]
     pub(crate) fn track_cell(&mut self, name: &str) {
         self.tracked.insert(name.to_string());
         self.stale.remove(name);
@@ -338,6 +339,7 @@ impl VarTable {
     /// The tracked names a choked mirror write has marked since their
     /// last proof — one half of the boundary verifier's candidate set
     /// (rubash#1956; the other half is the store's cell registry).
+    #[cfg(debug_assertions)]
     pub(crate) fn stale_names(&self) -> &HashSet<String> {
         &self.stale
     }
