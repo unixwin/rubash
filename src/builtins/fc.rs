@@ -33,7 +33,10 @@ pub enum FcResult {
 
 enum SpecErr {
     NotFound,
-    Erange,
+    /// HIST_INVALID (fc.def:91). HIST_ERANGE is never produced by
+    /// fc_gethnum; fc_builtin renders both sentinels with the same
+    /// "history specification out of range" diagnostic (fc.def:379-388).
+    Invalid,
 }
 
 /// GNU `strsub` (bash stringlib.c:136-173) with global=1, as called by
@@ -90,6 +93,12 @@ fn is_number_arg(arg: &str) -> bool {
 /// history specification to a 0-based index. Positive numbers are absolute
 /// history numbers (offsets from history_base); negative numbers are offsets
 /// from the most recent entry; strings are most-recent prefix matches.
+///
+/// The return is signed because fc.def:599-600 returns the ordinary integer
+/// -1 — not HIST_INVALID — when last_hist is negative. That distinction is
+/// the sole-current-entry case: fc_builtin clamps negative resolved indices
+/// to zero for the list/edit form (fc.def:395-399), while fc_gethist accepts
+/// only non-negative indices for `fc -s` (fc.def:679-684).
 fn fc_gethnum(
     spec: &str,
     entries: &[String],
@@ -98,11 +107,9 @@ fn fc_gethnum(
     real_last: usize,
     listing: bool,
     hn_first: bool,
-) -> Result<usize, SpecErr> {
-    // GNU builtins/fc.def:599-600: when last_hist < 0 (only the current fc
-    // invocation is on the history list), every specification is out of range.
+) -> Result<i64, SpecErr> {
     if last_hist < 0 {
-        return Err(SpecErr::Erange);
+        return Ok(-1);
     }
     let mut s = spec;
     let mut sign: i128 = 1;
@@ -117,32 +124,32 @@ fn fc_gethnum(
             // fc.def: "If the value is negative or zero, then it is an
             // offset from the current history item."
             let shifted = n + i128::from(last_hist) + 1;
-            return Ok(if shifted < 0 { 0 } else { shifted as usize });
+            return Ok(if shifted < 0 { 0 } else { shifted as i64 });
         } else if n == 0 {
             return if sign == -1 {
                 if listing {
-                    Ok(real_last)
+                    Ok(real_last as i64)
                 } else {
-                    Err(SpecErr::Erange)
+                    Err(SpecErr::Invalid)
                 }
             } else {
-                Ok(last_hist as usize)
+                Ok(last_hist)
             };
         }
         let rel = n - history_base as i128;
         if rel < 0 {
-            return Ok(if hn_first { 0 } else { last_hist as usize });
+            return Ok(if hn_first { 0 } else { last_hist });
         }
         if rel >= i128::from(last_hist) {
-            return Ok(if hn_first { 0 } else { last_hist as usize });
+            return Ok(if hn_first { 0 } else { last_hist });
         }
-        return Ok(rel as usize);
+        return Ok(rel as i64);
     }
     // String prefix search, most recent match first (fc.def STREQN loop).
     let mut j: i64 = last_hist;
     while j >= 0 {
         if entries[j as usize].starts_with(spec) {
-            return Ok(j as usize);
+            return Ok(j);
         }
         j -= 1;
     }
@@ -284,15 +291,19 @@ where
         return Ok(FcResult::Status(EXECUTION_SUCCESS));
     }
 
-    // fc.def:334-348 (fc_builtin) / fc_gethist: last_hist = i - rh -
-    // hist_last_line_added, where rh is remember_on_history (set -o
-    // history / interactive). With rh == 0 and the current line not
-    // added, last_hist lands one past the end and backs up over the
-    // empty tail slot to the last real entry (#1117).
-    let mut last_hist: i64 = count as i64 - remember_on_history as i64 - last_line_added as i64;
-    if last_hist >= count as i64 {
-        last_hist = count as i64 - 1;
+    // fc.def:334-348 (fc_builtin) and fc.def:593-600 (fc_gethnum):
+    // last_hist = i - rh - hist_last_line_added, where rh is
+    // remember_on_history (set -o history / interactive). With rh == 0
+    // and the current line not added, last_hist lands one past the end
+    // and backs up over the empty tail slot to the last real entry
+    // (#1117). fc_gethnum uses the raw value and returns plain -1 when
+    // it is negative; fc_builtin separately clamps its own copy to zero
+    // "per POSIX" (fc.def:349-350).
+    let mut raw_last_hist: i64 = count as i64 - remember_on_history as i64 - last_line_added as i64;
+    if raw_last_hist >= count as i64 {
+        raw_last_hist = count as i64 - 1;
     }
+    let last_hist: i64 = raw_last_hist.max(0);
     let real_last: usize = count.saturating_sub(1);
 
     let pos: Vec<&String> = args[index..].iter().collect();
@@ -326,23 +337,28 @@ where
             return Ok(FcResult::Status(EXECUTION_FAILURE));
         }
         let resolved = match spec {
-            None => Ok(last_hist.max(0) as usize),
+            // fc.def:605-607: no specification defaults to the most recent
+            // command, but only after the fc.def:596-600 negative-last_hist
+            // early return. In the sole-current-entry shape that value is
+            // plain -1, which fc_gethist rejects (fc.def:679-684).
+            None => Ok(raw_last_hist),
             Some(s) => fc_gethnum(
                 s,
                 &entries,
                 history_base,
-                last_hist,
+                raw_last_hist,
                 real_last,
                 false,
                 false,
             ),
         };
         let idx = match resolved {
-            Ok(i) => i,
-            // fc_gethist returns NULL for every negative sentinel
-            // (HIST_INVALID / HIST_ERANGE / HIST_NOTFOUND), so fc -s
-            // reports "no command found" for ALL resolution failures.
-            Err(SpecErr::NotFound) | Err(SpecErr::Erange) => {
+            Ok(i) if i >= 0 => i as usize,
+            // fc_gethist returns NULL for every negative resolution: the
+            // ordinary -1 of the sole-current-entry shape and the negative
+            // HIST_INVALID / HIST_NOTFOUND sentinels alike (fc.def:679-684),
+            // so fc -s reports "no command found" for all of them.
+            Ok(_) | Err(SpecErr::NotFound) | Err(SpecErr::Invalid) => {
                 writeln!(stderr, "{diagnostic_prefix}fc: no command found")?;
                 return Ok(FcResult::Status(EXECUTION_FAILURE));
             }
@@ -358,12 +374,14 @@ where
     }
 
     // fc.def:345-360: resolve histbeg/histend from one or two arguments.
-    let resolved: Result<(usize, usize), SpecErr> = match (pos.first(), pos.get(1)) {
+    // fc_gethnum receives the raw last_hist: its negative value produces
+    // the ordinary -1 resolution that fc_builtin clamps below.
+    let resolved: Result<(i64, i64), SpecErr> = match (pos.first(), pos.get(1)) {
         (Some(f), Some(l)) => fc_gethnum(
             f,
             &entries,
             history_base,
-            last_hist,
+            raw_last_hist,
             real_last,
             listing,
             true,
@@ -373,7 +391,7 @@ where
                 l,
                 &entries,
                 history_base,
-                last_hist,
+                raw_last_hist,
                 real_last,
                 listing,
                 false,
@@ -384,20 +402,20 @@ where
             f,
             &entries,
             history_base,
-            last_hist,
+            raw_last_hist,
             real_last,
             listing,
             true,
         )
         .map(|b| {
-            let e = if b == real_last {
+            let e = if b == real_last as i64 {
                 if listing {
-                    real_last
+                    real_last as i64
                 } else {
                     b
                 }
             } else if listing {
-                last_hist.max(0) as usize
+                last_hist
             } else {
                 b
             };
@@ -406,12 +424,12 @@ where
         (None, _) => {
             if listing {
                 // fc.def: "The default for listing is the last 16 history items."
-                let e = last_hist.max(0) as usize;
-                let b = (e as i64 - 16 + 1).max(0) as usize;
+                let e = last_hist;
+                let b = (e - 16 + 1).max(0);
                 Ok((b, e))
             } else {
                 // For editing it is the last history command.
-                let e = last_hist.max(0) as usize;
+                let e = last_hist;
                 Ok((e, e))
             }
         }
@@ -422,7 +440,7 @@ where
             writeln!(stderr, "{diagnostic_prefix}fc: no command found")?;
             return Ok(FcResult::Status(EXECUTION_FAILURE));
         }
-        Err(SpecErr::Erange) => {
+        Err(SpecErr::Invalid) => {
             writeln!(
                 stderr,
                 "{diagnostic_prefix}fc: history specification out of range"
@@ -430,6 +448,18 @@ where
             return Ok(FcResult::Status(EXECUTION_FAILURE));
         }
     };
+
+    // fc.def:395-399: "We don't throw an error for line specifications
+    // out of range, per POSIX" — the plain -1 returned by fc_gethnum in
+    // the sole-current-entry shape becomes index zero here, after the
+    // sentinel checks above.
+    if histbeg < 0 {
+        histbeg = 0;
+    }
+    if histend < 0 {
+        histend = 0;
+    }
+    let (mut histbeg, mut histend) = (histbeg as usize, histend as usize);
 
     // fc.def:403-421: when not listing and the current line was added,
     // "the fc command that caused the editing shall not be entered into
@@ -937,29 +967,58 @@ mod tests {
     }
 
     #[test]
-    fn test_fc_negative_last_hist_on_sole_current_entry_returns_erange() {
-        for args in [&["-l", "0"][..], &["-l", "1", "2"][..], &["-l", "-1"][..]] {
-            let mut out = Vec::new();
-            let mut err = Vec::new();
-            let args_vec: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
-            let result = execute_with_history(
-                &args_vec,
-                "bash: ",
-                vec!["fc -l 0".to_string()],
-                1,
-                true,
-                true,
-                false,
-                &mut out,
-                &mut err,
-            )
-            .unwrap();
-            expect_status(&result, EXECUTION_FAILURE);
-            assert!(
-                String::from_utf8_lossy(&err).contains("history specification out of range"),
-                "unexpected stderr for {args:?}: {}",
-                String::from_utf8_lossy(&err)
-            );
+    fn test_fc_negative_last_hist_on_sole_current_entry_clamps_to_zero() {
+        // rubash#4247: with only the in-flight fc line on the history
+        // list, fc.def:593-600 makes fc_gethnum return the ordinary
+        // integer -1 BEFORE even parsing the specification. fc_builtin
+        // then clamps that negative index to zero (fc.def:395-399), so
+        // every listing specification — even a string that cannot match
+        // or a huge offset — lists the sole current entry with rc 0.
+        for args in [
+            &["-l"][..],
+            &["-l", "0"][..],
+            &["-l", "1", "2"][..],
+            &["-l", "-1"][..],
+            &["-l", "99"][..],
+            &["-l", "-99"][..],
+            &["-l", "nosuchcmd"][..],
+        ] {
+            let entry = format!("fc {}", args.join(" "));
+            let (out, err, result) = run_fc(args, &[&entry]);
+            expect_status(&result, EXECUTION_SUCCESS);
+            assert_eq!(err, "", "unexpected stderr for {args:?}");
+            assert_eq!(out, format!("1\t {entry}\n"), "args: {args:?}");
         }
+    }
+
+    #[test]
+    fn test_fc_s_negative_last_hist_on_sole_current_entry_is_not_found() {
+        // fc_gethist accepts only non-negative fc_gethnum results
+        // (fc.def:679-684), so the same plain -1 is NULL for the execute
+        // form. In particular, bare `fc -s` must not re-execute the fc
+        // line itself recursively.
+        for args in [
+            &["-s"][..],
+            &["-s", "0"][..],
+            &["-s", "1"][..],
+            &["-s", "nosuchcmd"][..],
+        ] {
+            let entry = format!("fc {}", args.join(" "));
+            let (out, err, result) = run_fc(args, &[&entry]);
+            expect_status(&result, EXECUTION_FAILURE);
+            assert_eq!(out, "", "unexpected stdout for {args:?}");
+            assert_eq!(err, "fc: no command found\n", "args: {args:?}");
+        }
+    }
+
+    #[test]
+    fn test_fc_zero_spec_with_prior_entry_still_selects_prior_entry() {
+        // Control for the clamp above: once a real prior entry exists,
+        // last_hist is non-negative and numeric zero resolves there
+        // (fc.def:641-642), not to the in-flight fc entry.
+        let (out, err, result) = run_fc(&["-l", "0"], &[":", "fc -l 0"]);
+        expect_status(&result, EXECUTION_SUCCESS);
+        assert_eq!(err, "");
+        assert_eq!(out, "1\t :\n");
     }
 }
