@@ -835,6 +835,97 @@ impl Executor {
                 quoted_site = false;
             }
             match chars.peek().copied() {
+                Some('\'') if heredoc => {
+                    chars.next();
+                    output.push('$');
+                    output.push('\'');
+                    let mut escaped = false;
+                    for quoted_ch in chars.by_ref() {
+                        if escaped {
+                            output.push('\\');
+                            output.push(quoted_ch);
+                            escaped = false;
+                            continue;
+                        }
+                        if quoted_ch == '\\' {
+                            escaped = true;
+                            continue;
+                        }
+                        if quoted_ch == '\'' {
+                            output.push('\'');
+                            break;
+                        }
+                        output.push(quoted_ch);
+                    }
+                    if escaped {
+                        output.push('\\');
+                    }
+                }
+                Some('\'') if !in_double && !double_quoted => {
+                    chars.next();
+                    let mut quoted = String::new();
+                    let mut escaped = false;
+                    let mut closed = false;
+                    for quoted_ch in chars.by_ref() {
+                        if escaped {
+                            quoted.push('\\');
+                            quoted.push(quoted_ch);
+                            escaped = false;
+                            continue;
+                        }
+                        if quoted_ch == '\\' {
+                            escaped = true;
+                            continue;
+                        }
+                        if quoted_ch == '\'' {
+                            closed = true;
+                            break;
+                        }
+                        quoted.push(quoted_ch);
+                    }
+                    if escaped {
+                        quoted.push('\\');
+                    }
+                    if closed {
+                        let decoded = crate::lexer::decode_ansi_c_quoted(&quoted);
+                        if decoded.is_empty() {
+                            output.push_str("\"\"");
+                        } else if preserve_quotes {
+                            output.push('\'');
+                            output.push_str(
+                                &crate::lexer::escape_decoded_ansi_c_quotes_unprotected(&decoded),
+                            );
+                            output.push('\'');
+                        } else {
+                            let encoded = crate::lexer::escape_decoded_ansi_c_quotes(&decoded);
+                            if protect_results || protect_data {
+                                let protected = encoded.replace(
+                                    '\\',
+                                    crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH_STR,
+                                );
+                                output.push_str(&crate::executor::markers::restore_bare_sentinels(
+                                    &protected,
+                                    &[
+                                        (
+                                            crate::lexer::ANSI_C_QUOTE_MARKER,
+                                            crate::executor::markers::ASSIGN_EXPANSION_SQUOTE_STR,
+                                        ),
+                                        (
+                                            crate::lexer::ANSI_C_DQUOTE_MARKER,
+                                            crate::executor::markers::ASSIGN_EXPANSION_DQUOTE_STR,
+                                        ),
+                                    ],
+                                ));
+                            } else {
+                                output.push_str(&encoded);
+                            }
+                        }
+                    } else {
+                        output.push('$');
+                        output.push('\'');
+                        output.push_str(&quoted);
+                    }
+                }
                 Some('?') => {
                     chars.next();
                     output.push_str(&self.dollar_question_status().to_string());
