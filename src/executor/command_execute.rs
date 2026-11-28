@@ -1,6 +1,20 @@
 use super::*;
 use crate::executor::markers::{PARSE_ERROR_FIELD_SEP, STORAGE_WORD_PREFIX};
 
+/// Clears GNU execute_cmd.c's `this_command_name` when the simple command
+/// whose expansion installed it reaches `return_result` (execute_cmd.c:4952).
+/// The guard is created only after word expansion selects a non-empty command
+/// word; compound commands therefore do not clear the caller's label.
+struct ThisCommandNameGuard {
+    slot: std::rc::Rc<std::cell::RefCell<Option<String>>>,
+}
+
+impl Drop for ThisCommandNameGuard {
+    fn drop(&mut self) {
+        *self.slot.borrow_mut() = None;
+    }
+}
+
 impl Executor {
     /// Execute an AST
     pub fn execute_command(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
@@ -193,6 +207,18 @@ impl Executor {
             return self.execute_bare_windows_drive_command(cmd, drive_root);
         }
 
+        // GNU execute_cmd.c:3231/3931 (execute_arith_command) and :4164
+        // (execute_cond_command): arithmetic and conditional commands install
+        // their operator spelling as this_command_name, and — unlike simple
+        // commands — never clear it, so the label survives into the next
+        // command's expansion window. These nodes dispatch through
+        // execute_initial_command_node below and never reach the
+        // simple-command install/clear logic.
+        if cmd.arithmetic_command.is_some() {
+            *self.shell_state.this_command_name.borrow_mut() = Some("((".to_string());
+        } else if cmd.conditional_command.is_some() {
+            *self.shell_state.this_command_name.borrow_mut() = Some("[[".to_string());
+        }
         let _t_dispatch = PhaseTimer::new(&super::exec_profile::P_DISPATCH);
         if let Some(result) = self.execute_initial_command_node(cmd) {
             // Compound commands run through execute_initial_command_node and
@@ -332,7 +358,19 @@ impl Executor {
             return self.execute_time_ast_command(time_command);
         }
 
+        // Everything past the compound/time dispatch above is a simple
+        // command. GNU execute_cmd.c:4952 clears this_command_name when ANY
+        // simple command completes (the unwind protect at :4796 is discarded,
+        // not run — there is no restore), so the guard is unconditional here
+        // and its Drop covers every exit path below.
+        let _this_command_name_guard = ThisCommandNameGuard {
+            slot: self.shell_state.this_command_name.clone(),
+        };
         if cmd.words.is_empty() {
+            // execute_cmd.c:4629-4631: expansion left no words — the label is
+            // NULLed before the null command's own assignments expand.
+            *self.shell_state.this_command_name.borrow_mut() = None;
+            *self.shell_state.expansion_command_name.borrow_mut() = None;
             let result = self.execute_empty_words_command(cmd, None);
             // GNU execute_cmd.c:4625-4640: with WORDS==0 the null command
             // path binds `$_` to the null string (4638 bind_lastarg((char
@@ -646,6 +684,20 @@ impl Executor {
             return Ok(());
         }
         let mut cmd = alias_expanded;
+        // GNU execute_simple_command expands the word list before overwriting
+        // this_command_name (execute_cmd.c:4617 vs :4800), so expansion-time
+        // declaration diagnostics still see the enclosing invocation's label
+        // (`f` for the first command of `f`). Capture that expansion-time
+        // label, then install the command word for the command's dynamic
+        // extent; the guard created above performs the unconditional
+        // return_result clear at execute_cmd.c:4952 on every exit path.
+        // Compound commands never reach this point and therefore preserve
+        // the caller's label while their first simple command is expanded.
+        *self.shell_state.expansion_command_name.borrow_mut() =
+            self.shell_state.this_command_name.borrow().clone();
+        if let Some(word) = cmd.words.first() {
+            *self.shell_state.this_command_name.borrow_mut() = Some(word.clone());
+        }
         self.abort_on_expansion_errors()?;
         // GNU redir.c do_redirections: here-document bodies and the
         // here-string word are expanded after the command words and before
