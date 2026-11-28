@@ -121,6 +121,18 @@ impl Executor {
             );
         }
 
+        // GNU execute_cmd.c:3539 (execute_select_command) clears
+        // this_command_name once after the DEBUG/xtrace head and before
+        // expanding select_command->map_list. Unlike execute_for_command's
+        // per-iteration clear at :3064, this happens only once: a sticky
+        // label installed by one body iteration (`((`/`[[`) is visible to
+        // the next iteration's first expansion. Clear the expansion-time
+        // cache with the underlying label; the next simple command
+        // re-captures it before installing its own word (execute_cmd.c:4617
+        // vs :4800).
+        *self.shell_state.this_command_name.borrow_mut() = None;
+        *self.shell_state.expansion_command_name.borrow_mut() = None;
+
         // rubash#2246: same borrow conversion as the if wrapper — the
         // cmd + select_command deep clones existed only for the
         // procsub materialization (gated on a `>(` mirror target) and

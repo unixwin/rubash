@@ -212,6 +212,16 @@ impl Executor {
                     continue;
                 }
             }
+            // GNU execute_cmd.c:3064 (execute_for_command) clears
+            // this_command_name after the per-iteration DEBUG/xtrace head
+            // and before binding the loop variable. The clear runs on every
+            // iteration, so a body command that installs a sticky label
+            // (`((`/`[[`) cannot carry it into the next iteration. Keep the
+            // expansion-time cache in the same state; the next simple
+            // command re-captures it immediately before installing its own
+            // word (execute_cmd.c:4617 vs :4800).
+            *self.shell_state.this_command_name.borrow_mut() = None;
+            *self.shell_state.expansion_command_name.borrow_mut() = None;
             ran_body = true;
             // GNU execute_cmd.c:3066-3079: the loop variable is resolved with
             // find_variable_last_nameref; when it is a nameref the iteration

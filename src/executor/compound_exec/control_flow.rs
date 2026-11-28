@@ -1045,6 +1045,13 @@ impl Executor {
         // the remainder of the script (arith-for.tests: `for ((j=;;))` with
         // `j=` empty RHS). Match the Git Bash baseline for now.
         self.shell_state.loop_depth += 1;
+        // GNU execute_cmd.c:3231 (execute_arith_for_command) installs `((`
+        // as this_command_name before the init expression. Unlike a simple
+        // command, the arithmetic-for command never reaches execute_simple_
+        // command's :4952 clear, so the label survives the loop until a
+        // later simple command completes (or a for/select head clears it).
+        *self.shell_state.this_command_name.borrow_mut() = Some("((".to_string());
+        *self.shell_state.expansion_command_name.borrow_mut() = Some("((".to_string());
         // GNU execute_arith_for_command:3236 sets line_number = arith_lineno
         // = arith_for_command->line, and eval_arith_for_expr:3187 runs the
         // DEBUG trap before each expression evaluation (init once; test and
@@ -1085,6 +1092,13 @@ impl Executor {
         } else {
             false
         };
+        if !init_skipped && arithmetic.init.trim().is_empty() {
+            // GNU eval_arith_for_expr is called for an empty init word too,
+            // so execute_cmd.c:3204 still installs the arithmetic label even
+            // though this port has no expression text to evaluate here.
+            *self.shell_state.this_command_name.borrow_mut() = Some("((".to_string());
+            *self.shell_state.expansion_command_name.borrow_mut() = Some("((".to_string());
+        }
         if !init_skipped && !arithmetic.init.trim().is_empty() && {
             // GNU execute_cmd.c:3201 (eval_arith_for_expr): if `set -x`
             // is on, print `(( expr ))` before evaluating each for-loop
@@ -1098,6 +1112,12 @@ impl Executor {
             // (rubash#275: iteration-2 `(( i++ ))` printed the body line).
             restore_for_line(self);
             self.xtrace_print_arith_cmd(&arithmetic.init_metadata.expression);
+            // GNU execute_cmd.c:3204 (eval_arith_for_expr) reinstalls `((`
+            // after the DEBUG/xtrace prologue and immediately before evalexp;
+            // the trap action may itself have run simple commands that
+            // cleared the entry label installed at :3231.
+            *self.shell_state.this_command_name.borrow_mut() = Some("((".to_string());
+            *self.shell_state.expansion_command_name.borrow_mut() = Some("((".to_string());
             self.eval_arithmetic_command_value(&arithmetic.init)
                 .is_none()
         } {
@@ -1170,6 +1190,13 @@ impl Executor {
             if test_skipped {
                 break;
             }
+            if test_empty {
+                // GNU calls eval_arith_for_expr for the empty test word too;
+                // execute_cmd.c:3204 therefore reinstalls the label even
+                // though there is no expression text for this port to eval.
+                *self.shell_state.this_command_name.borrow_mut() = Some("((".to_string());
+                *self.shell_state.expansion_command_name.borrow_mut() = Some("((".to_string());
+            }
             if !test_empty {
                 let _t = crate::executor::exec_profile::PhaseTimer::new(
                     &crate::executor::exec_profile::P_FOR_TEST,
@@ -1180,6 +1207,11 @@ impl Executor {
                 // (execute_cmd.c:3236, rubash#275).
                 restore_for_line(self);
                 self.xtrace_print_arith_cmd(&arithmetic.test_metadata.expression);
+                // GNU execute_cmd.c:3204 (eval_arith_for_expr): each test
+                // evaluation reinstalls `((` after the body may have run a
+                // simple command whose :4952 completion clear removed it.
+                *self.shell_state.this_command_name.borrow_mut() = Some("((".to_string());
+                *self.shell_state.expansion_command_name.borrow_mut() = Some("((".to_string());
                 match self.eval_arithmetic_command_value(&arithmetic.test) {
                     Some(0) => break,
                     Some(_) => {}
@@ -1303,6 +1335,13 @@ impl Executor {
             } else {
                 false
             };
+            if !update_skipped && update_empty {
+                // GNU calls eval_arith_for_expr for the empty step word too;
+                // execute_cmd.c:3204 reinstalls the label there even though
+                // there is no expression text for this port to eval.
+                *self.shell_state.this_command_name.borrow_mut() = Some("((".to_string());
+                *self.shell_state.expansion_command_name.borrow_mut() = Some("((".to_string());
+            }
             if !update_skipped && !update_empty {
                 let _t = crate::executor::exec_profile::PhaseTimer::new(
                     &crate::executor::exec_profile::P_FOR_UPDATE,
@@ -1313,6 +1352,12 @@ impl Executor {
                 // (execute_cmd.c:3236, rubash#275).
                 restore_for_line(self);
                 self.xtrace_print_arith_cmd(&arithmetic.update_metadata.expression);
+                // GNU execute_cmd.c:3204 (eval_arith_for_expr): the step
+                // evaluation reinstalls `((` too, so the next test and body
+                // expansion see the arithmetic-for label even when the body
+                // ended with a simple command.
+                *self.shell_state.this_command_name.borrow_mut() = Some("((".to_string());
+                *self.shell_state.expansion_command_name.borrow_mut() = Some("((".to_string());
                 if self
                     .eval_arithmetic_command_value(&arithmetic.update)
                     .is_none()
