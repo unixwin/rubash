@@ -491,21 +491,22 @@ impl Executor {
         // and redirect gated), and any other compound body keeps the
         // live level (optimize_subshell_command requires cm_simple,
         // execute_cmd.c:1756). The key rides the validated nonce
-        // handshake; a forged ambient value arms nothing.
-        {
-            let payload_face =
-                if Self::nofork_spawn_async_simple_shape_ok(&background_command.command) {
-                    "simple"
-                } else if background_command.command.subshell_command.is_some()
-                    || background_command.command.subshell
-                {
-                    "subshell"
-                } else {
-                    "compound"
-                };
+        // handshake; a forged ambient value arms nothing. The simple /
+        // subshell classification is fixed here; the compound arm is
+        // stamped further down, once strip_consumed_redirects has
+        // settled which of the root's own redirects replay in the
+        // child (rubash#4046).
+        if Self::nofork_spawn_async_simple_shape_ok(&background_command.command) {
             env_map.insert(
                 crate::builtins::kill::BACKGROUND_WRAPPER_PAYLOAD_FACE_KEY.to_string(),
-                payload_face.to_string(),
+                "simple".to_string(),
+            );
+        } else if background_command.command.subshell_command.is_some()
+            || background_command.command.subshell
+        {
+            env_map.insert(
+                crate::builtins::kill::BACKGROUND_WRAPPER_PAYLOAD_FACE_KEY.to_string(),
+                "subshell".to_string(),
             );
         }
         // rubash#2486: iterate the SNAPSHOT, not the live table. The
@@ -778,6 +779,30 @@ impl Executor {
         let strip_parens = background_paren_absorbable(&background_command.command, &consumed);
         let mut child_command = background_command.command.clone();
         strip_consumed_redirects(&mut child_command, &consumed);
+        // rubash#4046: the compound payload face — stamped only when the
+        // respawned child will replay at least one of the async root's
+        // OWN redirects. GNU execute_in_subshell applies that list with
+        // RX_ACTIVE (execute_cmd.c:1761-1764) in the forked child and
+        // disposes it before the body runs, so the child's replay of
+        // the root's list must read non-undoable (face 4, consumed
+        // before the body executes) while everything inside the body
+        // stays an ordinary undoable walk. Roots whose redirects were
+        // all consumed into the spawn stdio replay nothing — no walk
+        // exists for the face to govern — and roots that cannot carry
+        // redirects of their own (and-or lists, pipelines) never
+        // earned GNU's RX_ACTIVE head pass either: in both shapes the
+        // child keeps the live level (face 0), so a nested
+        // `{ true; } 8>&10-` inside `cmd && cmd2 &` or a pipe element
+        // keeps its ordinary undoable verdict exactly like GNU's
+        // forked child (execute_cmd.c:854).
+        if !env_map.contains_key(crate::builtins::kill::BACKGROUND_WRAPPER_PAYLOAD_FACE_KEY)
+            && !child_command.redirects.is_empty()
+        {
+            env_map.insert(
+                crate::builtins::kill::BACKGROUND_WRAPPER_PAYLOAD_FACE_KEY.to_string(),
+                "compound".to_string(),
+            );
+        }
         // rubash#2332: the root body's line spans ride along with the
         // source built here — collect them over exactly the nodes each
         // form renders (the absorbed inner list, or the single

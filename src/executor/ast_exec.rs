@@ -1023,8 +1023,14 @@ impl Executor {
             // reset_or_restore_signal_handlers). `compound`: a group /
             // for / if body GNU never marks (optimize_subshell_command
             // requires cm_simple, execute_cmd.c:1756) — the live level.
+            // rubash#4046: face 4 (the async compound root's one-shot
+            // RX_ACTIVE redirect verdict) must NOT qualify for the
+            // nofork arm either — exactly the face-0 live level — so
+            // the block below runs only for the genuine nofork faces
+            // 1/2/3; admitting 4 would also clobber the body-candidate
+            // stamp a nested subshell's tail just armed above.
             let payload_face = self.respawn_payload_face.get();
-            if payload_face != 0 {
+            if matches!(payload_face, 1..=3) {
                 let is_tail = index + 1 == commands.len() && subshell_state.is_none();
                 let qualifies = match payload_face {
                     // simple: the forked async child's unconditional mark
