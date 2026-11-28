@@ -1833,6 +1833,11 @@ pub fn should_run_with_shell(path: &Path) -> bool {
 /// disambiguates CAFEBABE from Java class files (major version >= 45).
 /// Truncated headers fail validation so XNU's ENOEXEC refusal is
 /// preserved (rubash#3625).
+///
+/// The sniff window is sized for the largest supported fat Mach-O
+/// header; at 520 bytes it also covers the 52/64-byte ELF headers
+/// validated below. Keep the Mach-O name for the existing internal
+/// constant rather than widening the engine's API surface.
 pub(crate) const MACHO_SNIFF_BYTES: usize = 8 + 16 * 32;
 
 pub(crate) fn read_exec_sniff_head(file: &mut std::fs::File, buf: &mut [u8]) -> usize {
@@ -1894,6 +1899,48 @@ pub(crate) fn is_macho_binary_magic(head: &[u8]) -> bool {
     }
 }
 
+/// Structural ELF validator for the pre-exec native-binary classifiers.
+///
+/// GNU shell_execve (execute_cmd.c:6126-6233) tries execve(2) first and
+/// inspects the file only after the kernel answers ENOEXEC; the first-bytes
+/// test there is check_binary_file (general.c:738-761), which treats every
+/// `\x7fELF` prefix as binary. The pre-spawn question is therefore not that
+/// four-byte post-refusal test — it is whether the local kernel would have
+/// accepted the ELF image in the first place. Linux fs/binfmt_elf.c
+/// load_elf_binary rejects truncated ELF headers, unknown EI_CLASS/EI_DATA,
+/// a non-current EI_VERSION, and non-executable e_type values such as ET_REL.
+/// Validate exactly that header structure here; e_machine is deliberately
+/// not filtered because binfmt_misc/qemu-user can execute valid foreign-arch
+/// images.
+pub(crate) fn is_elf_binary_magic(head: &[u8]) -> bool {
+    if head.len() < 18 || &head[0..4] != b"\x7fELF" {
+        return false;
+    }
+    let min_len = match head[4] {
+        1 => 52, // ELFCLASS32: sizeof(Elf32_Ehdr)
+        2 => 64, // ELFCLASS64: sizeof(Elf64_Ehdr)
+        _ => return false,
+    };
+    if head.len() < min_len {
+        return false;
+    }
+    let little_endian = match head[5] {
+        1 => true,  // ELFDATA2LSB
+        2 => false, // ELFDATA2MSB
+        _ => return false,
+    };
+    if head[6] != 1 {
+        return false; // EI_VERSION must be EV_CURRENT
+    }
+    let e_type_bytes = [head[16], head[17]];
+    let e_type = if little_endian {
+        u16::from_le_bytes(e_type_bytes)
+    } else {
+        u16::from_be_bytes(e_type_bytes)
+    };
+    matches!(e_type, 2 | 3) // ET_EXEC or ET_DYN
+}
+
 /// Whether `path` is directly exec-able by the kernel (rubash#1035): a file
 /// carrying a `#!` interpreter line, an ELF image, or — on macOS only,
 /// where the Darwin kernel execs it — a Mach-O image. GNU shell_execve
@@ -1921,7 +1968,11 @@ pub fn program_execs_directly(path: &Path) -> bool {
     let n = read_exec_sniff_head(&mut file, &mut prefix);
     let prefix = &prefix[..n];
     prefix.starts_with(b"#!")
-        || prefix.starts_with(&[0x7F, b'E', b'L', b'F'])
+        // ELF is native only where execve(2) accepts it. Darwin refuses
+        // ELF with ENOEXEC; elsewhere a truncated/invalid header must stay
+        // on the ENOEXEC classification path rather than reaching glibc's
+        // silent /bin/sh fallback (rubash#3605).
+        || (cfg!(not(target_vendor = "apple")) && is_elf_binary_magic(prefix))
         || prefix.starts_with(b"MZ")
         // Mach-O is native only where the Darwin kernel execs it; on
         // Linux the kernel refuses it with ENOEXEC, so it is not
@@ -5499,6 +5550,171 @@ mod tests {
         assert!(!is_macho_binary_magic(b"hello"));
         assert!(!is_macho_binary_magic(&[]));
         assert!(!is_macho_binary_magic(&[0xCF, 0xFA, 0xED]));
+    }
+
+    /// rubash#3605: ELF native-image validation is structural, not a
+    /// four-byte magic prefix. Linux fs/binfmt_elf.c load_elf_binary refuses
+    /// truncated headers, invalid EI_CLASS/EI_DATA/EI_VERSION, and
+    /// non-executable e_type values; valid ET_EXEC/ET_DYN headers in either
+    /// endianness remain native-image candidates.
+    #[test]
+    fn elf_binary_magic_validates_header_structure() {
+        let elf = |class: u8, data: u8, version: u8, e_type: u16, len: usize| {
+            let mut buf = vec![0u8; len];
+            if len >= 4 {
+                buf[..4].copy_from_slice(b"\x7fELF");
+            }
+            if len > 4 {
+                buf[4] = class;
+            }
+            if len > 5 {
+                buf[5] = data;
+            }
+            if len > 6 {
+                buf[6] = version;
+            }
+            if len >= 18 {
+                let bytes = if data == 1 {
+                    e_type.to_le_bytes()
+                } else {
+                    e_type.to_be_bytes()
+                };
+                buf[16..18].copy_from_slice(&bytes);
+            }
+            buf
+        };
+
+        // Minimal valid ELF64 headers: ET_EXEC and ET_DYN, little- and
+        // big-endian. e_machine is intentionally unconstrained.
+        for e_type in [2u16, 3] {
+            for data in [1u8, 2] {
+                assert!(
+                    is_elf_binary_magic(&elf(2, data, 1, e_type, 64)),
+                    "class=2 data={data} type={e_type}"
+                );
+            }
+        }
+        // Minimal valid ELF32 ET_EXEC header.
+        assert!(is_elf_binary_magic(&elf(1, 1, 1, 2, 52)));
+        assert!(is_elf_binary_magic(&elf(1, 2, 1, 2, 52)));
+
+        // The issue reproducer and a header truncated at the ELF32 size
+        // while declaring ELFCLASS64 are both invalid.
+        assert!(!is_elf_binary_magic(b"\x7fELFgarbage"));
+        assert!(!is_elf_binary_magic(&elf(2, 1, 1, 2, 52)));
+        assert!(!is_elf_binary_magic(&elf(1, 1, 1, 2, 51)));
+        assert!(!is_elf_binary_magic(&elf(2, 1, 1, 2, 17)));
+
+        // Invalid identification bytes are rejected.
+        for class in [0u8, 3, u8::MAX] {
+            assert!(!is_elf_binary_magic(&elf(class, 1, 1, 2, 64)));
+        }
+        for data in [0u8, 3, u8::MAX] {
+            assert!(!is_elf_binary_magic(&elf(2, data, 1, 2, 64)));
+        }
+        for version in [0u8, 2, u8::MAX] {
+            assert!(!is_elf_binary_magic(&elf(2, 1, version, 2, 64)));
+        }
+
+        // ET_REL (.o) and other non-executable types are kernel ENOEXEC
+        // cases, not directly executable images.
+        for e_type in [0u16, 1, 4, 0xfe00, u16::MAX] {
+            assert!(!is_elf_binary_magic(&elf(2, 1, 1, e_type, 64)));
+            assert!(!is_elf_binary_magic(&elf(2, 2, 1, e_type, 64)));
+        }
+
+        // Non-ELF input remains false, including a short buffer shorter
+        // than the fixed magic prefix.
+        assert!(!is_elf_binary_magic(b"#!/bin/sh"));
+        assert!(!is_elf_binary_magic(b"MZ\x90\x00"));
+        assert!(!is_elf_binary_magic(b"\x7fEL"));
+        assert!(!is_elf_binary_magic(&[]));
+    }
+
+    /// rubash#3605: on Linux a structurally valid ELF image bypasses the
+    /// ENOEXEC fallback, while corrupt or non-executable ELF headers stay
+    /// on the refusal path. On Apple kernels every ELF remains an ENOEXEC
+    /// candidate because Mach-O is the native format there.
+    #[cfg(unix)]
+    #[test]
+    fn native_binary_classifiers_admit_elf_images() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join("rubash-elf-classifiers");
+        std::fs::create_dir_all(&base).unwrap();
+        let write_exec = |name: &str, bytes: &[u8]| {
+            let path = base.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        let elf = |class: u8, data: u8, version: u8, e_type: u16, len: usize| {
+            let mut buf = vec![0u8; len];
+            buf[..4].copy_from_slice(b"\x7fELF");
+            buf[4] = class;
+            buf[5] = data;
+            buf[6] = version;
+            let bytes = if data == 1 {
+                e_type.to_le_bytes()
+            } else {
+                e_type.to_be_bytes()
+            };
+            buf[16..18].copy_from_slice(&bytes);
+            buf
+        };
+
+        let valid64_exec = write_exec("elf64-exec", &elf(2, 1, 1, 2, 64));
+        let valid64_dyn_be = write_exec("elf64-dyn-be", &elf(2, 2, 1, 3, 64));
+        let valid32_exec = write_exec("elf32-exec", &elf(1, 1, 1, 2, 52));
+        let truncated_magic = write_exec("elf-truncated-magic", b"\x7fELFgarbage");
+        let truncated64 = write_exec("elf64-truncated", &elf(2, 1, 1, 2, 52));
+        let invalid_class = write_exec("elf-invalid-class", &elf(3, 1, 1, 2, 64));
+        let invalid_data = write_exec("elf-invalid-data", &elf(2, 3, 1, 2, 64));
+        let invalid_version = write_exec("elf-invalid-version", &elf(2, 1, 2, 2, 64));
+        let relocatable = write_exec("elf-rel-object", &elf(2, 1, 1, 1, 64));
+
+        let elf_is_native = cfg!(not(target_vendor = "apple"));
+        for path in [&valid64_exec, &valid64_dyn_be, &valid32_exec] {
+            assert_eq!(
+                program_execs_directly(path),
+                elf_is_native,
+                "{}",
+                path.display()
+            );
+            assert_eq!(
+                crate::executor::external_inner::is_enoexec_candidate(path),
+                !elf_is_native,
+                "{}",
+                path.display()
+            );
+        }
+        for path in [
+            &truncated_magic,
+            &truncated64,
+            &invalid_class,
+            &invalid_data,
+            &invalid_version,
+            &relocatable,
+        ] {
+            assert!(!program_execs_directly(path), "{}", path.display());
+            assert!(
+                crate::executor::external_inner::is_enoexec_candidate(path),
+                "{}",
+                path.display()
+            );
+        }
+        for path in [
+            &valid64_exec,
+            &valid64_dyn_be,
+            &valid32_exec,
+            &truncated_magic,
+            &truncated64,
+            &invalid_class,
+            &invalid_data,
+            &invalid_version,
+            &relocatable,
+        ] {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     /// rubash#3510 rework + rubash#3625: the two pre-emptive native-binary
