@@ -976,6 +976,20 @@ impl Executor {
         if internal_respawn {
             RESPAWNED_CHILD.store(true, std::sync::atomic::Ordering::Relaxed);
         }
+        // trap.c:1433-1452 reset_or_restore_signal_handlers: an ignored signal
+        // survives the process-substitution fork (subst.c:6426) while
+        // caught traps reset. Install only the validated respawn's
+        // transport, as ordinary (re-trappable) empty trap entries.
+        if internal_respawn {
+            if let Some(signals) = env_vars
+                .get(super::compound_exec::FORK_IGNORED_SIGNALS_TRANSPORT)
+                .cloned()
+            {
+                for signal in signals.split(':').filter(|signal| !signal.is_empty()) {
+                    crate::builtins::trap::install_fork_inherited_ignore(&mut env_vars, signal);
+                }
+            }
+        }
         if !internal_respawn {
             env_vars.remove("__RUBASH_SCRIPT_NAME");
             // rubash#2588: the extglob enabled-line stamp is per-shell

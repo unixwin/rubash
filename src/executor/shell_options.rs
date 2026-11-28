@@ -3483,6 +3483,23 @@ impl Executor {
         false
     }
 
+    /// Whether a broken pipe met by THIS process is the respawned
+    /// fork-child's SIGPIPE death. GNU restores caught signal handlers in
+    /// the child but preserves ignored dispositions
+    /// (trap.c:1433-1452 reset_or_restore_signal_handlers; process_substitute
+    /// calls restore_original_signals at subst.c:6426): a live `trap '' PIPE`
+    /// therefore makes the write fail EPIPE instead of killing the child,
+    /// while the default disposition dies silently with status 141.
+    pub(in crate::executor) fn respawned_child_broken_pipe_dies(&self) -> bool {
+        if !crate::executor::init::RESPAWNED_CHILD.load(std::sync::atomic::Ordering::Relaxed) {
+            return false;
+        }
+        !matches!(
+            crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "SIGPIPE"),
+            Some(action) if action.is_empty()
+        )
+    }
+
     pub(in crate::executor) fn write_default_stdout(
         &mut self,
         output: &[u8],

@@ -341,9 +341,18 @@ pub(in crate::executor) const LOGICAL_CWD_TRANSPORT: &str = "__RUBASH_LOGICAL_CW
 /// consumes it under the provenance gate (init.rs) and the key is
 /// stripped unconditionally with the rest of this family.
 pub(in crate::executor) const FORK_LOGIN_SHELL_TRANSPORT: &str = "__RUBASH_FORK_LOGIN_SHELL";
+/// rubash#4255: canonical names of runtime-ignored signals whose
+/// disposition crosses the fork unchanged. GNU restore_original_signals
+/// (trap.c:1433-1452) resets caught handlers in the child but keeps
+/// SIG_IGN entries ignored; process_substitute calls it in the forked
+/// child (subst.c:6426). The respawned child's init installs these as
+/// ordinary empty trap entries — visible and re-trappable, unlike a
+/// startup hard-ignore.
+pub(in crate::executor) const FORK_IGNORED_SIGNALS_TRANSPORT: &str =
+    "__RUBASH_FORK_IGNORED_SIGNALS";
 
 /// Every FORK_* transport key, for the child's unconditional strip.
-pub(in crate::executor) const FORK_TRANSPORT_KEYS: [&str; 14] = [
+pub(in crate::executor) const FORK_TRANSPORT_KEYS: [&str; 15] = [
     FORK_FUNCNAME_TRANSPORT,
     FORK_SOURCE_TRANSPORT,
     FORK_LINENO_TRANSPORT,
@@ -357,6 +366,7 @@ pub(in crate::executor) const FORK_TRANSPORT_KEYS: [&str; 14] = [
     FORK_FN_SPANS_TRANSPORT,
     FORK_ROOT_SPANS_TRANSPORT,
     FORK_LOGIN_SHELL_TRANSPORT,
+    FORK_IGNORED_SIGNALS_TRANSPORT,
     LOGICAL_CWD_TRANSPORT,
 ];
 
@@ -438,6 +448,39 @@ impl Executor {
         }
         if self.has_script_main_frame() || inherited.is_some_and(|frames| frames.has_main_frame) {
             entries.push((FORK_MAIN_FRAME_TRANSPORT.to_string(), "1".to_string()));
+        }
+        // trap.c:1433-1452 reset_or_restore_signal_handlers: signal entries
+        // whose trap_list value is IGNORE_SIG survive the fork as
+        // SIG_IGN; caught entries reset. The reset-aware action lookup
+        // reads exactly the live table: only a live empty action is an
+        // ignored disposition (a reset entry reads absent, and a caught
+        // action is nonempty). Startup hard-ignores already ride
+        // TRAP_ORIG_IGNORES and seed_startup_traps rebuilds them before
+        // init consumes this transport, so pack only runtime ignores here.
+        if let Some(list) = self
+            .shell_state
+            .env_vars
+            .get(crate::builtins::trap::TRAP_LIST)
+        {
+            let ignored: Vec<String> = list
+                .split(':')
+                .filter(|signal| !signal.is_empty())
+                .filter(|signal| {
+                    crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, signal)
+                        .is_some_and(|action| action.is_empty())
+                        && !crate::builtins::trap::is_hard_ignored(
+                            &self.shell_state.env_vars,
+                            signal,
+                        )
+                })
+                .map(str::to_string)
+                .collect();
+            if !ignored.is_empty() {
+                entries.push((
+                    FORK_IGNORED_SIGNALS_TRANSPORT.to_string(),
+                    ignored.join(":"),
+                ));
+            }
         }
         // rubash#2202: per-function source-line spans for exactly the
         // bodies background_function_prelude re-renders into the

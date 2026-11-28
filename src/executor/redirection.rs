@@ -2930,6 +2930,14 @@ impl Executor {
                 written_fds.insert(1);
                 match state.write_to_fd(self, 1, bytes) {
                     Ok(()) => {}
+                    Err(error)
+                        if !state.foreign_drain
+                            && self.respawned_child_broken_pipe_dies()
+                            && is_broken_pipe_output_error(&error) =>
+                    {
+                        return Err(ExecuteError::BrokenPipe);
+                    }
+                    Err(error) if state.foreign_drain && is_broken_pipe_output_error(&error) => {}
                     Err(error) if is_closed_output_error(&error) => {
                         if !state.foreign_drain
                             && !builtin_output_write_is_unchecked(cmd)
@@ -3039,6 +3047,20 @@ impl Executor {
     ) -> Result<(), ExecuteError> {
         match state.write_to_fd(self, fd, output) {
             Ok(()) => Ok(()),
+            Err(error)
+                if !state.foreign_drain
+                    && self.respawned_child_broken_pipe_dies()
+                    && is_broken_pipe_output_error(&error) =>
+            {
+                Err(ExecuteError::BrokenPipe)
+            }
+            Err(error) if state.foreign_drain && is_broken_pipe_output_error(&error) => {
+                // The foreign child already wrote (or failed) inside its
+                // own process; this drain is only replaying captured bytes.
+                // Keep the pre-#4255 loss silent rather than manufacturing
+                // a write verdict in the parent.
+                Ok(())
+            }
             Err(error) if is_closed_output_error(&error) => {
                 if fd == 2 {
                     // A failed fd-2 write (closed descriptor / broken stderr
@@ -5359,11 +5381,7 @@ impl OutputFdState {
                 if let Some(pipe) = executor.coproc_write_file(fd) {
                     crate::fd::write_all(pipe.handle, output)?;
                 } else {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::BrokenPipe,
-                        "coprocess input is closed",
-                    )
-                    .into());
+                    return Err(bad_file_descriptor_io_error().into());
                 }
                 Ok(())
             }
@@ -5395,13 +5413,39 @@ impl OutputFdState {
     }
 }
 
-fn is_closed_output_error(error: &ExecuteError) -> bool {
+fn is_broken_pipe_output_error(error: &ExecuteError) -> bool {
     matches!(
         error,
         ExecuteError::IoError(error)
             if error.kind() == std::io::ErrorKind::BrokenPipe
                 || error.raw_os_error() == Some(232)
+                || error.raw_os_error() == Some(109)
     )
+}
+
+fn bad_file_descriptor_io_error() -> std::io::Error {
+    #[cfg(windows)]
+    const BAD_FD: i32 = 6; // ERROR_INVALID_HANDLE
+    #[cfg(not(windows))]
+    const BAD_FD: i32 = libc::EBADF;
+    std::io::Error::from_raw_os_error(BAD_FD)
+}
+
+/// Genuine descriptor closure/invalid-handle errors. A pipe with no readers
+/// is deliberately NOT here: on POSIX it is EPIPE/SIGPIPE, never EBADF, and
+/// Windows ERROR_NO_DATA (232) is its closest analogue.
+fn is_closed_output_error(error: &ExecuteError) -> bool {
+    let ExecuteError::IoError(error) = error else {
+        return false;
+    };
+    #[cfg(windows)]
+    {
+        error.raw_os_error() == Some(6) // ERROR_INVALID_HANDLE
+    }
+    #[cfg(unix)]
+    {
+        error.raw_os_error() == Some(libc::EBADF)
+    }
 }
 
 /// Whether fd `fd` is dup2-able in the state the scan has reached: the
