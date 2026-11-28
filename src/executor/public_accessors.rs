@@ -2365,6 +2365,7 @@ impl Executor {
     /// binary must also have opted in with
     /// `builtins::exec::enable_process_replacement` before any
     /// execve/signal-death operation may end the process.
+    #[cfg(unix)]
     pub(crate) fn owns_process_image(&self) -> bool {
         self.owns_process_image
     }
