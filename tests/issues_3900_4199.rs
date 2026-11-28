@@ -122,6 +122,8 @@ mod issue4099_redirect_word_spawn_walks;
 mod issue4102_severed_dynamic_array_faces;
 #[path = "issues_3900_4199/issue4103_procsub_mtime.rs"]
 mod issue4103_procsub_mtime;
+#[path = "issues_3900_4199/issue4114_subscript_arith_redir_order.rs"]
+mod issue4114_subscript_arith_redir_order;
 #[path = "issues_3900_4199/issue4125_rematch_carrier_bytes_regressions.rs"]
 mod issue4125_rematch_carrier_bytes_regressions;
 #[path = "issues_3900_4199/issue4127_procsub_coproc_env_case.rs"]

@@ -9389,7 +9389,11 @@ impl Executor {
         ) {
             return Ok(false);
         }
-        let target = self.expand_redirect_target(redirect);
+        let (target, deferred_subscript_error) =
+            self.expand_redirect_target_deferring_subscript_error(redirect);
+        if deferred_subscript_error {
+            return Ok(true);
+        }
         if self.shell_state.redirect_failglob_error.get() {
             return Ok(true);
         }

@@ -407,6 +407,44 @@ impl Executor {
         expanded
     }
 
+    /// Expand a redirect target during preparatory scans (before
+    /// `reject_invalid_redirects`), deferring any subscript arithmetic error
+    /// so the gate evaluates, routes, and contains it in `do_redirections`
+    /// order. Returns `(target, true)` when a subscript arithmetic error was
+    /// deferred.
+    pub(in crate::executor) fn expand_redirect_target_deferring_subscript_error(
+        &self,
+        redirect: &crate::parser::Redirect,
+    ) -> (String, bool) {
+        let saved_evalerror_pending = self.evalerror_pending.get();
+        let saved_arith_err = self.shell_state.arithmetic_expansion_error.get();
+        let saved_arith_fatal = self.shell_state.arithmetic_fatal_error.get();
+        let saved_arith_nounset = self.shell_state.arithmetic_nounset_error.get();
+        let (target, _captured) =
+            crate::executor::arithmetic::with_operand_subscript_diag_capture(|| {
+                self.expand_redirect_target(redirect)
+            });
+        if self.shell_state.arithmetic_expansion_error.get()
+            || self.shell_state.arithmetic_fatal_error.get()
+        {
+            self.evalerror_pending.set(saved_evalerror_pending);
+            self.shell_state
+                .arithmetic_expansion_error
+                .set(saved_arith_err);
+            self.shell_state
+                .arithmetic_fatal_error
+                .set(saved_arith_fatal);
+            self.shell_state
+                .arithmetic_nounset_error
+                .set(saved_arith_nounset);
+            self.redirect_target_memo
+                .borrow_mut()
+                .remove(&Self::redirect_target_memo_key(redirect));
+            return (target, true);
+        }
+        (target, false)
+    }
+
     pub(crate) fn expand_redirect_target(&self, redirect: &crate::parser::Redirect) -> String {
         let Some(frame) = self.comsub_site_frame_for_redirect(redirect) else {
             return self.expand_redirect_target_inner(redirect);

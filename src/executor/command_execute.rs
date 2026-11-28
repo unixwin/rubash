@@ -2080,7 +2080,10 @@ impl Executor {
     /// True when the command carrying a failing heredoc would dispatch to
     /// a builtin or function (main-shell redirects, execute_cmd.c:5606)
     /// rather than a forked external child (execute_cmd.c:5884+).
-    fn heredoc_error_command_runs_in_main_shell(&mut self, cmd: &CommandNode) -> bool {
+    pub(in crate::executor) fn heredoc_error_command_runs_in_main_shell(
+        &mut self,
+        cmd: &CommandNode,
+    ) -> bool {
         // rubash#3429: a compound command's redirections run in the main
         // shell (GNU execute_cmd.c:854 compound prologue,
         // RX_ACTIVE|RX_UNDOABLE — cm_arith/cm_cond/cm_case/cm_while/
