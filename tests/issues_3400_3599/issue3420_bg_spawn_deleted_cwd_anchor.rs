@@ -9,17 +9,18 @@
 //! with no chdir in the child, so a deleted directory stays the
 //! child's cwd and the job is silent with rc 0.
 //!
-//! rubash keeps the session cwd as a field and the raw-fork direct
-//! spawn (`spawn_async_direct` -> `raw_fork_async_child`,
-//! src/executor/external_inner.rs) seated the child with a path-string
-//! `libc::chdir`, which fails once the directory is unlinked: the
-//! diagnostic was printed to the shell's own stderr (before dup2, so
-//! it bypassed the job's `2>` redirect) and the job exited 1. The fix
-//! passes the cwd anchor fd (`session_cwd_anchor_fd`, the same
-//! two-state ask `stamp_spawn_cwd` makes for `Command` spawns) into
-//! the raw-fork child, which fchdirs the anchor first — the anchor
-//! wins over a ghost path recreated at the same spelling — and only
-//! falls back to the path spelling when there is no anchor.
+//! rubash keeps the session cwd as a field. The raw-fork direct spawn
+//! (`spawn_async_direct` -> `raw_fork_async_child`,
+//! src/executor/external_inner.rs) and the whitelisted wrapper respawn
+//! (`fd::spawn_whitelisted`, used by compound background jobs and by
+//! simple jobs while an fd >= 3 is open) must both seat the child with
+//! the cwd anchor fd (`session_cwd_anchor_fd`, the same two-state ask
+//! `stamp_spawn_cwd` makes for `Command` spawns): fchdir the anchor
+//! first — the anchor wins over a ghost path recreated at the same
+//! spelling — and fall back to the path spelling only when there is no
+//! anchor or the fchdir fails. Before the wrapper half of that fix,
+//! `spawn_whitelisted` consulted `cwd.is_dir()` first, so a recreated
+//! ghost made the child chdir into the NEW inode and list its marker.
 //!
 //! Expectations below are GNU 5.3.20 oracle measurements
 //! (probe-3420.sh, saved at ~/workspace/fix-3420/probe-3420.sh):
@@ -128,6 +129,39 @@ fn bg_ls_ghost_lands_in_old_inode() {
     // lands in the new inode and lists `newmarker`.
     let (stdout, stderr, code) = rubash(&format!(
         "cd '{dir}' || exit 1\nmkdir a\ncd a || exit 1\ntouch marker\n(cd ..; rm -rf a; mkdir a; touch a/newmarker) || exit 1\nls >'{dir}/out' 2>'{dir}/err' & p=$!\nwait $p; echo \"bg-rc=$?\"\necho \"out=[$(cat '{dir}/out' 2>/dev/null)]\"\necho \"err=[$(cat '{dir}/err' 2>/dev/null)]\"\n"
+    ));
+    assert_eq!(code, Some(0));
+    assert_eq!(stderr, "");
+    assert_eq!(stdout, "bg-rc=0\nout=[]\nerr=[]\n");
+}
+
+#[test]
+#[cfg(unix)]
+fn bg_compound_ls_ghost_lands_in_old_inode() {
+    let d = Scratch::new("compound-ghost");
+    let dir = d.path.to_string_lossy();
+    // Wrapper respawn shape: a brace group cannot take the direct
+    // external spawn. The respawned shell must be seated by
+    // fchdir(anchor) even though the recreated ghost path is a valid
+    // directory; GNU's forked subshell never leaves the old inode.
+    let (stdout, stderr, code) = rubash(&format!(
+        "cd '{dir}' || exit 1\nmkdir a\ncd a || exit 1\ntouch marker\n(cd ..; rm -rf a; mkdir a; touch a/newmarker) || exit 1\n{{ ls; }} >'{dir}/out' 2>'{dir}/err' & p=$!\nwait $p; echo \"bg-rc=$?\"\necho \"out=[$(cat '{dir}/out' 2>/dev/null)]\"\necho \"err=[$(cat '{dir}/err' 2>/dev/null)]\"\n"
+    ));
+    assert_eq!(code, Some(0));
+    assert_eq!(stderr, "");
+    assert_eq!(stdout, "bg-rc=0\nout=[]\nerr=[]\n");
+}
+
+#[test]
+#[cfg(unix)]
+fn bg_fd3_wrapper_ls_ghost_lands_in_old_inode() {
+    let d = Scratch::new("fd3-ghost");
+    let dir = d.path.to_string_lossy();
+    // A persistent fd >= 3 disables the direct external spawn gate, so
+    // this simple `ls &` exercises the same whitelisted respawn path
+    // even when the test harness itself has no inherited extra fd.
+    let (stdout, stderr, code) = rubash(&format!(
+        "cd '{dir}' || exit 1\nmkdir a\ncd a || exit 1\ntouch marker\nexec 3</dev/null\n(cd ..; rm -rf a; mkdir a; touch a/newmarker) || exit 1\nls >'{dir}/out' 2>'{dir}/err' & p=$!\nwait $p; echo \"bg-rc=$?\"\necho \"out=[$(cat '{dir}/out' 2>/dev/null)]\"\necho \"err=[$(cat '{dir}/err' 2>/dev/null)]\"\n"
     ));
     assert_eq!(code, Some(0));
     assert_eq!(stderr, "");

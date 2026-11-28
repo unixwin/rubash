@@ -1126,23 +1126,50 @@ pub fn spawn_whitelisted(spec: &WhitelistedSpawn) -> std::io::Result<SpawnedChil
         // deleted directory itself, its birth getcwd fails, and its
         // own birth machinery (birth anchor on "." plus the
         // transported-PWD adoption in Executor::new) reconstructs the
-        // session there. GNU's forked child never leaves the inode.
-        if cwd.is_dir() {
-            cmd.current_dir(cwd);
-        } else if let Some(anchor_fd) = spec.cwd_anchor_fd {
+        // session there. GNU's forked child never leaves the inode:
+        // cd moves the shell process itself (builtins/cd.def:531-605
+        // change_to_directory, chdir at :600), the `&` connection
+        // executes the first command asynchronously (execute_cmd.c:2811
+        // execute_connection, `&` arm at :2822-2844), and the disk
+        // command child is make_child's fork (execute_cmd.c:5771
+        // execute_disk_command, fork at :5833-5835) with no path-string
+        // chdir in the child.
+        //
+        // rubash#3420: the anchor fd takes precedence over a live path
+        // spelling. `Path::is_dir` follows the spelling, so after the
+        // original directory is deleted and a ghost is recreated at the
+        // same path it answers true for the NEW inode; seating with
+        // `current_dir` there would move the child out of the session's
+        // old inode. `Command::current_dir` also runs before pre_exec,
+        // so it must not be installed in the anchored arm at all. The
+        // path spelling remains the fallback when no anchor exists and
+        // the spelling still resolves, or when the anchor's fchdir
+        // itself fails — the same precedence raw_fork_async_child
+        // implements.
+        if let Some(anchor_fd) = spec.cwd_anchor_fd {
+            use std::os::unix::ffi::OsStrExt as _;
+            let cwd_c = std::ffi::CString::new(cwd.as_os_str().as_bytes()).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "working directory contains an interior NUL",
+                )
+            })?;
             // SAFETY: pre_exec runs in the forked child before exec;
-            // fchdir is async-signal-safe, and the fd is the caller's
-            // live anchor handle (open in this process, inherited
-            // across the fork).
+            // fchdir/chdir are async-signal-safe, the fd is the caller's
+            // live anchor handle (open in this process, inherited across
+            // the fork), and cwd_c was allocated parent-side before fork.
             unsafe {
                 use std::os::unix::process::CommandExt as _;
                 cmd.pre_exec(move || {
-                    if libc::fchdir(anchor_fd) != 0 {
-                        return Err(std::io::Error::last_os_error());
+                    if libc::fchdir(anchor_fd) == 0 || libc::chdir(cwd_c.as_ptr()) == 0 {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::last_os_error())
                     }
-                    Ok(())
                 });
             }
+        } else if cwd.is_dir() {
+            cmd.current_dir(cwd);
         }
     }
     // The spec's env IS the child environment (the caller composes it from
