@@ -3451,7 +3451,7 @@ impl Executor {
         compound_field_split_transport(
             &text,
             field_split_values_with_ifs(
-                &text,
+                &crate::executor::markers::ansi_c_ifs_guard_to_ifs_glue(&text),
                 self.shell_state.env_vars.get("IFS").map(String::as_str),
             )
             .into_iter()
@@ -3967,7 +3967,7 @@ impl Executor {
         if !is_double_quoted && unquoted != core {
             return None;
         }
-        let value = self.whole_word_parameter_single_value(unquoted)?;
+        let value = self.whole_word_parameter_single_value(unquoted, is_double_quoted)?;
         if is_double_quoted {
             // A quoted whole-word element's product is a QUOTED storage
             // word (GNU W_QUOTED): expand_word_internal delivers the
@@ -4005,9 +4005,12 @@ impl Executor {
         Some(compound_field_split_transport(
             &value,
             field_split_values_with_ifs(
-                &value,
+                &crate::executor::markers::ansi_c_ifs_guard_to_ifs_glue(&value),
                 self.shell_state.env_vars.get("IFS").map(String::as_str),
-            ),
+            )
+            .into_iter()
+            .map(|field| decode_compound_expansion_carriers(&field))
+            .collect::<Vec<_>>(),
             &self.ifs_first_char_separator(),
         ))
     }
@@ -4015,7 +4018,7 @@ impl Executor {
     /// The single expansion of a whole-word `$name` / `${name...}` parameter
     /// token (shared by the element and `[sub]=` word forms). Returns None
     /// when the token is not a whole-word parameter.
-    fn whole_word_parameter_single_value(&self, unquoted: &str) -> Option<String> {
+    fn whole_word_parameter_single_value(&self, unquoted: &str, quoted: bool) -> Option<String> {
         if let Some(name) = single_unquoted_parameter_name(unquoted) {
             return Some(self.shell_variable_value(name).unwrap_or_default());
         }
@@ -4044,12 +4047,19 @@ impl Executor {
                         .is_some_and(|(var_name, _)| !var_name.ends_with(':'))
                 });
                 if has_word_operator {
-                    let name = body.replace("\\\"", "\"").replace("\\'", "'");
-                    return Some(self.expand_word(&format!("${{{name}}}")));
+                    let word = format!("${{{body}}}");
+                    return Some(if quoted {
+                        let value = self.expand_quoted_parameter_word(&word);
+                        crate::executor::markers::strip_ifs_glue(
+                            &crate::executor::markers::strip_ansi_c_ifs_guard(&value),
+                        )
+                    } else {
+                        self.expand_word(&word)
+                    });
                 }
             }
         }
-        let name = body.replace("\\\"", "\"").replace("\\'", "'");
+        let name = body;
         match self.array_element_parameter_value(&name) {
             Some(value) => Some(value),
             None => {
@@ -4122,13 +4132,15 @@ impl Executor {
         // (eval-argument) flatten re-serializes the word for eval's
         // re-parse, where the assignment executes afresh with its own
         // declare context, so no word is installed there.
+        let rhs_quoted =
+            dq_wrapped || (unquoted != core && core.starts_with('"') && core.ends_with('"'));
         let value = match compound_element_diag_word(token_raw, assoc) {
             CompoundElementDiag::Element(word) | CompoundElementDiag::Value(word) if !bare => {
                 crate::executor::expand_word::with_pending_diagnostic_raw(&word, false, || {
-                    self.whole_word_parameter_single_value(unquoted)
+                    self.whole_word_parameter_single_value(unquoted, rhs_quoted)
                 })
             }
-            _ => self.whole_word_parameter_single_value(unquoted),
+            _ => self.whole_word_parameter_single_value(unquoted, rhs_quoted),
         }?;
         Some(format!(
             "{}{}{}",

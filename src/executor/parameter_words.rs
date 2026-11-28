@@ -2275,21 +2275,7 @@ pub(in crate::executor) fn decode_double_quotes_in_quoted_parameter_word(
     let mut output = String::new();
     let chars = word.chars().collect::<Vec<_>>();
     let mut index = 0usize;
-    let mut in_sq = false;
     while index < chars.len() {
-        // POSIX mode keeps ' as a real single-quote delimiter inside
-        // "${v op w}" (parse.y:4036 Austin Group interp 221), so a `'`
-        // there opens/closes a quoted span — a `$'` only starts ANSI-C
-        // quoting when the ' is not a span closer (GNU's LEX_WASDOL check
-        // in parse_matched_pair only sees delimiters).
-        if in_sq {
-            if chars[index] == '\'' {
-                in_sq = false;
-            }
-            output.push(chars[index]);
-            index += 1;
-            continue;
-        }
         // GNU parse.y:4451 parse_comsub / parse.y:3877 parse_matched_pair:
         // a `$(...)` or `` `...` `` unit inside the ${...} word is a
         // self-contained parse unit — its interior quoting belongs to the
@@ -2324,6 +2310,12 @@ pub(in crate::executor) fn decode_double_quotes_in_quoted_parameter_word(
             index = cursor;
             continue;
         }
+        if chars[index] == '$' && chars.get(index + 1) == Some(&'\'') && posix && !heredoc {
+            output.push(DATA_DOLLAR);
+            output.push(crate::executor::markers::DATA_SQUOTE);
+            index += 2;
+            continue;
+        }
         // GNU parse.y:4053-4070 (parse_matched_pair): inside a `${...}`
         // grouping construct a `$'...'` body is ansiexpanded at extraction
         // time and wrapped in sh_single_quote so the decoded bytes ride out
@@ -2331,7 +2323,7 @@ pub(in crate::executor) fn decode_double_quotes_in_quoted_parameter_word(
         // form so the expansion walker never re-reads it as syntax; without
         // this the `'` is marked DATA_SQUOTE below and `$'\t'` inside
         // "${v-word}" leaks literal text (nquote.tests).
-        if chars[index] == '$' && chars.get(index + 1) == Some(&'\'') && !heredoc {
+        if chars[index] == '$' && chars.get(index + 1) == Some(&'\'') && !heredoc && !posix {
             let mut body = String::new();
             let mut cursor = index + 2;
             let mut closed = false;
@@ -2414,8 +2406,7 @@ pub(in crate::executor) fn decode_double_quotes_in_quoted_parameter_word(
             continue;
         }
         if chars[index] == '\'' && posix && !heredoc {
-            in_sq = true;
-            output.push(chars[index]);
+            output.push(crate::executor::markers::DATA_SQUOTE);
             index += 1;
             continue;
         }
