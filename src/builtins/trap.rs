@@ -9,7 +9,7 @@ use crate::shell::var_table::VarTable;
 use std::collections::{BTreeSet, HashMap};
 use std::io::{self, Write};
 
-const TRAP_LIST: &str = "__RUBASH_TRAPS";
+pub(crate) const TRAP_LIST: &str = "__RUBASH_TRAPS";
 /// Action-key prefix for installed traps (`__RUBASH_TRAP_<SIGNAL>`).
 /// `pub(crate)` for the arith-for counter fast driver's whitelist gate
 /// (`compound_exec.rs`): the fast loop runs no commands, so any installed
@@ -274,6 +274,25 @@ pub(crate) fn take_exit_trap(env_vars: &mut VarTable) -> Option<String> {
     action
 }
 
+/// Install signals whose ignored disposition crosses a GNU fork. GNU
+/// reset_or_restore_signal_handlers (trap.c:1433-1452), reached through
+/// restore_original_signals at subst.c:6426, resets caught traps but
+/// leaves SIG_IGN entries ignored; unlike seed_startup_traps these are
+/// runtime ignores, so they stay visible to `trap -p` and may be
+/// re-trapped — no TRAP_ORIG_IGNORES hard-ignore entry.
+pub(crate) fn install_fork_inherited_ignore(env_vars: &mut VarTable, signal: &str) {
+    let Some(signal) = normalize_signal(signal) else {
+        return;
+    };
+    let key = trap_key(&signal);
+    if !env_vars.contains_key(&key) {
+        env_vars.insert(key, String::new());
+    }
+    let mut signals = trap_list(env_vars);
+    signals.insert(signal);
+    store_trap_list(env_vars, signals);
+}
+
 pub(crate) fn get_trap_action(env_vars: &HashMap<String, String>, signal: &str) -> Option<String> {
     if reset_trap_signals(env_vars).contains(signal) {
         return None;
@@ -513,7 +532,7 @@ pub(crate) fn remove_trap(env_vars: &mut VarTable, signal: &str) {
     }
 }
 
-fn is_hard_ignored(env_vars: &HashMap<String, String>, signal: &str) -> bool {
+pub(crate) fn is_hard_ignored(env_vars: &HashMap<String, String>, signal: &str) -> bool {
     // rubash#2588: GNU's pseudo-signal set is EXIT/DEBUG/ERR/RETURN
     // (signames.h:71-73) — "ERROR" is not a trap name (normalize_signal
     // never produces it; `trap ... ERROR` is rejected), so the arm
