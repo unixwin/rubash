@@ -150,12 +150,8 @@ regression ELSEWHERE: runs in the windows-latest `regression` job (GNU goldens/s
 marker_leak_golden ELSEWHERE: runs in the named marker-leak lane of the `rust` job
 multi_session_isolation TIMING: single #[test]; serial+concurrent Executor matrix exceeds the 90s per-test budget (>283s observed on Linux, still running); file header documents it as an on-demand run (`cargo test --test multi_session_isolation`); needs bounding or a local-only marking
 executor_tests PRODUCT/ENV: 52 of 1561 tests red on a serial re-run (parallel load inflated to ~106); families: env-bound (GROUPS=1000 vs pinned 0:0:1, compgen user/group/hostname/service sources, DIRSTACK), product (FUNCNAME readonly assignment model, redirect-append faces, process-substitution stdin feed, alias-introduced forms, `time` before function body); adjudication owed per family
-deep_audit_b6_diagnostics PRODUCT: 1 test fails; `times -z` rejected as an invalid option vs pinned diagnostic-prefix wording; stale pin vs product
 oils_spec_arith_regressions PRODUCT: 11 tests fail; oils spec corpus (invalid const/lvalue wording, nounset, double-subscript cells); product divergence vs recorded GNU expectations
 oils_spec_array_regressions PRODUCT: 8 tests fail; oils spec corpus (negative/sparse/multi-subscript cells); product divergence
-oils_spec_assoc_append_regressions PRODUCT: 2 tests fail; append-list + assoc readonly cells; product divergence
 oils_spec_bracket_shift_regressions PRODUCT: 12 tests fail; `[ -ef ]` symlink semantics + `bash:`-vs-$0 diagnostic prefixes; product/stale-pin mix
 parser_tests PRODUCT: 3 tests fail; `time` before function body + coproc time-word cells; product divergence
 parser_coproc_tests PRODUCT: 2 tests fail; coproc time-word + named-coproc function-body parse cells; product divergence
-perf_assoc_element_miss_regressions PRODUCT: 1 test fails; assoc length through nameref reports uni=5 vs pinned 6; product divergence or stale pin
-profiler_regressions PRODUCT: 3 tests fail; committed collapsed fixture lacks the `builtin:[`/`builtin:return` frames the profiler now emits; stale fixture vs product change

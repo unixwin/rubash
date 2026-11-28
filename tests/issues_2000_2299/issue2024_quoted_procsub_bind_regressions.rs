@@ -141,24 +141,24 @@ fn issue2024_builtin_face_quoted_procsub_target_is_literal() {
 
 #[test]
 fn issue2024_set_u_unbound_loop_target_does_not_hang() {
-    // GNU bash 5.3.20 reports `NOPE: unbound variable` here and terminates
-    // the script; the #2024 acceptance for this form is that the bind
-    // level FAILS instead of reading the ambient stdin (the pre-fix naive
-    // guard hung exactly there). The unbound-variable wording itself is a
-    // parameter-expansion gap measured on master and out of #2024's
-    // channel scope.
+    // GNU bash 5.3.20 expands the redirection word before binding it,
+    // so `set -u` aborts the whole script while expanding "$NOPE": no
+    // loop output, no `rc=` follow-on line, exit status 1. The #2024
+    // acceptance for this form is still that the failed bind never
+    // falls through to the ambient stdin (the pre-fix naive guard hung
+    // exactly there).
     let (stdout, stderr, code) = run(
         "nounset",
         "set -u\nwhile read x; do echo \"got:$x\"; done < \"$NOPE\"\necho \"rc=$?\"\n",
     );
     assert!(!stdout.contains("got:"), "stdout: {stdout}");
     assert_eq!(
-        stdout, "rc=1\n",
-        "the compound aborts and the script continues"
+        stdout, "",
+        "the unbound-variable expansion aborts before the follow-on echo"
     );
     assert!(
-        stderr.contains("No such file or directory"),
-        "the literal-target channel reports the failed open: stderr: {stderr}"
+        stderr.contains("line 2: NOPE: unbound variable"),
+        "GNU bash 5.3.20 unbound-variable diagnostic: stderr: {stderr}"
     );
-    assert_eq!(code, Some(0));
+    assert_eq!(code, Some(1));
 }
